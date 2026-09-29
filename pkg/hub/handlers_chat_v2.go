@@ -1919,9 +1919,20 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			if h2hWcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
 			}
-			// A25.6 F1/F3: key may be a dm: route; register both principals
-			// so the conversation is discoverable via `conversation list`.
-			threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
+			// A25.6 F1/F3, tightened by A25.11 R1 (p2a-u5 review): key may be
+			// a dm: route. isDMParticipant (handleConversationSend) only
+			// authenticates the CALLER's own slot in the key — the other
+			// slot (the peer) is a caller-chosen path segment that was never
+			// resolved. Register both principals only when the peer is
+			// store-resolved with its matching kind; otherwise the
+			// conversation is still created (as at base, pre-A25.6) but
+			// with no participant rows, exactly like an unauthenticated
+			// third party never being written. See resolveDMPeerPrincipal.
+			if strings.HasPrefix(key, "dm:") {
+				if _, _, resolved := s.resolveDMPeerPrincipal(ctx, key, user.ID()); resolved {
+					threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
+				}
+			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {
@@ -3971,6 +3982,60 @@ func dmUserParticipants(key string) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// resolveDMPeerPrincipal parses a canonical "dm:<kind>:<id>:<kind>:<id>" key
+// and resolves the principal that is NOT the caller, verifying it exists in
+// the store with its matching kind (A25.11 R1, p2a-u5 review). Before this,
+// sendHumanToHuman's isDMParticipant check authenticated only the CALLER's
+// own slot; the other slot was never resolved, so an authenticated human
+// could name an unresolved ID (an agent's UUID, or a UUID matching nothing)
+// in a "dm:user:...:user:..." key and get it registered as a participant —
+// the same phantom-row class A25.7 R2 and A25.8 R1 closed on the agent
+// paths, now via a URL path segment instead of a JSON payload field.
+//
+// callerID is assumed to be the value isDMParticipant already matched
+// against a "user"-kind slot (handleConversationSend authorizes this before
+// sendHumanToHuman ever runs), so the OTHER slot is unambiguously the peer.
+//
+// resolved is true only when the peer's ID is found in the store under its
+// exact kind — a user ID that happens to equal an agent's UUID does not
+// count, and vice versa. A store error other than "not found" is logged as
+// a non-fatal WARN (G2 style) and treated the same as unresolved: the
+// caller must never learn anything about the peer's existence from this
+// path, and denying the send over a transient lookup failure would turn a
+// listing concern into an outage.
+func (s *Server) resolveDMPeerPrincipal(ctx context.Context, key, callerID string) (peerKind, peerID string, resolved bool) {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+	if err != nil {
+		return "", "", false
+	}
+	peerKind, peerID = kindA, idA
+	if kindA == "user" && idA == callerID {
+		peerKind, peerID = kindB, idB
+	}
+	switch peerKind {
+	case "user":
+		if _, getErr := s.store.GetUser(ctx, peerID); getErr != nil {
+			if !errors.Is(getErr, store.ErrNotFound) {
+				s.messageLog.Warn("chat v2 DM peer lookup failed (listing gap, not access)",
+					"principal_kind", peerKind, "principal_id", peerID, "error", getErr)
+			}
+			return peerKind, peerID, false
+		}
+		return peerKind, peerID, true
+	case "agent":
+		if _, getErr := s.store.GetAgent(ctx, peerID); getErr != nil {
+			if !errors.Is(getErr, store.ErrNotFound) {
+				s.messageLog.Warn("chat v2 DM peer lookup failed (listing gap, not access)",
+					"principal_kind", peerKind, "principal_id", peerID, "error", getErr)
+			}
+			return peerKind, peerID, false
+		}
+		return peerKind, peerID, true
+	default:
+		return peerKind, peerID, false
+	}
 }
 
 // resolveDMPeer extracts the peer's ID from a DM key given the caller's ID.

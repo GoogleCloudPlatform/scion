@@ -205,7 +205,13 @@ func TestChatV2_A257_R1_M8_SendHumanToHuman_RegistersDMParticipants(t *testing.T
 	srv, s, _, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
-	peerID := tid("m8-peer-user")
+	// A25.11 R1: the peer must be a real, store-resolved user — the fix
+	// registers participants only when the non-caller slot resolves with
+	// its matching kind. A peerID with no backing row would no longer get
+	// registered at all (see TestChatV2_A2511_R1_* below for that case).
+	peer := &store.User{ID: tid("m8-peer-user"), Email: "m8-peer-user@test.com", DisplayName: "M8 Peer"}
+	require.NoError(t, s.CreateUser(ctx, peer))
+	peerID := peer.ID
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	require.NoError(t, err)
 	setDMConversationID(t, s, dmKey, proj.ID)

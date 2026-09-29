@@ -344,8 +344,8 @@ func TestHandleAgentOutboundMessage_A259_R1_ConversationRef_UserPeer_Allowed(t *
 // TestHandleAgentOutboundMessage_A259_O3_RecipientIDNonCanonicalCase_Canonicalized
 // pins `recipientID = u.ID` (the assignment right after a successful
 // GetUser): a non-canonical-case UUID must resolve to, and be used as, the
-// canonical-case ID everywhere downstream — the persisted message and the
-// participant row.
+// canonical-case ID everywhere downstream — the 200 response's
+// `recipient_id`, the persisted message, and the participant row.
 func TestHandleAgentOutboundMessage_A259_O3_RecipientIDNonCanonicalCase_Canonicalized(t *testing.T) {
 	srv, s, _, sender, _, _, _ := deliverySetup(t)
 	ctx := context.Background()
