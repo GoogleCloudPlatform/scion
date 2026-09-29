@@ -100,6 +100,9 @@ type Layer1Snapshot struct {
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
 
+	// Quotas
+	EnforceBrokerQuotas *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -777,6 +780,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.AutoExposePortsEnabled = &v
 	}
 
+	// Quotas
+	if k.Exists("quotas.enforce_broker_quotas") {
+		v := k.Bool("quotas.enforce_broker_quotas")
+		snap.EnforceBrokerQuotas = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -922,6 +931,11 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Quotas — read from settings.yaml top-level quotas section, so a
+	// file-mode admin save takes effect without a restart (unlike
+	// AutoExposePortsEnabled, which is intentionally not populated here).
+	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
@@ -975,6 +989,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		s.config.DefaultScratchpad = snap.DefaultScratchpad
 		if oldVal == nil || *oldVal != *snap.DefaultScratchpad {
 			applied = append(applied, "default_scratchpad")
+		}
+	}
+
+	// Quotas
+	if snap.EnforceBrokerQuotas != nil {
+		oldVal := s.config.EnforceBrokerQuotas
+		s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+		if oldVal == nil || *oldVal != *snap.EnforceBrokerQuotas {
+			applied = append(applied, "enforce_broker_quotas")
 		}
 	}
 

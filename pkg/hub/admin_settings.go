@@ -90,6 +90,9 @@ type ServerConfigResponse struct {
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
 
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
+
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
@@ -145,6 +148,9 @@ type ServerConfigUpdateRequest struct {
 
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
 
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
@@ -333,6 +339,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultTimezone:      vs.DefaultTimezone,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
+		Quotas:               vs.Quotas,
 
 		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
 		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
@@ -651,6 +658,13 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
 			delete(raw, "auto_expose_ports")
+		}
+	}
+	if req.Quotas != nil {
+		if req.Quotas.EnforceBrokerQuotas != nil {
+			raw["quotas"] = marshalToMap(req.Quotas)
+		} else {
+			delete(raw, "quotas")
 		}
 	}
 	if req.Federation != nil {

@@ -989,6 +989,50 @@ hub:
 	}
 }
 
+func TestLoadServerFromSettingsFile_QuotasEnforceBrokerQuotas(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+quotas:
+  enforce_broker_quotas: false
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas != false {
+		t.Errorf("expected EnforceBrokerQuotas=false, got %v", gc.EnforceBrokerQuotas)
+	}
+}
+
+func TestLoadServerFromSettingsFile_QuotasAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas != nil {
+		t.Errorf("expected EnforceBrokerQuotas=nil when absent, got %v", *gc.EnforceBrokerQuotas)
+	}
+}
+
 // TestApplyDatabasePoolDefaults_PostgresOverridesLeakedSqliteDefault is a
 // regression test for the production incident where both hubs served every API
 // request in ~55s. The struct-level default for MaxOpenConns/MaxIdleConns is 1

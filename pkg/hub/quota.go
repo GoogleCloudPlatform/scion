@@ -26,6 +26,22 @@ type QuotaService struct {
 
 	scopeLocksMu sync.Mutex
 	scopeLocks   map[string]*sync.Mutex
+
+	// enforced reports whether a given limit should be rejected once it is
+	// exhausted (design P1-D5). When nil, or when it returns true, the limit
+	// is enforced — this is the fail-safe default. When it returns false for
+	// a limit, Reserve keeps counting (reservations, release, reconcile and
+	// backfill are unaffected) but no longer rejects the create.
+	enforced func(limitName string) bool
+}
+
+// isEnforced reports whether limitName should be rejected once exhausted.
+// A nil enforced func means every limit is enforced (fail-safe default).
+func (qs *QuotaService) isEnforced(limitName string) bool {
+	if qs.enforced == nil {
+		return true
+	}
+	return qs.enforced(limitName)
 }
 
 // lockForScope returns the process-local mutex for (limitName, scopeType,
@@ -123,6 +139,15 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 	}()
 
 	if !acquired {
+		if !qs.isEnforced(limitName) {
+			// Enforcement is off: let the request proceed without a
+			// reservation rather than 429 on lock contention. The reconcile
+			// backfill picks up the resource within its next pass
+			// (design P1-D5).
+			qs.logger.Debug("quota lock contention while enforcement is off, proceeding without reservation",
+				"limit", limitName, "scope_type", scopeType, "scope_id", scopeID)
+			return false, nil
+		}
 		return false, ErrQuotaLockContention
 	}
 
@@ -149,9 +174,19 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: count active reservations for %q: %w", limitName, err)
 	}
 
-	// 6. Check quota.
+	// 6. Check quota. When enforcement is off for this limit, the cap is
+	// still tracked (the reservation below is created) but the create is not
+	// rejected (design P1-D5): counts stay accurate for when the switch is
+	// flipped back on, and the usage page keeps showing the true count
+	// (e.g. "31 / 16") while it is off.
 	if count >= effectiveLimit {
-		return false, store.ErrQuotaExceeded
+		if !qs.isEnforced(limitName) {
+			qs.logger.Debug("quota exceeded but enforcement is off, creating reservation anyway",
+				"limit", limitName, "scope_type", scopeType, "scope_id", scopeID,
+				"count", count, "effective_limit", effectiveLimit)
+		} else {
+			return false, store.ErrQuotaExceeded
+		}
 	}
 
 	// 7. Create reservation.

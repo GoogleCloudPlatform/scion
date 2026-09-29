@@ -168,6 +168,10 @@ type ServerConfig struct {
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. nil means unset — the
+	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
+	EnforceBrokerQuotas *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -387,6 +391,16 @@ func DefaultServerConfig() ServerConfig {
 		StalledThreshold: 5 * time.Minute,
 		BrokerAuthConfig: DefaultBrokerAuthConfig(),
 	}
+}
+
+// brokerQuotasEnforced reports whether the per-broker agent quota cap
+// (max_agents_per_broker) is enforced on create. Fail-safe default: an
+// absent (nil) switch means enforced (design P1-D4/P1-D5).
+func (s *Server) brokerQuotasEnforced() bool {
+	if s.config.EnforceBrokerQuotas == nil {
+		return true
+	}
+	return *s.config.EnforceBrokerQuotas
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
@@ -1264,6 +1278,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.quotaService = &QuotaService{
 		store:  s,
 		logger: slog.Default().With("component", "quota"),
+		enforced: func(limitName string) bool {
+			return limitName != store.LimitMaxAgentsPerBroker || srv.brokerQuotasEnforced()
+		},
 	}
 
 	// Per-sender chat send rate limiter (#1054).

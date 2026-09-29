@@ -1063,6 +1063,79 @@ func TestExtractKoanfKeys_AllFieldCategories(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_Quotas(t *testing.T) {
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enforced},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "quotas.enforce_broker_quotas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected quotas.enforce_broker_quotas in keys, got %v", keys)
+	}
+}
+
+// Test 1/2/3 (design 4.7 P1b), DB-mode: PUT of the quotas section persists
+// it and the snapshot reflects the new value immediately (no restart).
+func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	body := `{"quotas": {"enforce_broker_quotas": false}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'quotas' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas != false {
+		t.Errorf("EnforceBrokerQuotas: want false, got %v", snap.EnforceBrokerQuotas)
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas != false {
+		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+}
+
+// Test 7 (design 4.7 P1b): a non-boolean enforce_broker_quotas is rejected.
+func TestPutServerConfigDB_Quotas_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"quotas": {"enforce_broker_quotas": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean quotas.enforce_broker_quotas, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // ---- buildSingleSectionDoc tests ----
 
 func TestBuildSingleSectionDoc_Access(t *testing.T) {

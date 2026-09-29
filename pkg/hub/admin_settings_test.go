@@ -214,6 +214,79 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 	}
 }
 
+func TestApplySettingsUpdates_QuotasNilEnforceBrokerQuotas(t *testing.T) {
+	// When Quotas is provided but EnforceBrokerQuotas is nil, the key should
+	// be deleted to avoid persisting an empty quotas: {} block.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas": map[string]interface{}{
+			"enforce_broker_quotas": false,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{
+			EnforceBrokerQuotas: nil, // nil signals deletion
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["quotas"]; ok {
+		t.Error("expected quotas key to be deleted when EnforceBrokerQuotas is nil")
+	}
+}
+
+func TestApplySettingsUpdates_QuotasWithEnforceBrokerQuotas(t *testing.T) {
+	// When Quotas is provided with a non-nil EnforceBrokerQuotas, the key
+	// should be set normally.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+	}
+
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{
+			EnforceBrokerQuotas: &enforced,
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	q, ok := raw["quotas"]
+	if !ok {
+		t.Fatal("expected quotas key to be present")
+	}
+	qMap, ok := q.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected quotas to be a map, got %T", q)
+	}
+	if qMap["enforce_broker_quotas"] != false {
+		t.Errorf("expected enforce_broker_quotas=false, got %v", qMap["enforce_broker_quotas"])
+	}
+}
+
+func TestApplySettingsUpdates_QuotasNilRequest(t *testing.T) {
+	// When Quotas itself is nil in the request, the existing value should be
+	// preserved (no change).
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas": map[string]interface{}{
+			"enforce_broker_quotas": false,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		Quotas: nil,
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["quotas"]; !ok {
+		t.Error("expected quotas to be preserved when request field is nil")
+	}
+}
+
 // TestApplySettingsUpdates_ClearFieldsToBlank is a regression test for
 // ptone/scion#860: clearing a field to blank in the admin UI should delete
 // the key from settings.yaml, not preserve the old value.
@@ -376,5 +449,43 @@ func TestHandlePutServerConfig_DefaultUserRole_ViewerPersistedAndApplied(t *test
 	}
 	if got := srv.DefaultUserRole(); got != "viewer" {
 		t.Errorf("live DefaultUserRole() = %q after reload, want viewer", got)
+	}
+}
+
+// Test 8 (design 4.7 P1b): file-mode PUT of quotas.enforce_broker_quotas
+// persists it to settings.yaml and applies it live via reloadSettings,
+// without a restart.
+func TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRestart(t *testing.T) {
+	srv := &Server{}
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
+
+	// A real settings.yaml always has a "server" key (hub port, etc.) by the
+	// time an admin edits Layer-1 settings; include one here so the file-mode
+	// reload path (loadServerFromSettingsFile) recognizes the file as
+	// versioned settings, exactly like a deployed hub's settings.yaml would.
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"server":{"hub":{"port":9810}},"quotas":{"enforce_broker_quotas":false}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	quotas, _ := raw["quotas"].(map[string]interface{})
+	if got, ok := quotas["enforce_broker_quotas"].(bool); !ok || got != false {
+		t.Errorf("persisted quotas.enforce_broker_quotas = %v, want false (settings.yaml: %s)", quotas["enforce_broker_quotas"], data)
+	}
+
+	// No restart: the in-memory config must already reflect the new value.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after PUT, without a restart")
 	}
 }
