@@ -128,39 +128,6 @@ func (s *UserAccessTokenService) createAuditRecord(ctx context.Context, txStore 
 	return txStore.CreateMutationAudit(ctx, record)
 }
 
-// resolveScopePermissionIDs maps already-expanded, flat UAT scopes (never
-// manage aliases — expandScopes has already flattened those) to canonical
-// permission IDs via A.1's SelectorRegistry (permissions.ResolveSelector),
-// replacing the Registry-scanning scopeToPermissionIDs this superseded:
-// that function matched on reconstructed "resource:action" pairs, which
-// would silently collapse two permissions sharing a resource/action pair
-// (e.g. hub.settings.read/hub.config.read) into one selector once either
-// became UAT-selectable. Live resolution is correct here — this is mint
-// time for a CeilingVersionV1 ceiling, when today's registry rules are
-// exactly what should apply (contrast with normalizing a pre-existing
-// legacy row, which must never call ResolveSelector — see
-// permissions.NormalizeLegacyUATScopes).
-//
-// ok is false, with a nil ids slice, if any scope fails to resolve — every
-// caller must fail closed rather than mint a token whose stored Scopes and
-// persisted ceiling silently disagree.
-func resolveScopePermissionIDs(scopes []string) (ids []string, ok bool) {
-	seen := make(map[string]bool, len(scopes))
-	for _, scope := range scopes {
-		m, resolved := permissions.ResolveSelector(scope)
-		if !resolved {
-			return nil, false
-		}
-		for _, id := range m.PermissionIDs {
-			if !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
-		}
-	}
-	return ids, true
-}
-
 // enforceSessionCredential enforces the A1 credential caveat and actor/user
 // binding at the service boundary:
 //
@@ -189,11 +156,9 @@ func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context, u
 	return nil
 }
 
-// CreateTokenParams collects CreateToken's inputs in one struct so later
-// areas (C.1 mint/attach, D.1 hub boundary, E.1 credential decoration) can
-// each add a field — e.g. D.1's boundary kind — without the argument list
-// growing further (F-7, A/notes/contract-shapes.md §6). A.2 introduces the
-// struct with today's fields.
+// CreateTokenParams collects the inputs for minting a token in one struct,
+// so a future field (e.g. a hub-vs-project boundary kind) can be added
+// without growing a positional argument list.
 type CreateTokenParams struct {
 	UserID    string
 	Name      string
@@ -218,23 +183,21 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 // CreateTokenWithParams is CreateToken's implementation, taking
 // CreateTokenParams directly.
 func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, params CreateTokenParams) (string, *store.UserAccessToken, error) {
-	userID, name, projectID, scopes, expiresAt := params.UserID, params.Name, params.ProjectID, params.Scopes, params.ExpiresAt
-
 	// A1: Credential caveat at service boundary.
-	if err := s.enforceSessionCredential(ctx, userID); err != nil {
+	if err := s.enforceSessionCredential(ctx, params.UserID); err != nil {
 		return "", nil, err
 	}
 
 	// --- Input validation (typed errors) ---
-	if name == "" {
+	if params.Name == "" {
 		return "", nil, ErrUATNameRequired
 	}
-	if projectID == "" {
+	if params.ProjectID == "" {
 		return "", nil, ErrUATProjectIDEmpty
 	}
 
 	// Expand and validate scopes against the registry.
-	expanded := expandScopes(scopes)
+	expanded := expandScopes(params.Scopes)
 	for _, scope := range expanded {
 		if !store.UATValidScopes[scope] {
 			return "", nil, fmt.Errorf("%w: %s", ErrInvalidUATScope, scope)
@@ -246,6 +209,7 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 
 	// Validate / default expiry.
 	now := s.nowFunc()
+	expiresAt := params.ExpiresAt
 	if expiresAt == nil {
 		defaultExpiry := now.Add(store.UATDefaultExpiry)
 		expiresAt = &defaultExpiry
@@ -257,9 +221,9 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- B1/A2/B2: Issuer ceiling at mint (target-project only) with oracle resistance ---
+	// --- Issuer ceiling at mint (target-project only) with oracle resistance ---
 	// Resolve only project-scoped permissions for the target project. System/hub
-	// authority must not enlarge the token (frozen decision A2).
+	// authority must not enlarge the token.
 	//
 	// getProjectScopedPermissions filters to ScopeType==project && ScopeID==projectID
 	// while retaining group-expanded principals (transitive membership), activation
@@ -273,24 +237,24 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	// of token scopes and the user's current permissions, and (2) token minting
 	// only reads authority state, it does not mutate it. See O1 documentation in
 	// rs4_credential_test.go.
-	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, params.UserID, params.ProjectID)
 	if err != nil {
 		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
-			"user_id", userID, "project_id", projectID, "error", err)
+			"user_id", params.UserID, "project_id", params.ProjectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
 	}
 	if len(actorPerms) == 0 {
 		return "", nil, ErrUATProjectForbidden
 	}
 
-	// Convert requested scopes to permission IDs (A.1's SelectorRegistry, not
-	// a Registry resource/action scan) and verify the issuer holds each one
-	// in the target project. Fail closed if any valid scope does not resolve
-	// (F1 defense) — these are the same permission IDs persisted as the
-	// token's CeilingVersionV1 ceiling below, so mint validation and the
-	// persisted ceiling can never disagree.
-	requiredPermIDs, resolvedOK := resolveScopePermissionIDs(expanded)
-	if !resolvedOK {
+	// Resolve the requested scopes to a ceiling through the shared ceiling
+	// core (used identically at mint, runtime authorization, and
+	// delegation), and verify the issuer holds every resulting permission in
+	// the target project. Fail closed if any valid scope does not resolve.
+	// Mint validation and the persisted ceiling below share this one value,
+	// so they can never disagree.
+	ceiling, ceilingOK := permissions.BuildCeilingFromSelectors(expanded)
+	if !ceilingOK {
 		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scope has no resolvable selector",
 			"expanded_count", len(expanded))
 		return "", nil, ErrUATScopeViolation
@@ -299,7 +263,7 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	for _, p := range actorPerms {
 		actorPermSet[p] = true
 	}
-	for _, permID := range requiredPermIDs {
+	for _, permID := range ceiling.PermissionIDs {
 		if !actorPermSet[permID] {
 			return "", nil, ErrUATScopeViolation
 		}
@@ -311,11 +275,11 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 
 	txErr := s.store.WithTx(ctx, func(tx store.Store) error {
 		// B5/G7: Concurrency-safe token cap inside the transaction.
-		if lockErr := tx.LockUserForTokens(ctx, userID); lockErr != nil {
+		if lockErr := tx.LockUserForTokens(ctx, params.UserID); lockErr != nil {
 			return fmt.Errorf("failed to acquire token lock: %w", lockErr)
 		}
 
-		count, countErr := tx.CountUserAccessTokens(ctx, userID)
+		count, countErr := tx.CountUserAccessTokens(ctx, params.UserID)
 		if countErr != nil {
 			return fmt.Errorf("failed to check token count: %w", countErr)
 		}
@@ -337,14 +301,14 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 
 		token = &store.UserAccessToken{
 			ID:                   uuid.New().String(),
-			UserID:               userID,
-			Name:                 name,
+			UserID:               params.UserID,
+			Name:                 params.Name,
 			Prefix:               prefix,
 			KeyHash:              hashStr,
-			ProjectID:            projectID,
+			ProjectID:            params.ProjectID,
 			Scopes:               expanded,
-			CeilingVersion:       permissions.CeilingVersionV1,
-			CeilingPermissionIDs: requiredPermIDs,
+			CeilingVersion:       ceiling.Version,
+			CeilingPermissionIDs: ceiling.PermissionIDs,
 			ExpiresAt:            expiresAt,
 			Created:              now,
 		}
@@ -356,7 +320,7 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		// B3/G3: Atomic audit — commit or roll back with the token.
 		scopesJSON, _ := json.Marshal(expanded)
 		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
-			token.ID, string(scopesJSON), projectID)
+			token.ID, string(scopesJSON), params.ProjectID)
 
 		return s.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "credential_create",

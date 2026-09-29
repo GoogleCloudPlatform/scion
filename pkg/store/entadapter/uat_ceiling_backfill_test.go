@@ -30,13 +30,12 @@ import (
 )
 
 // createLegacyUAT inserts a user_access_tokens row directly through the Ent
-// client, the way a pre-A.2 row exists in an un-migrated database: every
-// field CreateUserAccessToken would have set is present, but
-// ceiling_permission_ids is left unset (SQL NULL) and ceiling_version keeps
-// its column default (0). It deliberately goes around
-// ExternalStore.CreateUserAccessToken — that method now always populates the
-// ceiling columns for a newly minted token, so it cannot produce the "never
-// backfilled" shape this test needs.
+// client, the way a row exists in an un-migrated database: every field
+// CreateUserAccessToken would have set is present, but ceiling_permission_ids
+// is left unset (SQL NULL) and ceiling_version keeps its column default (0).
+// It deliberately goes around ExternalStore.CreateUserAccessToken — that
+// method now always populates the ceiling columns for a newly minted token,
+// so it cannot produce the "never backfilled" shape this test needs.
 func createLegacyUAT(t *testing.T, cs *CompositeStore, userID, projectID string, scopes []string) *store.UserAccessToken {
 	t.Helper()
 	ctx := context.Background()
@@ -79,11 +78,15 @@ func seedProjectAndUser(t *testing.T, cs *CompositeStore) (userID, projectID str
 	return user.ID, project.ID
 }
 
-// TestBackfillUATCeilings_PreservesFieldsAndNormalizes is the AC migration
+// TestBackfillUATCeilings_PreservesFieldsAndNormalizes is the migration
 // round-trip test: token IDs, hashes, expiry, revocation, and scopes survive
 // the backfill unchanged, and the persisted ceiling equals what the frozen
-// legacy snapshot computes directly from those scopes (pat-a-lead
-// requirement (b)).
+// legacy snapshot computes directly from those scopes.
+//
+// These entadapter tests run against SQLite by default (enttest.NewClient).
+// Building with -tags integration and SCION_TEST_POSTGRES_URL set runs the
+// same suite against Postgres instead; that was not exercised for this
+// change because no Postgres instance was available in this environment.
 func TestBackfillUATCeilings_PreservesFieldsAndNormalizes(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -232,4 +235,172 @@ func TestBackfillUATCeilings_PreservesTransactionalAudit(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, "credential_revoke", records[0].MutationType)
 	assert.Equal(t, legacy.ID, records[0].TargetID)
+}
+
+// TestBackfillUATCeilings_Pagination exercises more than one page of the
+// keyset-paginated backfill query, with the page size shrunk so the test
+// does not need hundreds of rows to cross a page boundary.
+func TestBackfillUATCeilings_Pagination(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	userID, projectID := seedProjectAndUser(t, cs)
+
+	original := uatCeilingBackfillPageSize
+	uatCeilingBackfillPageSize = 3
+	t.Cleanup(func() { uatCeilingBackfillPageSize = original })
+
+	const rowCount = 7 // more than two pages at page size 3
+	ids := make([]string, 0, rowCount)
+	for i := 0; i < rowCount; i++ {
+		row := createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+		ids = append(ids, row.ID)
+	}
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	for _, id := range ids {
+		loaded, err := cs.GetUserAccessToken(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"agent.read"}, loaded.CeilingPermissionIDs, "row %s must be backfilled exactly once across pagination", id)
+	}
+}
+
+// TestBackfillUATCeilings_PreservesRevokedAndNilExpiry covers two field
+// shapes the other tests do not: a row that starts revoked (the backfill
+// must not clear it) and a row with no expiry at all (the backfill must not
+// invent one).
+func TestBackfillUATCeilings_PreservesRevokedAndNilExpiry(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	userID, projectID := seedProjectAndUser(t, cs)
+
+	revokedID := uuid.New()
+	_, err := client.UserAccessToken.Create().
+		SetID(revokedID).
+		SetUserID(uuid.MustParse(userID)).
+		SetName("revoked-legacy").
+		SetPrefix("scion_pat_revoked").
+		SetKeyHash(uuid.NewString()).
+		SetProjectID(uuid.MustParse(projectID)).
+		SetScopes(marshalScopes([]string{"agent:read"})).
+		SetRevoked(true).
+		SetCreated(time.Now()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	noExpiryID := uuid.New()
+	_, err = client.UserAccessToken.Create().
+		SetID(noExpiryID).
+		SetUserID(uuid.MustParse(userID)).
+		SetName("no-expiry-legacy").
+		SetPrefix("scion_pat_noexp").
+		SetKeyHash(uuid.NewString()).
+		SetProjectID(uuid.MustParse(projectID)).
+		SetScopes(marshalScopes([]string{"agent:read"})).
+		SetRevoked(false).
+		SetCreated(time.Now()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.Migrate(ctx))
+
+	revoked, err := cs.GetUserAccessToken(ctx, revokedID.String())
+	require.NoError(t, err)
+	assert.True(t, revoked.Revoked, "backfill must not clear revocation")
+	assert.Equal(t, []string{"agent.read"}, revoked.CeilingPermissionIDs)
+
+	noExpiry, err := cs.GetUserAccessToken(ctx, noExpiryID.String())
+	require.NoError(t, err)
+	assert.Nil(t, noExpiry.ExpiresAt, "backfill must not invent an expiry")
+	assert.Equal(t, []string{"agent.read"}, noExpiry.CeilingPermissionIDs)
+}
+
+// TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies is the malformed-
+// ceiling round-trip: garbage written directly into ceiling_permission_ids,
+// through neither the mint path nor the backfill, must deny on load rather
+// than being mistaken for "never backfilled" and re-derived from Scopes.
+func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	userID, projectID := seedProjectAndUser(t, cs)
+
+	t.Run("malformed JSON, version 0", func(t *testing.T) {
+		row := createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+		_, err := client.UserAccessToken.UpdateOneID(uuid.MustParse(row.ID)).
+			SetCeilingPermissionIds("not-json").
+			Save(ctx)
+		require.NoError(t, err)
+
+		loaded, err := cs.GetUserAccessToken(ctx, row.ID)
+		require.NoError(t, err)
+		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"),
+			"malformed ceiling JSON must deny rather than re-derive from Scopes, even though agent:read would otherwise resolve")
+	})
+
+	t.Run("malformed JSON, version 1", func(t *testing.T) {
+		id := uuid.New()
+		_, err := client.UserAccessToken.Create().
+			SetID(id).
+			SetUserID(uuid.MustParse(userID)).
+			SetName("v1-malformed").
+			SetPrefix("scion_pat_v1mal").
+			SetKeyHash(uuid.NewString()).
+			SetProjectID(uuid.MustParse(projectID)).
+			SetScopes(marshalScopes([]string{"agent:read"})).
+			SetCeilingVersion(int32(permissions.CeilingVersionV1)).
+			SetCeilingPermissionIds("not-json").
+			SetRevoked(false).
+			SetCreated(time.Now()).
+			Save(ctx)
+		require.NoError(t, err)
+
+		loaded, err := cs.GetUserAccessToken(ctx, id.String())
+		require.NoError(t, err)
+		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"))
+	})
+
+	t.Run("persisted empty list wins over Scopes re-derivation", func(t *testing.T) {
+		row := createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+		_, err := client.UserAccessToken.UpdateOneID(uuid.MustParse(row.ID)).
+			SetCeilingPermissionIds("[]").
+			Save(ctx)
+		require.NoError(t, err)
+
+		loaded, err := cs.GetUserAccessToken(ctx, row.ID)
+		require.NoError(t, err)
+		require.NotNil(t, loaded.CeilingPermissionIDs, "an explicit [] must not be read back as nil/never-backfilled")
+		assert.Empty(t, loaded.CeilingPermissionIDs)
+		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"),
+			"a persisted empty list must deny even though Scopes would otherwise resolve to agent.read")
+	})
+
+	t.Run("null literal denies", func(t *testing.T) {
+		row := createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+		_, err := client.UserAccessToken.UpdateOneID(uuid.MustParse(row.ID)).
+			SetCeilingPermissionIds("null").
+			Save(ctx)
+		require.NoError(t, err)
+
+		loaded, err := cs.GetUserAccessToken(ctx, row.ID)
+		require.NoError(t, err)
+		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"))
+	})
+
+	t.Run("unknown version denies even a well-formed list", func(t *testing.T) {
+		row := createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+		validList := marshalCeilingPermissionIDs([]string{"agent.read"})
+		require.NotNil(t, validList)
+		_, err := client.UserAccessToken.UpdateOneID(uuid.MustParse(row.ID)).
+			SetCeilingVersion(9).
+			SetCeilingPermissionIds(*validList).
+			Save(ctx)
+		require.NoError(t, err)
+
+		loaded, err := cs.GetUserAccessToken(ctx, row.ID)
+		require.NoError(t, err)
+		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"), "an unknown ceiling version must deny even a well-formed permission list")
+	})
 }

@@ -23,14 +23,13 @@ type CeilingVersion int
 
 const (
 	// CeilingVersionUnspecified marks a row with no recorded version — every
-	// credential minted before this ceiling existed. Its interpretation is
-	// the OBSERVED Decide-path behavior from before normalization: raw
-	// stored scopes mapped through the frozen legacy selector snapshot (see
-	// NormalizeLegacyUATScopes), with NO LegacyUATScopeImplications
-	// expansion. This is deliberately distinct from an explicit
-	// CeilingVersionV1+ ceiling whose PermissionIDs list happens to be
-	// empty: both deny via Allows, but only the latter represents an
-	// intentionally-issued, permission-less credential.
+	// credential minted before this ceiling existed. Its raw stored scopes
+	// are mapped through the frozen legacy selector snapshot (see
+	// NormalizeLegacyUATScopes): each scope grants exactly the permission it
+	// names, and no scope implies another. This is deliberately distinct
+	// from an explicit CeilingVersionV1+ ceiling whose PermissionIDs list
+	// happens to be empty: both deny via Allows, but only the latter
+	// represents an intentionally-issued, permission-less credential.
 	CeilingVersionUnspecified CeilingVersion = 0
 	// CeilingVersionV1 is the first explicit ceiling version: PermissionIDs
 	// is the exact, alias-expanded, deduplicated set of canonical permission

@@ -14,27 +14,24 @@
 
 package permissions
 
-// legacyUATScopeToPermissionID is a FROZEN snapshot, taken 2026-09-29, of the
-// UATScope -> canonical permission ID mapping that CeilingVersionUnspecified
-// (pre-normalization) rows were minted and enforced under.
+// legacyUATScopeToPermissionID is a FROZEN literal snapshot, taken
+// 2026-09-29, of the UATScope -> canonical permission ID mapping for every
+// scope a CeilingVersionUnspecified row can hold.
 //
-// This table must NEVER be regenerated from the live Registry. The whole
-// point of normalizing legacy rows into an explicit, persisted
-// FrozenPermissionCeiling is that a later Registry addition or UATScope
-// retarget must not silently change what an already-minted legacy token
-// means — that is exactly what calling the live, Registry-derived
-// ResolveSelector at load time would do (see NormalizeLegacyUATScopes).
+// This table must NEVER be regenerated from, or fall back to, the live
+// Registry: a later Registry addition or UATScope retarget must not
+// silently change what an already-minted legacy token means. A change here
+// requires a new CeilingVersion, not an edit to this map — see
+// TestLegacyUATScopeToPermissionID_Golden, which fails on any modification.
 //
 // Every entry a legacy row's stored Scopes can actually contain is a key
 // here: minting has always validated each stored scope against a
 // Registry-derived UATValidScopes set (itself built from Permission.UATScope
-// and UATManageAliases), and UserAccessTokenService.CreateToken has always
-// called expandScopes before persisting, so a manage alias is never stored
-// raw — only its expanded concrete scopes are. Every Permission.UATScope
-// value has always equalled Resource+":"+Action (verified by
-// TestLegacyUATScopeToPermissionID_MatchesUATScopeField), which is what
-// makes this table equivalent, for every scope a legacy row can hold, to
-// the pre-A.2 scopeToPermissionIDs Registry scan it replaces.
+// and UATManageAliases), and a manage alias is expanded to its concrete
+// scopes before being persisted, so it is never stored raw. Every
+// Permission.UATScope value equals Resource+":"+Action (see
+// TestPermissionRegistry_UATScopeMatchesResourceAction), which is what makes
+// this table a faithful snapshot of that mapping.
 var legacyUATScopeToPermissionID = map[string]string{
 	"agent:attach":               "agent.attach",
 	"agent:create":               "agent.create",
@@ -83,26 +80,20 @@ var legacyUATScopeToPermissionID = map[string]string{
 }
 
 // NormalizeLegacyUATScopes maps a CeilingVersionUnspecified row's raw stored
-// Scopes to canonical permission IDs using the frozen snapshot above —
-// never the live, mutable ResolveSelector — so a later Registry change
-// cannot retroactively reinterpret an already-minted legacy token (A.2
-// ruling, a2-legacy-attach-ruling.md). Deliberately no
-// LegacyUATScopeImplications expansion: that map was never honored on the
-// Decide path, and this normalization freezes Decide's actual observed
-// behavior, not CanDelegate's historically inconsistent one.
+// Scopes to canonical permission IDs using the frozen snapshot above, never
+// the live, mutable ResolveSelector: a scope grants exactly the one
+// permission it names, and no scope implies another.
 //
 // A scope with no entry (never valid, or valid only after this snapshot was
 // taken) is dropped rather than denying the whole ceiling: dropping an
-// unrecognized scope can only shrink the resulting permission set, so it
-// stays inside the narrowing-only mandate. Duplicate permission IDs
-// (multiple scopes resolving to the same ID — not possible today, but not
-// relied upon) are deduplicated.
+// unrecognized scope can only shrink the resulting permission set. Duplicate
+// permission IDs (multiple scopes resolving to the same ID — not possible
+// today, but not relied upon) are deduplicated. The result is never nil,
+// even for empty input, so callers can distinguish "resolved to nothing"
+// from "not yet resolved" without a special case.
 func NormalizeLegacyUATScopes(scopes []string) []string {
-	if len(scopes) == 0 {
-		return nil
-	}
+	ids := make([]string, 0, len(scopes))
 	seen := make(map[string]bool, len(scopes))
-	var ids []string
 	for _, scope := range scopes {
 		id, ok := legacyUATScopeToPermissionID[scope]
 		if !ok || seen[id] {

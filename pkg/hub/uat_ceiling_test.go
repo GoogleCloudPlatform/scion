@@ -18,50 +18,57 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// ---------------------------------------------------------------------------
-// A.2 characterization and acceptance tests (ptone/scion#2118).
-//
-// Characterization (before-change pins, still true after the change — Decide
-// is not widened):
-//   - TestUATCeiling_Decide_LegacyAttachOnlyDeniesLifecycle
-//   - TestUATCeiling_Decide_LegacyManageAliasAllowsLifecycle
-//
-// Ruling alignment (CanDelegate narrowed to match Decide's actual behavior —
-// a2-legacy-attach-ruling.md):
-//   - TestUATCeiling_CanDelegate_LegacyAttachOnlyDeniesLifecycle
-//   - TestUATCeiling_CanDelegate_LegacyManageAliasAllowsLifecycle
-//
-// Acceptance criteria:
-//   - Registry/alias changes never widen an existing token:
-//     TestUATCeiling_RegistryAdditionNeverWidensExistingToken
-//   - Unknown/malformed/empty ceilings deny:
-//     TestUATCeiling_Decide_UnknownVersionDenies,
-//     TestUATCeiling_Decide_EmptyCeilingDenies
-//   - Mint validation and the persisted ceiling agree, and manage-alias
-//     expansion is persisted while attach/port_access require explicit
-//     selection: TestCreateTokenWithParams_PersistsCeiling*
-// ---------------------------------------------------------------------------
-
-// legacyScopedIdentity builds a *ScopedUserIdentity the way a
-// CeilingVersionUnspecified row is normalized: NewScopedUserIdentity derives
-// the ceiling from raw scopes via the frozen legacy snapshot, exactly what
-// store.UserAccessToken.NormalizedCeiling does for an unbackfilled row.
+// legacyScopedIdentity builds a *ScopedUserIdentity the way an unbackfilled
+// row is normalized: NewScopedUserIdentity derives the ceiling from scopes
+// via the frozen legacy snapshot, exactly what
+// store.UserAccessToken.NormalizedCeiling does for such a row. Tests that
+// need the production load path instead (ValidateToken against a real
+// stored row) use seedLegacyTokenInStore.
 func legacyScopedIdentity(base UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return NewScopedUserIdentity(base, projectID, scopes)
 }
 
+// seedLegacyTokenInStore inserts a user_access_tokens row directly through
+// the real store, the way a row exists before its ceiling has ever been
+// computed: CeilingVersion/CeilingPermissionIDs are left at their zero
+// values. It returns the plaintext key (for ValidateToken) and the row ID.
+func seedLegacyTokenInStore(t *testing.T, s store.Store, userID, projectID string, scopes []string) (plaintext, tokenID string) {
+	t.Helper()
+	randomBytes := make([]byte, UATRandomBytes)
+	_, err := rand.Read(randomBytes)
+	require.NoError(t, err)
+	keyBody := base64.RawURLEncoding.EncodeToString(randomBytes)
+	fullKey := store.UATPrefix + keyBody
+	prefix := store.UATPrefix + keyBody[:UATPrefixLength]
+	hash := sha256.Sum256([]byte(fullKey))
+	hashStr := hex.EncodeToString(hash[:])
+
+	future := time.Now().Add(90 * 24 * time.Hour)
+	token := &store.UserAccessToken{
+		ID: uuid.New().String(), UserID: userID, Name: "legacy", Prefix: prefix, KeyHash: hashStr,
+		ProjectID: projectID, Scopes: scopes, ExpiresAt: &future, Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUserAccessToken(context.Background(), token))
+	return fullKey, token.ID
+}
+
 // TestUATCeiling_Decide_LegacyAttachOnlyDeniesLifecycle characterizes the
-// Decide path for a legacy (unversioned) attach-only UAT: it must be denied
-// a lifecycle action on its own project's agent, both before and after A.2 —
-// Decide's exact-scope behavior is preserved, never widened.
+// Decide path for an unversioned attach-only UAT: it is denied a lifecycle
+// action on its own project's agent. No scope implies another.
 func TestUATCeiling_Decide_LegacyAttachOnlyDeniesLifecycle(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -77,26 +84,24 @@ func TestUATCeiling_Decide_LegacyAttachOnlyDeniesLifecycle(t *testing.T) {
 	base := NewAuthenticatedUser(ownerID, "owner@example.com", "Owner", "member", "api")
 	scoped := legacyScopedIdentity(base, project.ID, []string{"agent:attach"})
 
-	// OwnerID must be set: agent.attach is deliberately excluded from the
-	// project-owner role's flat permissions (miller79/scion#88) — the owner
-	// reaches their OWN agent's attach only through the resource-owner
-	// relationship grant, which is what the "control" assertion below
-	// exercises.
+	// OwnerID must be set: agent.attach is not part of the project-owner
+	// role's flat permissions (miller79/scion#88) — the owner reaches their
+	// OWN agent's attach only through the resource-owner relationship
+	// grant, which is what the "control" assertion below exercises.
 	resource := Resource{Type: "agent", ID: agent.ID, OwnerID: ownerID, ParentType: "project", ParentID: project.ID}
 	decision := authz.CheckAccess(ctx, scoped, resource, ActionLifecycle)
-	assert.False(t, decision.Allowed, "legacy attach-only UAT must not gain lifecycle on the Decide path")
+	assert.False(t, decision.Allowed, "attach-only UAT must not gain lifecycle on the Decide path")
 
 	// Control: the same token IS allowed the action it actually holds.
 	attachDecision := authz.CheckAccess(ctx, scoped, resource, ActionAttach)
-	assert.True(t, attachDecision.Allowed, "legacy attach-only UAT must still be allowed agent.attach")
+	assert.True(t, attachDecision.Allowed, "attach-only UAT must still be allowed agent.attach")
 }
 
 // TestUATCeiling_Decide_LegacyManageAliasAllowsLifecycle characterizes
-// legacy manage-alias expansion separately, as required by the A.2 brief: a
-// legacy token minted with agent:manage stores the mint-time expanded
-// concrete scopes (including agent:lifecycle explicitly), so — unlike
-// attach-only — it IS allowed lifecycle, without any implication expansion
-// being involved.
+// legacy manage-alias expansion separately: an unversioned token minted with
+// agent:manage stores the mint-time expanded concrete scopes (including
+// agent:lifecycle explicitly), so — unlike attach-only — it is allowed
+// lifecycle, without any implication expansion being involved.
 func TestUATCeiling_Decide_LegacyManageAliasAllowsLifecycle(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -110,25 +115,25 @@ func TestUATCeiling_Decide_LegacyManageAliasAllowsLifecycle(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	base := NewAuthenticatedUser(ownerID, "owner2@example.com", "Owner", "member", "api")
-	// This is what expandScopes("agent:manage") persisted at mint time —
-	// a legacy row's Scopes column never holds the raw alias.
+	// This is what expandScopes("agent:manage") persists at mint time — the
+	// stored Scopes column never holds the raw alias.
 	storedScopes := permissions.UATManageScopesFor(permissions.ResourceAgent)
 	scoped := legacyScopedIdentity(base, project.ID, storedScopes)
 
 	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: project.ID}
 	decision := authz.CheckAccess(ctx, scoped, resource, ActionLifecycle)
-	assert.True(t, decision.Allowed, "legacy agent:manage token must keep its explicitly-expanded lifecycle scope")
+	assert.True(t, decision.Allowed, "an agent:manage token must keep its explicitly-expanded lifecycle scope")
 
 	// The manage alias still deliberately excludes attach/port_access.
 	attachDecision := authz.CheckAccess(ctx, scoped, resource, ActionAttach)
-	assert.False(t, attachDecision.Allowed, "legacy agent:manage token must not gain attach (excluded from the alias)")
+	assert.False(t, attachDecision.Allowed, "an agent:manage token must not gain attach (excluded from the alias)")
 }
 
-// TestUATCeiling_CanDelegate_LegacyAttachOnlyDeniesLifecycle is the ruling
-// test: CanDelegate is narrowed to match Decide's exact-scope behavior. A
-// project owner who minted a legacy attach-only UAT holds agent.lifecycle
-// through their real project-owner role, but the credential ceiling must
-// still prevent that UAT from delegating it.
+// TestUATCeiling_CanDelegate_LegacyAttachOnlyDeniesLifecycle: CanDelegate
+// applies the same ceiling as Decide. A project owner who holds
+// agent.lifecycle through their real project-owner role, but whose
+// credential ceiling carries only agent.attach, must not be able to
+// delegate agent.lifecycle.
 func TestUATCeiling_CanDelegate_LegacyAttachOnlyDeniesLifecycle(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -147,11 +152,11 @@ func TestUATCeiling_CanDelegate_LegacyAttachOnlyDeniesLifecycle(t *testing.T) {
 		ScopeType:       store.RoleScopeProject,
 		ScopeID:         project,
 	})
-	assert.False(t, decision.Allowed, "legacy attach-only UAT must not be able to delegate agent.lifecycle")
+	assert.False(t, decision.Allowed, "an attach-only credential must not be able to delegate agent.lifecycle")
 }
 
 // TestUATCeiling_CanDelegate_LegacyManageAliasAllowsLifecycle is the
-// companion positive case: a legacy manage-alias token's persisted concrete
+// companion positive case: an agent:manage token's persisted concrete
 // scopes already include agent.lifecycle, so CanDelegate allows it — this is
 // not an implication, it was always explicitly in the ceiling.
 func TestUATCeiling_CanDelegate_LegacyManageAliasAllowsLifecycle(t *testing.T) {
@@ -172,13 +177,12 @@ func TestUATCeiling_CanDelegate_LegacyManageAliasAllowsLifecycle(t *testing.T) {
 		ScopeType:       store.RoleScopeProject,
 		ScopeID:         project,
 	})
-	assert.True(t, decision.Allowed, "legacy agent:manage token must be able to delegate its explicitly-held agent.lifecycle")
+	assert.True(t, decision.Allowed, "a credential holding agent.lifecycle explicitly must be able to delegate it")
 }
 
-// TestUATCeiling_CanDelegate_EmptyCeilingDeniesEverything pins the F-8
-// over-permissive-path fix directly: a ScopedUserIdentity whose ceiling has
-// no permission IDs must not fall through to "unrestricted" in
-// intersectCredentialCaveats.
+// TestUATCeiling_CanDelegate_EmptyCeilingDeniesEverything: a ScopedUserIdentity
+// whose ceiling has no permission IDs must not fall through to "unrestricted"
+// in intersectCredentialCaveats.
 func TestUATCeiling_CanDelegate_EmptyCeilingDeniesEverything(t *testing.T) {
 	authz, s := setupCanDelegateTest(t)
 	ctx := context.Background()
@@ -250,47 +254,223 @@ func TestUATCeiling_Decide_EmptyCeilingDenies(t *testing.T) {
 	assert.False(t, decision.Allowed, "an explicit empty V1 ceiling must deny, not become unrestricted")
 }
 
-// TestUATCeiling_RegistryAdditionNeverWidensExistingToken is the direct AC
-// test: mint a real token, capture its persisted ceiling, mutate the live
-// Registry to add a new permission that (if live-resolved) could plausibly
-// enlarge what the token's stored scope means, and confirm the previously
-// minted token's authorization outcome is unchanged.
-func TestUATCeiling_RegistryAdditionNeverWidensExistingToken(t *testing.T) {
+// TestUATCeiling_Decide_NewlyIssuedAttachOnlyDeniesLifecycle covers the
+// "newly issued" half of the rule at CeilingVersionV1: a V1 ceiling
+// containing only agent.attach denies agent.lifecycle and allows
+// agent.attach, through the same ceilingRestriction path a legacy ceiling
+// goes through.
+//
+// Built via NewScopedUserIdentityWithCeiling rather than minted through
+// CreateTokenWithParams: agent.attach is granted only through the
+// resource-owner/ancestor relationship, never through a flat role
+// permission (miller79/scion#88), and mint validation only checks flat role
+// permissions today — no role can mint a bare agent:attach token.
+func TestUATCeiling_Decide_NewlyIssuedAttachOnlyDeniesLifecycle(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	ownerID := tid("v1-attach-owner")
+	project := &store.Project{ID: tid("v1-attach-project"), Name: "p", Slug: "v1-attach-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	createTestUserWithProjectRole(t, s, ownerID, "v1a@example.com", project.ID, store.ProjectRoleOwner)
+	agent := &store.Agent{ID: tid("v1-attach-agent"), Slug: "a", Name: "a", ProjectID: project.ID, OwnerID: ownerID}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	base := NewAuthenticatedUser(ownerID, "v1a@example.com", "Owner", "member", "api")
+	scoped := NewScopedUserIdentityWithCeiling(base, project.ID, []string{"agent:attach"}, "", permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionV1,
+		PermissionIDs: []string{"agent.attach"},
+	})
+
+	resource := Resource{Type: "agent", ID: agent.ID, OwnerID: ownerID, ParentType: "project", ParentID: project.ID}
+	decision := authz.CheckAccess(ctx, scoped, resource, ActionLifecycle)
+	assert.False(t, decision.Allowed, "a V1 attach-only token must not gain lifecycle")
+	attachDecision := authz.CheckAccess(ctx, scoped, resource, ActionAttach)
+	assert.True(t, attachDecision.Allowed, "a V1 attach-only token must still be allowed attach")
+
+	cdDecision := authz.CanDelegate(ctx, scoped, GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"agent.lifecycle"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         project.ID,
+	})
+	assert.False(t, cdDecision.Allowed, "a V1 attach-only token must not be able to delegate lifecycle")
+}
+
+// TestUATCeiling_LegacyRowThroughValidateToken exercises the production
+// load path — a row inserted through the store, validated by
+// UserAccessTokenService.ValidateToken — rather than a test-constructed
+// identity, both before and after the ceiling backfill runs against that
+// row. The authorization outcome must be identical at both stages.
+func TestUATCeiling_LegacyRowThroughValidateToken(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	ownerID := tid("no-widen-owner")
-	project := &store.Project{ID: tid("no-widen-project"), Name: "p", Slug: "no-widen-project"}
+	ownerID := tid("legacy-load-owner")
+	project := &store.Project{ID: tid("legacy-load-project"), Name: "p", Slug: "legacy-load-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
-	createTestUserWithProjectRole(t, s, ownerID, "nw@example.com", project.ID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, s, ownerID, "ll@example.com", project.ID, store.ProjectRoleOwner)
+	agent := &store.Agent{ID: tid("legacy-load-agent"), Slug: "a", Name: "a", ProjectID: project.ID, OwnerID: ownerID}
+	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	_, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
-		UserID: ownerID, Name: "no-widen", ProjectID: project.ID, Scopes: []string{"agent:read"},
+	plaintext, tokenID := seedLegacyTokenInStore(t, s, ownerID, project.ID, []string{"agent:attach"})
+	resource := Resource{Type: "agent", ID: agent.ID, OwnerID: ownerID, ParentType: "project", ParentID: project.ID}
+
+	checkDeniesLifecycleAllowsAttach := func(t *testing.T) {
+		t.Helper()
+		identity, err := srv.uatService.ValidateToken(ctx, plaintext)
+		require.NoError(t, err)
+
+		decision := srv.authzService.CheckAccess(ctx, identity, resource, ActionLifecycle)
+		assert.False(t, decision.Allowed, "a legacy attach-only row must not gain lifecycle through the production load path")
+		attachDecision := srv.authzService.CheckAccess(ctx, identity, resource, ActionAttach)
+		assert.True(t, attachDecision.Allowed, "a legacy attach-only row must still be allowed attach through the production load path")
+
+		cdDecision := srv.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+			Type:            GrantTypeRoleBinding,
+			RolePermissions: []string{"agent.lifecycle"},
+			ScopeType:       store.RoleScopeProject,
+			ScopeID:         project.ID,
+		})
+		assert.False(t, cdDecision.Allowed, "a legacy attach-only row must not be able to delegate lifecycle through the production load path")
+	}
+
+	t.Run("before backfill", checkDeniesLifecycleAllowsAttach)
+
+	stored, err := s.GetUserAccessToken(ctx, tokenID)
+	require.NoError(t, err)
+	require.Nil(t, stored.CeilingPermissionIDs, "precondition: row must not be backfilled yet")
+
+	// Force the ceiling backfill to reprocess: testServer's own setup
+	// already ran Migrate once, before this row existed, and recorded
+	// completion.
+	require.NoError(t, s.DeleteHubSetting(ctx, "migration_uat_ceiling_backfill_v1"))
+	require.NoError(t, s.Migrate(ctx))
+
+	stored, err = s.GetUserAccessToken(ctx, tokenID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.CeilingPermissionIDs, "row must be backfilled by the forced re-migrate")
+
+	t.Run("after backfill", checkDeniesLifecycleAllowsAttach)
+}
+
+// TestUATCeiling_LegacyRow_AliasChangeCannotWidenBetweenValidations pins the
+// sharpest form of "a Registry or alias change never widens an existing
+// token": an unbackfilled legacy row recomputes its ceiling on every
+// ValidateToken call, so an alias change happening between two requests for
+// the SAME token must not change what it is authorized for. The mutation's
+// effectiveness is confirmed via ResolveSelector before the negative result
+// is trusted.
+func TestUATCeiling_LegacyRow_AliasChangeCannotWidenBetweenValidations(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ownerID := tid("nowiden-alias-owner")
+	project := &store.Project{ID: tid("nowiden-alias-project"), Name: "p", Slug: "nowiden-alias-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	createTestUserWithProjectRole(t, s, ownerID, "nwa@example.com", project.ID, store.ProjectRoleOwner)
+
+	plaintext, _ := seedLegacyTokenInStore(t, s, ownerID, project.ID, []string{"agent:attach"})
+
+	before, err := srv.uatService.ValidateToken(ctx, plaintext)
+	require.NoError(t, err)
+	beforeDecision := srv.authzService.CanDelegate(ctx, before, GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"agent.lifecycle"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         project.ID,
+	})
+	require.False(t, beforeDecision.Allowed)
+
+	originalAliases := permissions.UATManageAliases
+	t.Cleanup(func() {
+		permissions.UATManageAliases = originalAliases
+		permissions.ResetSelectorRegistryForTest()
+	})
+	// Retarget agent:attach as a manage alias for "agent": buildSelectorRegistry
+	// processes aliases after plain UATScope entries, so this alias
+	// candidate wins the same map key and "agent:attach" would resolve to
+	// the full agent:manage expansion — including agent.lifecycle — if
+	// anything re-consulted ResolveSelector live.
+	mutated := make(map[string]string, len(originalAliases)+1)
+	for k, v := range originalAliases {
+		mutated[k] = v
+	}
+	mutated["agent:attach"] = permissions.ResourceAgent
+	permissions.UATManageAliases = mutated
+	permissions.ResetSelectorRegistryForTest()
+
+	live, ok := permissions.ResolveSelector("agent:attach")
+	require.True(t, ok)
+	require.Contains(t, live.PermissionIDs, "agent.lifecycle", "test setup: expected the alias mutation to be effective")
+
+	after, err := srv.uatService.ValidateToken(ctx, plaintext)
+	require.NoError(t, err)
+	afterDecision := srv.authzService.CanDelegate(ctx, after, GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"agent.lifecycle"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         project.ID,
+	})
+	assert.False(t, afterDecision.Allowed, "an alias mutation must not let re-validating the same never-backfilled legacy token gain lifecycle")
+}
+
+// TestUATCeiling_V1Token_RegistryChangeCannotWidenBetweenValidations is the
+// CeilingVersionV1 counterpart: a minted token's persisted
+// CeilingPermissionIDs must survive a later Registry mutation unchanged
+// across repeated ValidateToken calls.
+func TestUATCeiling_V1Token_RegistryChangeCannotWidenBetweenValidations(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ownerID := tid("nowiden-v1-owner")
+	project := &store.Project{ID: tid("nowiden-v1-project"), Name: "p", Slug: "nowiden-v1-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	createTestUserWithProjectRole(t, s, ownerID, "nwv1@example.com", project.ID, store.ProjectRoleOwner)
+
+	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
+		UserID: ownerID, Name: "v1", ProjectID: project.ID, Scopes: []string{"agent:read"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, permissions.CeilingVersionV1, token.CeilingVersion)
-	require.Equal(t, []string{"agent.read"}, token.CeilingPermissionIDs)
+
+	before, err := srv.uatService.ValidateToken(ctx, key)
+	require.NoError(t, err)
+	require.True(t, before.Ceiling().Allows("agent.read"))
+	require.False(t, before.Ceiling().Allows("agent.list"))
 
 	originalRegistry := permissions.Registry
-	t.Cleanup(func() { permissions.Registry = originalRegistry })
+	t.Cleanup(func() {
+		permissions.Registry = originalRegistry
+		permissions.ResetSelectorRegistryForTest()
+	})
+	// Retarget "agent:read" to resolve to agent.list instead, by appending a
+	// later Registry entry with the same UATScope: buildSelectorRegistry's
+	// last-write-wins map assignment means the appended entry decides what
+	// ResolveSelector("agent:read") returns from here on. agent.list already
+	// has a reviewed boundary entry, so the selector still resolves.
 	mutated := append([]permissions.Permission(nil), originalRegistry...)
 	mutated = append(mutated, permissions.Permission{
-		ID: "agent.read.v2", Resource: permissions.ResourceAgent, Action: permissions.ActionRead, UATScope: "agent:read",
+		ID: "agent.list", Resource: permissions.ResourceAgent, Action: permissions.ActionRead, UATScope: "agent:read",
 	})
 	permissions.Registry = mutated
+	permissions.ResetSelectorRegistryForTest()
 
-	ceiling := token.NormalizedCeiling()
-	assert.True(t, ceiling.Allows("agent.read"))
-	assert.False(t, ceiling.Allows("agent.read.v2"), "a Registry addition after mint must not widen an already-minted token")
+	live, ok := permissions.ResolveSelector("agent:read")
+	require.True(t, ok)
+	require.Equal(t, []string{"agent.list"}, live.PermissionIDs, "test setup: expected the Registry mutation to be effective")
+
+	after, err := srv.uatService.ValidateToken(ctx, key)
+	require.NoError(t, err)
+	assert.True(t, after.Ceiling().Allows("agent.read"), "a V1 token's persisted ceiling must survive a later Registry mutation unchanged")
+	assert.False(t, after.Ceiling().Allows("agent.list"), "a Registry mutation must not let re-validating an existing V1 token gain a new permission")
 }
 
 // TestCreateTokenWithParams_PersistsCeiling_ExplicitScope pins that mint
-// validation (resolveScopePermissionIDs, A.1's SelectorRegistry) and the
-// persisted ceiling agree for an ordinary, explicitly-selected scope. Uses
-// agent:read/agent:list — flat permissions a project-owner role actually
-// holds; agent.attach is deliberately NOT part of that flat grant
-// (miller79/scion#88), so it belongs in the mint-denial characterization,
-// not here.
+// validation and the persisted ceiling agree for an ordinary,
+// explicitly-selected scope. Uses agent:read/agent:list — flat permissions
+// a project-owner role actually holds; agent.attach is deliberately NOT
+// part of that flat grant (miller79/scion#88), so it belongs in the
+// mint-denial characterization, not here.
 func TestCreateTokenWithParams_PersistsCeiling_ExplicitScope(t *testing.T) {
 	srv, s := testServer(t)
 	ownerID := tid("mint-explicit-owner")

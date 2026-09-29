@@ -1575,18 +1575,20 @@ type UserAccessToken struct {
 	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
 	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
-	// Ceiling is the normalized, frozen permission ceiling (A.2). CeilingVersion
-	// CeilingVersionUnspecified (zero value) marks a row minted before A.2, or
-	// one whose ceiling has not been backfilled yet: CeilingPermissionIDs is nil
-	// (distinct from a persisted, explicit empty list) in that case, and
-	// NormalizedCeiling recomputes it from Scopes via the frozen legacy snapshot
-	// rather than trusting a zero value that could equally mean "backfilled to
-	// nothing." Once backfilled, or for any CeilingVersionV1+ row minted going
-	// forward, CeilingPermissionIDs is the authoritative, already-resolved
-	// value and Scopes is retained only for legacy display/audit — never
-	// re-derived.
-	CeilingVersion       permissions.CeilingVersion `json:"ceilingVersion,omitempty"`
-	CeilingPermissionIDs []string                   `json:"ceilingPermissionIds,omitempty"`
+	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
+	// permission ceiling. CeilingVersionUnspecified (zero value) with
+	// CeilingPermissionIDs == nil means no ceiling has been persisted for
+	// this row yet: NormalizedCeiling recomputes it from Scopes via the
+	// frozen legacy snapshot rather than trusting a zero value that could
+	// equally mean "persisted, and resolves to nothing." Once
+	// CeilingPermissionIDs is non-nil — backfilled, or set at mint for any
+	// CeilingVersionV1+ row — it is the authoritative, already-resolved
+	// value and Scopes is retained only for display/audit, never re-derived.
+	// Excluded from JSON: the HTTP token response is a separate type, and
+	// omitempty would collapse the nil-vs-empty-list distinction on a round
+	// trip.
+	CeilingVersion       permissions.CeilingVersion `json:"-"`
+	CeilingPermissionIDs []string                   `json:"-"`
 
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
@@ -1602,7 +1604,7 @@ type UserAccessToken struct {
 // via permissions.NormalizeLegacyUATScopes, the frozen legacy snapshot. This
 // never calls the live, mutable permissions.ResolveSelector, so a later
 // Registry or alias change cannot retroactively change what an existing
-// token means (A.2 ruling). Once CeilingPermissionIDs has been persisted
+// token means. Once CeilingPermissionIDs has been persisted
 // (by the migration backfill, or because the token was minted under
 // CeilingVersionV1+), that value is authoritative and is returned as-is,
 // including when it is an explicit empty list — which denies, not

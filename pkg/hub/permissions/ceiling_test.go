@@ -32,6 +32,17 @@ func TestFrozenPermissionCeiling_Allows_EmptyDenies(t *testing.T) {
 	}
 }
 
+// TestFrozenPermissionCeiling_Allows_EmptyStringInListStillDenies pins that
+// the permissionID == "" guard in Allows is load-bearing: without it, a
+// ceiling that happened to list "" as a permission ID would allow an
+// empty-string lookup.
+func TestFrozenPermissionCeiling_Allows_EmptyStringInListStillDenies(t *testing.T) {
+	c := FrozenPermissionCeiling{Version: CeilingVersionV1, PermissionIDs: []string{""}}
+	if c.Allows("") {
+		t.Error("Allows(\"\") must deny even when \"\" literally appears in PermissionIDs")
+	}
+}
+
 // TestFrozenPermissionCeiling_Allows_UnknownVersionDenies pins that an
 // unrecognized CeilingVersion denies every permission, even one present in
 // PermissionIDs (AC: "unknown versions ... deny rather than become
@@ -98,38 +109,52 @@ func TestBuildCeilingFromSelectors_UnknownSelectorFailsClosed(t *testing.T) {
 	}
 }
 
-// TestBuildCeilingFromSelectors_RegistryAdditionNeverWidensExistingToken
+// TestBuildCeilingFromSelectors_FreezingProtectsAgainstLaterRegistryChange
 // pins the AC directly: a ceiling computed and frozen at one point in time
 // must not change meaning just because the live Registry later grows. Since
-// BuildCeilingFromSelectors is only used at mint time, the actual
-// non-widening guarantee for an EXISTING token comes from freezing
-// PermissionIDs once and never recomputing from ResolveSelector again — this
-// test demonstrates that recomputing the same selector after a Registry
-// mutation would (correctly) require a new call, and that a stored ceiling
-// value (simulated here as a variable, standing in for a persisted column)
-// is untouched by the mutation.
-func TestBuildCeilingFromSelectors_RegistryAdditionNeverWidensExistingToken(t *testing.T) {
+// BuildCeilingFromSelectors resolves live (correct at mint time), the actual
+// non-widening guarantee for an EXISTING token comes entirely from calling
+// it once and storing the result — never calling it, or ResolveSelector,
+// again for that token. This test proves the Registry mutation is real
+// (a fresh ResolveSelector call changes) before trusting that the
+// already-frozen value does not.
+func TestBuildCeilingFromSelectors_FreezingProtectsAgainstLaterRegistryChange(t *testing.T) {
 	frozen, ok := BuildCeilingFromSelectors([]string{"agent:read"})
 	if !ok {
 		t.Fatal("expected agent:read to resolve")
 	}
 
-	// Simulate a later Registry addition that could, if re-resolved live,
-	// change what "agent:read" means (e.g. a hypothetical alias retarget).
 	originalRegistry := Registry
-	t.Cleanup(func() { Registry = originalRegistry })
+	t.Cleanup(func() {
+		Registry = originalRegistry
+		ResetSelectorRegistryForTest()
+	})
+
+	// Retarget "agent:read" to resolve to agent.list instead, by appending a
+	// later Registry entry with the same UATScope: buildSelectorRegistry's
+	// last-write-wins map assignment means this appended entry decides what
+	// ResolveSelector("agent:read") returns from here on. agent.list already
+	// has a reviewed SelectorAllowedBoundaries entry, so the selector still
+	// resolves rather than being dropped as unreviewed.
 	mutated := append([]Permission(nil), originalRegistry...)
 	mutated = append(mutated, Permission{
-		ID: "agent.read.v2", Resource: ResourceAgent, Action: ActionRead, UATScope: "agent:read",
+		ID: "agent.list", Resource: ResourceAgent, Action: ActionRead, UATScope: "agent:read",
 	})
 	Registry = mutated
+	ResetSelectorRegistryForTest()
 
-	// The previously-frozen value must be completely unaffected: it holds a
-	// plain []string, computed once, with no live dependency on Registry.
+	live, ok := ResolveSelector("agent:read")
+	if !ok || len(live.PermissionIDs) != 1 || live.PermissionIDs[0] != "agent.list" {
+		t.Fatalf("test setup: expected the Registry mutation to be effective, got %v ok=%v", live, ok)
+	}
+
+	// The already-frozen value is a plain []string with no live dependency
+	// on Registry: it must still allow the ORIGINAL permission and must not
+	// pick up the one the mutation retargeted the selector to.
 	if !frozen.Allows("agent.read") {
 		t.Error("frozen ceiling must still allow agent.read")
 	}
-	if frozen.Allows("agent.read.v2") {
-		t.Error("frozen ceiling must not gain the newly-added permission ID")
+	if frozen.Allows("agent.list") {
+		t.Error("frozen ceiling must not gain the permission ID a later Registry mutation retargeted the selector to")
 	}
 }

@@ -15,17 +15,18 @@
 package permissions
 
 import (
+	"reflect"
 	"sort"
 	"testing"
 )
 
-// TestLegacyUATScopeToPermissionID_MatchesUATScopeField pins the invariant
-// the frozen snapshot's freshness argument depends on: every current
-// Permission.UATScope value equals Resource+":"+Action, so a raw stored
-// scope string and its canonical permission ID are in 1:1 correspondence.
-// If a future change breaks this invariant, this test — not production
-// behavior — is what should fail; the frozen table itself stays untouched.
-func TestLegacyUATScopeToPermissionID_MatchesUATScopeField(t *testing.T) {
+// TestPermissionRegistry_UATScopeMatchesResourceAction pins a Registry
+// invariant, independent of the frozen snapshot: every current
+// Permission.UATScope value equals Resource+":"+Action. legacy_ceiling.go's
+// snapshot relies on this having held on the day it was written; it does not
+// need to keep holding afterward, since the snapshot is a literal copy, not
+// a live derivation.
+func TestPermissionRegistry_UATScopeMatchesResourceAction(t *testing.T) {
 	for _, p := range Registry {
 		if p.UATScope == "" {
 			continue
@@ -37,32 +38,67 @@ func TestLegacyUATScopeToPermissionID_MatchesUATScopeField(t *testing.T) {
 	}
 }
 
-// TestLegacyUATScopeToPermissionID_CoversAllCurrentUATScopes documents that
-// the frozen snapshot was accurate as of its authoring date: every
-// UATScope-bearing Registry permission today has an entry. This is a
-// point-in-time documentation check, not a live derivation — adding a new
-// UATScope later must NOT require (or cause) a change to the frozen table;
-// this test will simply start reporting the new scope as "not yet legacy",
-// which is correct, since no pre-A.2 row could ever contain it.
-func TestLegacyUATScopeToPermissionID_CoversAllCurrentUATScopes(t *testing.T) {
-	var missing []string
-	for _, p := range Registry {
-		if p.UATScope == "" {
-			continue
-		}
-		if _, ok := legacyUATScopeToPermissionID[p.UATScope]; !ok {
-			missing = append(missing, p.UATScope)
-		}
+// TestLegacyUATScopeToPermissionID_Golden pins legacyUATScopeToPermissionID
+// to an independent literal copy. A change to the map fails this test: the
+// fix for a real interpretation change is a new CeilingVersion, never an
+// edit to this table.
+func TestLegacyUATScopeToPermissionID_Golden(t *testing.T) {
+	golden := map[string]string{
+		"agent:attach":               "agent.attach",
+		"agent:create":               "agent.create",
+		"agent:delete":               "agent.delete",
+		"agent:lifecycle":            "agent.lifecycle",
+		"agent:list":                 "agent.list",
+		"agent:message":              "agent.message",
+		"agent:port_access":          "agent.port_access",
+		"agent:read":                 "agent.read",
+		"broker:list":                "broker.list",
+		"broker:read":                "broker.read",
+		"gcp_service_account:assign": "gcp_service_account.assign",
+		"gcp_service_account:list":   "gcp_service_account.list",
+		"gcp_service_account:read":   "gcp_service_account.read",
+		"gcp_service_account:verify": "gcp_service_account.verify",
+		"group:addMember":            "group.addMember",
+		"group:create":               "group.create",
+		"group:delete":               "group.delete",
+		"group:list":                 "group.list",
+		"group:read":                 "group.read",
+		"group:removeMember":         "group.removeMember",
+		"group:update":               "group.update",
+		"harness_config:create":      "harness_config.create",
+		"harness_config:delete":      "harness_config.delete",
+		"harness_config:list":        "harness_config.list",
+		"harness_config:read":        "harness_config.read",
+		"harness_config:update":      "harness_config.update",
+		"project:clone":              "project.clone",
+		"project:manage":             "project.manage",
+		"project:read":               "project.read",
+		"project:update":             "project.update",
+		"skill:create":               "skill.create",
+		"skill:delete":               "skill.delete",
+		"skill:list":                 "skill.list",
+		"skill:read":                 "skill.read",
+		"skill:register":             "skill.register",
+		"skill:update":               "skill.update",
+		"template:create":            "template.create",
+		"template:delete":            "template.delete",
+		"template:list":              "template.list",
+		"template:read":              "template.read",
+		"template:update":            "template.update",
+		"user:invite":                "user.invite",
+		"user:list":                  "user.list",
+		"user:read":                  "user.read",
 	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		t.Logf("UATScope(s) not present in the frozen legacy snapshot (expected only for scopes added after 2026-09-29): %v", missing)
+	if !reflect.DeepEqual(golden, legacyUATScopeToPermissionID) {
+		t.Fatalf("legacyUATScopeToPermissionID changed from its frozen snapshot.\ngolden: %v\nactual: %v\n"+
+			"a real interpretation change needs a new CeilingVersion, not an edit to this table",
+			golden, legacyUATScopeToPermissionID)
 	}
 }
 
 // TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly is the
-// characterization pin for the A.2 ruling: a legacy row holding only
-// agent:attach normalizes to exactly agent.attach — no lifecycle
+// characterization pin for the legacy-attach ruling: a legacy row holding
+// only agent:attach normalizes to exactly agent.attach — no lifecycle
 // implication.
 func TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly(t *testing.T) {
 	ids := NormalizeLegacyUATScopes([]string{"agent:attach"})
@@ -72,11 +108,10 @@ func TestNormalizeLegacyUATScopes_AttachOnlyStaysAttachOnly(t *testing.T) {
 }
 
 // TestNormalizeLegacyUATScopes_ManageAliasExpansion characterizes legacy
-// manage-alias expansion separately, per the A.2 brief: a legacy row's
-// stored scopes always already reflect the mint-time expandScopes output
-// (manage aliases were never stored raw), so normalizing them recovers
-// exactly the resource's manage-alias scopes, still excluding attach/
-// port_access.
+// manage-alias expansion separately: a legacy row's stored scopes always
+// already reflect the mint-time expandScopes output (manage aliases were
+// never stored raw), so normalizing them recovers exactly the resource's
+// manage-alias scopes, still excluding attach/port_access.
 func TestNormalizeLegacyUATScopes_ManageAliasExpansion(t *testing.T) {
 	storedAfterMintTimeExpansion := UATManageScopesFor(ResourceAgent) // what expandScopes("agent:manage") would have persisted
 	ids := NormalizeLegacyUATScopes(storedAfterMintTimeExpansion)
@@ -115,45 +150,65 @@ func TestNormalizeLegacyUATScopes_UnrecognizedScopeDropped(t *testing.T) {
 	}
 }
 
-// TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges pins F-8 requirement
-// 1 directly: normalizing a legacy row must never consult the live,
-// mutable Registry, so a later Registry/alias change cannot silently
-// reinterpret what an existing legacy token means.
+// TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges proves — not just
+// asserts — that normalizing a legacy row never consults the live, mutable
+// selector registry. It mutates UATManageAliases so that, if
+// NormalizeLegacyUATScopes were switched to call the live ResolveSelector,
+// "agent:attach" would resolve to a materially different (and wider) set of
+// permission IDs; it then confirms that mutation actually took effect on
+// ResolveSelector before trusting the negative result on
+// NormalizeLegacyUATScopes. Without the effectiveness check, this test
+// would pass vacuously if the mutation were a no-op.
 func TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges(t *testing.T) {
 	before := NormalizeLegacyUATScopes([]string{"agent:attach", "agent:read"})
 
-	originalRegistry := Registry
 	originalAliases := UATManageAliases
 	t.Cleanup(func() {
-		Registry = originalRegistry
 		UATManageAliases = originalAliases
+		ResetSelectorRegistryForTest()
 	})
 
-	// Simulate a later change that would (if this function consulted live
-	// state) alter the interpretation of "agent:attach": retarget its
-	// UATScope-bearing entry's ID and add a brand new implication-like
-	// alias.
-	mutated := append([]Permission(nil), originalRegistry...)
-	for i := range mutated {
-		if mutated[i].UATScope == "agent:attach" {
-			mutated[i].ID = "agent.attach.renamed"
+	// agent:attach already exists as an ordinary UATScope (mapping only to
+	// agent.attach). Retargeting it as a manage alias too makes the alias
+	// candidate — built and inserted into the selector table AFTER the
+	// plain UATScope entries — win the same map key, so a live resolution
+	// of "agent:attach" would jump from {agent.attach} to the full
+	// agent:manage expansion, which includes agent.lifecycle. That is
+	// exactly the widening a live-resolution regression would produce.
+	mutated := make(map[string]string, len(originalAliases)+1)
+	for k, v := range originalAliases {
+		mutated[k] = v
+	}
+	mutated["agent:attach"] = ResourceAgent
+	UATManageAliases = mutated
+	ResetSelectorRegistryForTest()
+
+	mutatedResolution, ok := ResolveSelector("agent:attach")
+	if !ok {
+		t.Fatal("test setup: expected agent:attach to still resolve after the alias mutation")
+	}
+	foundLifecycle := false
+	for _, id := range mutatedResolution.PermissionIDs {
+		if id == "agent.lifecycle" {
+			foundLifecycle = true
 		}
 	}
-	Registry = mutated
-	UATManageAliases = map[string]string{"agent:attach": "agent"}
+	if !foundLifecycle {
+		t.Fatalf("test setup: mutation was not effective — ResolveSelector(\"agent:attach\") = %v, expected it to include agent.lifecycle", mutatedResolution.PermissionIDs)
+	}
 
 	after := NormalizeLegacyUATScopes([]string{"agent:attach", "agent:read"})
 	if len(before) != len(after) {
-		t.Fatalf("registry mutation changed normalization result: before=%v after=%v", before, after)
+		t.Fatalf("alias mutation changed normalization result: before=%v after=%v", before, after)
 	}
 	for i := range before {
 		if before[i] != after[i] {
-			t.Fatalf("registry mutation changed normalization result: before=%v after=%v", before, after)
+			t.Fatalf("alias mutation changed normalization result: before=%v after=%v", before, after)
 		}
 	}
 	for _, id := range after {
-		if id == "agent.attach.renamed" {
-			t.Error("legacy normalization must not pick up a live Registry ID rename")
+		if id == "agent.lifecycle" {
+			t.Error("legacy attach-only normalization must not pick up a live alias retarget that would add lifecycle")
 		}
 	}
 }

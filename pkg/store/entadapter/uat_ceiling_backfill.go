@@ -29,20 +29,25 @@ import (
 
 const uatCeilingBackfillMarkerSection = "migration_uat_ceiling_backfill_v1"
 
-// BackfillUATCeilings persists a FrozenPermissionCeiling for every existing
-// user_access_tokens row that predates the ceiling_version/
-// ceiling_permission_ids columns (A.2, ptone/scion#2118).
+// uatCeilingBackfillPageSize is a var, not a const, so a test can shrink it
+// to exercise pagination across multiple pages without creating hundreds of
+// rows.
+var uatCeilingBackfillPageSize = 500
+
+// BackfillUATCeilings persists a normalized permission ceiling for every
+// existing user_access_tokens row that has never had one computed
+// (ptone/scion#2118).
 //
 // A row in scope is identified by ceiling_permission_ids IS NULL — "never
-// backfilled" — not by ceiling_version, so this is independent of
-// project_id nullability (D.1 later relaxes project_id for hub-boundary
-// rows; every row D.1 mints sets ceiling_permission_ids itself, so it is
-// never a backfill target). PermissionIDs is computed via
-// permissions.NormalizeLegacyUATScopes — the frozen legacy snapshot, never
-// the live, mutable permissions.ResolveSelector — from each row's existing
-// Scopes column, which is left untouched, as are ID, KeyHash, Prefix,
-// ExpiresAt, and Revoked. Idempotent via a HubSetting completion marker, the
-// same pattern as BackfillDelegationEdges; safe to run on every startup.
+// backfilled" — not by ceiling_version, and never by project_id (a later
+// change makes project_id nullable for hub-boundary rows; every row minted
+// under that scheme sets ceiling_permission_ids itself, so it is never a
+// backfill target). PermissionIDs is computed via
+// permissions.NormalizeLegacyUATScopes — a fixed table, never the live,
+// mutable permissions.ResolveSelector — from each row's existing Scopes
+// column, which is left untouched, as are ID, KeyHash, Prefix, ExpiresAt,
+// and Revoked. Idempotent via a HubSetting completion marker, the same
+// pattern as BackfillDelegationEdges; safe to run on every startup.
 func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 	if _, err := c.GetHubSetting(ctx, uatCeilingBackfillMarkerSection); err == nil {
 		return nil
@@ -50,7 +55,6 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		return err
 	}
 
-	const pageSize = 500
 	var lastID *ent.UserAccessToken
 	var updated int
 
@@ -58,7 +62,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		q := c.client.UserAccessToken.Query().
 			Where(useraccesstoken.CeilingPermissionIdsIsNil()).
 			Order(ent.Asc(useraccesstoken.FieldID)).
-			Limit(pageSize)
+			Limit(uatCeilingBackfillPageSize)
 		if lastID != nil {
 			q = q.Where(useraccesstoken.IDGT(lastID.ID))
 		}
@@ -73,18 +77,18 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		for _, row := range rows {
 			var scopes []string
 			if row.Scopes != "" {
-				_ = json.Unmarshal([]byte(row.Scopes), &scopes)
+				if err := json.Unmarshal([]byte(row.Scopes), &scopes); err != nil {
+					slog.Warn("user access token ceiling backfill: scopes column is not valid JSON, treating as no scopes",
+						"token_id", row.ID, "error", err)
+					scopes = nil
+				}
 			}
+			// NormalizeLegacyUATScopes always returns a non-nil slice, so the
+			// persisted value is always non-nil too: a backfilled row is
+			// never left looking "never backfilled" (NULL) again, even when
+			// it resolves to zero permissions.
 			ids := permissions.NormalizeLegacyUATScopes(scopes)
 			persisted := marshalCeilingPermissionIDs(ids)
-			if persisted == nil {
-				// NormalizeLegacyUATScopes returns nil for an empty input,
-				// but an already-minted token always has at least one
-				// scope; guard anyway so a backfilled row is never left
-				// looking "never backfilled" (NULL) again.
-				empty := marshalCeilingPermissionIDs([]string{})
-				persisted = empty
-			}
 			if err := c.client.UserAccessToken.UpdateOneID(row.ID).
 				SetCeilingVersion(int32(permissions.CeilingVersionUnspecified)).
 				SetCeilingPermissionIds(*persisted).
@@ -95,7 +99,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		}
 
 		lastID = rows[len(rows)-1]
-		if len(rows) < pageSize {
+		if len(rows) < uatCeilingBackfillPageSize {
 			break
 		}
 	}

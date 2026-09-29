@@ -487,11 +487,10 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 7: Build restrictions ────────────────────────────────────
 	var restrictions []Restriction
 
-	// 7a. UAT credential permission ceiling restriction. Applied whenever the
-	// credential is a UAT, regardless of whether Ceiling.PermissionIDs is
-	// empty — an empty or malformed ceiling must deny every permission
-	// (F-8), not fall through to "no restriction" the way the old
-	// len(credential.Scopes) > 0 guard did.
+	// 7a. UAT credential permission ceiling restriction. Every UAT request
+	// applies this restriction, including one whose ceiling has no
+	// permission IDs at all: an empty or malformed ceiling denies every
+	// permission rather than lifting the restriction.
 	if credential.Kind == CredentialKindUAT {
 		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
 	}
@@ -1124,55 +1123,16 @@ func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 // Restriction builders
 // =============================================================================
 
-// ceilingRestriction builds a kernel Restriction from a UAT's normalized,
-// frozen permission ceiling (A.2). It is the production restriction builder
-// for UAT credentials — used by both Decide (step 7a) and CanDelegate's
-// intersectCredentialCaveats — and defers entirely to
-// FrozenPermissionCeiling.Allows, the one place "empty/unknown/malformed
-// denies" is encoded, so it applies identically to every ceiling version,
-// including a zero-value ceiling (which denies every permission, never
-// "unrestricted").
+// ceilingRestriction builds a kernel Restriction from a UAT's permission
+// ceiling. It defers entirely to FrozenPermissionCeiling.Allows: an empty,
+// zero-value, or unknown-version ceiling denies every permission rather
+// than lifting the restriction, and no scope ever implies another.
 func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction {
 	return Restriction{
 		Kind:        "credential_scope",
 		Description: "UAT credential permission ceiling",
 		Check: func(permissionID string) bool {
 			return ceiling.Allows(permissionID)
-		},
-	}
-}
-
-// uatScopeRestriction builds a kernel Restriction from raw UAT credential
-// scopes, expanded via LegacyUATScopeImplications. It is retained only as a
-// direct, documented characterization of that legacy implication map (see
-// its own doc comment and TestCrossMemberAttach_UATScopes) — production
-// UAT restriction now goes through ceilingRestriction, which never applies
-// implication expansion, matching the A.2 ruling that CanDelegate narrows to
-// Decide's actual exact-scope behavior rather than Decide widening to
-// CanDelegate's historical over-grant.
-func uatScopeRestriction(scopes []string) Restriction {
-	// UAT scopes are in "resource:action" format. Map them to permission IDs.
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		scopeSet[s] = true
-		for _, implied := range permissions.LegacyUATScopeImplications[s] {
-			scopeSet[implied] = true
-		}
-	}
-	// Build the set of allowed permission IDs from the scopes.
-	allowed := make(map[string]struct{})
-	for _, p := range permissions.Registry {
-		scopeKey := p.Resource + ":" + p.Action
-		if scopeSet[scopeKey] {
-			allowed[p.ID] = struct{}{}
-		}
-	}
-	return Restriction{
-		Kind:        "credential_scope",
-		Description: "UAT credential scope restriction",
-		Check: func(permissionID string) bool {
-			_, ok := allowed[permissionID]
-			return ok
 		},
 	}
 }
