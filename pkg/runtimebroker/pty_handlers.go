@@ -607,9 +607,7 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 			// retries) — this is not the same as the agent not existing, so
 			// don't tell the user "Agent not found". Give them something
 			// actionable instead.
-			slog.Warn("PTY attach: agent lookup failed, runtime listing unavailable",
-				"agent_id", agentID, "error", err)
-			RuntimeUnavailable(w, fmt.Sprintf(
+			AgentLookupUnavailable(w, agentID, err, fmt.Sprintf(
 				"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry the attach in a moment.", agentID))
 			return
 		}

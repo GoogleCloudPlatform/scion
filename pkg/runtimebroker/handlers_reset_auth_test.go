@@ -204,6 +204,51 @@ func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
 	if strings.Contains(w.Body.String(), "docker ps failed") {
 		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
 	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+}
+
+// TestResetAuth_NotFoundReturns404 is the N4 regression companion to
+// TestResetAuth_ListUnavailableReturns503: a genuine "not found" (a
+// successful, empty list — no lookup error at all) must still 404, not 503,
+// and must never invoke the exec. Without this test, a mutation that turns
+// every lookup error (or even no error) into a 503 would only be caught by
+// the exec handler's equivalent tests, leaving resetAuth's 404 branch
+// unpinned.
+func TestResetAuth_NotFoundReturns404(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{}
+
+	execCalled := false
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a genuinely missing agent, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("reset-auth must not exec when the agent was not found")
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeAgentNotFound {
+		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotFound, resp.Error.Code)
+	}
 }
 
 // TestResetAuth_MissingTokenIsValidationError verifies an empty token is

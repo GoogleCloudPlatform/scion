@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -124,6 +125,18 @@ func RuntimeError(w http.ResponseWriter, message string) {
 // the failure as permanent.
 func RuntimeUnavailable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeUnavailable, message, nil)
+}
+
+// AgentLookupUnavailable logs the underlying runtime error that caused an
+// agent lookup to fail (server-side only — see #2164 for keeping raw runtime
+// error text out of response bodies generally) and writes a generic 503
+// response. Callers use this when errors.Is(err, ErrAgentListUnavailable):
+// the container runtime itself failed to respond, which is not the same as
+// the agent being genuinely missing, so the client should retry rather than
+// be told "not found".
+func AgentLookupUnavailable(w http.ResponseWriter, agentID string, err error, message string) {
+	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "error", err)
+	RuntimeUnavailable(w, message)
 }
 
 // HubUnreachableError writes a 503 Service Unavailable response for Hub connectivity issues.

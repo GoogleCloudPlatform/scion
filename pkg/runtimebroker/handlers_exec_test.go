@@ -284,6 +284,46 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	}
 }
 
+// TestStopAgent_AuxiliaryListErrorAbortsWithout202 is the knock-on-effect
+// regression test called out in the ptone/scion#2176 R1 review: before the
+// fix, an auxiliary runtime's List failure inside LookupContainerID was
+// folded into agentNotFoundError (ErrAgentNotFound), so projectScopedTarget
+// treated it as "not found in this project" and stopAgent answered 202
+// "Agent stopped (not found in project)" — a false "stopped" for what was
+// actually a transient listing failure, not via a 404 but via a 202. Now
+// that the failure surfaces as ErrAgentListUnavailable, projectScopedTarget's
+// existing "surface anything that isn't ErrAgentNotFound" check (handlers.go)
+// must reject it, and stopAgent must report a 5xx instead of a false-success
+// 202, and must never call Stop.
+func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: fmt.Errorf("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code == http.StatusAccepted {
+		t.Fatalf("expected a 5xx, not the idempotent 202 no-op, when an auxiliary runtime's list fails: %s", w.Body.String())
+	}
+	if w.Code < 500 {
+		t.Fatalf("expected a 5xx status, got %d (%s)", w.Code, w.Body.String())
+	}
+	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
+	}
+}
+
 // TestExecCommand_ListUnavailableReturns503 is a regression test for
 // ptone/scion#2165: when the container runtime itself fails to answer the
 // agent lookup (LookupContainerID wraps that in ErrAgentListUnavailable),
@@ -315,6 +355,13 @@ func TestExecCommand_ListUnavailableReturns503(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "docker ps failed") {
 		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
 }
 

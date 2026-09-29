@@ -2252,11 +2252,11 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	// both — execing an empty target would fall back to slug resolution inside
 	// the runtime and reintroduce the cross-project collision.
 	target, err := s.LookupContainerID(ctx, id, projectID)
-	if err != nil && errors.Is(err, ErrAgentListUnavailable) {
+	if errors.Is(err, ErrAgentListUnavailable) {
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		RuntimeUnavailable(w, fmt.Sprintf(
+		AgentLookupUnavailable(w, id, err, fmt.Sprintf(
 			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry in a moment.", id))
 		return
 	}
@@ -2307,11 +2307,11 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 
 	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
 	target, err := s.LookupContainerID(ctx, id, projectID)
-	if err != nil && errors.Is(err, ErrAgentListUnavailable) {
+	if errors.Is(err, ErrAgentListUnavailable) {
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		RuntimeUnavailable(w, fmt.Sprintf(
+		AgentLookupUnavailable(w, id, err, fmt.Sprintf(
 			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry in a moment.", id))
 		return
 	}
