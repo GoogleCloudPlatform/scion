@@ -21,12 +21,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// nonAgentDispatchStateExpiredReason is the exact reason string
-// brokerMessageSweepHandler writes when ExpireStuckPendingMessages flips a
-// stuck-pending row to "failed" (pkg/hub/sweep.go). Must match verbatim — a
-// different reason means a genuine, unrelated delivery failure.
-const nonAgentDispatchStateExpiredReason = "expired: stuck in pending state beyond TTL"
-
 // runNonAgentDispatchStateBackfill repairs non-agent-recipient message rows
 // left "pending" or TTL-expired-"failed" by the pre-fix nc-promote-busy bug
 // (see BackfillNonAgentDispatchState and the investigation note for the
@@ -45,7 +39,7 @@ func runNonAgentDispatchStateBackfill(ctx context.Context, s store.Store) {
 
 	slog.Info("Non-agent dispatch_state backfill: starting")
 
-	repaired, err := s.BackfillNonAgentDispatchState(ctx, nonAgentDispatchStateExpiredReason)
+	repaired, err := s.BackfillNonAgentDispatchState(ctx, store.MessageExpiredStuckPendingReason)
 	if err != nil {
 		slog.Error("Non-agent dispatch_state backfill: pass did not complete; will retry next boot",
 			"error", err)

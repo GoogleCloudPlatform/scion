@@ -1100,6 +1100,16 @@ const (
 	MessageDispatchFailed     = "failed"
 )
 
+// MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
+// stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
+// when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
+// non-agent dispatch_state backfill (cmd/boot_non_agent_dispatch_state_backfill.go)
+// matches this exact string to identify rows the sweep mislabeled rather than
+// a genuine, differently-reasoned delivery failure. Both sites must use this
+// single constant — two independent literals can drift, silently breaking
+// the backfill's ability to find and repair swept rows.
+const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
+
 // =============================================================================
 // Notifications (Agent Status Notification System)
 // =============================================================================

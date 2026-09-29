@@ -31,9 +31,11 @@ import (
 // nc-promote-busy R3 boot-migration test: it seeds every non-agent
 // recipient shape the writer bug could produce (user:, thread:, conv:),
 // plus a differently-reasoned failure and a genuine agent-recipient
-// pending row, runs the migration through the boot entry point, and
-// asserts only the bug shapes are repaired, the marker is written, and a
-// second run is a no-op.
+// pending row, runs the migration through the cmd-level migration
+// function, and asserts only the bug shapes are repaired, the marker is
+// written, and a second run is a no-op. The boot entry point itself
+// (runBootDataMigrations) is covered separately by the marker assertion in
+// TestBootDataMigrations_FullFlow.
 func TestNonAgentDispatchStateBackfill_RepairsOnlyEligibleRows(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -53,7 +55,7 @@ func TestNonAgentDispatchStateBackfill_RepairsOnlyEligibleRows(t *testing.T) {
 
 	userPending := seed("user:alice", "reply 1", 2*time.Hour)
 	threadExpiredFailed := seed("thread:space-42", "reply 2", 30*time.Hour)
-	require.NoError(t, s.MarkMessageFailed(ctx, threadExpiredFailed.ID, nonAgentDispatchStateExpiredReason))
+	require.NoError(t, s.MarkMessageFailed(ctx, threadExpiredFailed.ID, store.MessageExpiredStuckPendingReason))
 	convPending := seed("conv:"+uuid.NewString(), "reply 3", 2*time.Hour)
 
 	userOtherFailed := seed("user:carol", "reply 4", 30*time.Hour)
