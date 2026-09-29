@@ -929,6 +929,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Build storeMsg and structuredMsg from the routing result.
+	// DispatchState is stamped "dispatched" up front: the deliveryUserDirect
+	// case below persists this exact row as the dispatch itself, with no
+	// later step that transitions it. Leaving it unset would fall through to
+	// the Ent schema's "pending" default and never clear (nc-promote-busy) —
+	// deliveryUserBroker never persists this row (deliverToUser builds and
+	// persists its own), so stamping it here is a no-op on that path.
 	storeMsg := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      agent.ProjectID,
@@ -944,6 +950,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ThreadID:       result.ThreadID,
 		ConversationID: result.ConversationID,
 		GroupID:        result.GroupID,
+		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now(),
 	}
 

@@ -463,7 +463,16 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		AgentID:     agentID,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		CreatedAt:   time.Now(),
+		// DispatchState must be stamped explicitly: the Ent schema defaults
+		// an unset dispatch_state to "pending" (pkg/ent/schema/message.go),
+		// and this broker delivery is itself the dispatch — there is no
+		// later step that ever transitions the row. Leaving this unset left
+		// every agent reply to a user permanently "pending", which the
+		// promote-DM-to-thread guard (CountPendingMessages) reads directly,
+		// so the very first agent reply in a DM made every subsequent
+		// promote attempt fail with IN_FLIGHT_MESSAGES (nc-promote-busy).
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now(),
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
