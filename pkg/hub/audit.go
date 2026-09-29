@@ -560,24 +560,6 @@ func (l *LogAuditLogger) RecordSAAssignment(ctx context.Context, event *store.SA
 	return nil
 }
 
-// LogAgentSecretRead logs an agent secret read event through the AuditLogger interface.
-func LogAgentSecretRead(ctx context.Context, logger AuditLogger, agentID, projectID, secretKey string, success bool, failReason string) {
-	if logger == nil {
-		return
-	}
-
-	event := &AgentSecretReadEvent{
-		AgentID:    agentID,
-		ProjectID:  projectID,
-		SecretKey:  secretKey,
-		Success:    success,
-		FailReason: failReason,
-		Timestamp:  time.Now(),
-	}
-
-	_ = logger.LogAgentSecretReadEvent(ctx, event)
-}
-
 // AuditableBrokerAuthMiddleware creates middleware that logs authentication events.
 // This wraps BrokerAuthMiddleware with audit logging.
 func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) func(http.Handler) http.Handler {
