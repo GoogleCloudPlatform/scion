@@ -2104,6 +2104,8 @@ var (
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_used", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "purpose", Type: field.TypeString, Nullable: true},
+		{Name: "labels", Type: field.TypeString, Nullable: true},
 	}
 	// UserAccessTokensTable holds the schema information for the "user_access_tokens" table.
 	UserAccessTokensTable = &schema.Table{

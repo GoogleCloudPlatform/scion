@@ -60869,6 +60869,8 @@ type UserAccessTokenMutation struct {
 	expires_at    *time.Time
 	last_used     *time.Time
 	created       *time.Time
+	purpose       *string
+	labels        *string
 	clearedFields map[string]struct{}
 	done          bool
 	oldValue      func(context.Context) (*UserAccessToken, error)
@@ -61365,6 +61367,104 @@ func (m *UserAccessTokenMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetPurpose sets the "purpose" field.
+func (m *UserAccessTokenMutation) SetPurpose(s string) {
+	m.purpose = &s
+}
+
+// Purpose returns the value of the "purpose" field in the mutation.
+func (m *UserAccessTokenMutation) Purpose() (r string, exists bool) {
+	v := m.purpose
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPurpose returns the old "purpose" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldPurpose(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPurpose is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPurpose requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPurpose: %w", err)
+	}
+	return oldValue.Purpose, nil
+}
+
+// ClearPurpose clears the value of the "purpose" field.
+func (m *UserAccessTokenMutation) ClearPurpose() {
+	m.purpose = nil
+	m.clearedFields[useraccesstoken.FieldPurpose] = struct{}{}
+}
+
+// PurposeCleared returns if the "purpose" field was cleared in this mutation.
+func (m *UserAccessTokenMutation) PurposeCleared() bool {
+	_, ok := m.clearedFields[useraccesstoken.FieldPurpose]
+	return ok
+}
+
+// ResetPurpose resets all changes to the "purpose" field.
+func (m *UserAccessTokenMutation) ResetPurpose() {
+	m.purpose = nil
+	delete(m.clearedFields, useraccesstoken.FieldPurpose)
+}
+
+// SetLabels sets the "labels" field.
+func (m *UserAccessTokenMutation) SetLabels(s string) {
+	m.labels = &s
+}
+
+// Labels returns the value of the "labels" field in the mutation.
+func (m *UserAccessTokenMutation) Labels() (r string, exists bool) {
+	v := m.labels
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLabels returns the old "labels" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldLabels(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLabels is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLabels requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLabels: %w", err)
+	}
+	return oldValue.Labels, nil
+}
+
+// ClearLabels clears the value of the "labels" field.
+func (m *UserAccessTokenMutation) ClearLabels() {
+	m.labels = nil
+	m.clearedFields[useraccesstoken.FieldLabels] = struct{}{}
+}
+
+// LabelsCleared returns if the "labels" field was cleared in this mutation.
+func (m *UserAccessTokenMutation) LabelsCleared() bool {
+	_, ok := m.clearedFields[useraccesstoken.FieldLabels]
+	return ok
+}
+
+// ResetLabels resets all changes to the "labels" field.
+func (m *UserAccessTokenMutation) ResetLabels() {
+	m.labels = nil
+	delete(m.clearedFields, useraccesstoken.FieldLabels)
+}
+
 // Where appends a list predicates to the UserAccessTokenMutation builder.
 func (m *UserAccessTokenMutation) Where(ps ...predicate.UserAccessToken) {
 	m.predicates = append(m.predicates, ps...)
@@ -61399,7 +61499,7 @@ func (m *UserAccessTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserAccessTokenMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 12)
 	if m.user_id != nil {
 		fields = append(fields, useraccesstoken.FieldUserID)
 	}
@@ -61430,6 +61530,12 @@ func (m *UserAccessTokenMutation) Fields() []string {
 	if m.created != nil {
 		fields = append(fields, useraccesstoken.FieldCreated)
 	}
+	if m.purpose != nil {
+		fields = append(fields, useraccesstoken.FieldPurpose)
+	}
+	if m.labels != nil {
+		fields = append(fields, useraccesstoken.FieldLabels)
+	}
 	return fields
 }
 
@@ -61458,6 +61564,10 @@ func (m *UserAccessTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.LastUsed()
 	case useraccesstoken.FieldCreated:
 		return m.Created()
+	case useraccesstoken.FieldPurpose:
+		return m.Purpose()
+	case useraccesstoken.FieldLabels:
+		return m.Labels()
 	}
 	return nil, false
 }
@@ -61487,6 +61597,10 @@ func (m *UserAccessTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldLastUsed(ctx)
 	case useraccesstoken.FieldCreated:
 		return m.OldCreated(ctx)
+	case useraccesstoken.FieldPurpose:
+		return m.OldPurpose(ctx)
+	case useraccesstoken.FieldLabels:
+		return m.OldLabels(ctx)
 	}
 	return nil, fmt.Errorf("unknown UserAccessToken field %s", name)
 }
@@ -61566,6 +61680,20 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreated(v)
 		return nil
+	case useraccesstoken.FieldPurpose:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPurpose(v)
+		return nil
+	case useraccesstoken.FieldLabels:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLabels(v)
+		return nil
 	}
 	return fmt.Errorf("unknown UserAccessToken field %s", name)
 }
@@ -61602,6 +61730,12 @@ func (m *UserAccessTokenMutation) ClearedFields() []string {
 	if m.FieldCleared(useraccesstoken.FieldLastUsed) {
 		fields = append(fields, useraccesstoken.FieldLastUsed)
 	}
+	if m.FieldCleared(useraccesstoken.FieldPurpose) {
+		fields = append(fields, useraccesstoken.FieldPurpose)
+	}
+	if m.FieldCleared(useraccesstoken.FieldLabels) {
+		fields = append(fields, useraccesstoken.FieldLabels)
+	}
 	return fields
 }
 
@@ -61621,6 +61755,12 @@ func (m *UserAccessTokenMutation) ClearField(name string) error {
 		return nil
 	case useraccesstoken.FieldLastUsed:
 		m.ClearLastUsed()
+		return nil
+	case useraccesstoken.FieldPurpose:
+		m.ClearPurpose()
+		return nil
+	case useraccesstoken.FieldLabels:
+		m.ClearLabels()
 		return nil
 	}
 	return fmt.Errorf("unknown UserAccessToken nullable field %s", name)
@@ -61659,6 +61799,12 @@ func (m *UserAccessTokenMutation) ResetField(name string) error {
 		return nil
 	case useraccesstoken.FieldCreated:
 		m.ResetCreated()
+		return nil
+	case useraccesstoken.FieldPurpose:
+		m.ResetPurpose()
+		return nil
+	case useraccesstoken.FieldLabels:
+		m.ResetLabels()
 		return nil
 	}
 	return fmt.Errorf("unknown UserAccessToken field %s", name)

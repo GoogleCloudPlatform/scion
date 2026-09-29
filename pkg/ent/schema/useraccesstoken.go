@@ -64,6 +64,16 @@ func (UserAccessToken) Fields() []ent.Field {
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
+
+		// E.1 descriptive credential metadata. Optional/Nillable additive
+		// columns: NULL means no metadata (always true for pre-E.1 rows).
+		// Immutable after issuance — there is no update path in E.1.
+		field.String("purpose").
+			Optional().
+			Nillable(),
+		field.String("labels").
+			Optional().
+			Nillable(),
 	}
 }
 
