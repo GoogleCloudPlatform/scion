@@ -995,21 +995,30 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 
 	delivered := 0
 	deferred := 0
+	failed := 0
 	for _, r := range results {
 		switch r.Status {
 		case "delivered":
 			delivered++
 		case "deferred":
 			deferred++
+		default:
+			failed++
 		}
 	}
 
-	if !isJSONOutput() {
-		if deferred > 0 {
-			fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
-		} else {
-			fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
+	// A25.7 O1: honour --json for group sends the same way the
+	// single-recipient paths do (outputJSON(result)) — the per-recipient
+	// status, including "deferred", was previously only ever printed as
+	// human text; --json produced no output at all.
+	if isJSONOutput() {
+		if err := outputJSON(results); err != nil {
+			return err
 		}
+	} else if deferred > 0 {
+		fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
+	} else {
+		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
 	// @mention and --cc fan-out for group messages: mentioned agents that are
@@ -1051,12 +1060,19 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
 	// §3.7 — the message is saved for catch-up, not dropped), so it must not
 	// trip the partial-failure error below on its own.
+	//
+	// A25.7 O2: report delivered, deferred and failed counts explicitly. The
+	// previous "%d/%d delivered" wording folded deferred into "delivered" for
+	// this message only (the counts above were already separated), which
+	// could describe e.g. 1 delivered + 1 deferred + 1 failed as "2/3
+	// delivered" — technically true of the denominator, but it hides that a
+	// real failure occurred.
 	succeeded := delivered + deferred
 	if succeeded == 0 {
-		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
+		return fmt.Errorf("group delivery failed: 0 delivered, 0 deferred, %d failed (of %d total)", failed, len(recipients))
 	}
 	if succeeded < len(recipients) {
-		return fmt.Errorf("group delivery partially failed: %d/%d delivered", succeeded, len(recipients))
+		return fmt.Errorf("group delivery partially failed: %d delivered, %d deferred, %d failed (of %d total)", delivered, deferred, failed, len(recipients))
 	}
 
 	return nil

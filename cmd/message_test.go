@@ -2010,6 +2010,140 @@ func TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered(t 
 		"the summary line must separate deferred from delivered; got: %s", output)
 }
 
+// TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus is
+// design.md A25.7 O1: group[] sends must honour --json the same way the
+// single-recipient paths do. Before this, --json mode for a group send
+// printed nothing at all — the per-recipient results (including a
+// "deferred" status) were computed but never serialized.
+func TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	projectID := "project-msg-group-json"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-migrating/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred-json",
+				"status":      "deferred",
+				"agent":       "agent-migrating",
+				"agent_phase": "stopping",
+				"deferred":    "agent is reincarnating",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-running/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-delivered-json",
+				"status":      "delivered",
+				"agent":       "agent-running",
+				"agent_phase": "running",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-running"},
+		{Kind: messages.RecipientAgent, Name: "agent-migrating"},
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	sendErr := sendGroupMessageViaHub(hubCtx, recipients, "group hello via json", false)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, sendErr, "a deferred recipient is not a failure and must not error the group send")
+
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	var got []struct {
+		Recipient string `json:"recipient"`
+		Status    string `json:"status"`
+		Error     string `json:"error,omitempty"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(output), &got), "output must be valid JSON; got: %s", output)
+	require.Len(t, got, 2)
+
+	byRecipient := map[string]string{}
+	for _, r := range got {
+		byRecipient[r.Recipient] = r.Status
+	}
+	assert.Equal(t, "deferred", byRecipient["agent:agent-migrating"], "JSON output must carry status:\"deferred\"; got: %s", output)
+	assert.Equal(t, "delivered", byRecipient["agent:agent-running"])
+}
+
+// TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly
+// is design.md A25.7 O2: the partial-failure error must report delivered,
+// deferred and failed counts explicitly, rather than folding a genuine
+// failure into "%d/%d delivered" (which could describe 1 delivered + 1
+// failed as "1/2 delivered" without ever using the word "failed").
+func TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-group-partial"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-ok/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": "m1", "status": "delivered", "agent": "agent-ok",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-bad/message"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{"code": "INTERNAL", "message": "boom"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-ok"},
+		{Kind: messages.RecipientAgent, Name: "agent-bad"},
+	}
+
+	sendErr := sendGroupMessageViaHub(hubCtx, recipients, "partial failure test", false)
+	require.Error(t, sendErr)
+	assert.Contains(t, sendErr.Error(), "1 delivered, 0 deferred, 1 failed (of 2 total)",
+		"got: %v", sendErr)
+}
+
 func TestCCFlagValidation(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
