@@ -62,6 +62,42 @@ func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServic
 // just if it disappears.
 const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
 
+// scaCreateDelegatorWithoutAssign creates an active, existing user bound to a
+// minimal custom project-scoped role that omits gcp_service_account.assign.
+//
+// GoogleCloudPlatform/scion#2062 added gcp_service_account.assign to all
+// three built-in project roles (project-owner, project-admin, project-
+// member), so none of them can stand in any longer for "an active project
+// member who lacks the permission" — every built-in role now has it. A
+// custom role is the only way left to construct a delegator that genuinely
+// lacks the permission while still being a real, resolvable project member.
+func scaCreateDelegatorWithoutAssign(t *testing.T, s store.Store, userID, email, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: email, Role: "member", Status: "active",
+	}))
+
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "sca-no-assign-" + userID,
+		Description: "Project role without gcp_service_account.assign, for ceiling tests",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
 // TestEvaluateSAAssignment_CeilingOrphanedDelegator covers the case that
 // motivated the issue: the agent's delegator (its creator, here a user) no
 // longer exists. The Hub policy kernel allows via the agent-jwt-scope
@@ -102,9 +138,11 @@ func TestEvaluateSAAssignment_CeilingOrphanedDelegator(t *testing.T) {
 }
 
 // TestEvaluateSAAssignment_CeilingDelegatorLacksPermission covers the second
-// ceiling cause: the delegator still exists and is active, but no longer
-// holds gcp_service_account.assign (no seeded project role grants it — only
-// super-admin does).
+// ceiling cause: the delegator still exists and is active, but does not hold
+// gcp_service_account.assign. Since GoogleCloudPlatform/scion#2062 added that
+// permission to all three built-in project roles, only a custom role (or
+// super-admin, which bypasses the ceiling check entirely) can lack it, so the
+// delegator is bound to a minimal custom role instead of a seeded one.
 func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -114,7 +152,7 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	delegatorID := tid("sca-lacks-delegator")
 
 	createDCProject(t, s, projectID, "sca-lacks-project")
-	createDCUser(t, s, delegatorID, "sca-lacks-delegator@example.com", projectID, store.ProjectRoleOwner)
+	scaCreateDelegatorWithoutAssign(t, s, delegatorID, "sca-lacks-delegator@example.com", projectID)
 	assertNotSystemAdmin(t, srv.authzService, ctx, delegatorID)
 	createDCAgent(t, s, agentID, projectID, delegatorID, AgentRoleFull)
 	sa := scaCreateSA(t, s, projectID)
