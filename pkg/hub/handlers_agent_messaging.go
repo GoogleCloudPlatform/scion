@@ -929,12 +929,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Build storeMsg and structuredMsg from the routing result.
-	// DispatchState is stamped "dispatched" up front: the deliveryUserDirect
-	// case below persists this exact row as the dispatch itself, with no
-	// later step that transitions it. Leaving it unset would fall through to
-	// the Ent schema's "pending" default and never clear (nc-promote-busy) —
-	// deliveryUserBroker never persists this row (deliverToUser builds and
-	// persists its own), so stamping it here is a no-op on that path.
+	// deliveryUserDirect below persists this row as the dispatch itself;
+	// Ent defaults dispatch_state to "pending" if left unset (nc-promote-busy).
+	// A no-op on the deliveryUserBroker path, which persists its own row.
 	storeMsg := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      agent.ProjectID,
@@ -2476,7 +2473,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Urgent:      userMsg.Urgent,
 				AgentID:     anchorAgent.ID,
 				GroupID:     groupID,
-				CreatedAt:   time.Now(),
+				// This persist *is* the delivery; Ent defaults
+				// dispatch_state to "pending" if left unset (nc-promote-busy).
+				DispatchState: store.MessageDispatchDispatched,
+				CreatedAt:     time.Now(),
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
 			// B5 SECURITY: derive sender from authenticated context, never payload.

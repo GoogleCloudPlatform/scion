@@ -165,6 +165,37 @@ func TestDEF126_AC_A2_ExactEmailResolves(t *testing.T) {
 	require.Equal(t, 1, result.TotalCount, "expected 1 message for the recipient")
 }
 
+// TestDEF126_AgentToUserSend_StampsDispatchStateDispatched is a regression
+// test for nc-promote-busy round 2 (R2): the RecipientUser branch of the
+// group/set message handler (handlers_agent_messaging.go, the code this
+// exercises via a bare "user:" recipient, no "group[...]" wrapper needed)
+// persists its own storeMsg directly, and that persist is itself the
+// delivery. An unset DispatchState defaults to Ent's "pending" and is never
+// transitioned — the same omission fixed for deliverToUser and
+// deliveryUserDirect — which would put the row on the sweep-then-purge path
+// and silently delete it after 7 days.
+func TestDEF126_AgentToUserSend_StampsDispatchStateDispatched(t *testing.T) {
+	srv, s, projectID, _, agentID := def126Setup(t)
+	ctx := context.Background()
+
+	userID := tid("def126-dispatch-state")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "dispatch-state@example.com", DisplayName: "Dispatch State User",
+	}))
+
+	rr := postOutboundTo(t, srv, projectID, agentID, "user:dispatch-state@example.com", "hello")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	result, err := s.ListMessages(ctx,
+		store.MessageFilter{RecipientID: userID},
+		store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TotalCount, "expected 1 message for the recipient")
+	require.Equal(t, store.MessageDispatchDispatched, result.Items[0].DispatchState,
+		"an unset DispatchState defaults to \"pending\" and is never transitioned, "+
+			"so the sweep would eventually delete this message")
+}
+
 // ---------------------------------------------------------------------------
 // AC-A3: Mutation gate — reverting the guard to len(result.Items) == 1
 // must turn AC-A1 red (and the mutation must compile).
