@@ -66,7 +66,7 @@ func loadOpencodeHookPayloadFixture(t *testing.T) []map[string]interface{} {
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var records []map[string]interface{}
 	scanner := bufio.NewScanner(f)
