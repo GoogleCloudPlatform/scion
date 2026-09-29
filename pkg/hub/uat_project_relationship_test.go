@@ -1370,13 +1370,16 @@ func TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal(t *te
 // TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError pins
 // the same fail-closed contract as
 // TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal for a
-// realistic error source, exercised through a real HTTP request rather than
-// a direct call: a transient access-constraint-table load failure inside
-// SystemAuthorityProof, reached from ProjectTargetAdmission when the UAT
-// holder has no project membership and relies on system authority (the same
-// fixture as TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach). Any
-// error from ProjectTargetAdmission must deny, never silently pass through
-// as if the check had not run.
+// realistic error source: a transient access-constraint-table load failure
+// inside SystemAuthorityProof, reached from ProjectTargetAdmission when the
+// UAT holder has no project membership and relies on system authority (the
+// same fixture as TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach).
+// Two layers are pinned here, deliberately kept separate: the HTTP assertion
+// exercises the request end-to-end and denies via defence in depth (the
+// kernel's own constraint load also hits the injected failure), while the
+// direct enforceUATConstraints call at the end pins the specific branch this
+// test is named for -- that ProjectTargetAdmission's own error, and not just
+// its Admitted field, is what enforceUATConstraints treats as a denial.
 func TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("uatp-failclosed-cle-project")
@@ -1405,6 +1408,17 @@ func TestProjectUAT_EnforceUATConstraintsFailsClosedOnConstraintLoadError(t *tes
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"a transient access-constraint load failure inside the use-time gate must deny, not silently pass through: %s", rec.Body.String())
+
+	// The HTTP assertion above is satisfied by the kernel's own constraint
+	// load hitting the same injected failure independently, so it alone does
+	// not pin enforceUATConstraints's own ProjectTargetAdmission-error branch
+	// (authz.go's "if err != nil || !admission.Admitted" check). Call the
+	// gate directly, with the failing store still installed, to pin that
+	// specific branch.
+	scoped := NewScopedUserIdentity(NewAuthenticatedUser(superAdminID, superAdminID+"@test.com", "Admin", "admin", "api"), projectID, []string{"agent:attach"})
+	decision := srv.authzService.enforceUATConstraints(context.Background(), principalContextForIdentity(scoped), scoped, agentResource(agent), ActionAttach, "agent.attach")
+	require.NotNil(t, decision, "step-1 gate must deny on a ProjectTargetAdmission error")
+	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
 }
 
 // TestProjectUAT_CreateTokenMapsCanMintSelectorErrorToForbidden pins the
