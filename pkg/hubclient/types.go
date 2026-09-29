@@ -309,6 +309,11 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach, mirroring store.BrokerProfile.Attach. A pointer: nil means
+	// the field was never reported (an older broker or profile record),
+	// which must be read as supported, not as an explicit false.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
