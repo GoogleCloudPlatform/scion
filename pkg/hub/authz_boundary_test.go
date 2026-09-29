@@ -1062,6 +1062,60 @@ func TestProjectAdmissionForClass_ErrorsNeverMemoized(t *testing.T) {
 	}
 }
 
+// onceFailingConstraintStore wraps a store.Store and fails the FIRST call to
+// ListAccessConstraints with failErr, then delegates to the real store for
+// every subsequent call.
+type onceFailingConstraintStore struct {
+	store.Store
+	failed  bool
+	failErr error
+}
+
+func (s *onceFailingConstraintStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	if !s.failed {
+		s.failed = true
+		return nil, s.failErr
+	}
+	return s.Store.ListAccessConstraints(ctx, limit, offset)
+}
+
+// TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized proves that a
+// transient access-constraint-table load error on the SYSTEM-AUTHORITY path
+// (SystemAuthorityProof, which loads the constraint table for its
+// project-scoped reduction) denies without being memoized: the first call
+// must error, and a second call on the SAME memo must recompute via the
+// now-succeeding store and admit, rather than replay a cached deny-all
+// restriction from the first call's load failure.
+func TestProjectAdmissionForClass_ConstraintLoadErrorNotMemoized(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	projectID := tid("pafc-cle-proj")
+	userID := tid("pafc-cle-user")
+	createDelegateTestProject(t, s, projectID, "pafc-cle-proj", "test")
+	// A non-member with a target-applicable SYSTEM grant only, so
+	// ProjectMembershipEvidence denies and SystemAuthorityProof — the path
+	// that loads the access-constraint table — is the one exercised.
+	systemRoleUserWithPermissions(t, s, userID, []string{"skill.read"})
+
+	failing := &onceFailingConstraintStore{Store: s, failErr: errors.New("injected transient constraint-list failure")}
+	authz := NewAuthzService(failing, nil)
+
+	class := ProjectTargetClass{ResourceType: "skill", ScopeKind: store.SkillScopeProject}
+	memo := NewProjectAdmissionCache()
+
+	_, err1 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, memo)
+	if err1 == nil {
+		t.Fatal("expected the first call to fail via the injected constraint-table load error")
+	}
+
+	result2, err2 := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "skill.read", class, memo)
+	require.NoError(t, err2)
+	if !result2.Admitted {
+		t.Error("the second call must recompute and succeed, not return a cached denial from the first call's constraint-load error")
+	}
+}
+
 // --- CanMintSelector ---------------------------------------------------------
 
 func TestCanMintSelector_EmptySelectors_RejectedExplicitly(t *testing.T) {

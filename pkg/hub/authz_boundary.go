@@ -514,22 +514,19 @@ func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal Princ
 
 // scopedRoleBindingPermissions backs getProjectScopedPermissions's
 // project-scope query (its only caller): given a pre-fetched binding list,
-// it unions the permission IDs granted by every ACTIVE binding whose
-// ScopeType matches scopeType (and, for project scope, whose ScopeID
-// matches scopeID), then applies the same access-constraint reduction
-// (loadAccessConstraintRestrictions) already relied on elsewhere.
+// it unions the permission IDs granted by every ACTIVE project-scoped
+// binding whose ScopeID matches projectID, then applies the same
+// access-constraint reduction (loadAccessConstraintRestrictions) already
+// relied on elsewhere.
 // A role definition referenced by an active binding but missing/unloadable
 // is a data-integrity error, not a routine "skip and continue" case: this
 // function propagates that error to the caller (fail closed) rather than
 // silently omitting the binding's permissions.
-func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
+func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, projectID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
 	seen := make(map[string]bool)
 	var result []string
 	for _, b := range bindings {
-		if b.ScopeType != scopeType {
-			continue
-		}
-		if scopeType == ScopeTypeProject && b.ScopeID != scopeID {
+		if b.ScopeType != ScopeTypeProject || b.ScopeID != projectID {
 			continue
 		}
 		if !bindingActivationOK(b, now) {
@@ -939,12 +936,20 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 		return false, nil
 	}
 
-	// Access-constraint reduction, project-scoped.
+	// Access-constraint reduction, project-scoped. Uses the error-returning
+	// accessConstraintRestrictions rather than loadAccessConstraintRestrictions:
+	// ProjectAdmissionForClass's memo must never cache a denial caused by a
+	// transient constraint-table load failure, only a real, reviewable
+	// admission decision — so the load error is returned here and propagated,
+	// which ProjectAdmissionForClass already treats as unmemoized.
 	closure := make(map[string]struct{}, len(refs))
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
 }
@@ -1172,12 +1177,9 @@ type projectAdmissionCacheKey struct {
 // multiple ProjectTargetAdmission calls in one request (e.g. B.2's
 // request-local authority cache). nil is safe (unmemoized). Never persisted
 // or shared ACROSS requests. An error returned FROM ProjectAdmissionForClass
-// is NEVER cached — a failed lookup is recomputed on the next call, never
-// remembered as a denial or an allow. This does not cover every failure
-// inside the call: a failure to load the access-constraint table is reduced
-// to a deny-all restriction by loadAccessConstraintRestrictions rather than
-// returned as an error, so on the system-authority path it IS memoized, as
-// an ordinary (fail-safe) denial for the remainder of the request.
+// is NEVER cached — a failed lookup, including a failure to load the
+// access-constraint table, is recomputed on the next call, never remembered
+// as a denial or an allow.
 type ProjectAdmissionCache struct {
 	mu    sync.Mutex
 	cache map[projectAdmissionCacheKey]ProjectAdmissionResult
@@ -1239,14 +1241,10 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 // Composes ProjectMembershipEvidence(ctx, principal, projectID) OR
 // SystemAuthorityProof(ctx, principal, projectID, permissionID, class). Any
 // error RETURNED BY THIS FUNCTION denies and is never memoized — a failed
-// lookup is recomputed on the next call, never remembered as a denial or an
-// allow. The memo (nil-safe) is keyed on
-// (principal, projectID, permissionID, class). This does not cover every
-// internal failure: a failure to load the access-constraint table is
-// reduced to a deny-all restriction by loadAccessConstraintRestrictions
-// rather than returned as an error, so on the system-authority path it IS
-// memoized, as an ordinary (fail-safe) denial for the remainder of the
-// request.
+// lookup, including a failure to load the access-constraint table on the
+// system-authority path, is recomputed on the next call, never remembered
+// as a denial or an allow. The memo (nil-safe) is keyed on
+// (principal, projectID, permissionID, class).
 //
 // class.ScopeKind must be exactly empty for a resource type with no
 // reviewed scope-kind semantics, and one of validRealProjectScopeKinds's

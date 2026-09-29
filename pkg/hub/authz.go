@@ -1180,14 +1180,20 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
-// store and converts them to kernel restrictions.
+// store and converts them to kernel restrictions. On a load error it fails
+// closed by returning a deny-all restriction rather than returning the error
+// — the right choice for its callers, which have no error return of their
+// own to propagate through. A caller that DOES have an error return and
+// needs the load error to actually deny (rather than be silently absorbed
+// into a restriction that a caller's memo could then cache as an ordinary
+// denial) should call accessConstraintRestrictions directly instead; see
+// SystemAuthorityProof.
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
 	resource ResourceContext,
 ) []Restriction {
-	// R-1 fix: page through all constraints instead of capping at 200.
-	constraints, err := a.loadAllAccessConstraints(ctx)
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resource)
 	if err != nil {
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
@@ -1199,8 +1205,30 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 			// nil Check denies everything.
 		}}
 	}
+	return restrictions
+}
+
+// accessConstraintRestrictions is loadAccessConstraintRestrictions's
+// error-returning form: it loads active access constraints from the store
+// and converts them to kernel restrictions, but returns a load error to the
+// caller instead of converting it into a deny-all restriction. Use this
+// directly only when the caller has its own error return AND needs a load
+// failure to propagate as an error — so it denies without being memoized as
+// an ordinary (fail-safe) denial by a downstream cache such as
+// ProjectAdmissionCache. Every other caller should use
+// loadAccessConstraintRestrictions.
+func (a *AuthzService) accessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	resource ResourceContext,
+) ([]Restriction, error) {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -1259,7 +1287,7 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions
+	return restrictions, nil
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
@@ -1864,7 +1892,7 @@ func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principa
 	for _, p := range principals {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	result, err := a.scopedRoleBindingPermissions(ctx, bindings, store.RoleScopeProject, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
+	result, err := a.scopedRoleBindingPermissions(ctx, bindings, projectID, closure, ResourceContext{ProjectID: projectID}, time.Now())
 	if err != nil {
 		return nil, err
 	}
