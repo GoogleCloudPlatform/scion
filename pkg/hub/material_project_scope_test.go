@@ -496,7 +496,7 @@ func TestAgentSecretFetch_DeniedRequestReadsNoMetadata(t *testing.T) {
 }
 
 // TestAgentSecretFetch_ErrorTextIsNeutral pins that a backend error string
-// never reaches the response.
+// never reaches the response, and that the item is audited as backend_error.
 func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	f := newMaterialFixture(t, "neutral-error-text")
 
@@ -505,6 +505,9 @@ func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 		err:           errors.New("backend detail: disk quota exceeded on volume XYZ123"),
 	}
 	f.Server.SetSecretBackend(wrapped)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
 		secretFetchRequest{Keys: []string{"NEUTRAL_KEY"}}, f.Token)
@@ -519,6 +522,7 @@ func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	if len(resp.Secrets) != 1 || resp.Secrets[0].Status != "entitled_but_unavailable" || resp.Secrets[0].Error != "secret unavailable" {
 		t.Fatalf("expected entitled_but_unavailable/secret unavailable, got %+v", resp.Secrets)
 	}
+	assertBackendErrorAudited(t, auditor)
 }
 
 // TestAgentGetSecret_ProjectMetaErrorIsUnavailable pins that a project-scope
