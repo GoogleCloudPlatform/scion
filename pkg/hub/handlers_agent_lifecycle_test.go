@@ -122,18 +122,15 @@ func TestGuardAgentPhaseTransition_SuspendedStillSuppressesStatus(t *testing.T) 
 	assert.Equal(t, "", status.Activity)
 }
 
-// TestUpdateAgentStatus_ReincarnationInFlight_MessageStaysBlanked is the
+// TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded is the
 // end-to-end half of Guard 0b's reincarnation-sticky rule (design Amendment
 // A26.8): a self-reported status update carrying Phase and Activity while a
 // migration is in flight must be entirely discarded by the real HTTP
 // handler, not just by guardAgentPhaseTransition in isolation — the agent
 // row must keep whatever the reincarnation worker itself wrote (e.g.
 // "migrating to generation N"), never whatever a racing status POST tried to
-// write. This is the "crosses the real guard" test design Amendment A26.8
-// calls for: the CLI's own blocked-status call was removed precisely
-// because a unit test on the guard function alone could not see that its
-// call site was unreachable by construction.
-func TestUpdateAgentStatus_ReincarnationInFlight_MessageStaysBlanked(t *testing.T) {
+// write.
+func TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {

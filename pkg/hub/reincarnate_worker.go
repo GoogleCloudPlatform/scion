@@ -72,9 +72,9 @@ type reincarnationStepUpdate struct {
 	// clearMessageIfEquals, when non-empty and message is nil, clears
 	// Message to "" but ONLY if the freshly re-read agent.Message still
 	// equals this exact value (design Amendment A26.8: the completion write
-	// uses this so it never clobbers a message the new generation has
-	// already set for itself — e.g. by messaging the requester — between
-	// the start dispatch and this write landing).
+	// uses this defensively, against any other writer of Message during the
+	// in-flight window — for example a message-only status POST — so it
+	// never clobbers a value that is no longer the one it set itself).
 	clearMessageIfEquals string
 	// now, when non-zero, pins ReincarnationUpdatedAt to this exact instant
 	// instead of a freshly computed time.Now(). tryAdvanceReincarnation's
@@ -416,12 +416,11 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // also the 202 response's Generation field), passed in rather than derived
 // from agent.Generation+1 partway through the steps below — the same
 // by-construction reasoning as plan above. It is also the value the worker
-// stamps into its own in-flight status message (Amendment A26.8): since a
-// `sciontool status blocked` POST from the CLI is unconditionally discarded
-// by Guard 0b (handlers_agent_lifecycle.go) for the whole in-flight window —
-// the CLI's blocked-status call was removed for exactly this reason — the
-// worker is the only thing that can make §3.9's "migrating to generation
-// N+1" observable at all, for both self and non-self migrations.
+// stamps into its own in-flight status message (Amendment A26.8): Guard 0b
+// (handlers_agent_lifecycle.go) blanks Message on every agent status update
+// while a migration is in flight, so the worker is the sole writer of
+// §3.9's "migrating to generation N+1" for both self and non-self
+// migrations.
 func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int) {
 	defer func() {
 		if p := recover(); p != nil {
@@ -619,10 +618,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	//
 	// clearMessageIfEquals (design Amendment A26.8): clears the in-flight
 	// "migrating to generation N" message set at the stopping step, but only
-	// if it is still exactly that value — the new generation's own container
-	// is already running by this point (DispatchAgentStart above already
-	// succeeded) and may have messaged the requester and/or reported its own
-	// status in the meantime; this write must never clobber that.
+	// if it is still exactly that value — defensively, against any other
+	// writer of Message during the window (for example a message-only
+	// status POST); this write must never clobber a value that is no
+	// longer the one the stopping step set.
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState:   store.ReincarnationStateNone,
 		generation:           &toGeneration,
