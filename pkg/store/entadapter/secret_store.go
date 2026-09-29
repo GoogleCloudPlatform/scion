@@ -209,7 +209,16 @@ func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, 
 	// this method exists to safely migrate. Current writers never persist a
 	// literal "" (empty-but-non-NULL) secret_ref, but also match on
 	// SecretRefEQ("") defensively in case a row is ever imported or edited
-	// into that state (ptone/scion#2152 round-4 review nit 11).
+	// into that state (ptone/scion#2152 round-4 review nit 11). That
+	// SecretRefEQ("") arm is deliberately untested (ptone/scion#2152 round-5
+	// review nit 6): every write path in this store (CreateSecret,
+	// UpdateSecret, UpsertSecret) goes through SetSecretRef/ClearSecretRef,
+	// which never persist a literal empty string — reaching this arm from a
+	// test would require writing `secret_ref=''` via raw SQL against the ent
+	// client's underlying driver, bypassing the store API this file exists
+	// to provide, purely to exercise a branch the API can't produce. It
+	// stays as defense in depth against a row imported or edited outside
+	// this store, not as a path this code is expected to exercise itself.
 	refPredicate := entsecret.SecretRefEQ(expectedRef)
 	if expectedRef == "" {
 		refPredicate = entsecret.Or(entsecret.SecretRefIsNil(), entsecret.SecretRefEQ(""))
