@@ -378,7 +378,13 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // catch-up window start (design §3.7, Amendment A25 2a.3/R4, Nit p2a-r1
 // review) — it predates anything the gate in the three delivery paths could
 // have deferred, so it is a safe (if very slightly generous) lower bound.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time) {
+//
+// requestedBy is the AgentReincarnation record's raw RequestedBy principal ID
+// (Amendment A26.1), resolved to a display string via
+// resolveReincarnationRequesterName once the preamble is actually built
+// (below) — not any earlier, so a slow or failing lookup can never delay or
+// abort the stop/reprovision/start steps that matter more.
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -449,7 +455,8 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	toGeneration := agent.Generation + 1
-	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart)
+	requesterDisplay := s.resolveReincarnationRequesterName(ctx, requestedBy)
+	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterDisplay)
 	fresh.Task = preamble
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
@@ -739,6 +746,61 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 	return true
 }
 
+// reincarnationRequesterFallback is design §3.9's "{requester}" text for
+// when the requester cannot be resolved to a display name (Amendment A26.1):
+// used both when AgentReincarnation.RequestedBy is empty and when
+// resolveReincarnationRequesterName's lookups miss or error. It reads
+// correctly standing in for "{requester}" in both of buildReincarnationPreamble's
+// uses (the header line's "reincarnated on request of %s" and step 3's
+// "Message %s that generation ... is up").
+const reincarnationRequesterFallback = "whoever requested this migration"
+
+// resolveReincarnationRequesterName resolves AgentReincarnation.RequestedBy
+// (design §3.2: a polymorphic principal ID — a User.ID or an Agent.ID, no
+// FK, "like Agent.CreatedBy") to a display string for design §3.9's
+// "{requester}" (Amendment A26.1, lead review round 1 on this phase: "the
+// new generation can't act on 'whoever requested this migration'").
+//
+// Resolution order: GetUser → "user:<email>"; on a miss (store.ErrNotFound),
+// GetAgent → "agent:<slug>". A miss in both, an empty requestedBy (the
+// pre-CreateInputs / no-identity-in-context edge case handleReincarnateAgent
+// already tolerates), or any *other* store error along either lookup, falls
+// back to reincarnationRequesterFallback with a WARN log identifying the
+// unresolved ID.
+//
+// This must never fail the reincarnation: it runs deep inside the
+// background worker, called only after stop/reprovision have already
+// succeeded (see runReincarnationWorker) — a lookup failure here is a
+// cosmetic loss in the preamble's wording, not a reason to abandon a
+// migration that has already torn down the old container.
+func (s *Server) resolveReincarnationRequesterName(ctx context.Context, requestedBy string) string {
+	if requestedBy == "" {
+		return reincarnationRequesterFallback
+	}
+
+	if user, err := s.store.GetUser(ctx, requestedBy); err == nil {
+		if user != nil && user.Email != "" {
+			return "user:" + user.Email
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("reincarnation preamble: GetUser failed resolving requester, falling back",
+			"requested_by", requestedBy, "error", err)
+	}
+
+	if agent, err := s.store.GetAgent(ctx, requestedBy); err == nil {
+		if agent != nil && agent.Slug != "" {
+			return "agent:" + agent.Slug
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("reincarnation preamble: GetAgent failed resolving requester, falling back",
+			"requested_by", requestedBy, "error", err)
+	}
+
+	s.agentLifecycleLog.Warn("reincarnation preamble: could not resolve requester principal to a user or agent, falling back",
+		"requested_by", requestedBy)
+	return reincarnationRequesterFallback
+}
+
 // buildReincarnationPreamble builds the hub-authored instructions delivered
 // as the new generation's first harness input (design §3.9). Phase 1 ships
 // the wording the design marks as "fine for P1" — the fuller agent-guidance
@@ -748,18 +810,8 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // Amendment A26 (Phase 2b): steps 1 and 2 keep their 2a wording verbatim (the
 // A23 neutral step 1 and the A25.2 O-b catch-up-window step 2); "everything
 // else in §3.9" — steps 3-4 and the no-handoff fallback text — comes in from
-// the original design here. Two adjustments from §3.9's literal text, made
-// because the data or the section names it names don't otherwise exist at
-// this call site:
-//   - Step 3 names the target generation (already available as toGeneration)
-//     instead of a resolved {requester} display name. Resolving the
-//     requester's principal ID (AgentReincarnation.RequestedBy) to a
-//     message-able name is unplumbed to this call site and out of A26's
-//     scope; "whoever requested this migration" is unambiguous given the
-//     requester is already subscribed to this agent's status
-//     (ensureReincarnateRequesterSubscribed) and can be found via the
-//     Hub-side notification, so the new generation can still act on step 3
-//     without a literal name.
+// the original design here. One adjustment from §3.9's literal text, made
+// because the section names it uses don't otherwise exist at this call site:
 //   - Step 4 names the handoff's actual section headings ("Immediate active
 //     work" and "Do not redo") from the --handoff-template sections
 //     (cmd/reincarnate.go's reincarnateHandoffTemplateText), rather than
@@ -768,6 +820,14 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 //     template's actual section list, not its own heading, so pointing at
 //     the real heading keeps the instruction literally followable against
 //     the template the outgoing generation was told to use.
+//
+// requester is a pre-resolved display string for §3.9's "{requester}" slots
+// (Amendment A26.1, lead review round 1 on this phase: "{requester} is in
+// §3.9 and the new generation can't act on 'whoever requested this
+// migration'"). It is produced by resolveReincarnationRequesterName, which
+// this function does not call itself — resolution needs store I/O and this
+// function stays a pure string builder — and is used verbatim in both the
+// header line and step 3.
 //
 // migrationStart is step 2's catch-up window start (design §3.7, Amendment
 // A25 2a.3/R4, p2a-r1 review): only the start is named, not an end. An end
@@ -794,10 +854,10 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // hub delivery path persists-and-defers instead of rejecting/dropping while
 // agents.reincarnation_state is non-terminal, p2a-r1 R3) make it true again,
 // so it comes back here.
-func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time) string {
+func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s).\n",
-		toGeneration, agent.Slug, agent.ID)
+	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s), reincarnated on request of %s.\n",
+		toGeneration, agent.Slug, agent.ID, requester)
 	b.WriteString("Before resuming:\n")
 	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
 	// shared-workspace and hub-managed agents, whose git state is not "your
@@ -808,7 +868,7 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		"Messages sent to you since %s were saved to your conversations, not dropped. "+
 		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
 		migrationStart.UTC().Format(time.RFC3339), migrationStart.UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, " 3. Message whoever requested this migration that generation %d is up, and state your next action.\n", toGeneration)
+	fmt.Fprintf(&b, " 3. Message %s that generation %d is up, and state your next action.\n", requester, toGeneration)
 	b.WriteString(" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")
 	if handoff != "" {

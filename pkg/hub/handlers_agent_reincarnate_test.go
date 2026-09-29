@@ -2117,7 +2117,7 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
 	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, "user:requester@example.com")
 
 	assert.Contains(t, preamble,
 		"2. Run `scion conversation list --json` and, for each conversation, "+
@@ -2143,10 +2143,15 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 // — comes in here. It also pins Amendment A23's invariant that the preamble
 // carries no workspace-mode-specific text: a clone-per-agent agent and a
 // shared/mounted-workspace agent must produce byte-identical step text, both
-// with a handoff and without one.
+// with a handoff and without one. The requester argument is a pre-resolved
+// display string (Amendment A26.1) — resolveReincarnationRequesterName has
+// its own dedicated tests below; this test only pins that
+// buildReincarnationPreamble places whatever string it's given verbatim into
+// both the header line and step 3.
 func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
 	srv, _ := testServer(t)
 	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	const requester = "user:requester@example.com"
 
 	cloneAgent := &store.Agent{
 		ID:   "agent-clone",
@@ -2165,13 +2170,15 @@ func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
 
 	assertA26Steps := func(t *testing.T, preamble string, agent *store.Agent, toGeneration int) {
 		t.Helper()
-		assert.Contains(t, preamble, fmt.Sprintf("You are generation %d of agent %q (id %s).", toGeneration, agent.Slug, agent.ID))
+		assert.Contains(t, preamble,
+			fmt.Sprintf("You are generation %d of agent %q (id %s), reincarnated on request of %s.", toGeneration, agent.Slug, agent.ID, requester),
+			"the header line (A26.1) must name the resolved requester")
 		assert.Contains(t, preamble,
 			" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n",
 			"step 1 must keep A23's neutral wording regardless of workspace mode")
 		assert.Contains(t, preamble,
-			fmt.Sprintf(" 3. Message whoever requested this migration that generation %d is up, and state your next action.\n", toGeneration),
-			"step 3 (§3.9, come in per A26) must name the target generation")
+			fmt.Sprintf(" 3. Message %s that generation %d is up, and state your next action.\n", requester, toGeneration),
+			"step 3 (§3.9, A26.1) must name both the resolved requester and the target generation")
 		assert.Contains(t, preamble,
 			" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n",
 			"step 4 (§3.9, come in per A26) must point at the handoff template's real section headings")
@@ -2186,13 +2193,13 @@ func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Run("with handoff", func(t *testing.T) {
-				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start)
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start, requester)
 				assertA26Steps(t, preamble, tc.agent, 4)
 				assert.Contains(t, preamble, "next: ship it")
 				assert.NotContains(t, preamble, "No handoff was provided")
 			})
 			t.Run("no handoff", func(t *testing.T) {
-				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start)
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start, requester)
 				assertA26Steps(t, preamble, tc.agent, 4)
 				assert.Contains(t, preamble,
 					"No handoff was provided. Reconstruct context from your branch, your conversations "+
@@ -2201,6 +2208,84 @@ func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestResolveReincarnationRequesterName_A26_1 is the design Amendment A26.1
+// (lead review round 1 on Phase 2b) test matrix for resolving
+// AgentReincarnation.RequestedBy to a display string: a resolvable user, a
+// resolvable agent, a principal ID that resolves to neither (unresolvable),
+// and a real store.Store whose GetUser call errors (store-error fallback).
+// All four must be safe — the function never panics or errors out, only ever
+// returns a string — matching the requirement that a lookup failure must
+// never fail the reincarnation itself.
+func TestResolveReincarnationRequesterName_A26_1(t *testing.T) {
+	t.Run("empty requestedBy falls back immediately", func(t *testing.T) {
+		srv, _ := testServer(t)
+		got := srv.resolveReincarnationRequesterName(context.Background(), "")
+		assert.Equal(t, reincarnationRequesterFallback, got)
+	})
+
+	t.Run("resolves a user", func(t *testing.T) {
+		srv, s := testServer(t)
+		user := &store.User{
+			ID:      tid("a261-req-user"),
+			Email:   "req-user@example.com",
+			Role:    store.UserRoleMember,
+			Status:  store.UserStatusActive,
+			Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(context.Background(), user))
+
+		got := srv.resolveReincarnationRequesterName(context.Background(), user.ID)
+		assert.Equal(t, "user:req-user@example.com", got)
+	})
+
+	t.Run("resolves an agent when the ID is not a user", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+		got := srv.resolveReincarnationRequesterName(context.Background(), agent.ID)
+		assert.Equal(t, "agent:"+agent.Slug, got)
+	})
+
+	t.Run("unresolvable ID falls back with a WARN, does not panic or error", func(t *testing.T) {
+		srv, _ := testServer(t)
+		got := srv.resolveReincarnationRequesterName(context.Background(), "no-such-principal-id")
+		assert.Equal(t, reincarnationRequesterFallback, got)
+	})
+
+	t.Run("a store error on GetUser falls back rather than propagating", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+		// Swap in a store whose GetUser always errors (not ErrNotFound), to
+		// prove the fallback path is taken on a genuine store error and not
+		// just on a clean miss. GetAgent still succeeds via the real store,
+		// so this also proves the function still falls through to the agent
+		// lookup after a non-NotFound GetUser error, rather than a store
+		// error short-circuiting resolution the way a NotFound is expected
+		// to.
+		srv.store = &reincarnateGetUserErrorStore{Store: s, err: fmt.Errorf("injected store failure")}
+
+		got := srv.resolveReincarnationRequesterName(context.Background(), agent.ID)
+		assert.Equal(t, "agent:"+agent.Slug, got,
+			"a GetUser store error must fall through to GetAgent, not abandon resolution")
+	})
+}
+
+// reincarnateGetUserErrorStore wraps a real store.Store and forces GetUser to
+// return a non-ErrNotFound error for every call, so
+// TestResolveReincarnationRequesterName_A26_1's store-error case exercises a
+// genuine store failure rather than a clean "not found" miss.
+type reincarnateGetUserErrorStore struct {
+	store.Store
+	err error
+}
+
+func (e *reincarnateGetUserErrorStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	return nil, e.err
 }
 
 // AC-6: a start failure leaves state=failed with an error and phase=error,
