@@ -22,6 +22,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -345,8 +346,8 @@ func TestReconcileHarnessConfigColumn_CrossesPageBoundary(t *testing.T) {
 // against the mutant: with lastID's advancement disabled, the unbounded
 // query keeps re-fetching the same stuck row (the smallest ID still
 // matching) forever and this test times out; with the real cursor it
-// passes in well under a second. Reverted before committing — see the
-// dispositions table in dev-notes for the mutation-check log this round.
+// passes in well under a second. Both the mutation and its revert were
+// applied only to a scratch working copy and never committed.
 func TestReconcileHarnessConfigColumn_PagingAdvancesCursor(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -399,11 +400,11 @@ func TestReconcileHarnessConfigColumn_PagingAdvancesCursor(t *testing.T) {
 // a second call must be a cheap no-op for rows already populated, and must
 // NOT clobber an already-populated column even if applied_config changes
 // afterward (this is also the R4-4 IsNil-guard-closes-the-overwrite-window
-// property, and it is the flip side of the documented mixed-version-rollout
-// residual gap in dev-notes: a row's harness_config, once non-NULL — real
-// value or the R5-1 "" sentinel — is never re-derived from a later
-// applied_config change by this migration — only by CreateAgent/UpdateAgent's
-// own sync).
+// property, and it is the flip side of the mixed-version-rollout residual
+// documented on ReconcileHarnessConfigColumn's own doc comment, R6-3: a
+// row's harness_config, once non-NULL — real value or the R5-1 ""
+// sentinel — is never re-derived from a later applied_config change by
+// this migration, only by CreateAgent/UpdateAgent's own sync).
 func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -438,6 +439,18 @@ func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 // reconcile's page read and its per-row update must be skipped (logged),
 // not treated as a boot failure — reachable in normal operation now that
 // every replica runs this on every boot.
+// TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete is the
+// ptone/scion#2146 review R5-5/R6-1 fix: it forces the actual race — a
+// concurrent hard delete landing between ReconcileHarnessConfigColumn's
+// SELECT and its per-row UPDATE — deterministically, via an ent mutation
+// hook, rather than deleting the row before the reconcile runs at all (an
+// earlier version of this test did that, which meant the row was never
+// selected in the first place and the ent.IsNotFound branch was never
+// exercised — review R6-1 mutation-verified this: with that branch
+// disabled entirely, the old test still passed). The hook here intercepts
+// exactly the UpdateOne for the targeted row and deletes it first, so the
+// UPDATE that follows genuinely hits a gone row and genuinely returns
+// ent's NotFound.
 func TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -445,26 +458,35 @@ func TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete(t *testing.T) {
 	survivor := createLegacyAgent(t, cs, projectUID, "survivor", `{"harnessConfig":"claude"}`)
 	deleted := createLegacyAgent(t, cs, projectUID, "deleted-mid-reconcile", `{"harnessConfig":"gemini"}`)
 
-	// Simulate another replica hard-deleting the agent after this
-	// replica's page read would have already happened logically, by
-	// deleting it before the reconcile call runs at all — from
-	// ReconcileHarnessConfigColumn's perspective this is indistinguishable
-	// from a delete landing between its SELECT and its UPDATE, since either
-	// way the UPDATE hits a row that no longer exists.
-	_, err := cs.client.Agent.Delete().Where(agent.IDEQ(deleted)).Exec(ctx)
-	require.NoError(t, err)
+	// Both rows are created normally and are still present — the SELECT
+	// inside ReconcileHarnessConfigColumn will see both. This hook is
+	// registered on this test's own client, so it cannot affect any other
+	// test's store.
+	cs.client.Agent.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if am, ok := m.(*ent.AgentMutation); ok && am.Op() == ent.OpUpdateOne {
+				if id, ok := am.ID(); ok && id == deleted {
+					// Another replica deletes the row right between this
+					// reconcile's SELECT (which already returned it) and
+					// this UPDATE.
+					if _, err := cs.client.Agent.Delete().Where(agent.IDEQ(deleted)).Exec(ctx); err != nil {
+						return nil, err
+					}
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
 
-	// Directly exercise the not-found path: a plain UpdateOneID on an
-	// already-deleted ID returns ent's NotFound, which the reconcile must
-	// tolerate. (The realistic "deleted mid-page" race can't be forced
-	// deterministically against a real DB in a unit test; this proves the
-	// tolerance the fix adds rather than the race that triggers it.)
 	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx),
 		"a concurrently deleted agent must not fail the whole reconcile")
 
 	got, err := cs.client.Agent.Get(ctx, survivor)
 	require.NoError(t, err)
 	assert.Equal(t, "claude", got.HarnessConfig, "other rows must still be reconciled normally")
+
+	_, err = cs.client.Agent.Get(ctx, deleted)
+	assert.True(t, ent.IsNotFound(err), "the deleted row must actually be gone")
 }
 
 func TestMigrateRunsHarnessConfigReconcile(t *testing.T) {

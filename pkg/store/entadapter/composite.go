@@ -702,11 +702,13 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 // backfill and set the marker, and those rows would then never be
 // reconciled. Running on every boot closes that gap for the common case (a
 // new-binary boot eventually reconciles what an old-binary replica left
-// behind). See "Release notes" in dev-notes.md for the residual case this
-// still doesn't cover (a row whose harness_config a *new*-binary boot wrote
-// is `""`, exactly like a row with no harness — see below for why that
-// matters — while `applied_config` was later changed by an *old*-binary
-// replica that doesn't know the column exists at all).
+// behind).
+//
+// Residual (ptone/scion#2146 review R6-3): a row an upgraded binary already
+// wrote (non-NULL harness_config, real value or the "" sentinel) whose
+// applied_config harness a pre-upgrade binary later changes keeps its stale
+// column value until an upgraded binary next updates it — this reconcile
+// only selects NULL rows, so a restart alone does not fix it.
 //
 // NULL means exactly one thing: "never reconciled or synced by any binary
 // that knows this column exists." Every write path other than a raw,
