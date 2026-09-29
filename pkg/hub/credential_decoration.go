@@ -461,14 +461,16 @@ func sanitizeForLog(s string, maxBytes int) string {
 		return out
 	}
 	// Truncate at a rune boundary at or before maxBytes. out is valid UTF-8
-	// (rebuilt rune-by-rune above), so cutting mid-rune can only ever
-	// produce a split final rune — checking utf8.ValidString directly
-	// (review-2 nit 3) drops exactly that one incomplete rune, unlike the
-	// previous byte-scan, which over-trimmed a complete multi-byte rune
-	// whenever it happened to end exactly at maxBytes.
-	truncated := out[:maxBytes]
-	for len(truncated) > 0 && !utf8.ValidString(truncated) {
-		truncated = truncated[:len(truncated)-1]
+	// (rebuilt rune-by-rune above), so the only way cutting at maxBytes can
+	// be wrong is landing inside the final rune's byte sequence. Checking
+	// utf8.RuneStart on the byte immediately after the cut tells us that
+	// directly: if it starts a new rune, the cut is already clean; if it is
+	// a continuation byte, walk back to where that rune began and drop it
+	// whole. This is O(1) (at most 3 steps back) instead of re-validating
+	// the whole prefix with utf8.ValidString on every trim.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
 	}
-	return truncated + "…"
+	return out[:cut] + "…"
 }
