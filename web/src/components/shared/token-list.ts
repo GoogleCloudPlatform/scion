@@ -86,7 +86,7 @@ const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
     'you do not currently have authority for this permission in this project',
 };
 
-function formatEligibilityReason(reason?: string): string {
+export function formatEligibilityReason(reason?: string): string {
   if (!reason) return 'not currently selectable';
   return ELIGIBILITY_REASON_LABELS[reason] || reason;
 }

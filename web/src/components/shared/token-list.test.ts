@@ -28,6 +28,8 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionTokenList: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let formatEligibilityReason: (reason?: string) => string;
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -171,6 +173,7 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
   beforeAll(async () => {
     const mod = await import('./token-list.js');
     ScionTokenList = mod.ScionTokenList;
+    formatEligibilityReason = mod.formatEligibilityReason;
   });
 
   afterEach(() => {
@@ -210,6 +213,14 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
     expect(attach.eligibilityKind).toBe('relationship');
     expect(del.eligible).toBe(false);
     expect(del.eligibilityReason).toBe('flat_role_insufficient');
+  });
+
+  it('formats flat_role_insufficient with a human-readable label, and falls back to the raw code for an unmapped reason', () => {
+    expect(formatEligibilityReason('flat_role_insufficient')).toBe(
+      'your project role does not include this permission'
+    );
+    expect(formatEligibilityReason('some_future_reason_code')).toBe('some_future_reason_code');
+    expect(formatEligibilityReason(undefined)).toBe('not currently selectable');
   });
 
   it('refuses to select an ineligible scope even if toggled directly', async () => {
