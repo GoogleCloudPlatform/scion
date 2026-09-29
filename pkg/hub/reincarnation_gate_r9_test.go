@@ -37,6 +37,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -114,6 +115,95 @@ func TestChatV2_A2511_R1_AgentUser_GhostAgentAsPeer_NoPhantomRow(t *testing.T) {
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
 	require.Equal(t, http.StatusCreated, code)
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot names a nonexistent agent")
+}
+
+// TestChatV2_A2511_R1_AgentUser_UserUUIDInAgentSlot_NoPhantomRow is the
+// p2a-u6 reviewer's repro (design.md A25.12 R1): dm:agent:<real USER's
+// UUID>:user:<self> — the agent slot names a real principal, but of the
+// WRONG kind (a user's UUID in an "agent" slot). It must not resolve via
+// GetUser, and no "agent:<user-UUID>" row may be written. This is the
+// mirror image of UserUser_AgentUUIDAsPeer above and is the test that
+// kills mutation kind_userForAgent (accepting GetUser for an agent slot),
+// which survived every other test in the p2a-u5/u6 suites because none of
+// them used a real, store-backed user's UUID in the agent slot specifically
+// (GhostAgentAsPeer's ID resolves to neither a user nor an agent, so it
+// cannot tell GetAgent from GetUser apart).
+func TestChatV2_A2511_R1_AgentUser_UserUUIDInAgentSlot_NoPhantomRow(t *testing.T) {
+	srv, s, _, _, _ := setupSendTest(t)
+	ctx := context.Background()
+	u := &store.User{ID: tid("a2511-user-in-agent-slot"), Email: "a2511-uias@test.com", DisplayName: "U"}
+	require.NoError(t, s.CreateUser(ctx, u))
+	key := "dm:agent:" + u.ID + ":user:" + DevUserID
+	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
+	require.Equal(t, http.StatusCreated, code)
+	assert.Empty(t, parts)
+}
+
+// ---------------------------------------------------------------------------
+// A25.12 O1: the store-error path (a lookup failure that is NOT "not
+// found") must be treated as unresolved, exactly like a genuine ghost ID —
+// never as "resolved" (which would let a store hiccup mint a
+// caller-uncontrolled phantom row).
+// ---------------------------------------------------------------------------
+
+// getUserErrStore wraps a real store and makes GetUser return a non-NotFound
+// error for one specific ID, simulating a transient store failure during
+// peer resolution — distinct from a ghost ID, which returns store.ErrNotFound
+// and is already covered by the shapes above.
+type getUserErrStore struct {
+	store.Store
+	failID string
+}
+
+func (s *getUserErrStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == s.failID {
+		return nil, errors.New("injected store error")
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+// getAgentErrStore is getUserErrStore's mirror for the agent-slot lookup.
+type getAgentErrStore struct {
+	store.Store
+	failID string
+}
+
+func (s *getAgentErrStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.failID {
+		return nil, errors.New("injected store error")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow pins the WARN-and-skip
+// (G2 non-fatal) behavior for a store error on the user-slot peer lookup.
+func TestChatV2_A2511_O1_UserSlot_StoreError_NoPhantomRow(t *testing.T) {
+	srv, s, _, _, _ := setupSendTest(t)
+
+	peerID := tid("a2511-o1-user-peer")
+	srv.store = &getUserErrStore{Store: s, failID: peerID}
+
+	key, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
+	require.NoError(t, err)
+
+	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
+	require.Equal(t, http.StatusCreated, code)
+	assert.Empty(t, parts, "a store error on the peer lookup must not write a participant row")
+}
+
+// TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow is the matching
+// GetAgent store-error case (A25.12 O1, optional but included).
+func TestChatV2_A2511_O1_AgentSlot_StoreError_NoPhantomRow(t *testing.T) {
+	srv, s, _, _, _ := setupSendTest(t)
+
+	agentID := tid("a2511-o1-agent-peer")
+	srv.store = &getAgentErrStore{Store: s, failID: agentID}
+
+	key := "dm:agent:" + agentID + ":user:" + DevUserID
+
+	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
+	require.Equal(t, http.StatusCreated, code)
+	assert.Empty(t, parts, "a store error on the peer lookup must not write a participant row")
 }
 
 // TestChatV2_A2511_R1_UserUser_RealPeer_BothRowsRegistered is the positive
