@@ -225,6 +225,34 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "disabled")
         self.assertNotIn("SCION_USAGE_SOURCE", env)
 
+    def test_telemetry_enabled_treats_non_dict_as_disabled(self) -> None:
+        # GoogleCloudPlatform/scion#2065 review (gemini-code-assist, medium):
+        # a non-dict truthy value used to crash `.get()`. The production
+        # writer (ApplyTelemetrySettings) never produces one, but this pins
+        # the defensive fallback instead of relying on that invariant.
+        for value in (True, "enabled", [1, 2, 3]):
+            with self.subTest(value=value):
+                self.assertFalse(provision._telemetry_enabled(value))
+                # And the callers that gate on it don't crash either.
+                env = provision._telemetry_output_env(value)
+                self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "disabled")
+                self.assertNotIn("SCION_USAGE_SOURCE", env)
+        # False is a legitimate (if unusual) dict value and a bare bool are
+        # both "not enabled", for different reasons -- both must still not
+        # crash.
+        self.assertFalse(provision._telemetry_enabled(False))
+        self.assertFalse(provision._telemetry_enabled({}))
+
+    def test_telemetry_provider_treats_non_dict_telemetry_and_cloud_as_absent(self) -> None:
+        # Same review, second comment: (telemetry or {}).get("cloud") used to
+        # crash on a truthy non-dict telemetry. Also covers a dict telemetry
+        # whose "cloud" key is itself a non-dict value.
+        for value in (True, "enabled", [1, 2, 3]):
+            with self.subTest(value=value):
+                self.assertEqual(provision._telemetry_provider(value, None), "")
+        self.assertEqual(provision._telemetry_provider({"cloud": "gcp"}, None), "")
+        self.assertEqual(provision._telemetry_provider({"cloud": {"provider": "gcp"}}, None), "gcp")
+
     def test_disabled_otel_disables_all_exporters(self) -> None:
         with tempfile.TemporaryDirectory() as home, temporary_home(home):
             os.makedirs(os.path.join(home, ".codex"), exist_ok=True)

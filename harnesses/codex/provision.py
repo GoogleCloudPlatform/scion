@@ -148,7 +148,14 @@ def _resolve_otel_environment(telemetry: dict[str, Any], env: dict[str, str] | N
 
 
 def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
-    if not telemetry:
+    # The production writer (ApplyTelemetrySettings, pkg/harness/
+    # container_script_harness.go) always marshals a typed *api.TelemetryConfig
+    # or a Go nil, so inputs/telemetry.json's "telemetry" key is always a JSON
+    # object or null in practice -- a non-dict value can't reach here today.
+    # The isinstance guard is defensive anyway (GoogleCloudPlatform/scion#2065
+    # review): treat anything that isn't a dict (True, a string, a list, ...)
+    # the same as absent, rather than crashing on `.get()`.
+    if not isinstance(telemetry, dict) or not telemetry:
         return False
     enabled = telemetry.get("enabled")
     if enabled is None:
@@ -178,7 +185,9 @@ def _telemetry_provider(telemetry: dict[str, Any] | None, env: dict[str, str] | 
     provider resolution, minus claude's stricter "explicit provider
     required" validation, which is out of scope for codex."""
     env = env or {}
-    cloud = (telemetry or {}).get("cloud")
+    # Same non-dict defensiveness as _telemetry_enabled above: a truthy
+    # non-dict telemetry (e.g. True) would otherwise crash `.get("cloud")`.
+    cloud = telemetry.get("cloud") if isinstance(telemetry, dict) else None
     configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
     staged_provider = env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
     return staged_provider or configured_provider
