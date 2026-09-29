@@ -109,7 +109,7 @@ func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers B.3's interim
+// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers the dispatch_agent
 // authoring gate: a scoped UAT cannot author a dispatch_agent event even when
 // the underlying user holds full project-owner authority, because the
 // scheduler persists only the creator ID and cannot re-apply the token's

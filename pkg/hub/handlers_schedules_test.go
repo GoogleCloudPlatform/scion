@@ -154,7 +154,7 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 	return ownerUser
 }
 
-// TestSchedule_CreateDispatchAgentScopedUATDenied covers B.3's interim
+// TestSchedule_CreateDispatchAgentScopedUATDenied covers the dispatch_agent
 // authoring gate for recurring-schedule create: a scoped UAT cannot author a
 // dispatch_agent schedule even when the underlying user holds full
 // project-owner authority, because the scheduler persists only the creator
@@ -247,7 +247,7 @@ func TestSchedule_UpdateDispatchAgentScopedUATDenied(t *testing.T) {
 // TestSchedule_ResumeDispatchAgentScopedUATDenied covers resume: resuming a
 // paused dispatch_agent schedule re-arms future dispatches, so it requires a
 // credential whose scope can be applied at execution time. A paused
-// "message" schedule is unaffected.
+// "message" schedule is outside this gate.
 func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-resume-dispatch-owner"))
@@ -277,10 +277,9 @@ func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	// A paused "message" schedule is a different event type: resume for it is
-	// unaffected by this gate (it has no scoped-UAT check either, matching
-	// its current behavior; only dispatch_agent authority is gated here).
-	t.Run("scoped UAT can resume a paused message schedule (unaffected)", func(t *testing.T) {
+	// A paused "message" schedule is outside this gate, which covers only
+	// dispatch_agent schedules.
+	t.Run("scoped UAT can resume a paused message schedule (outside dispatch_agent gate)", func(t *testing.T) {
 		msgCreateRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, "", http.MethodPost,
 			CreateScheduleRequest{
 				Name: "resume-message-scoped", CronExpr: "0 * * * *",

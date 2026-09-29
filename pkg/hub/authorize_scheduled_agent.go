@@ -25,17 +25,13 @@ import "net/http"
 // authorize_scheduled_message.go, so both event kinds enforce one rule
 // instead of two independently maintained checks.
 //
-// This is an interim authoring-time gate (ptone/scion#2121, part of B.3): it
-// denies new scoped-UAT authoring of dispatch_agent work going forward. It
-// does not change fire-time behavior (server.go's authorizeScheduledAgentCreate
-// and scheduledCreatorIdentity are unchanged) and does not touch any
-// already-persisted scheduled event or schedule rows; whether existing rows
-// need separate handling is left to the rest of B.3.
+// This gate applies at authoring time (ptone/scion#2121). Fire-time
+// authorization is performed separately by authorizeScheduledAgentCreate in
+// server.go.
 //
-// Other credential kinds (session/dev users, federated users, agents) are
-// unaffected by this gate and continue to be authorized by
-// authorizeAgentCreate, which callers must still invoke alongside this
-// function.
+// The gate denies only scoped UATs. Every caller, whatever its credential
+// kind, must also be authorized by authorizeAgentCreate, which callers invoke
+// alongside this function.
 func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter, r *http.Request) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
