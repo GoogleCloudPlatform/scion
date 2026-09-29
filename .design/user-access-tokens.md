@@ -348,3 +348,92 @@ Add a **"Access Tokens"** page to the profile section:
 6. **UAT-creates-UAT prevention**: Enforced at the middleware level. Requests authenticated with `scion_pat_*` tokens are rejected on the token creation endpoint.
 
 7. **Scope granularity evolution**: Scopes remain coarse capability gates. The policy engine handles fine-grained decisions within those gates. Scopes can evolve as the authorization system matures.
+
+## Credential Decoration: Bounded Purpose and Labels (E.1, ptone/scion#2126)
+
+**Status:** Approved (part of the access-token-relationship-refactor tracker, execution area E).
+
+Simple compute automation (CI/CD, scheduled jobs) commonly reuses one human's
+UAT across several purposes. E.1 lets the issuer attach optional, bounded,
+purely descriptive metadata to a token at mint time, so that reused-by-the-
+same-human tokens are distinguishable in logs and audit records — without
+ever treating that metadata as a verified actor, ancestry, or authorization
+signal. The authenticated principal is always the human user; a label such
+as `nightly-cleanup` is a hint for a log reader, never an agent identity, and
+authorization code is mechanically prevented from branching on it (see
+`pkg/hub/credential_decoration_authz_guard_test.go`).
+
+### Fields
+
+- `purpose` (optional, string): a free-text description of what the token is
+  for, e.g. "nightly cleanup automation".
+- `labels` (optional, map of string to string): issuer-supplied key/value
+  annotations, e.g. `{"team": "platform", "env": "prod"}`.
+
+Both are set only at **issuance** (`POST /api/v1/auth/tokens`, `scion hub
+token create --purpose/--label`) and are **immutable afterward** — there is
+no update endpoint or CLI command. To change them, create a replacement
+token and revoke the old one. This is enforced at both the service layer
+(`ValidateCredentialMetadata` runs once, at mint) and the store layer (the
+`purpose`/`labels` ent fields are `Immutable()`, so no generated update
+setter exists for them).
+
+### Bounded schema
+
+| Item | Rule |
+|---|---|
+| `purpose` | optional; ≤ 128 bytes UTF-8 after trim; must be valid UTF-8; reject Unicode categories Cc (control), Cf (format, including bidi overrides and zero-width characters), Zl (line separator, U+2028) and Zp (paragraph separator, U+2029) — i.e. genuinely a single line |
+| label count | ≤ 8 labels per token |
+| label key | must be valid UTF-8; must match `^[a-z][a-z0-9_.-]{0,31}$` (≤ 32 bytes, lowercase ASCII, digits, `_`, `.`, `-`) |
+| label value | must be valid UTF-8; ≤ 64 bytes; charset `[A-Za-z0-9 _.:/@+=,-]`; no leading/trailing whitespace; empty value allowed |
+| token `name` (existing field) | **new tokens:** ≤ 128 bytes, must be valid UTF-8, reject Cc/Cf/Zl/Zp, reject text resembling a pasted secret. **Existing rows (minted before E.1):** accepted unchanged; sanitized at render time instead |
+| secret-looking text | any of `name`/`purpose`/a label key or value containing `scion_pat_` or `Bearer ` (case-insensitive) is rejected — a cheap, deliberately non-exhaustive check against accidentally pasting a token or an `Authorization` header value |
+
+**Reserved label keys** — rejected exactly or as a dotted prefix (e.g. `user`
+also rejects `user.name`), case-insensitively, with `-` normalized to `_`
+first (so `actor-binding` and `actor_binding` are both caught):
+
+```
+agent  agent_id  actor  actor_binding  principal  principal_id  principal_kind
+user  user_id  email  on_behalf_of  delegate  delegator  delegation  ancestry
+creator  created_by  owner  project_id  broker_id  credential  credential_id
+token  token_id  role  scope  scopes  permission  permissions  verified
+system  executor  initiator
+```
+
+`actor_binding` is reserved for a future verified-agent-binding extension
+(execution area G); it is not itself implemented by E.1.
+
+In addition, any label key starting with `scion.`, `hub.`, or `x-` (again
+case-insensitively) is rejected outright, reserving those namespaces for the
+platform and for future header-derived metadata.
+
+### Validation errors never echo the offending value
+
+A validation failure returns `400 validation_error` with a message naming
+the **field** and the **rule** that failed (e.g. "invalid labels: label key
+is reserved") — never the value that violated it. This keeps a rejected
+purpose or label out of error responses and logs, since that text is
+untrusted and unbounded until it passes validation.
+
+### Rendering (logs)
+
+Decoration renders as a `slog` group (`credential.*`): `kind`, `id`, `name`,
+`boundary.kind`, `boundary.project_id`, `purpose`, and labels nested under
+`credential.labels.*` with a constant `credential.labels_source="issuer"`
+marker — never promoted to top-level log attributes, so a label can never
+collide with (or be mistaken for) a real `agent_id`/`user_id`/`principal_kind`
+field. Rendering always re-sanitizes text (replacing Cc/Cf/Zl/Zp runes with
+U+FFFD and truncating with a `…` marker), because a row created before this
+validation existed cannot be assumed to already satisfy the bounded schema.
+The token's plaintext value, its SHA-256 hash, and its visible prefix are
+never part of the decoration and never logged this way.
+
+### Non-goals
+
+Purpose and labels never grant, narrow, or verify anything: they carry no
+permissions, do not affect `Decide`, `CanDelegate`, capabilities, or
+delegation-edge attribution, and are not a substitute for the agent-bound
+delegation extension (area G) that will add a separately verified actor
+binding. See `pkg/hub/credential_decoration_authz_guard_test.go` for the
+mechanical enforcement of "never read by authorization code."
