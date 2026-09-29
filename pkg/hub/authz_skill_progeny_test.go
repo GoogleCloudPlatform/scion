@@ -272,22 +272,41 @@ func TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant(t *testing.T) {
 	ctx := context.Background()
 	u := createCharacterizationUser(t, s, tid("sp-projgone-u"))
 	project := tid("sp-projgone-proj")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: project, Name: "sp-projgone", Slug: "sp-projgone", CreatedBy: u.ID(),
-	}))
+	proj := &store.Project{ID: project, Name: "sp-projgone", Slug: "sp-projgone", CreatedBy: u.ID()}
+	require.NoError(t, s.CreateProject(ctx, proj))
 	createTestUserWithProjectRole(t, s, u.ID(), u.ID()+"@relchar.test", project, store.ProjectRoleMember)
+
+	agentID := tid("sp-projgone-agent")
+	// A stored agent row with the same project and ancestry a real agent
+	// would carry, so the fixture matches what a future execution-project
+	// admission check would actually resolve, rather than an ID-only JWT
+	// wrapper.
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "sp-projgone-agent", Name: "sp-projgone-agent",
+		ProjectID: project, OwnerID: u.ID(), Ancestry: []string{u.ID()},
+	}))
+
+	// U's project access is present before removal.
+	before := authz.CheckAccess(ctx, u, projectResource(proj), ActionRead)
+	assert.True(t, before.Allowed, "U should have project read access before removal: reason %q", before.Reason)
 
 	// Remove U's project membership while U itself stays active.
 	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID())
 	require.NoError(t, err)
 	require.Positive(t, n, "the user's project membership must actually be removed")
 
+	// U's project access is gone after removal.
+	after := authz.CheckAccess(ctx, u, projectResource(proj), ActionRead)
+	assert.False(t, after.Allowed, "U should have lost project read access after removal: reason %q", after.Reason)
+
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-projgone-agent")}, ProjectID: project,
+		Claims: jwt.Claims{Subject: agentID}, ProjectID: project,
 		Scopes: allRegisteredAgentScopes(), Ancestry: []string{u.ID()},
 	}}
 	sk := createTestSkill(t, s, "sp-projgone-skill", store.SkillScopeUser, u.ID(), u.ID())
 
+	// The personal-skill read is still allowed today (this is the PARTIAL
+	// behaviour this test characterizes, not endorses).
 	d := authz.CheckAccess(ctx, agent, skillScopeResource(store.SkillScopeUser, u.ID()), ActionRead)
 	assert.True(t, d.Allowed, "bucket probe: reason %q", d.Reason)
 	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)

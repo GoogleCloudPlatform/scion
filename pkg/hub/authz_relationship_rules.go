@@ -195,10 +195,11 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		})
 	}
 
-	// Progeny: an agent reads a sharing source opted in by (or, for a
-	// resource kind with a bucket-keyed adapter such as personal skills,
-	// available by default to descendants of) a member of its ancestry
-	// chain. Only read actions match. ptone/scion#2128 consolidated the
+	// Progeny: an agent reads a sharing source that a member of its
+	// ancestry chain opted in, or, for an origin-descendants source such
+	// as a personal skill, one owned by the agent's origin (root) user —
+	// not merely owned by any member of the chain. Only read actions
+	// match. ptone/scion#2128 consolidated the
 	// former dedicated creator-user-skill grant into this common path: the
 	// registered "skill" adapter (skillProgenyAdapter, authz_skill_progeny.go)
 	// supplies the per-kind fact-resource-ID and shape refusal that used to
