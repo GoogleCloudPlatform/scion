@@ -446,6 +446,26 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		fields.Status = true
 	}
 
+	// An enable transition (any prior status, e.g. paused, back to active)
+	// re-arms future dispatch the same way resumeSchedule does. If this
+	// request didn't already recompute NextRunAt via a real CronExpr change,
+	// it must be recomputed here from the stored cron: otherwise a schedule
+	// that went stale while paused (or was paused with a next_run_at already
+	// in the past) would reactivate carrying that stale time, and the
+	// scheduler would treat it as immediately due.
+	enabling := req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive
+	if enabling && !fields.CronExpr {
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		cronSchedule, err := parser.Parse(schedule.CronExpr)
+		if err != nil {
+			InternalError(w)
+			return
+		}
+		nextRunAt := cronSchedule.Next(time.Now().UTC())
+		schedule.NextRunAt = &nextRunAt
+		fields.NextRunAt = true
+	}
+
 	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
 	// (payload/target/type/timing, or an enable transition) replaces the
 	// attribution and bumps authorization_revision atomically in the same
@@ -454,10 +474,8 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// does not re-attribute, and attribution is passed to the store only
 	// when it changed. Deriving this from the field mask itself (rather
 	// than from req's presence checks) is what keeps the two in sync: a
-	// dispatch field only re-attributes when it is also the field mask
-	// actually writes.
-	changesFutureDispatch := fields.CronExpr || fields.EventType || fields.Payload ||
-		(req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive)
+	// dispatch field only re-attributes when the field mask also writes it.
+	changesFutureDispatch := fields.CronExpr || fields.EventType || fields.Payload || enabling
 
 	// The write is conditioned on the revision this handler just read,
 	// regardless of whether this particular call replaces attribution: a

@@ -698,6 +698,65 @@ func TestUpdateSchedule_PayloadChangeReattributes(t *testing.T) {
 	assert.Equal(t, 2, after.AuthorizationRevision, "an actual payload change must bump the revision")
 }
 
+// TestUpdateSchedule_UnchangedCronEnableRefreshesNextRunAt covers a PATCH
+// that resends the schedule's own CronExpr alongside status:"active" on a
+// paused schedule. Because the cron itself doesn't change, that PATCH only
+// reaches the field mask through the enable transition — but the enable
+// transition must still recompute NextRunAt the way resumeSchedule does.
+// Without that, a schedule that went stale (or was already due) while
+// paused reactivates carrying its stale next_run_at, and the scheduler
+// treats it as immediately due.
+func TestUpdateSchedule_UnchangedCronEnableRefreshesNextRunAt(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	userA, userB := setupTwoScheduleUsers(t, srv, s, projectID)
+	ctx := context.Background()
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
+	rec := doRequestAsUser(t, srv, userA, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	pauseRec := doRequestAsUser(t, srv, userA, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+	// pauseSchedule leaves next_run_at untouched; simulate one that has gone
+	// stale (or was already due) while paused, the same way the reviewer's
+	// repro did.
+	paused, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	staleNextRunAt := time.Now().UTC().Add(-48 * time.Hour)
+	paused.NextRunAt = &staleNextRunAt
+	require.NoError(t, s.UpdateSchedule(ctx, paused, store.ScheduleFieldMask{NextRunAt: true},
+		paused.AuthorizationRevision, paused.AuthorizationRevision != 0, nil))
+
+	before, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ScheduleStatusPaused, before.Status)
+	require.WithinDuration(t, staleNextRunAt, *before.NextRunAt, time.Second)
+
+	// B resends the schedule's own CronExpr and flips status back to active
+	// in one PATCH — the round-trip case the fix covers.
+	updateReq := UpdateScheduleRequest{CronExpr: before.CronExpr, Status: store.ScheduleStatusActive}
+	rec2 := doRequestAsUser(t, srv, userB, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	after, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleStatusActive, after.Status)
+	require.NotNil(t, after.NextRunAt)
+	assert.True(t, after.NextRunAt.After(time.Now().UTC()),
+		"an unchanged-cron enable must recompute next_run_at, not leave the stale paused value: got %v", after.NextRunAt)
+	assert.Equal(t, 2, after.AuthorizationRevision, "an enable transition must bump the revision")
+	assert.Equal(t, userB.ID, after.InitiatorPrincipalID, "an enable transition must attribute to the resumer/mutator")
+
+	due, err := s.ListDueSchedules(ctx, time.Now().UTC())
+	require.NoError(t, err)
+	for _, d := range due {
+		assert.NotEqual(t, created.ID, d.ID, "the reactivated schedule must not be immediately due right after the fix")
+	}
+}
+
 // TestResumeSchedule_ReattributesToResumer is R7's resume counterpart.
 func TestResumeSchedule_ReattributesToResumer(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
