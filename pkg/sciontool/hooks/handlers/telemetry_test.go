@@ -727,10 +727,7 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 // but never runs recordTokenMetrics itself (the two packages can't import
 // each other in tests; see that test's doc comment). Without this test nothing
 // would catch a regression where the handler goes back to including
-// agent_id/project_id, since the admission test would keep passing --
-// mutation-tested during review: manually appending agent_id/project_id
-// after the helper loop in recordTokenMetrics left every existing handler
-// test green.
+// agent_id/project_id, since the admission test would keep passing.
 //
 // gen_ai.api.calls is asserted to still carry agent_id and project_id in the
 // same run, documenting the intended asymmetry: it keeps them for Cloud
@@ -780,6 +777,12 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 	}
 	sawUsageTokenPoint := false
 	sawAPICallPoint := false
+	// Both model-end events share the same attribute set, so the SDK merges
+	// them into one series per token_type: summed totals prove both the
+	// paired (input=100, output=50, cached=10) and unpaired (input=5,
+	// output=2, cached=1) calls actually contributed, which the key-set
+	// check alone doesn't show.
+	tokenTotals := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			switch m.Name {
@@ -802,6 +805,9 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 						if !gotKeys[key] {
 							t.Errorf("%s point attribute keys = %v, missing %q", m.Name, gotKeys, key)
 						}
+					}
+					if tokenType, ok := point.Attributes.Value(attribute.Key(telemetrycontract.TokenTypeLabel)); ok {
+						tokenTotals[tokenType.AsString()] += point.Value
 					}
 				}
 			case telemetrycontract.MetricAPICalls:
@@ -826,6 +832,16 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 	}
 	if !sawAPICallPoint {
 		t.Fatalf("expected at least one %s point", telemetrycontract.MetricAPICalls)
+	}
+	wantTotals := map[string]int64{
+		telemetrycontract.TokenTypeInput:     105, // 100 (paired) + 5 (unpaired)
+		telemetrycontract.TokenTypeOutput:    52,  // 50 (paired) + 2 (unpaired)
+		telemetrycontract.TokenTypeCacheRead: 11,  // 10 (paired) + 1 (unpaired)
+	}
+	for tokenType, want := range wantTotals {
+		if got := tokenTotals[tokenType]; got != want {
+			t.Errorf("token_type=%s total = %d, want %d (both the paired and unpaired model-end must have contributed)", tokenType, got, want)
+		}
 	}
 }
 
