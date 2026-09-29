@@ -31,7 +31,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/require"
 )
 
@@ -420,23 +419,15 @@ func TestAgentSecretRead_ViewerCatalogGrantsDoNotAdmit(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit covers checks
-// 5 and 7 together. Changed rule (ptone/scion#2129): check 5's admission is
-// now ProjectAdmissionForClass's project-membership-evidence branch, which
-// treats any active project-scoped role binding for the principal as
-// membership (it does not itself inspect which permissions the binding
-// carries) -- so an unrelated scheduled_event.update-only binding now admits
-// at check 5, unlike the old interim built-in-roles-only membership reader.
-// The read is still denied end to end, but only once the backfill marker is
-// set: check 7's Decide grants the agent's own JWT-scope-derived synthetic
-// binding, and without a recorded delegation edge the ceiling's pre-backfill
-// exception allows any action -- so this scenario is only meaningfully
-// exercised with the marker set, which activates the missing-edge branch
-// (secret_read is not read-only-classified) and denies.
+// TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit covers check
+// 5: a project-scoped role binding that is not one of the built-in
+// membership roles (owner/admin/member) does not satisfy
+// CheckEffectiveMembership, no matter what permissions it carries, and does
+// not qualify as exact system authority for secret.use either (it is a
+// project-scoped, not a system-scoped, binding).
 func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) {
 	f := newMaterialFixture(t, "unrelated-grant")
 	ctx := context.Background()
-	setBackfillCompleted(t, f.Store)
 
 	// Remove the fixture's own owner membership so only the unrelated grant
 	// remains.
@@ -465,33 +456,76 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 	require.NoError(t, err)
 
 	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
-	facts, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
-	if status != 0 || reason != ReasonAllowed || facts == nil {
-		t.Fatalf("expected check 5 to admit (any active project-scoped binding is membership evidence), got %d/%s", status, reason)
+	_, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
+		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
 	}
+}
 
-	seedSecret(t, f.Server.secretBackend, "UNRELATED_KEY", "v", "", "", f.ProjectID)
-	rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
-		secretFetchRequest{Keys: []string{"UNRELATED_KEY"}}, f.Token)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+// TestAgentSecretRead_SystemRoleExactPermissionAdmitted covers check 5's
+// system-authority leg: a system-scope role holding the exact secret.use
+// permission establishes target-applicable authority for the project, even
+// with no project membership row.
+func TestAgentSecretRead_SystemRoleExactPermissionAdmitted(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysrole-exact")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-exact", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-exact")
+	systemRoleUserWithPermissions(t, s, userID, []string{"secret.use"})
+	agentID := tid("agent-sysrole-exact")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-exact", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	facts, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("expected check 5 to admit via exact system authority for secret.use, got %d/%s", status, reason)
 	}
-	var resp secretFetchResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	if len(resp.Secrets) != 1 || resp.Secrets[0].Status != "not_found" || resp.Secrets[0].Value != "" {
-		t.Fatalf("expected not_found with no value (no recorded delegation edge, post-backfill), got %+v", resp.Secrets)
+}
+
+// TestAgentSecretRead_SystemRoleUnrelatedPermissionDenied covers check 5's
+// system-authority leg: a system-scope role holding a permission other than
+// secret.use does not establish authority, so a root with no project
+// membership row is denied.
+func TestAgentSecretRead_SystemRoleUnrelatedPermissionDenied(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysrole-unrelated")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-unrelated", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-unrelated")
+	systemRoleUserWithPermissions(t, s, userID, []string{"agent.delete"})
+	agentID := tid("agent-sysrole-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-unrelated", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	_, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
+		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
 	}
 }
 
 // TestAgentSecretRead_HubAdminWithoutMembershipDenied covers check 5: a
 // hub-admin root without a project membership row is still denied.
-// hub-admin's curated permission set does not gain secret.use
-// (ptone/scion#2129 adds it to no curated role), so
+// hub-admin's curated permission set does not include secret.use, so
 // ProjectAdmissionForClass's system authority branch does not admit it
-// either. This is the surviving half of the former
-// ...SystemRoleWithoutMembershipDeniedInterim table test; the super-admin
-// half is superseded by TestAgentSecretRead_SuperAdminExactPermissionAdmitted
-// below, now that the membership-only reader is replaced.
+// either. See TestAgentSecretRead_SuperAdminExactPermissionAdmitted below
+// for the super-admin case, which does hold secret.use and is admitted.
 func TestAgentSecretRead_HubAdminWithoutMembershipDenied(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
@@ -560,22 +594,16 @@ func TestAgentSecretRead_SuperAdminExactPermissionAdmitted(t *testing.T) {
 
 // TestAgentSecretRead_MembershipLookupErrorDenies covers check 5: a genuine
 // store fault while checking membership (as opposed to a definite
-// non-member) fails closed with a 500, not a 403. Changed rule
-// (ptone/scion#2129): check 5 now calls ProjectAdmissionForClass, whose
-// membership-evidence branch resolves bindings through the plural
-// ListRoleBindingsForPrincipals, not the singular method the old
-// CheckEffectiveMembership reader used -- the injected fault moves with it.
-// The failing store must back a fresh AuthzService: AuthzService captures
-// its own store reference at construction (NewAuthzService), so reassigning
-// f.Server.store alone would not reach ProjectAdmissionForClass.
+// non-member) fails closed with a 500, not a 403. Check 5 calls
+// CheckEffectiveMembership, which resolves a principal's direct bindings
+// through the singular ListRoleBindingsForPrincipal, so the fault is
+// injected there.
 func TestAgentSecretRead_MembershipLookupErrorDenies(t *testing.T) {
 	f := newMaterialFixture(t, "membership-lookup-error")
-	failing := &materialFailingStore{
-		Store:                            f.Store,
-		listRoleBindingsForPrincipalsErr: errors.New("injected membership lookup failure"),
+	f.Server.store = &materialFailingStore{
+		Store:                           f.Store,
+		listRoleBindingsForPrincipalErr: errors.New("injected membership lookup failure"),
 	}
-	f.Server.store = failing
-	f.Server.authzService = NewAuthzService(failing, logging.Subsystem("hub.auth"))
 
 	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
 	_, reason, status := f.Server.materialRuntimePrecheck(context.Background(), ident)
