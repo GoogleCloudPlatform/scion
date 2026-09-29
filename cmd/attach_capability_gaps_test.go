@@ -53,11 +53,12 @@ func newBrokerGetHub(t *testing.T, brokerID string, status int, body string) *Hu
 func TestAttachSupportedByBroker_Branches(t *testing.T) {
 	const id = "b1"
 	tests := []struct {
-		name    string
-		status  int
-		body    string
-		profile string
-		want    bool
+		name           string
+		status         int
+		body           string
+		profile        string
+		want           bool
+		wantUnreadable bool
 	}{
 		{
 			// A live broker instance always resolves its own default-type
@@ -107,18 +108,27 @@ func TestAttachSupportedByBroker_Branches(t *testing.T) {
 			want:    false,
 		},
 		{
-			name:    "hub error reading broker defaults true",
-			status:  http.StatusForbidden,
-			body:    `{"error":{"code":"forbidden","message":"no"}}`,
-			profile: "p",
-			want:    true,
+			// The point-GET fails and this fixture serves no LIST endpoint at
+			// all (a 404 default), so the LIST fallback also can't produce
+			// the record: this is the "record unreadable" case, which
+			// refuses rather than assumes supported. The
+			// LIST-succeeds-as-fallback and LIST-also-fails cases against a
+			// live attachViaHub call are covered in attach_test.go's
+			// TestAttachViaHub_PointGETForbidden_* tests.
+			name:           "hub error reading broker and list fallback unreadable refuses",
+			status:         http.StatusForbidden,
+			body:           `{"error":{"code":"forbidden","message":"no"}}`,
+			profile:        "p",
+			want:           false,
+			wantUnreadable: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			hubCtx := newBrokerGetHub(t, id, tc.status, tc.body)
-			got := attachSupportedByBroker(context.Background(), hubCtx, id, tc.profile)
+			got, unreadable := attachSupportedByBroker(context.Background(), hubCtx, id, tc.profile)
 			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantUnreadable, unreadable)
 		})
 	}
 }

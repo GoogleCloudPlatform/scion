@@ -93,16 +93,20 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfi
 	assert.Nil(t, k8s.Attach, "a profile of a different type has no live instance to ask and must stay unknown, not inherit the default runtime's answer")
 
 	hubCtx := serveStoredBroker(t, broker)
-	assert.False(t, attachSupportedByBroker(ctx, hubCtx, brokerID, "optout-prof"),
+	optoutSupported, optoutUnreadable := attachSupportedByBroker(ctx, hubCtx, brokerID, "optout-prof")
+	assert.False(t, optoutSupported,
 		"CLI must refuse attach for the opted-out profile as persisted by the real producer")
+	assert.False(t, optoutUnreadable, "the broker record was read successfully")
 	// k8s-prof's own Attach is unknown (nil), so attachSupportedByBroker
 	// falls through to the broker-wide Capabilities.Attach, which is false
 	// here — the accepted cost documented on attachSupportedByBroker: a
 	// non-default-type profile with no live instance of its own inherits
 	// the opted-out default runtime's broker-wide answer rather than being
 	// treated as supported by default.
-	assert.False(t, attachSupportedByBroker(ctx, hubCtx, brokerID, "k8s-prof"),
+	k8sSupported, k8sUnreadable := attachSupportedByBroker(ctx, hubCtx, brokerID, "k8s-prof")
+	assert.False(t, k8sSupported,
 		"CLI must fall through to the broker-wide false for a profile with no Attach of its own")
+	assert.False(t, k8sUnreadable, "the broker record was read successfully")
 }
 
 // TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRuntime

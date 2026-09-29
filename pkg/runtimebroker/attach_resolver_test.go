@@ -38,7 +38,7 @@ import (
 // REAL Server.LookupAgent (not a fake injecting Runtime), the default
 // runtime supports attach, and the agent is only found on an auxiliary
 // runtime whose own instance opts out. handlePTYStream must close the
-// stream with 4503/session-not-ready and never invoke the runtime exec.
+// stream with 4501/attach_unsupported and never invoke the runtime exec.
 //
 // The auxiliary runtime is registered under the path of a script that
 // records every invocation: LookupAgent reports the matched map key as
@@ -111,8 +111,8 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 
 			select {
 			case msg := <-closedCh:
-				require.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, msg.Code)
-				require.Equal(t, wsprotocol.CloseReasonSessionNotReady, msg.Reason)
+				require.Equal(t, wsprotocol.ClosePTYAttachUnsupported, msg.Code)
+				require.Equal(t, wsprotocol.CloseReasonAttachUnsupported, msg.Reason)
 			case <-time.After(5 * time.Second):
 				t.Fatal("no stream_close received")
 			}

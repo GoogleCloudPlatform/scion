@@ -34,7 +34,7 @@ import (
 // TestHandlePTYStream_RuntimeWithoutAttach_ClosesBeforeExec covers the
 // control-channel pre-check in handlePTYStream: when the matched runtime
 // instance opts out of attach (runtime.HasAttachSupport == false), the
-// stream is closed with 4503/session-not-ready and the runtime exec is
+// stream is closed with 4501/attach_unsupported and the runtime exec is
 // NEVER invoked. The close code alone cannot prove the gate fired (a failed
 // exec is classified the same way), so RuntimeName points at a script that
 // records every invocation; the assertion is that it was never run.
@@ -86,8 +86,8 @@ func TestHandlePTYStream_RuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) {
 
 	select {
 	case msg := <-closedCh:
-		require.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, msg.Code)
-		require.Equal(t, wsprotocol.CloseReasonSessionNotReady, msg.Reason)
+		require.Equal(t, wsprotocol.ClosePTYAttachUnsupported, msg.Code)
+		require.Equal(t, wsprotocol.CloseReasonAttachUnsupported, msg.Reason)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no stream_close received")
 	}
