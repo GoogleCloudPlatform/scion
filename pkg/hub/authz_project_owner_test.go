@@ -699,3 +699,50 @@ func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testin
 	assert.Equal(t, []string{"read", "delete", "verify", "assign"}, projectCaps.Actions,
 		"the project-scoped control should still get the full bypass")
 }
+
+// TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel
+// pins ptone/scion#2147: the project-owner/-admin capability short-circuit
+// (projectOwnerAdminCapabilities) shows "assign" for a project-scoped SA
+// regardless of who created it, and that agrees with CheckAccess because the
+// project-owner and project-admin RoleDefinitions grant
+// gcp_service_account.assign.
+func TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	admin := makeProjectMemberUser(t, s, project, tid("sa-caps-admin"), "Admin", store.GroupMemberRoleAdmin)
+
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sa-project-scoped-owner-admin-agreement"),
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
+		Email:     "sa-owner-admin-agreement@example.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		// Created by bob, a plain project member — neither alice (owner) nor
+		// admin owns this resource, so the resource-owner relationship grant
+		// does not apply and the only route to an allow is the role permission.
+		CreatedBy: bob.ID,
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+	resource := gcpServiceAccountResource(sa)
+
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"owner", alice},
+		{"admin", admin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity := NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, "member", "api")
+
+			caps := srv.authzService.ComputeCapabilities(ctx, identity, resource)
+			assert.Contains(t, caps.Actions, "assign",
+				"%s short-circuit should list assign", tc.name)
+
+			decision := srv.authzService.CheckAccess(ctx, identity, resource, ActionAssign)
+			assert.True(t, decision.Allowed,
+				"%s CheckAccess(assign) should agree with the short-circuit's capability list", tc.name)
+		})
+	}
+}

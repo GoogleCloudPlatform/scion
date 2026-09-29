@@ -167,6 +167,49 @@ jobs:
       - name: Run pkg/hub tests (SQLite-enabled)
         run: make test-hub-sqlite
 
+  launch-store-postgres-tests:
+    name: T1 Launch Store PostgreSQL Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # design t1-async-create-v11.md §6, "Postgres in CI": runs
+      # pkg/store/integrationtest (the existing Postgres-only harness) plus
+      # the new T1 launch store/reaper tests in pkg/store/entadapter, which
+      # run unchanged against SQLite (the default `go test` build) and
+      # Postgres (here, via -tags integration) to prove dialect parity. This
+      # job owns every Postgres-specific assertion in P1a: the transaction-
+      # scoped advisory lock, SKIP LOCKED, lock_timeout/idle-in-transaction
+      # SET LOCAL, and the per-row savepoints.
+      - name: Run launch store tests (Postgres-enabled)
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-launch-store-postgres
+
   test-full-suite:
     name: Full Test Suite (reporting only)
     runs-on: ubuntu-latest

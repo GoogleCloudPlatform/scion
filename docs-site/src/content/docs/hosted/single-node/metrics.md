@@ -243,12 +243,20 @@ are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
 is.
 
 A hook-sourced harness's dialect can populate all five `token_type` values on
-`scion.usage.tokens`, not just three: a Go dialect, or a bundled
-`dialect.yaml`'s `fields` mapping, sets `input_tokens`, `output_tokens`,
-`cached_tokens` (→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
-`reasoning_tokens` (→ `reasoning`, informational — already included in
-`output`, never added again) on the hook event data. A point is emitted only
-for a token type whose field was actually populated (a positive value); a
+`scion.usage.tokens`, not just three. A Go dialect sets the `EventData`
+fields `InputTokens`, `OutputTokens`, `CachedTokens`, `CacheWriteTokens` and
+`ReasoningTokens`; a `dialect.yaml` `fields` mapping uses the YAML keys
+`input_tokens` (→ `input`), `output_tokens` (→ `output`), `cached_tokens`
+(→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
+`reasoning_tokens` (→ `reasoning`, informational, already included in
+`output` and never added again). `output_tokens`/`OutputTokens` must be the
+*total* output including reasoning (canonical usage contract,
+`.design/hosted/usage-telemetry.md` §3.2): a `dialect.yaml` `fields`
+mapping is a pure path copy with no arithmetic, so a harness that reports
+output and reasoning as exclusive values needs a Go dialect or bridge-side
+summing to produce a combined `output_tokens` — the YAML mapping alone
+cannot add them together. A point is emitted only for a token type
+whose field was actually populated (a positive value); a
 dialect that never maps a given field simply never emits that `token_type`.
 
 #### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`

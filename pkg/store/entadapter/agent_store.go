@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -121,6 +122,21 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		StateVersion:        a.StateVersion,
 		Generation:          a.Generation,
 		ReincarnationState:  a.ReincarnationState,
+		LaunchAsyncOptIn:    a.LaunchAsyncOptIn,
+		LaunchID:            a.LaunchID,
+		LaunchState:         a.LaunchState,
+		LaunchEndReason:     a.LaunchEndReason,
+		LaunchKind:          a.LaunchKind,
+		LaunchOwner:         a.LaunchOwner,
+		LaunchSeq:           a.LaunchSeq,
+		LaunchStep:          a.LaunchStep,
+		LaunchError:         a.LaunchError,
+	}
+	if a.LaunchDeadline != nil {
+		sa.LaunchDeadline = *a.LaunchDeadline
+	}
+	if a.LaunchLastReportAt != nil {
+		sa.LaunchLastReportAt = *a.LaunchLastReportAt
 	}
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
@@ -382,7 +398,268 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	expectedVersion := a.StateVersion
 	newVersion := expectedVersion + 1
 
-	update := s.client.Agent.Update().
+	if a.Phase != "running" {
+		// Fast path, unchanged from before T1: one statement, no
+		// transaction. Rows whose write never touches phase=running (the
+		// overwhelming majority of UpdateAgent calls) pay nothing extra and
+		// gain no new error path (design t1-async-create-v11.md §3.3: "the
+		// same transaction runs" applies only to a running write).
+		update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+		if err != nil {
+			return err
+		}
+		affected, err := update.Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 0 {
+			return agentUpdateConflictError(ctx, s.client.Agent, uid)
+		}
+		a.Updated = now
+		a.StateVersion = newVersion
+		return nil
+	}
+
+	// a.Phase == "running": try the single-statement CAS first, restricted to
+	// rows that do NOT have an active launch. This is a single UPDATE, so it
+	// is already atomic on its own — no transaction needed — and it is the
+	// only path taken by a row that has never had a launch (the overwhelming
+	// majority of UpdateAgent calls while the feature is off or unused).
+	affected, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+	if err != nil {
+		return err
+	}
+	if affected {
+		a.Updated = now
+		a.StateVersion = newVersion
+		return nil
+	}
+
+	// affected == 0: probe once with a single read, in place of a bare
+	// Exist, to disambiguate a stale version / missing row from a row that
+	// genuinely has an active launch — so a row with no launch gets exactly
+	// main's statement sequence and error classes (one UPDATE, then one
+	// read; ErrNotFound or ErrVersionConflict), never the transactional path
+	// or its failure modes. Like main's Exist, this selects only the columns
+	// it needs (state_version, launch_state) rather than the full row, and
+	// wraps a read error the same way main's Exist-based check does.
+	injectAgentRunningRace("before_probe")
+	probeVersion, probeLaunchState, err := s.probeAgentVersionAndLaunchState(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.ErrNotFound
+		}
+		return err
+	}
+	if probeVersion != expectedVersion {
+		return store.ErrVersionConflict
+	}
+	if probeLaunchState != store.LaunchStateActive {
+		// The version still matches, but launch_state is no longer active —
+		// a narrow race (e.g. a concurrent EndLaunch, which never bumps
+		// state_version) cleared the exclusion between the fast path's
+		// failed UPDATE and this probe. Retry the fast path once; it should
+		// now match.
+		injectAgentRunningRace("before_retry")
+		affected, err := s.tryRunningFastPath(ctx, uid, a, expectedVersion, newVersion, now)
+		if err != nil {
+			return err
+		}
+		if affected {
+			a.Updated = now
+			a.StateVersion = newVersion
+			return nil
+		}
+		// Yet another race landed in between (e.g. a BeginLaunch
+		// re-activated the launch without bumping state_version, in the gap
+		// between the probe and this retry). Do NOT classify this as a
+		// conflict here — that would wrongly return ErrVersionConflict for a
+		// write whose version is still current. Fall through to the
+		// transactional path below instead: its own CAS carries no
+		// launch_state exclusion, so it correctly reports ErrNotFound/
+		// ErrVersionConflict if that's what changed, or atomically ends the
+		// newly-active launch together with the phase write if not. This is
+		// terminal — at most one retry, then the tx settles it either way.
+	}
+
+	// The transactional path: either the probe found a genuinely active
+	// launch, or a second race after the retry above means only the tx's own
+	// CAS can tell what the row's current state actually is. The CAS update
+	// and the conditional "end active launch" update must run in the SAME
+	// transaction — never as two separate statements/transactions — so a
+	// launch can never be observed active on a row that has already
+	// committed phase=running,
+	// and a failure of the second statement rolls back the phase write
+	// instead of leaving it committed with a now-stale caller copy
+	// (a.StateVersion/a.Updated would otherwise disagree with the row, and a
+	// retry would get a spurious ErrVersionConflict).
+	// updateAgentRunningTx re-runs the CAS without the launch_state
+	// exclusion above, so it also correctly reports a version conflict or
+	// not-found if the row changed yet again between here and the
+	// transaction actually starting.
+	injectAgentRunningTxEnter()
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return err
+		}
+		// s.client already wraps a transaction (constructed inside
+		// store.WithTx) — run directly on it so this participates in the
+		// caller's transaction instead of starting (and failing to start) a
+		// nested one. The caller owns commit/rollback.
+		if err := s.updateAgentRunningTx(ctx, s.client, uid, a, expectedVersion, newVersion, now); err != nil {
+			return err
+		}
+		a.Updated = now
+		a.StateVersion = newVersion
+		return nil
+	}
+	if err := s.updateAgentRunningTx(ctx, tx.Client(), uid, a, expectedVersion, newVersion, now); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("agent store: commit UpdateAgent (running): %w", err)
+	}
+	a.Updated = now
+	a.StateVersion = newVersion
+	return nil
+}
+
+// tryRunningFastPath attempts the single-statement CAS for a phase=running
+// write, excluding rows with an active launch (agent_store.go's UpdateAgent
+// running branch). It reports whether the statement matched a row; it never
+// opens a transaction.
+func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (bool, error) {
+	update, err := buildAgentUpdate(s.client.Agent, uid, a, expectedVersion, newVersion, now)
+	if err != nil {
+		return false, err
+	}
+	update.Where(agent.Or(agent.LaunchStateIsNil(), agent.LaunchStateNEQ(store.LaunchStateActive)))
+	affected, err := update.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// agentVersionAndLaunchState is the projection probeAgentVersionAndLaunchState
+// reads; struct tags name the columns for ent's generated Select+Scan.
+type agentVersionAndLaunchState struct {
+	StateVersion int64  `sql:"state_version"`
+	LaunchState  string `sql:"launch_state"`
+}
+
+// probeAgentVersionAndLaunchState reads just state_version and launch_state
+// for uid — the two columns UpdateAgent's running-write fast-path miss needs
+// to disambiguate a conflict from a genuinely active launch — rather than
+// the full row. Returns store.ErrNotFound if the row doesn't exist; any
+// other read error is wrapped the same way agentUpdateConflictError's
+// Exist-based check wraps main's.
+func (s *AgentStore) probeAgentVersionAndLaunchState(ctx context.Context, uid uuid.UUID) (int64, string, error) {
+	var rows []agentVersionAndLaunchState
+	err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldStateVersion, agent.FieldLaunchState).
+		Scan(ctx, &rows)
+	if err != nil {
+		return 0, "", fmt.Errorf("ent: check existence: %w", err)
+	}
+	if len(rows) == 0 {
+		return 0, "", store.ErrNotFound
+	}
+	return rows[0].StateVersion, rows[0].LaunchState, nil
+}
+
+// agentRunningTxFailureHook, when non-nil, is called inside
+// updateAgentRunningTx between the CAS update and the conditional
+// end-active-launch update. Tests use it to prove the two statements commit
+// or roll back together: an error here must leave the row's phase,
+// state_version and launch_state exactly as they were before the call.
+var agentRunningTxFailureHook func() error
+
+func injectAgentRunningTxFailure() error {
+	if agentRunningTxFailureHook == nil {
+		return nil
+	}
+	return agentRunningTxFailureHook()
+}
+
+// agentRunningTxEnterHook, when non-nil, is called immediately before
+// UpdateAgent's running branch opens (or reuses an ambient) transaction —
+// before updateAgentRunningTx's CAS runs. Tests use it as a tripwire: it
+// must never fire for a plain stale-version or not-found running write on a
+// row with no launch (those return from the fast-path probe above, without
+// reaching this point), only for a row that genuinely has, or might still
+// have after a race, an active launch.
+var agentRunningTxEnterHook func()
+
+func injectAgentRunningTxEnter() {
+	if agentRunningTxEnterHook != nil {
+		agentRunningTxEnterHook()
+	}
+}
+
+// agentRunningRaceHook, when non-nil, is called at named points inside
+// UpdateAgent's running branch, between its separate autocommitted
+// statements (mirroring launch_reaper.go's injectFailure). Tests use it to
+// land a concurrent write in the exact window a real race would: "before_probe"
+// is between the first fast-path miss and the probe read; "before_retry" is
+// between the probe (having found a matching version but a non-active
+// launch_state) and the retried fast path.
+var agentRunningRaceHook func(point string)
+
+func injectAgentRunningRace(point string) {
+	if agentRunningRaceHook != nil {
+		agentRunningRaceHook(point)
+	}
+}
+
+// updateAgentRunningTx runs the CAS update and, only if it matched, the
+// conditional "end active launch as running_observed" update, both against
+// client — either a freshly opened transaction's client or the ambient
+// tx-scoped client when s is already inside one. It returns
+// store.ErrNotFound / store.ErrVersionConflict, without touching
+// launch_state, when the CAS did not match a row.
+func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Client, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) error {
+	update, err := buildAgentUpdate(client.Agent, uid, a, expectedVersion, newVersion, now)
+	if err != nil {
+		return err
+	}
+	affected, err := update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return agentUpdateConflictError(ctx, client.Agent, uid)
+	}
+
+	if err := injectAgentRunningTxFailure(); err != nil {
+		return err
+	}
+
+	// T1 async agent create (design §3.3): end any still-active launch as
+	// running_observed. Conditioned on the ROW's launch_state (not the
+	// caller's struct, which may be stale), so a caller whose
+	// copy still says launch_state="" (never having read the launch that
+	// BeginLaunch just started) or "active" (stale, when the row has
+	// actually already ended, e.g. not_launched) cannot corrupt it: the
+	// WHERE clause only ever matches a row that is genuinely still active,
+	// and a mismatch is a silent no-op (zero rows = success), never an
+	// error.
+	_, err = client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.LaunchStateEQ(store.LaunchStateActive)).
+		SetLaunchState(store.LaunchStateEnded).
+		SetLaunchEndReason(store.LaunchEndReasonRunningObserved).
+		Save(ctx)
+	return err
+}
+
+// buildAgentUpdate constructs the CAS update statement shared by both the
+// fast path and the running-write transactional path. ac is either
+// s.client.Agent or a tx-scoped client's Agent — both are *ent.AgentClient.
+func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (*ent.AgentUpdate, error) {
+	update := ac.Update().
 		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion)).
 		SetSlug(a.Slug).
 		SetName(a.Name).
@@ -455,31 +732,34 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	} else {
 		ownerUID, err := parseUUID(a.OwnerID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		update.SetOwnerID(ownerUID)
 	}
 
-	affected, err := update.Save(ctx)
-	if err != nil {
-		return mapError(err)
-	}
-	if affected == 0 {
-		// No row matched the (id, state_version) pair. Distinguish a missing
-		// agent from a stale write so callers can retry conflicts.
-		exists, existErr := s.client.Agent.Query().Where(agent.IDEQ(uid)).Exist(ctx)
-		if existErr != nil {
-			return existErr
-		}
-		if !exists {
-			return store.ErrNotFound
-		}
-		return store.ErrVersionConflict
+	// T1 async agent create (design §3.3, T3): a write of phase=running
+	// always clears launch_error, regardless of what the caller's struct
+	// carries for the launch_* columns — UpdateAgent otherwise never sets any
+	// launch_* column from the caller's struct; this is the one exception,
+	// and it is unconditional (not gated on the row's launch_state).
+	if a.Phase == "running" {
+		update.SetLaunchError("")
 	}
 
-	a.Updated = now
-	a.StateVersion = newVersion
-	return nil
+	return update, nil
+}
+
+// agentUpdateConflictError distinguishes a missing agent from a stale write
+// so callers can retry conflicts, for a CAS update that matched zero rows.
+func agentUpdateConflictError(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID) error {
+	exists, err := ac.Query().Where(agent.IDEQ(uid)).Exist(ctx)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return store.ErrVersionConflict
 }
 
 // DeleteAgent permanently removes an agent by ID (hard delete).
@@ -814,6 +1094,21 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetStalledFromActivity("")
 		upd.ClearExitCode()
 		upd.SetExitReason("")
+	}
+
+	// T1 async agent create (design t1-async-create-v11.md §3.3): a write of
+	// phase=running always clears launch_error (T3) — once an agent has run,
+	// it must never again match the incomplete-create predicate, whatever
+	// happens to it later. If a launch is still active on this row, the same
+	// write also ends it as running_observed, evaluated on the row this
+	// method has already locked (not on the caller's struct, which may be
+	// stale). No CASE SQL: both are plain Go conditionals on current.
+	if su.Phase == "running" {
+		upd.SetLaunchError("")
+		if current.LaunchState == store.LaunchStateActive {
+			upd.SetLaunchState(store.LaunchStateEnded)
+			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
+		}
 	}
 
 	if su.Message != "" {
