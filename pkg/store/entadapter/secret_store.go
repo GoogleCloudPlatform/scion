@@ -194,6 +194,38 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 	return nil
 }
 
+// UpdateSecretRefIfMatches conditionally updates only the secret_ref column,
+// applying the change (and incrementing version) only if the row's current
+// secret_ref equals expectedRef. See store.SecretStore for the full contract.
+func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef, newRef string) (bool, error) {
+	// secret_ref is an optional (nullable) column: a record that never had a
+	// ref set stores SQL NULL, not "". entsecret.SecretRefEQ("") compiles to
+	// "secret_ref = ''", which SQL NULL never matches — so matching an
+	// expected empty ref needs the IsNil predicate instead, or the CAS would
+	// silently never apply to exactly the records (no ref persisted yet)
+	// this method exists to safely migrate.
+	refPredicate := entsecret.SecretRefEQ(expectedRef)
+	if expectedRef == "" {
+		refPredicate = entsecret.SecretRefIsNil()
+	}
+	update := s.client.Secret.Update().
+		Where(
+			entsecret.KeyEQ(key),
+			entsecret.ScopeEQ(scope),
+			entsecret.ScopeIDEQ(scopeID),
+			refPredicate,
+		).
+		SetSecretRef(newRef).
+		AddVersion(1).
+		SetUpdated(time.Now())
+
+	n, err := update.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // UpdateSecretMeta updates only metadata columns of an existing secret without
 // touching the encrypted value. The version is incremented automatically.
 func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID string, meta *store.SecretMetaUpdate) (*store.Secret, error) {
