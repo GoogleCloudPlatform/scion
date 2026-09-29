@@ -517,6 +517,35 @@ func TestAgentSecretFetch_ErrorTextIsNeutral(t *testing.T) {
 	}
 }
 
+// TestAgentSecretFetch_NilAuthzServiceDenies covers the whole-request nil or
+// absent authz service guard: it fails the entire fetch request closed with
+// 500, audited as a request-level backend_error with no items, rather than
+// letting a per-item entitled_but_unavailable slip inside a 200 (R2-3).
+func TestAgentSecretFetch_NilAuthzServiceDenies(t *testing.T) {
+	f := newMaterialFixture(t, "fetch-nil-authz")
+	seedSecret(t, f.Server.secretBackend, "NIL_AUTHZ_KEY", "v", "", "", f.ProjectID)
+	f.Server.authzService = nil
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"NIL_AUTHZ_KEY"}}, f.Token)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if e.RequestReason != ReasonBackendError {
+		t.Fatalf("expected RequestReason %s, got %s", ReasonBackendError, e.RequestReason)
+	}
+	if len(e.Items) != 0 {
+		t.Fatalf("expected no items, got %d", len(e.Items))
+	}
+}
+
 // TestAgentSecretRead_ProjectScopeDenialRecordedAsPolicyDenial pins that a
 // ceiling denial records denied_by_policy with a non-empty Detail carrying
 // Decision.Reason verbatim, and that no code path inspects Decision.Reason
@@ -546,5 +575,31 @@ func TestAgentSecretRead_ProjectScopeDenialRecordedAsPolicyDenial(t *testing.T) 
 	}
 	if item.Detail == "" {
 		t.Fatalf("expected a non-empty Detail carrying Decision.Reason verbatim")
+	}
+}
+
+// TestMaterialRuntime_AuthorizeProjectItemKernelDenialMapsToPolicyDenial unit-tests
+// check 7 directly with a synthetic denied Decision, rather than relying on
+// a fixture's ceiling shape to produce one: any kernel denial maps to
+// denied_by_policy and carries Decision.Reason verbatim as the audit-only
+// Detail.
+func TestMaterialRuntime_AuthorizeProjectItemKernelDenialMapsToPolicyDenial(t *testing.T) {
+	srv, _ := testServer(t)
+
+	facts := &TargetFacts{ProjectID: "synthetic-project"}
+	decision := Decision{Allowed: false, Reason: "synthetic kernel denial"}
+
+	item, detail := srv.authorizeRuntimeProjectItem(context.Background(), "SYNTHETIC_KEY", facts, decision)
+	if item.Allowed {
+		t.Fatalf("expected the item to be denied")
+	}
+	if item.Reason != ReasonDeniedByPolicy {
+		t.Fatalf("expected reason %s, got %s", ReasonDeniedByPolicy, item.Reason)
+	}
+	if item.Grant != GrantProjectSecretRead {
+		t.Fatalf("expected grant %s, got %s", GrantProjectSecretRead, item.Grant)
+	}
+	if detail != decision.Reason {
+		t.Fatalf("expected Detail %q (Decision.Reason verbatim), got %q", decision.Reason, detail)
 	}
 }

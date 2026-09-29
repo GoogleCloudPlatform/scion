@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -540,6 +541,202 @@ func TestAgentListSecrets_ProgenyFilterMatchesPerItemCheck(t *testing.T) {
 	}
 }
 
+// TestAgentGetSecret_InvalidScopeEmitsAudit covers check 6 on P8: an invalid
+// scope query parameter still emits the request's MaterialSelectionEvent,
+// with RequestReason invalid_scope, rather than exiting silently (R2-3).
+func TestAgentGetSecret_InvalidScopeEmitsAudit(t *testing.T) {
+	f := newMaterialFixture(t, "get-invalid-scope")
+	seedSecret(t, f.Server.secretBackend, "INVALID_SCOPE_KEY", "v", "", "", f.ProjectID)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+		"/api/v1/agents/"+f.AgentID+"/secrets/INVALID_SCOPE_KEY?scope=bogus", nil, f.Token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if e.RequestReason != ReasonInvalidScope {
+		t.Fatalf("expected RequestReason %s, got %s", ReasonInvalidScope, e.RequestReason)
+	}
+	if len(e.Items) != 0 {
+		t.Fatalf("expected no items, got %d", len(e.Items))
+	}
+}
+
+// TestAgentListSecrets_DecisionErrorEmitsAudit covers the list's
+// project-decision-error branch: a nil authz service makes the check-7
+// decision fail, and the exit still emits the request's
+// MaterialSelectionEvent with a request-level backend_error item, rather
+// than exiting silently (R2-3).
+func TestAgentListSecrets_DecisionErrorEmitsAudit(t *testing.T) {
+	f := newMaterialFixture(t, "list-decision-error")
+	seedSecret(t, f.Server.secretBackend, "LIST_DECISION_ERROR_KEY", "v", "", "", f.ProjectID)
+	f.Server.authzService = nil
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=project", nil, f.Token)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonBackendError {
+		t.Fatalf("expected reason %s, got %s", ReasonBackendError, item.Reason)
+	}
+	if item.Grant != GrantProjectSecretRead {
+		t.Fatalf("expected grant %s, got %s", GrantProjectSecretRead, item.Grant)
+	}
+}
+
+// TestAgentListSecrets_ProjectListErrorEmitsAudit covers the list's project
+// backend.List error exit: it still emits the request's
+// MaterialSelectionEvent with a request-level backend_error item, rather
+// than exiting silently (R2-2).
+func TestAgentListSecrets_ProjectListErrorEmitsAudit(t *testing.T) {
+	f := newMaterialFixture(t, "list-project-list-error")
+	seedSecret(t, f.Server.secretBackend, "LIST_PROJECT_LIST_ERROR_KEY", "v", "", "", f.ProjectID)
+	f.Server.SetSecretBackend(&erroringListBackend{
+		SecretBackend: f.Server.secretBackend,
+		scope:         store.ScopeProject,
+		err:           errors.New("injected project list failure"),
+	})
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=project", nil, f.Token)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected a non-200 status on a backend list failure, got 200: %s", rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonBackendError || item.Grant != GrantProjectSecretRead || item.Scope != store.ScopeProject {
+		t.Fatalf("expected a project-scope backend_error item, got %+v", item)
+	}
+}
+
+// TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit covers the list's
+// progenyEligibleSecretIDs error exit: it still emits the request's
+// MaterialSelectionEvent with a request-level backend_error item, rather
+// than exiting silently (R2-2).
+func TestAgentListSecrets_ProgenyEligibleIDsErrorEmitsAudit(t *testing.T) {
+	f := newMaterialFixture(t, "list-progeny-eligible-error")
+	seedSecret(t, f.Server.secretBackend, "LIST_PROGENY_ELIGIBLE_ERROR_KEY", "v", "", "", f.ProjectID)
+	f.Server.store = &materialFailingStore{
+		Store:                 f.Store,
+		listProgenySecretsErr: errors.New("injected progeny list failure"),
+	}
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected a non-200 status on a progeny lookup failure, got 200: %s", rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonBackendError || item.Grant != GrantProgeny || item.Scope != store.ScopeUser {
+		t.Fatalf("expected a user-scope backend_error item, got %+v", item)
+	}
+}
+
+// TestAgentListSecrets_UserListErrorEmitsAudit covers the list's user
+// backend.List error exit: it still emits the request's
+// MaterialSelectionEvent with a request-level backend_error item, rather
+// than exiting silently (R2-2).
+func TestAgentListSecrets_UserListErrorEmitsAudit(t *testing.T) {
+	f := newMaterialFixture(t, "list-user-list-error")
+	seedSecret(t, f.Server.secretBackend, "LIST_USER_LIST_ERROR_KEY", "v", "", "", f.ProjectID)
+	f.Server.SetSecretBackend(&erroringListBackend{
+		SecretBackend: f.Server.secretBackend,
+		scope:         store.ScopeUser,
+		err:           errors.New("injected user list failure"),
+	})
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected a non-200 status on a backend list failure, got 200: %s", rec.Body.String())
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonBackendError || item.Grant != GrantProgeny || item.Scope != store.ScopeUser {
+		t.Fatalf("expected a user-scope backend_error item, got %+v", item)
+	}
+}
+
+// TestAgentListSecrets_ProjectDenialCarriesDetail covers the list's project
+// branch when the check-7 decision denies: the project part of the list
+// stays empty, but the denial is still recorded as a request-level item
+// carrying a non-empty Detail, rather than leaving no trace of the project
+// scope having been evaluated (R2-3).
+func TestAgentListSecrets_ProjectDenialCarriesDetail(t *testing.T) {
+	f := newMaterialFixture(t, "list-project-denial")
+	setBackfillCompleted(t, f.Store) // ceiling denial: no edge, post-backfill
+	seedSecret(t, f.Server.secretBackend, "LIST_DENIAL_KEY", "v", "", "", f.ProjectID)
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=project", nil, f.Token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp AgentListSecretsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if len(resp.Secrets) != 0 {
+		t.Fatalf("expected an empty project list, got %+v", resp.Secrets)
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonDeniedByPolicy {
+		t.Fatalf("expected reason %s, got %s", ReasonDeniedByPolicy, item.Reason)
+	}
+	if item.Detail == "" {
+		t.Fatalf("expected a non-empty Detail carrying Decision.Reason verbatim")
+	}
+}
+
 // TestMaterialAudit_SeparatesActorTargetAndSource pins that the audit event
 // separates the actor, target agent, and sharing source, that
 // project items carry Grant=project_secret_read and user items carry
@@ -584,6 +781,11 @@ func TestMaterialAudit_SeparatesActorTargetAndSource(t *testing.T) {
 		}
 		if e.ProvenanceRoot.ID != f.UserID {
 			t.Errorf("expected provenance root %s, got %s", f.UserID, e.ProvenanceRoot.ID)
+		}
+		// Each request reads exactly one key, so a vacuous item loop below
+		// (no items at all) must not let this test pass unnoticed.
+		if len(e.Items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(e.Items))
 		}
 		for _, item := range e.Items {
 			switch item.Scope {

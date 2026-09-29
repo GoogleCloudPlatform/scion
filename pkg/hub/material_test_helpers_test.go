@@ -130,6 +130,14 @@ type materialFailingStore struct {
 	listRoleBindingsForPrincipalErr  error
 	getDelegationEdgesForDelegateErr error
 	delegationEdgesOverride          []*store.DelegationEdge
+	listProgenySecretsErr            error
+}
+
+func (f *materialFailingStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]store.Secret, error) {
+	if f.listProgenySecretsErr != nil {
+		return nil, f.listProgenySecretsErr
+	}
+	return f.Store.ListProgenySecrets(ctx, ancestorIDs)
 }
 
 func (f *materialFailingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
@@ -216,6 +224,22 @@ func (e *erroringMetaBackend) GetMeta(ctx context.Context, name, scope, scopeID 
 		return nil, e.err
 	}
 	return e.SecretBackend.GetMeta(ctx, name, scope, scopeID)
+}
+
+// erroringListBackend wraps a secret.SecretBackend and returns a fixed error
+// from List for one scope only, so the agent secret list's per-scope error
+// exits can be exercised without disturbing the other scope.
+type erroringListBackend struct {
+	secret.SecretBackend
+	scope string
+	err   error
+}
+
+func (e *erroringListBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	if e.err != nil && filter.Scope == e.scope {
+		return nil, e.err
+	}
+	return e.SecretBackend.List(ctx, filter)
 }
 
 // recordingMaterialAuditor embeds a real LogAuditLogger (so it satisfies the
