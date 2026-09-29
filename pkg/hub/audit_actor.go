@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -123,31 +124,48 @@ func auditActorFromContext(ctx context.Context) AuditActor {
 // caller has not already set explicitly. This preserves existing callers
 // that pre-populate specific actor fields (e.g. attributing a mutation to a
 // resource's original creator rather than the live request's identity).
+//
+// Principal and credential are treated as one unit, not filled field by
+// field: the credential fields (ID, type, name, boundary, labels) are filled
+// only when this call also filled the principal, or when a caller-preset
+// principal is exactly this AuditActor's own principal. Otherwise a caller
+// that presets the principal to someone other than the live request's actor
+// would still inherit the ambient request credential's ID, name, boundary,
+// and labels — a record naming principal A with principal B's credential.
+// CorrelationID and Executor* are independent of principal/credential and
+// are always filled when empty.
 func (a AuditActor) ApplyActor(record *store.MutationAuditRecord) {
+	principalPreset := record.ActorPrincipalKind != "" || record.ActorPrincipalID != ""
+	principalMatchesActor := record.ActorPrincipalKind == a.PrincipalKind && record.ActorPrincipalID == a.PrincipalID
+
 	if record.ActorPrincipalKind == "" {
 		record.ActorPrincipalKind = a.PrincipalKind
 	}
 	if record.ActorPrincipalID == "" {
 		record.ActorPrincipalID = a.PrincipalID
 	}
-	if record.ActorCredentialID == "" {
-		record.ActorCredentialID = a.CredentialID
+
+	if !principalPreset || principalMatchesActor {
+		if record.ActorCredentialID == "" {
+			record.ActorCredentialID = a.CredentialID
+		}
+		if record.ActorCredentialType == "" {
+			record.ActorCredentialType = a.CredentialKind
+		}
+		if record.CredentialName == "" {
+			record.CredentialName = a.CredentialName
+		}
+		if record.CredentialBoundaryKind == "" {
+			record.CredentialBoundaryKind = a.CredentialBoundaryKind
+		}
+		if record.CredentialBoundaryProjectID == "" {
+			record.CredentialBoundaryProjectID = a.CredentialBoundaryProjectID
+		}
+		if record.CredentialLabels == "" {
+			record.CredentialLabels = a.CredentialLabels
+		}
 	}
-	if record.ActorCredentialType == "" {
-		record.ActorCredentialType = a.CredentialKind
-	}
-	if record.CredentialName == "" {
-		record.CredentialName = a.CredentialName
-	}
-	if record.CredentialBoundaryKind == "" {
-		record.CredentialBoundaryKind = a.CredentialBoundaryKind
-	}
-	if record.CredentialBoundaryProjectID == "" {
-		record.CredentialBoundaryProjectID = a.CredentialBoundaryProjectID
-	}
-	if record.CredentialLabels == "" {
-		record.CredentialLabels = a.CredentialLabels
-	}
+
 	if record.CorrelationID == "" {
 		record.CorrelationID = a.CorrelationID
 	}
@@ -159,24 +177,72 @@ func (a AuditActor) ApplyActor(record *store.MutationAuditRecord) {
 	}
 }
 
-// boundedLabelsJSON renders a credential decoration's labels as a JSON
-// object for audit snapshotting. E.1's label schema already bounds the
-// serialized result well under 1KiB (at most 8 labels, each key ≤32 bytes
-// and value ≤64 bytes — see credential_decoration.go), so no additional
-// truncation is applied here; a legacy row written directly to the store
-// could in principle exceed that, in which case this still returns valid
-// (if larger) JSON rather than silently dropping the audit trail.
+// maxAuditLabelsBytes is the plan's bound on the serialized credential_labels
+// audit snapshot (plan §3.2/§3.3/§3.6: "credential_labels JSON ≤ 1 KiB").
+const maxAuditLabelsBytes = 1024
+
+// auditLabelsTruncatedMarker is the fixed key added when a labels map still
+// exceeds maxAuditLabelsBytes after per-field sanitization, so a truncated
+// snapshot is distinguishable from a complete one that merely happens to be
+// small.
+const auditLabelsTruncatedMarker = "_truncated"
+
+// boundedLabelsJSON renders a credential decoration's labels as a bounded,
+// sanitized JSON object for audit snapshotting. It never trusts labels to
+// already satisfy the bounded schema — a row written directly to the store
+// (a legacy row, or one written outside ValidateCredentialMetadata) skips
+// validation — so it applies the same per-key and per-value treatment
+// CredentialDecoration.LogValue uses: a key that fails the bounded shape is
+// sanitized like a value, and every value is sanitized and length-capped.
+// The result is capped at uatMaxLabelCount entries (sorted by key, so the
+// selection is deterministic) and at maxAuditLabelsBytes total; if it still
+// does not fit, entries are dropped from the end until it does, and a fixed
+// truncation marker is added, so the output is always valid, bounded JSON.
 func boundedLabelsJSON(labels map[string]string) string {
 	if len(labels) == 0 {
 		return ""
 	}
-	out := make(map[string]string, len(labels))
-	for k, v := range labels {
-		out[k] = v
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
 	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return ""
+	sort.Strings(keys)
+	if len(keys) > uatMaxLabelCount {
+		keys = keys[:uatMaxLabelCount]
 	}
-	return string(b)
+
+	build := func(keys []string, truncated bool) (string, bool) {
+		out := make(map[string]string, len(keys)+1)
+		for _, k := range keys {
+			renderKey := k
+			if !isValidLabelKeyShape(k) {
+				renderKey = sanitizeForLog(k, uatMaxLabelKeyBytes)
+			}
+			out[renderKey] = sanitizeForLog(labels[k], uatMaxLabelValueBytes)
+		}
+		if truncated {
+			out[auditLabelsTruncatedMarker] = "true"
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return "", false
+		}
+		return string(b), len(b) <= maxAuditLabelsBytes
+	}
+
+	if out, ok := build(keys, false); ok {
+		return out
+	}
+	// Defence in depth: per-field caps already keep uatMaxLabelCount entries
+	// well under maxAuditLabelsBytes in the common case (see
+	// credential_decoration.go's equivalent note), so this loop is expected
+	// to be unreachable in practice, not a normal code path.
+	for len(keys) > 0 {
+		keys = keys[:len(keys)-1]
+		if out, ok := build(keys, true); ok {
+			return out
+		}
+	}
+	out, _ := build(nil, true)
+	return out
 }
