@@ -2982,8 +2982,9 @@ func TestSPREV6_DeleteLegacyTOCTOUWithOldBinaryWriter(t *testing.T) {
 // ptone/scion#2254, not fixed here): a DB record with no stored ref at all
 // (ref=="", or a ref in some other scheme entirely) is classified
 // differently by the copy step than by --delete-legacy when the computed
-// legacy name is PermissionDenied. The copy step (via migrationCheck)
-// treats it as absent, matching the no-DB-record path; canDeleteLegacyName
+// legacy name is PermissionDenied. The copy step (via
+// planOrRepairRefAttempt's no-stored-ref PermissionDenied arm) treats it as
+// absent, matching the no-DB-record path; canDeleteLegacyName
 // treats the identical signal as fatal, since RefPointsAtPrefixed only
 // reports whether a DB row exists, not whether it has a stored ref. Both
 // fail closed -- nothing is written or deleted -- so this is a
