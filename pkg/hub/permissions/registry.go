@@ -176,7 +176,17 @@ var Registry = []Permission{
 	{ID: "policy.delete", Resource: ResourcePolicy, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete policies", Enforcement: []string{"pkg/hub/handlers_policies.go", "pkg/hub/route_metadata.go:requireAdmin"}},
 	{ID: "policy.list", Resource: ResourcePolicy, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List policies", Enforcement: []string{"pkg/hub/handlers_policies.go", "pkg/hub/route_metadata.go:requireAdmin"}},
 
-	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
+	// broker.create is a hub-level permission: registration is gated by an
+	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
+	// mere authentication. The agreed cross-workstream UAT selector name for
+	// this permission is "broker:create" (ptone/scion#2104, ptone/scion#2107),
+	// but it has no UATScope yet: today's UATs are project-bound, and
+	// enforceUATConstraints already rejects any project-scoped UAT against
+	// this hub-level resource. ptone/scion#2123 introduces hub-bound UAT
+	// boundaries; only then does a broker:create selector become
+	// mintable/usable, and this entry gains UATScope: "broker:create" at that
+	// point.
+	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
