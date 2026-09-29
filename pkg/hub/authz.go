@@ -271,10 +271,11 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 	}
 	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
 	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
-	// Registration only fails for a programming error (an unregistered or
-	// non-read-class permission), so a failure here is logged, not fatal;
-	// progenyAdapter falls back to the built-in store adapter, which denies
-	// "skill" (an unsupported kind for it) — fail closed, never open.
+	// Registration only fails for a programming error, so a failure here is
+	// logged, not fatal. Without a registered adapter, progenyAdapter returns
+	// none for "skill" (it is not a built-in store-adapter kind), and the
+	// progeny candidate's fact stage rejects it ("no sharing-source adapter")
+	// — fail closed, never open.
 	if err := svc.RegisterProgenyAdapter(skillProgenyAdapter{}); err != nil {
 		if logger != nil {
 			logger.Error("failed to register skill progeny adapter", "error", err)
