@@ -1156,6 +1156,13 @@ const (
 	MessageDispatchPending    = "pending"
 	MessageDispatchDispatched = "dispatched"
 	MessageDispatchFailed     = "failed"
+	// MessageDispatchDeferred marks a row persisted while the recipient was
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7, migration
+	// gate): the message is saved to history for catch-up but was
+	// deliberately never handed to a dispatcher. Distinct from "failed"
+	// (dispatch was attempted and rejected) and "pending" (dispatch is
+	// still outstanding) — deferred means dispatch was never attempted.
+	MessageDispatchDeferred = "deferred"
 )
 
 // =============================================================================

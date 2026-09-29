@@ -2100,20 +2100,39 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery pins the wording of
-// the preamble's step 2. Messages sent during a migration are rejected, not
-// queued, so the preamble must not claim they are redelivered.
-func TestBuildReincarnationPreamble_DoesNotPromiseRedelivery(t *testing.T) {
+// TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25
+// 2a.3/R4 (p2a-r1 review), then O-b (p2a-r2 review), update of the former
+// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery: now that 2a.1
+// (catch-up works in agent containers) and 2a.2/R3 (the migration gate
+// persists-and-defers on every hub delivery path instead of
+// rejecting/dropping) are both true, step 2 is allowed to say messages sent
+// during the migration can be read with catch-up. R4 corrected the window
+// to name only a start (an end would have to be the state-clear instant,
+// not known until long after this text is built). O-b corrected the command
+// itself: plain `scion conversation list` truncates IDs to 12 runes with no
+// `conv:` prefix, which `catch-up` cannot accept — step 2 now says
+// `list --json` and spells out the `conv:<id>` prefix.
+func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next")
+	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
 
 	assert.Contains(t, preamble,
-		"2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
-		"step 2 must not claim messages sent during the migration window are redelivered — that was never implemented")
+		"2. Run `scion conversation list --json` and, for each conversation, "+
+			"`scion conversation catch-up conv:<id> --since <duration reaching back to 2026-09-28T10:00:00Z>`.",
+		"step 2 must be runnable as written: --json for full IDs, and the conv:<id> prefix catch-up requires")
+	assert.Contains(t, preamble,
+		"Messages sent to you since 2026-09-28T10:00:00Z were saved to your conversations, not dropped.",
+		"step 2 must reinstate the catch-up claim now that 2a.1/R3 make it true, naming only a start")
+	assert.NotContains(t, preamble, "to 2026-09-28T10:05",
+		"an end timestamp would be a lower bound the preamble cannot honestly state (R4)")
+	assert.Contains(t, preamble,
+		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.",
+		"the image-lag fallback (#1910) must remain since it is not fixed by this phase")
 	assert.NotContains(t, preamble, "redeliver",
-		"the unverified redelivery claim must not appear anywhere in the preamble")
+		"catch-up is not automatic redelivery — the wording must not claim that")
 	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
 }
 
