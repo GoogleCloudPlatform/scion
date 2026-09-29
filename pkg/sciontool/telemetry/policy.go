@@ -404,7 +404,7 @@ func normalizedLogEventName(record *logspb.LogRecord, scopeName string) (string,
 		// this case existed. Every other EventName value -- matching or
 		// conflicting -- still participates, so a genuine conflict is still
 		// rejected.
-		if !(len(attrValues) > 0 && isTracingAppenderCallsiteEventName(record.EventName)) {
+		if len(attrValues) == 0 || !isTracingAppenderCallsiteEventName(record.EventName) {
 			values = append(values, normalizeNativeEventName(record.EventName, scopeName))
 		}
 	}
