@@ -151,24 +151,17 @@ func ResolveOrCreateDMConversation(
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
 	// attempt EnsureParticipant. This is benign: EnsureParticipant is
 	// idempotent and race-safe (unique constraint violations are mapped to nil).
-	for _, pp := range []struct{ kind, id string }{
-		{senderKind, senderID},
-		{recipientKind, recipientID},
-	} {
-		ensureErr := pe.EnsureParticipant(ctx, &store.ConversationParticipant{
-			ConversationID: result.ID,
-			PrincipalKind:  pp.kind,
-			PrincipalID:    pp.id,
-			Role:           "member",
-		})
-		if ensureErr != nil {
-			log.Warn("participant registration failed (listing gap, not access)",
-				"conversation_id", result.ID,
-				"principal_kind", pp.kind,
-				"principal_id", pp.id,
-				"error", ensureErr)
-		}
-	}
+	//
+	// O4 (A25.7): the actual ensure-both-even-on-failure loop and its WARN
+	// wording are owned by ensureConversationParticipants (derive_key.go) —
+	// the same helper ResolveOrCreateConversationByKey uses — so there is a
+	// single place that implements this G2 exception. The two principals are
+	// parsed back out of the DB-returned result.ExternalRef rather than
+	// passed positionally; for a real upsert this is always the canonical
+	// key built from senderKind/senderID/recipientKind/recipientID above; it
+	// only differs in this function's own unit tests that stub a
+	// non-canonical mock ExternalRef unrelated to participant registration.
+	ensureConversationParticipants(ctx, pe, log, result.ID, result.ExternalRef)
 
 	return &ConversationResult{
 		ConversationID: result.ID,
