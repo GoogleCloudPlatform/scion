@@ -905,9 +905,14 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 	// runtime-specific work. Without this, an opted-out runtime only fails
 	// once StreamPTYHandler.Run() actually tries to start it, at a point
 	// where the Hub has already told its own client the stream is open.
+	//
+	// This is a distinct, terminal close code (4501/attach_unsupported),
+	// distinct from the retriable 4503/session_not_ready used for a
+	// readiness failure: a runtime that will never support attach must not
+	// look the same on the wire as a broker that is merely still starting up.
 	if !scionrt.HasAttachSupport(result.Runtime) {
 		c.log.Info("PTY stream: runtime does not support attach", "slug", handler.slug, "runtime", runtimeCmd)
-		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonSessionNotReady, wsprotocol.ClosePTYUpstreamUnavailable)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonAttachUnsupported, wsprotocol.ClosePTYAttachUnsupported)
 		return
 	}
 
