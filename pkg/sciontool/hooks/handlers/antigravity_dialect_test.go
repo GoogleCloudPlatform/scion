@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -130,6 +131,16 @@ func TestAntigravityFixture_EventSequence(t *testing.T) {
 // report, and nothing must synthesize a value.
 func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	// Pin the label set metricAttrs()/recordEndMetrics stamp on
+	// gen_ai.api.calls (design §3.2): harness and model from these two env
+	// vars, status from the event (always success here). SCION_AGENT_ID and
+	// SCION_PROJECT_ID are cleared so this test's expected key set doesn't
+	// depend on whatever the process happens to have ambient (this sandbox
+	// itself runs as a Scion agent, with both set in its real environment).
+	t.Setenv("SCION_HARNESS", "antigravity")
+	t.Setenv("SCION_MODEL", "gemini-3.1-pro-low")
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv("SCION_PROJECT_ID", "")
 	_, events := loadAntigravityFixture(t)
 
 	reader := sdkmetric.NewManualReader()
@@ -151,6 +162,40 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	gotCalls := sumInt64Counter(rm, telemetrycontract.MetricAPICalls)
 	if gotCalls != 3 {
 		t.Errorf("gen_ai.api.calls = %d, want 3 (one per PostInvocation: 2 in turn 1, 1 in turn 2)", gotCalls)
+	}
+
+	// Pin the exact producer label set (design §3.2, §7.4): all three calls
+	// share identical attributes, so a correct implementation merges them
+	// into one data point with value 3. A regression that leaked a payload
+	// attribute onto gen_ai.api.calls (for example conversationId or the
+	// per-invocation modelName -- see the model-label note in
+	// harnesses/antigravity/README.md) would either add an unexpected key
+	// here or split this into more than one data point.
+	callPoints := int64CounterDataPoints(rm, telemetrycontract.MetricAPICalls)
+	if len(callPoints) != 1 {
+		t.Fatalf("gen_ai.api.calls data point count = %d, want 1 (identical attributes across all 3 calls)", len(callPoints))
+	}
+	if callPoints[0].Value != 3 {
+		t.Errorf("gen_ai.api.calls single data point value = %d, want 3", callPoints[0].Value)
+	}
+	wantAttrs := map[string]string{
+		telemetrycontract.HarnessLabel: "antigravity",
+		telemetrycontract.ModelLabel:   "gemini-3.1-pro-low",
+		telemetrycontract.StatusLabel:  telemetrycontract.StatusSuccess,
+	}
+	gotAttrs := callPoints[0].Attributes
+	if gotAttrs.Len() != len(wantAttrs) {
+		t.Errorf("gen_ai.api.calls attribute count = %d, want %d (got %v)", gotAttrs.Len(), len(wantAttrs), gotAttrs.ToSlice())
+	}
+	for key, want := range wantAttrs {
+		got, ok := gotAttrs.Value(attribute.Key(key))
+		if !ok {
+			t.Errorf("gen_ai.api.calls missing expected attribute %q", key)
+			continue
+		}
+		if got.AsString() != want {
+			t.Errorf("gen_ai.api.calls attribute %q = %q, want %q", key, got.AsString(), want)
+		}
 	}
 
 	gotToolCalls := sumInt64Counter(rm, "agent.tool.calls")
@@ -231,10 +276,14 @@ func TestAntigravityDialect_MalformedTokenFieldsAreIgnored(t *testing.T) {
 		"hook_event_name": "PostInvocation",
 		"conversationId":  "test-conversation",
 		"invocationNum":   float64(0),
-		// None of these are fields antigravity's dialect.yaml maps, and
-		// they are not among extractTokens' recognized top-level names
-		// either; included to prove a completely unexpected, garbage-typed
-		// usage-shaped payload doesn't panic Parse.
+		// usageMetadata is not a key any dialect maps -- antigravity's real
+		// PostInvocation never carries one (see the fixture) -- so it's
+		// inert here regardless of its (garbage) contents. input_tokens
+		// *is* a recognized shared top-level name (dialects/common.go's
+		// extractTokens), included here to prove that a non-numeric value
+		// for it is ignored by the shared getInt64 path rather than
+		// panicking or coercing garbage into a number -- the same handling
+		// every hook dialect gets for free.
 		"usageMetadata": map[string]interface{}{
 			"promptTokenCount": "not-a-number",
 		},
@@ -272,6 +321,24 @@ func sumInt64Counter(rm metricdata.ResourceMetrics, name string) int64 {
 		}
 	}
 	return total
+}
+
+// int64CounterDataPoints returns every data point of the named Sum[int64]
+// metric across all scope metrics in rm, for tests that need to inspect
+// attributes or value per point rather than just a total.
+func int64CounterDataPoints(rm metricdata.ResourceMetrics, name string) []metricdata.DataPoint[int64] {
+	var points []metricdata.DataPoint[int64]
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
+				points = append(points, sum.DataPoints...)
+			}
+		}
+	}
+	return points
 }
 
 // hasUsageTokenPoints reports whether scion.usage.tokens has any data point

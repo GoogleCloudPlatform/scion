@@ -55,13 +55,26 @@ def _invoke(home: str, *, env_vars: list[str], explicit_type: str = "") -> dict:
     with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
         json.dump(candidates, f)
 
+    # _generate_hooks_json (provision.py) writes .agents/hooks.json under
+    # SCION_WORKSPACE_PATH (default "/workspace" -- the real repo checkout)
+    # and chowns it. Without pinning this to a tempdir subdirectory, every
+    # test run would write into the real workspace instead of its own
+    # sandbox -- a live repo checkout, potentially shared, and (inside an
+    # antigravity agent) the real hook wiring.
+    ws = os.path.join(home, "workspace")
+    os.makedirs(ws, exist_ok=True)
+
     manifest = {"harness_bundle_dir": bundle, "harness_config": {}}
-    with temporary_home(home):
+    with temporary_home(home), unittest.mock.patch.dict(os.environ, {"SCION_WORKSPACE_PATH": ws}):
         ctx = scion_harness.ProvisionContext("antigravity", manifest)
         provision.provision(ctx)
         env_path = os.path.join(bundle, "outputs", "env.json")
         with open(env_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            env = json.load(f)
+
+    hooks_path = os.path.join(ws, ".agents", "hooks.json")
+    assert os.path.isfile(hooks_path), f"expected {hooks_path} to exist (hooks.json wiring)"
+    return env
 
 
 class AntigravityProvisionTest(unittest.TestCase):
