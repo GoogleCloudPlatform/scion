@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -429,15 +430,31 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// dispatch (payload/target/type/timing, or an enable transition) replaces
 	// the attribution and bumps authorization_revision atomically in the same
 	// write. A metadata-only edit (name, or a status change other than an
-	// enable, e.g. pause) does not re-attribute. CreatedBy is never touched
-	// here.
+	// enable, e.g. pause) does not re-attribute — and does not touch the
+	// attribution columns at all (review R2): attribution is passed to the
+	// store only when it changed.
 	changesFutureDispatch := req.CronExpr != "" || req.EventType != "" || req.Payload != "" ||
 		(req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive)
+
+	var attribution *store.ScheduleAttributionUpdate
 	if changesFutureDispatch {
-		schedule.InitiatorAttribution = reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
+		prevRevision := schedule.AuthorizationRevision
+		prevRevisionKnown := schedule.AttributionVersion != 0
+		newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
+		schedule.InitiatorAttribution = newAttr
+		attribution = &store.ScheduleAttributionUpdate{
+			Attribution:       newAttr,
+			PrevRevision:      prevRevision,
+			PrevRevisionKnown: prevRevisionKnown,
+		}
 	}
 
-	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
+	if err := s.store.UpdateSchedule(r.Context(), schedule, attribution); err != nil {
+		if errors.Is(err, store.ErrRevisionConflict) {
+			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
+				"schedule was concurrently modified; refresh and retry", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -462,6 +479,14 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	// E.2b (review O1): no future dispatch is created by a delete, so there
+	// is no re-attribution — just a record of who deleted it.
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "schedule_delete",
+		TargetType:   "schedule",
+		TargetID:     scheduleID,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -485,6 +510,14 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// E.2b (review O1): no future dispatch is created by a pause, so there
+	// is no re-attribution — just a record of who paused it.
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "schedule_pause",
+		TargetType:   "schedule",
+		TargetID:     scheduleID,
+	})
 
 	schedule.Status = store.ScheduleStatusPaused
 	writeJSON(w, http.StatusOK, schedule)
@@ -522,21 +555,28 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
-	if err := s.store.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusActive); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Update next_run_at
+	// E.2b / ruling Q2 (review R3): status, next_run_at and the
+	// re-attribution are one write, not two — a failure here must be
+	// reported as an error, never as a 200 naming an attribution that was
+	// never persisted.
+	prevRevision := schedule.AuthorizationRevision
+	prevRevisionKnown := schedule.AttributionVersion != 0
 	schedule.Status = store.ScheduleStatusActive
 	schedule.NextRunAt = &nextRunAt
-	// E.2b / ruling Q2: resume re-arms future dispatch, so it re-attributes to
-	// the resumer and bumps authorization_revision in the same write as
-	// next_run_at, below.
-	schedule.InitiatorAttribution = reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
-	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
-		// Status was updated, but next_run_at wasn't — still return success
-		writeJSON(w, http.StatusOK, schedule)
+	newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
+	schedule.InitiatorAttribution = newAttr
+
+	if err := s.store.UpdateSchedule(r.Context(), schedule, &store.ScheduleAttributionUpdate{
+		Attribution:       newAttr,
+		PrevRevision:      prevRevision,
+		PrevRevisionKnown: prevRevisionKnown,
+	}); err != nil {
+		if errors.Is(err, store.ErrRevisionConflict) {
+			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
+				"schedule was concurrently modified; refresh and retry", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
