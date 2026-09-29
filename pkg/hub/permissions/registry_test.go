@@ -100,10 +100,10 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 // resource/action cannot collapse into one selector." hub.settings.read and
 // hub.config.read are real Registry entries that already share
 // {Resource: hub, Action: read} today. A resource:action reconstruction
-// would map the single selector string "hub:read" to BOTH permission IDs at
-// once. ResolveSelector
-// must not do that: it has no resource:action path at all, so "hub:read"
-// resolves to nothing rather than to an ambiguous pair.
+// would map the single selector string "hub:read" to BOTH permission IDs
+// at once. ResolveSelector must not do that: it has no resource:action
+// path at all, so "hub:read" resolves to nothing rather than to an
+// ambiguous pair.
 func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 	var settingsRead, configRead *Permission
 	for i := range Registry {

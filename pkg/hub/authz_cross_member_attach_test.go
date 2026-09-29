@@ -155,7 +155,7 @@ func TestCrossMemberAttach_HTTPRoutes(t *testing.T) {
 }
 
 // TestCrossMemberAttach_UATScopes verifies the UAT side of the split:
-// agent:manage no longer requires agent.attach (so project owners can mint
+// agent:manage does not require agent.attach (so project owners can mint
 // it), and a token that carries only agent:attach — however it was minted —
 // does not gain agent.lifecycle: no scope implies another.
 func TestCrossMemberAttach_UATScopes(t *testing.T) {

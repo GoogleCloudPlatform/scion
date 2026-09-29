@@ -16,11 +16,17 @@ package permissions
 
 import "sync"
 
-// selectorTestMu serializes OverrideSelectorInputsForTest calls against each
-// other and against the cache reset they perform, so overlapping install/
-// restore pairs cannot interleave. It does not make this hook safe to call
-// concurrently with ResolveSelector itself — see the doc comment below.
+// selectorTestMu guards selectorOverrideActive and serializes
+// OverrideSelectorInputsForTest/restore calls against each other and
+// against the cache reset they perform. It does not make this hook safe to
+// call concurrently with ResolveSelector itself — see the doc comment
+// below.
 var selectorTestMu sync.Mutex
+
+// selectorOverrideActive is true while a install/restore pair from
+// OverrideSelectorInputsForTest has not yet been restored. Guarded by
+// selectorTestMu.
+var selectorOverrideActive bool
 
 // OverrideSelectorInputsForTest replaces Registry and UATManageAliases for
 // the duration of a test and resets the cached selector registry so the
@@ -32,10 +38,15 @@ var selectorTestMu sync.Mutex
 //	restore := permissions.OverrideSelectorInputsForTest(mutatedRegistry, mutatedAliases)
 //	t.Cleanup(restore)
 //
-// Must only be called from tests, never concurrently with ResolveSelector:
-// it reassigns package-level state ResolveSelector reads without a lock on
-// the read side, by design, since production code treats that state as
-// immutable for the life of the process. Production code never calls this.
+// Serializes install and restore, and rejects a second override while one
+// is active by panicking, so overlapping overrides fail loudly instead of
+// leaking a mutated registry into later tests (an install/restore pair that
+// overlaps another and restores out of order would otherwise leave the
+// process on the wrong registry for the rest of the binary). It does not
+// make this hook safe to call concurrently with ResolveSelector: production
+// code treats Registry/UATManageAliases as immutable for the life of the
+// process and never calls this. restore is idempotent; calling it more than
+// once after the first call is a no-op.
 //
 // Exported (rather than confined to a _test.go file in this package)
 // because callers outside this package — e.g. pkg/hub tests proving that a
@@ -47,18 +58,29 @@ func OverrideSelectorInputsForTest(registry []Permission, aliases map[string]str
 	selectorTestMu.Lock()
 	defer selectorTestMu.Unlock()
 
+	if selectorOverrideActive {
+		panic("OverrideSelectorInputsForTest: an override is already active; overrides must not overlap (do not use from parallel tests)")
+	}
+	selectorOverrideActive = true
+
 	originalRegistry := Registry
 	originalAliases := UATManageAliases
 	Registry = registry
 	UATManageAliases = aliases
 	resetSelectorRegistryCache()
 
+	var restored bool
 	return func() {
 		selectorTestMu.Lock()
 		defer selectorTestMu.Unlock()
+		if restored {
+			return
+		}
+		restored = true
 		Registry = originalRegistry
 		UATManageAliases = originalAliases
 		resetSelectorRegistryCache()
+		selectorOverrideActive = false
 	}
 }
 

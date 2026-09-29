@@ -35,8 +35,7 @@ const uatCeilingBackfillMarkerSection = "migration_uat_ceiling_backfill_v1"
 var uatCeilingBackfillPageSize = 500
 
 // BackfillUATCeilings persists a normalized permission ceiling for every
-// existing user_access_tokens row that has never had one computed
-// (ptone/scion#2118).
+// existing user_access_tokens row that has never had one computed.
 //
 // A row in scope is identified by ceiling_permission_ids IS NULL — "never
 // backfilled" — not by ceiling_version, and never by project_id (a later
