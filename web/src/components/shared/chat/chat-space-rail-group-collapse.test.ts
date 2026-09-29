@@ -667,3 +667,174 @@ describe('space rail — storage key scoped per user (F2)', () => {
     expect(elB.collapsedGroups.has('g-a-group')).toBe(false);
   });
 });
+
+describe('space rail — currentUserId arriving after connect (N4)', () => {
+  it('re-reads the scoped key if currentUserId is set after the rail has already connected', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-late`, JSON.stringify(['g-late']));
+    const el = mount(); // currentUserId defaults to '' — restores the unscoped (empty) key
+    await el.updateComplete;
+    expect(el.collapsedGroups.size).toBe(0);
+
+    // A future caller setting the ID only after the rail is already up —
+    // the scenario N4 is about.
+    el.currentUserId = 'user-late';
+    await el.updateComplete;
+
+    expect(el.collapsedGroups.has('g-late')).toBe(true);
+  });
+
+  it('does not re-read storage when currentUserId was already set before connecting', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-1']));
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1'; // set before appendChild, the normal chat.ts case
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.collapsedGroups.has('g-1')).toBe(true);
+
+    // A toggle lands in memory; an unrelated update (selecting a thread)
+    // must not clobber it by re-reading storage — the guard only fires when
+    // the *old* currentUserId was '', not on every update.
+    el.toggleGroupCollapse('g-mid-session');
+    el.selectedKey = 'thread-1';
+    await el.updateComplete;
+
+    expect(el.collapsedGroups.has('g-mid-session')).toBe(true);
+  });
+});
+
+describe('space rail — auto-expand override cleared when the thread changes groups (N5)', () => {
+  it('clears (without re-picking) the override when the selected thread moves to a different group', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-a', 'g-b']));
+
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+        );
+      }
+      if (path.startsWith('/api/v1/chat/spaces/')) {
+        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
+      }
+      if (path === '/api/v1/chat/user-prefs') {
+        // thread-1 starts in g-a.
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threadGroups: JSON.stringify({
+                'p-a': [
+                  { id: 'g-a', name: 'A', threadIds: ['thread-1'] },
+                  { id: 'g-b', name: 'B', threadIds: [] },
+                ],
+              }),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    el.selectedKey = 'thread-1';
+    document.body.appendChild(el);
+    await el.reload();
+    expect(el.autoExpandedGroupId).toBe('g-a');
+
+    // The thread moves server-side from g-a to g-b; both stay collapsed.
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+        );
+      }
+      if (path.startsWith('/api/v1/chat/spaces/')) {
+        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
+      }
+      if (path === '/api/v1/chat/user-prefs') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threadGroups: JSON.stringify({
+                'p-a': [
+                  { id: 'g-a', name: 'A', threadIds: [] },
+                  { id: 'g-b', name: 'B', threadIds: ['thread-1'] },
+                ],
+              }),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    await el.reload();
+
+    // Cleared, not re-picked to g-b. collapsedGroups (the user's real
+    // preference for each group) is untouched by any of this.
+    expect(el.autoExpandedGroupId).toBeNull();
+    expect(el.collapsedGroups.has('g-a')).toBe(true);
+    expect(el.collapsedGroups.has('g-b')).toBe(true);
+  });
+
+  it('clears the override when the group itself is deleted', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.selectedKey = 'thread-1';
+    el.autoExpandedGroupId = 'g-gone';
+    el.prefs = railPrefs({ 'p-a': [] }); // g-gone no longer exists
+
+    el.clearStaleAutoExpand();
+
+    expect(el.autoExpandedGroupId).toBeNull();
+  });
+});
+
+describe('space rail — a new selection re-decides the override (N6, intended behavior)', () => {
+  it('reopens a group the user just collapsed when a different thread in it is selected next', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-shared']));
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+        );
+      }
+      if (path.startsWith('/api/v1/chat/spaces/')) {
+        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
+      }
+      if (path === '/api/v1/chat/user-prefs') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threadGroups: JSON.stringify({
+                'p-a': [{ id: 'g-shared', name: 'Shared', threadIds: ['thread-a', 'thread-b'] }],
+              }),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    el.selectedKey = 'thread-a';
+    document.body.appendChild(el);
+    await el.reload();
+    expect(el.autoExpandedGroupId).toBe('g-shared');
+
+    // The user re-collapses it for this view.
+    el.toggleGroupCollapse('g-shared');
+    expect(el.autoExpandedGroupId).toBeNull();
+
+    // A new selection — even one already in the same group — gets its own,
+    // independent decision. This is deliberate (round-3 review, N6): a
+    // newly selected thread should be visible, and "decide once per key"
+    // means each key gets to make that call for itself.
+    el.selectedKey = 'thread-b';
+    await el.updateComplete;
+
+    expect(el.autoExpandedGroupId).toBe('g-shared');
+  });
+});

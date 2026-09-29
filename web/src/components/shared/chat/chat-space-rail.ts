@@ -826,6 +826,25 @@ export class ScionChatSpaceRail extends LitElement {
     document.addEventListener('click', this._outsideClickHandler);
   }
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    // `currentUserId` is normally set before connectedCallback (chat.ts
+    // binds it as a template attribute — round-2 review, F5), so the
+    // restore in connectedCallback already reads the right key and this is
+    // a no-op on the very first update (`this.hasUpdated` is still false).
+    // If some future caller instead sets the ID *after* the rail has
+    // already connected and rendered with none, re-read the scoped key —
+    // otherwise a save from that point on would silently write into a
+    // different bucket than the one the initial restore read from (round-2
+    // review, N4).
+    if (
+      this.hasUpdated &&
+      changedProperties.has('currentUserId') &&
+      changedProperties.get('currentUserId') === ''
+    ) {
+      this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('selectedKey')) {
       if (this.selectedKey) {
@@ -899,6 +918,30 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /**
+   * Clear the auto-expand override if the group it names has since stopped
+   * containing the selected thread — e.g. the thread was moved to a
+   * different group, or the group itself was deleted, server-side. Called
+   * only after a successful `loadPrefs`, so "no longer contains" reflects
+   * the server's current state rather than a stale or failed fetch.
+   *
+   * Deliberately does *not* pick a new group for the thread's new location:
+   * `maybeAutoExpandGroupForSelectedKey` already declined to reconsider
+   * once `selectedKey` is set (that's the whole R3 fix), and re-picking
+   * here would reopen a group the user may have collapsed in the meantime.
+   * The stale group just stops being forced open — the user's real
+   * preference for every group, old and new, is left exactly as it was
+   * (round-3 review, N5).
+   */
+  private clearStaleAutoExpand(): void {
+    if (!this.autoExpandedGroupId) return;
+    const allGroups = Object.values(this.prefs.threadGroups ?? {}).flat();
+    const group = allGroups.find((g) => g.id === this.autoExpandedGroupId);
+    if (!group || !group.threadIds.includes(this.selectedKey)) {
+      this.autoExpandedGroupId = null;
+    }
+  }
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this._outsideClickHandler) {
@@ -946,6 +989,9 @@ export class ScionChatSpaceRail extends LitElement {
       // otherwise.
       if (spacesOk && prefsOk) {
         this.pruneCollapsedGroups();
+      }
+      if (prefsOk) {
+        this.clearStaleAutoExpand();
       }
       if (this.selectedKey) {
         this.maybeAutoExpandGroupForSelectedKey();
