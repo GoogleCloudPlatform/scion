@@ -746,27 +746,9 @@ func (s *Server) resolveOutboundRouting(
 				// and is derivable — a mismatch is an authorization-shaped error, not a
 				// shape mismatch. Do NOT silently overwrite (contrast with the group half
 				// above where overwriting is the correct action).
-				if (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient {
-					// The recipient was explicitly supplied (not derived in S5).
-					// Verify it matches the DM key.
-					_, idA, _, idB, parseErr := messages.ParseDMKey(convResult.ExternalRef)
-					if parseErr != nil {
-						s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
-							"external_ref", convResult.ExternalRef, "conversation_id", convResult.ConversationID, "error", parseErr)
-						writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-							"conversation has an invalid DM key; cannot validate recipient", nil)
-						return nil, parseErr
-					}
-					// The supplied recipientID must match one of the two participants.
-					if recipientID != idA && recipientID != idB {
-						s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
-							"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
-							"external_ref", convResult.ExternalRef)
-						writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-							"a recipient may not be supplied with a direct conversation reference — "+
-								"the conversation is the address; remove the recipient and retry", nil)
-						return nil, fmt.Errorf("recipient not in DM key")
-					}
+				explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
+				if err := s.checkDirectRecipientMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, recipientID, explicitRecipient); err != nil {
+					return nil, err
 				}
 
 				// DEF-168: The affinity re-run that was here (DEF-158) has been
@@ -788,6 +770,19 @@ func (s *Server) resolveOutboundRouting(
 					req.Channel = derivedCh
 				}
 			}
+		}
+	}
+
+	// DEF-161 (raw conversation_id path): the direct-half recipient check
+	// above only ran when the conversation was named via a resolved
+	// conversation_ref (convRefResolved). Apply the identical check when the
+	// caller instead asserted a direct conversation directly by
+	// conversation_id (Rule 1), so both ways of naming the same conversation
+	// enforce the same recipient consistency.
+	if !convRefResolved && asserted && convResult != nil && convResult.Kind == "direct" {
+		explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
+		if err := s.checkDirectRecipientMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, recipientID, explicitRecipient); err != nil {
+			return nil, err
 		}
 	}
 
@@ -830,6 +825,39 @@ func (s *Server) resolveOutboundRouting(
 	result.Def152DerivedRecipient = def152DerivedRecipient
 
 	return result, nil
+}
+
+// checkDirectRecipientMatchesDMKey applies the DEF-161 direct-conversation
+// recipient check: when the caller supplied an explicit recipient alongside
+// an asserted direct conversation, that recipient must be one of the two
+// participants named in the conversation's DM key. For direct conversations
+// the DM key IS the ACL and is derivable — a mismatch is an
+// authorization-shaped error, not a shape mismatch. This is shared by both
+// ways a caller can assert a direct conversation: a resolved
+// conversation_ref and a raw conversation_id, so the two behave identically.
+func (s *Server) checkDirectRecipientMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, recipientID string, explicitRecipientSupplied bool) error {
+	if !explicitRecipientSupplied {
+		return nil
+	}
+	_, idA, _, idB, parseErr := messages.ParseDMKey(externalRef)
+	if parseErr != nil {
+		s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
+			"external_ref", externalRef, "conversation_id", conversationID, "error", parseErr)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"conversation has an invalid DM key; cannot validate recipient", nil)
+		return parseErr
+	}
+	// The supplied recipientID must match one of the two participants.
+	if recipientID != idA && recipientID != idB {
+		s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
+			"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
+			"external_ref", externalRef)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"a recipient may not be supplied with a direct conversation reference — "+
+				"the conversation is the address; remove the recipient and retry", nil)
+		return fmt.Errorf("recipient not in DM key")
+	}
+	return nil
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
