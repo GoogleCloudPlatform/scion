@@ -57,7 +57,8 @@ const codexUsageFixturePath = "testdata/usage/codex-0.158.0.pb.json"
 // output, and are not edited. The fixture is also a *subset* of what the
 // capture produced: a response.created frame and a response.output_item.done
 // frame were emitted too but are omitted here, since the rule ignores
-// every event.kind other than the two included ones.
+// every event.kind other than response.completed (the included
+// output_text.delta frame is kept as a negative case).
 //
 // Every other field -- every attribute key, value type (stringValue vs
 // intValue), the scope name, and every record's
