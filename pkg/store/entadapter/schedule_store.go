@@ -89,14 +89,33 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 
 // initiatorAttributionFromColumns collapses E.2b's nullable attribution
 // columns (identical on Schedule and ScheduledEvent, via one ent mixin) into
-// a store.InitiatorAttribution. A NULL column reads as that field's zero
-// value; a row where every column is NULL therefore has AttributionVersion
-// 0, which pkg/hub's scheduledInitiator/legacy_unknown handling requires.
+// a store.InitiatorAttribution.
+//
+// A NULL/zero attribution_version means the row predates E.2b (or was
+// written by a caller that never set attribution). Review R1: such a row
+// must read InitiatorCredentialKind as the explicit
+// store.InitiatorCredentialKindLegacyUnknown, never "" — every other
+// identity field is cleared too, so a legacy row never surfaces
+// partial/stale column data (design check (c); the same rule
+// pkg/hub's scheduledInitiator applies on top of this). AuthorizationRevision
+// is preserved regardless: R2's conditional write needs the real counter
+// value (including 0/absent) even for a legacy row being re-attributed for
+// the first time.
 func initiatorAttributionFromColumns(
 	principalKind, principalID, credentialKind, credentialID, credentialSnapshot *string,
 	attributionVersion, authorizationRevision *int,
 ) store.InitiatorAttribution {
 	var attr store.InitiatorAttribution
+	if authorizationRevision != nil {
+		attr.AuthorizationRevision = *authorizationRevision
+	}
+
+	if attributionVersion == nil || *attributionVersion == 0 {
+		attr.InitiatorCredentialKind = store.InitiatorCredentialKindLegacyUnknown
+		return attr
+	}
+
+	attr.AttributionVersion = *attributionVersion
 	if principalKind != nil {
 		attr.InitiatorPrincipalKind = *principalKind
 	}
@@ -111,12 +130,6 @@ func initiatorAttributionFromColumns(
 	}
 	if credentialSnapshot != nil {
 		attr.InitiatorCredentialSnapshot = *credentialSnapshot
-	}
-	if attributionVersion != nil {
-		attr.AttributionVersion = *attributionVersion
-	}
-	if authorizationRevision != nil {
-		attr.AuthorizationRevision = *authorizationRevision
 	}
 	return attr
 }
@@ -278,14 +291,31 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	return result, nil
 }
 
-// UpdateSchedule updates an existing schedule.
-func (s *ScheduleStore) UpdateSchedule(ctx context.Context, sc *store.Schedule) error {
+// UpdateSchedule updates an existing schedule's mutable fields, and
+// optionally — in the same write — replaces its InitiatorAttribution.
+//
+// When attribution is nil (a metadata-only edit, e.g. a name change),
+// InitiatorAttribution columns are not referenced at all: no Set, no Clear.
+// A concurrent re-attribution racing this write is therefore untouched by
+// it, by construction (review R2).
+//
+// When attribution is non-nil, the update additionally carries a
+// conditional WHERE clause on authorization_revision — the value the caller
+// read before deciding to re-attribute (or IS NULL, for a never-attributed
+// row) — and only then sets the new attribution columns. If no row matches
+// (someone else's write already changed the revision), zero rows are
+// affected and this returns store.ErrRevisionConflict rather than silently
+// applying the write, which would either overwrite a newer attribution or
+// let a stale one look like it replaced it (review R2/R3; ruling Q2: old
+// and new authority are never unioned, and a re-attribution is atomic).
+func (s *ScheduleStore) UpdateSchedule(ctx context.Context, sc *store.Schedule, attribution *store.ScheduleAttributionUpdate) error {
 	uid, err := parseUUID(sc.ID)
 	if err != nil {
 		return err
 	}
 
-	update := s.client.Schedule.UpdateOneID(uid).
+	update := s.client.Schedule.Update().
+		Where(schedule.IDEQ(uid)).
 		SetName(sc.Name).
 		SetCronExpr(sc.CronExpr).
 		SetEventType(sc.EventType).
@@ -293,46 +323,89 @@ func (s *ScheduleStore) UpdateSchedule(ctx context.Context, sc *store.Schedule) 
 		SetStatus(sc.Status)
 
 	if sc.NextRunAt != nil {
-		update.SetNextRunAt(*sc.NextRunAt)
+		update = update.SetNextRunAt(*sc.NextRunAt)
 	} else {
-		update.ClearNextRunAt()
+		update = update.ClearNextRunAt()
 	}
 
-	// E.2b: persist whatever InitiatorAttribution is currently on sc —
-	// unchanged (a metadata-only edit) or freshly replaced
-	// (reattributeInitiator, ruling Q2). An empty field is cleared rather
-	// than written as "", so a never-attributed/legacy schedule stays NULL
-	// (legacy_unknown) until it is actually re-attributed.
-	setOrClear := func(set func(string), clear func(), v string) {
-		if v != "" {
-			set(v)
+	if attribution != nil {
+		if attribution.PrevRevisionKnown {
+			update = update.Where(schedule.AuthorizationRevisionEQ(attribution.PrevRevision))
 		} else {
-			clear()
+			update = update.Where(schedule.AuthorizationRevisionIsNil())
 		}
-	}
-	attr := sc.InitiatorAttribution
-	setOrClear(func(v string) { update.SetInitiatorPrincipalKind(v) }, func() { update.ClearInitiatorPrincipalKind() }, attr.InitiatorPrincipalKind)
-	setOrClear(func(v string) { update.SetInitiatorPrincipalID(v) }, func() { update.ClearInitiatorPrincipalID() }, attr.InitiatorPrincipalID)
-	setOrClear(func(v string) { update.SetInitiatorCredentialKind(v) }, func() { update.ClearInitiatorCredentialKind() }, attr.InitiatorCredentialKind)
-	setOrClear(func(v string) { update.SetInitiatorCredentialID(v) }, func() { update.ClearInitiatorCredentialID() }, attr.InitiatorCredentialID)
-	setOrClear(func(v string) { update.SetInitiatorCredentialSnapshot(v) }, func() { update.ClearInitiatorCredentialSnapshot() }, attr.InitiatorCredentialSnapshot)
-	if attr.AttributionVersion != 0 {
-		update.SetAttributionVersion(attr.AttributionVersion)
-	} else {
-		update.ClearAttributionVersion()
-	}
-	if attr.AuthorizationRevision != 0 {
-		update.SetAuthorizationRevision(attr.AuthorizationRevision)
-	} else {
-		update.ClearAuthorizationRevision()
+		update = setScheduleAttributionUpdate(update, attribution.Attribution)
 	}
 
-	updated, err := update.Save(ctx)
+	affected, err := update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		if attribution != nil {
+			return store.ErrRevisionConflict
+		}
+		return store.ErrNotFound
+	}
+
+	if attribution != nil {
+		sc.InitiatorAttribution = attribution.Attribution
+	}
+	// The bulk Update() form above returns only an affected-row count, not
+	// the updated entity, so re-fetch to give the caller an accurate
+	// UpdatedAt/Status (mirrors what UpdateOneID's returned entity gave
+	// before this method switched to a conditional bulk update).
+	updated, err := s.client.Schedule.Get(ctx, uid)
 	if err != nil {
 		return mapError(err)
 	}
 	sc.UpdatedAt = updated.Updated
+	sc.Status = updated.Status
 	return nil
+}
+
+// setScheduleAttributionUpdate applies a store.InitiatorAttribution's fields
+// to a bulk ScheduleUpdate builder (used by UpdateSchedule's conditional
+// re-attribution write). Unlike the create-side setter, this always sets or
+// explicitly clears every field, since it replaces a prior attribution
+// rather than filling in blanks on a brand-new row.
+func setScheduleAttributionUpdate(u *ent.ScheduleUpdate, attr store.InitiatorAttribution) *ent.ScheduleUpdate {
+	if attr.InitiatorPrincipalKind != "" {
+		u = u.SetInitiatorPrincipalKind(attr.InitiatorPrincipalKind)
+	} else {
+		u = u.ClearInitiatorPrincipalKind()
+	}
+	if attr.InitiatorPrincipalID != "" {
+		u = u.SetInitiatorPrincipalID(attr.InitiatorPrincipalID)
+	} else {
+		u = u.ClearInitiatorPrincipalID()
+	}
+	if attr.InitiatorCredentialKind != "" {
+		u = u.SetInitiatorCredentialKind(attr.InitiatorCredentialKind)
+	} else {
+		u = u.ClearInitiatorCredentialKind()
+	}
+	if attr.InitiatorCredentialID != "" {
+		u = u.SetInitiatorCredentialID(attr.InitiatorCredentialID)
+	} else {
+		u = u.ClearInitiatorCredentialID()
+	}
+	if attr.InitiatorCredentialSnapshot != "" {
+		u = u.SetInitiatorCredentialSnapshot(attr.InitiatorCredentialSnapshot)
+	} else {
+		u = u.ClearInitiatorCredentialSnapshot()
+	}
+	if attr.AttributionVersion != 0 {
+		u = u.SetAttributionVersion(attr.AttributionVersion)
+	} else {
+		u = u.ClearAttributionVersion()
+	}
+	if attr.AuthorizationRevision != 0 {
+		u = u.SetAuthorizationRevision(attr.AuthorizationRevision)
+	} else {
+		u = u.ClearAuthorizationRevision()
+	}
+	return u
 }
 
 // UpdateScheduleStatus updates only the status of a schedule.
