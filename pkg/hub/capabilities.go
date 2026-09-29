@@ -252,6 +252,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
+	// Every principal, project owners and admins included, gets each
+	// capability from one Decide call per resource and action, so a batch
+	// costs len(resources) × len(actions) decisions.
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
 		var allowed []string
