@@ -189,10 +189,11 @@ const auditLabelsTruncatedMarker = "_truncated"
 // sanitized like a value, and every value is sanitized and length-capped.
 // The result is capped at uatMaxLabelCount entries (sorted by key, so the
 // selection is deterministic) and at maxAuditLabelsBytes total — JSON
-// escaping (e.g. "<" to "<") can widen sanitized content past the
-// per-field caps' sum, so the byte cap is a real path, not a defensive
-// no-op. If entries are dropped by either cap, auditLabelsTruncatedMarker is
-// set, so the output is always valid, bounded, unambiguously-marked JSON.
+// escaping (e.g. a literal `<` becomes the six-byte escape sequence
+// `\u003c`) can widen sanitized content past the per-field
+// caps' sum, so the byte cap is a real path, not a defensive no-op. If
+// entries are dropped by either cap, auditLabelsTruncatedMarker is set,
+// so the output is always valid, bounded, unambiguously-marked JSON.
 func boundedLabelsJSON(labels map[string]string) string {
 	if len(labels) == 0 {
 		return ""
@@ -219,6 +220,17 @@ func boundedLabelsJSON(labels map[string]string) string {
 			// state that did not occur.
 			if renderKey == auditLabelsTruncatedMarker {
 				renderKey = renderKey + "_key"
+			}
+			// Two distinct source keys can sanitize or get renamed to the
+			// same renderKey (for example two differently-invalid keys that
+			// both sanitize to the same replacement string, or a legacy key
+			// literally named "_truncated" colliding with another key
+			// already renamed to "_truncated_key"). Overwriting silently
+			// would lose one entry with no sign it happened, so a collision
+			// is treated as a dropped entry instead.
+			if _, exists := out[renderKey]; exists {
+				truncated = true
+				continue
 			}
 			out[renderKey] = sanitizeForLog(labels[k], uatMaxLabelValueBytes)
 		}

@@ -212,9 +212,10 @@ func TestBoundedLabelsJSON_SanitizesControlCharacterKey(t *testing.T) {
 
 // TestBoundedLabelsJSON_TruncatesOnByteBoundAfterEscaping proves the byte
 // cap is a reachable path, not dead code. Per-field sanitization caps each
-// value at uatMaxLabelValueBytes raw bytes, but JSON escapes characters like
-// "<" to six bytes ("<"), which can multiply a sanitized value's
-// encoded size well past what the raw per-field caps alone would suggest.
+// value at uatMaxLabelValueBytes raw bytes, but JSON escapes a literal `<`
+// to the six-byte sequence `\u003c`, which can multiply a
+// sanitized value's encoded size well past what the raw per-field caps
+// alone would suggest.
 // Eight labels of uatMaxLabelValueBytes "<" characters each drive the
 // marshalled size over maxAuditLabelsBytes, forcing entries to be dropped.
 func TestBoundedLabelsJSON_TruncatesOnByteBoundAfterEscaping(t *testing.T) {
@@ -279,6 +280,47 @@ func TestBoundedLabelsJSON_MarkerCannotBeSpoofedByALegacyKey(t *testing.T) {
 		}
 	}
 	require.True(t, found, "the legacy label's value must still survive under a renamed key")
+}
+
+// TestBoundedLabelsJSON_CollidingRenderKeysSetTheMarkerInsteadOfOverwriting
+// proves that when two distinct source keys render to the same key — whether
+// because a legacy key literally named "_truncated" is renamed to
+// "_truncated_key" and collides with another legacy key already named that,
+// or because two differently-invalid keys sanitize to the same replacement
+// string — the collision is visible as a marked truncation rather than a
+// silent loss of one entry.
+func TestBoundedLabelsJSON_CollidingRenderKeysSetTheMarkerInsteadOfOverwriting(t *testing.T) {
+	t.Run("legacy marker-key rename collides with an existing legacy key", func(t *testing.T) {
+		labels := map[string]string{
+			auditLabelsTruncatedMarker:          "a",
+			auditLabelsTruncatedMarker + "_key": "b",
+		}
+
+		out := boundedLabelsJSON(labels)
+		var parsed map[string]string
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		marker, ok := parsed[auditLabelsTruncatedMarker]
+		require.True(t, ok, "a colliding rename must set the truncation marker rather than silently overwriting")
+		require.Equal(t, "true", marker)
+		require.Len(t, parsed, 2, "exactly one of the two colliding entries plus the marker should survive")
+	})
+
+	t.Run("two invalid keys sanitize to the same replacement string", func(t *testing.T) {
+		labels := map[string]string{
+			"a\x00": "first",
+			"a\x01": "second",
+		}
+
+		out := boundedLabelsJSON(labels)
+		var parsed map[string]string
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		marker, ok := parsed[auditLabelsTruncatedMarker]
+		require.True(t, ok, "two keys sanitizing to the same string must set the truncation marker")
+		require.Equal(t, "true", marker)
+		require.Len(t, parsed, 2, "exactly one of the two colliding entries plus the marker should survive")
+	})
 }
 
 // TestBoundedLabelsJSON_AppliesToBothDecisionAndMutationAudit proves the same
