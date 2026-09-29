@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -241,6 +242,52 @@ func TestCredentialDecoration_LogValue_TruncatesMultiByteExactly(t *testing.T) {
 	}
 	if !utf8.ValidString(kept) {
 		t.Fatalf("truncated output is not valid UTF-8: %q", kept)
+	}
+}
+
+// TestSanitizeForLog_TruncatesAtRuneBoundary exercises sanitizeForLog's
+// RuneStart-based cut directly (T1 fix) across 2-, 3-, and 4-byte runes,
+// with maxBytes landing both exactly on a rune boundary (the whole rune is
+// kept) and at every mid-rune byte offset (the incomplete rune is dropped).
+// Output must always be valid UTF-8 and end with the truncation marker.
+func TestSanitizeForLog_TruncatesAtRuneBoundary(t *testing.T) {
+	cases := []struct {
+		name      string
+		r         rune
+		runeBytes int
+		reps      int
+	}{
+		{"two-byte rune (é)", 'é', 2, 5},
+		{"three-byte rune (€)", '€', 3, 5},
+		{"four-byte rune (😀)", '😀', 4, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if n := utf8.RuneLen(tc.r); n != tc.runeBytes {
+				t.Fatalf("test setup error: %q is %d bytes, not %d", tc.r, n, tc.runeBytes)
+			}
+			s := strings.Repeat(string(tc.r), tc.reps)
+			// Keep 3 whole runes; try every maxBytes from exactly on the
+			// 4th rune's boundary through partway into it. All must keep
+			// exactly the same 3 complete runes.
+			wantKeptBytes := 3 * tc.runeBytes
+			for extra := 0; extra < tc.runeBytes; extra++ {
+				maxBytes := wantKeptBytes + extra
+				t.Run(fmt.Sprintf("maxBytes=+%d", extra), func(t *testing.T) {
+					got := sanitizeForLog(s, maxBytes)
+					if !strings.HasSuffix(got, "…") {
+						t.Fatalf("expected a truncation marker, got %q", got)
+					}
+					kept := strings.TrimSuffix(got, "…")
+					if !utf8.ValidString(kept) {
+						t.Fatalf("truncated output is not valid UTF-8: %q", kept)
+					}
+					if len(kept) != wantKeptBytes {
+						t.Fatalf("maxBytes=%d: expected %d bytes kept, got %d bytes (%q)", maxBytes, wantKeptBytes, len(kept), kept)
+					}
+				})
+			}
+		})
 	}
 }
 
