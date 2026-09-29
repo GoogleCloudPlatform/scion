@@ -151,6 +151,12 @@ type CredentialContext struct {
 	Type      string
 	ProjectID string
 	Scopes    []string
+
+	// E.1 descriptive credential metadata. Decoration is additive,
+	// server-derived attribution (token name/boundary/purpose/labels) for
+	// logs and audit. It is never read by authorization decisions — see
+	// TestCredentialDecorationNotReadByAuthzCode.
+	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -1377,7 +1383,16 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		// E.1: carry the descriptive decoration, if ValidateToken attached
+		// one, through to the credential context. This is the single copy
+		// point named in the E.1 design (plan §2.2); decoration is never
+		// otherwise derived here.
+		if d := scoped.Decoration(); d != nil {
+			copied := *d
+			cc.Decoration = &copied
+		}
+		return cc
 	}
 	switch identity.Type() {
 	case "agent":
