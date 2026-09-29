@@ -499,6 +499,19 @@ func TestUpdateSchedule_MetadataOnlyStaleWriteAfterReattributionReturnsConflict(
 	assert.Equal(t, afterReattribution.InitiatorPrincipalID, final.InitiatorPrincipalID,
 		"the attribution must never end up paired with the stale payload")
 	assert.NotEqual(t, "renamed-from-stale-read", final.Name, "a rejected conditional write must not apply any field")
+
+	// A stale status-only write, built from the same pre-re-attribution read,
+	// must be rejected the same way — status is protected by both its own
+	// field-mask flag and the revision check, and nothing exercises that
+	// combination above.
+	staleRead.Status = store.ScheduleStatusPaused
+	err = s.UpdateSchedule(ctx, staleRead, store.ScheduleFieldMask{Status: true},
+		staleRead.AuthorizationRevision, staleRead.AuthorizationRevision != 0, nil)
+	assert.ErrorIs(t, err, store.ErrRevisionConflict)
+
+	afterStaleStatus, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, afterReattribution.Status, afterStaleStatus.Status, "a rejected stale status write must leave status unchanged")
 }
 
 // TestUpdateSchedule_RevisionConflictMapsTo409 covers the handler side: the
