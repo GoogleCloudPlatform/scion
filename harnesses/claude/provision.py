@@ -46,6 +46,9 @@ This script's job:
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
+
+Design references below (section N, Dn) are to
+.design/hosted/usage-telemetry.md (ptone/scion#2053).
 """
 
 from __future__ import annotations

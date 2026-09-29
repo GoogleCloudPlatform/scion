@@ -18,6 +18,9 @@
 // consumer). It has no dependency on either package, so the hub never
 // depends on sciontool, and a rename on one side fails the contract test
 // on the other (see ptone/scion#2053, design §3.6 "Contract pinning").
+//
+// Design references in this package (section N, Dn) are to
+// .design/hosted/usage-telemetry.md.
 package telemetrycontract
 
 // Canonical metric names. Both are exported under the
