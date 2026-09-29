@@ -509,42 +509,6 @@ func (u *UserAccessTokenUpsert) ClearLastUsed() *UserAccessTokenUpsert {
 	return u
 }
 
-// SetPurpose sets the "purpose" field.
-func (u *UserAccessTokenUpsert) SetPurpose(v string) *UserAccessTokenUpsert {
-	u.Set(useraccesstoken.FieldPurpose, v)
-	return u
-}
-
-// UpdatePurpose sets the "purpose" field to the value that was provided on create.
-func (u *UserAccessTokenUpsert) UpdatePurpose() *UserAccessTokenUpsert {
-	u.SetExcluded(useraccesstoken.FieldPurpose)
-	return u
-}
-
-// ClearPurpose clears the value of the "purpose" field.
-func (u *UserAccessTokenUpsert) ClearPurpose() *UserAccessTokenUpsert {
-	u.SetNull(useraccesstoken.FieldPurpose)
-	return u
-}
-
-// SetLabels sets the "labels" field.
-func (u *UserAccessTokenUpsert) SetLabels(v string) *UserAccessTokenUpsert {
-	u.Set(useraccesstoken.FieldLabels, v)
-	return u
-}
-
-// UpdateLabels sets the "labels" field to the value that was provided on create.
-func (u *UserAccessTokenUpsert) UpdateLabels() *UserAccessTokenUpsert {
-	u.SetExcluded(useraccesstoken.FieldLabels)
-	return u
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (u *UserAccessTokenUpsert) ClearLabels() *UserAccessTokenUpsert {
-	u.SetNull(useraccesstoken.FieldLabels)
-	return u
-}
-
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -564,6 +528,12 @@ func (u *UserAccessTokenUpsertOne) UpdateNewValues() *UserAccessTokenUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(useraccesstoken.FieldCreated)
+		}
+		if _, exists := u.create.mutation.Purpose(); exists {
+			s.SetIgnore(useraccesstoken.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.Labels(); exists {
+			s.SetIgnore(useraccesstoken.FieldLabels)
 		}
 	}))
 	return u
@@ -733,48 +703,6 @@ func (u *UserAccessTokenUpsertOne) UpdateLastUsed() *UserAccessTokenUpsertOne {
 func (u *UserAccessTokenUpsertOne) ClearLastUsed() *UserAccessTokenUpsertOne {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.ClearLastUsed()
-	})
-}
-
-// SetPurpose sets the "purpose" field.
-func (u *UserAccessTokenUpsertOne) SetPurpose(v string) *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetPurpose(v)
-	})
-}
-
-// UpdatePurpose sets the "purpose" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertOne) UpdatePurpose() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdatePurpose()
-	})
-}
-
-// ClearPurpose clears the value of the "purpose" field.
-func (u *UserAccessTokenUpsertOne) ClearPurpose() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearPurpose()
-	})
-}
-
-// SetLabels sets the "labels" field.
-func (u *UserAccessTokenUpsertOne) SetLabels(v string) *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetLabels(v)
-	})
-}
-
-// UpdateLabels sets the "labels" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertOne) UpdateLabels() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdateLabels()
-	})
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (u *UserAccessTokenUpsertOne) ClearLabels() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearLabels()
 	})
 }
 
@@ -964,6 +892,12 @@ func (u *UserAccessTokenUpsertBulk) UpdateNewValues() *UserAccessTokenUpsertBulk
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(useraccesstoken.FieldCreated)
 			}
+			if _, exists := b.mutation.Purpose(); exists {
+				s.SetIgnore(useraccesstoken.FieldPurpose)
+			}
+			if _, exists := b.mutation.Labels(); exists {
+				s.SetIgnore(useraccesstoken.FieldLabels)
+			}
 		}
 	}))
 	return u
@@ -1133,48 +1067,6 @@ func (u *UserAccessTokenUpsertBulk) UpdateLastUsed() *UserAccessTokenUpsertBulk 
 func (u *UserAccessTokenUpsertBulk) ClearLastUsed() *UserAccessTokenUpsertBulk {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.ClearLastUsed()
-	})
-}
-
-// SetPurpose sets the "purpose" field.
-func (u *UserAccessTokenUpsertBulk) SetPurpose(v string) *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetPurpose(v)
-	})
-}
-
-// UpdatePurpose sets the "purpose" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertBulk) UpdatePurpose() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdatePurpose()
-	})
-}
-
-// ClearPurpose clears the value of the "purpose" field.
-func (u *UserAccessTokenUpsertBulk) ClearPurpose() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearPurpose()
-	})
-}
-
-// SetLabels sets the "labels" field.
-func (u *UserAccessTokenUpsertBulk) SetLabels(v string) *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetLabels(v)
-	})
-}
-
-// UpdateLabels sets the "labels" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertBulk) UpdateLabels() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdateLabels()
-	})
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (u *UserAccessTokenUpsertBulk) ClearLabels() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearLabels()
 	})
 }
 

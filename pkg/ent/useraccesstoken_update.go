@@ -167,46 +167,6 @@ func (_u *UserAccessTokenUpdate) ClearLastUsed() *UserAccessTokenUpdate {
 	return _u
 }
 
-// SetPurpose sets the "purpose" field.
-func (_u *UserAccessTokenUpdate) SetPurpose(v string) *UserAccessTokenUpdate {
-	_u.mutation.SetPurpose(v)
-	return _u
-}
-
-// SetNillablePurpose sets the "purpose" field if the given value is not nil.
-func (_u *UserAccessTokenUpdate) SetNillablePurpose(v *string) *UserAccessTokenUpdate {
-	if v != nil {
-		_u.SetPurpose(*v)
-	}
-	return _u
-}
-
-// ClearPurpose clears the value of the "purpose" field.
-func (_u *UserAccessTokenUpdate) ClearPurpose() *UserAccessTokenUpdate {
-	_u.mutation.ClearPurpose()
-	return _u
-}
-
-// SetLabels sets the "labels" field.
-func (_u *UserAccessTokenUpdate) SetLabels(v string) *UserAccessTokenUpdate {
-	_u.mutation.SetLabels(v)
-	return _u
-}
-
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_u *UserAccessTokenUpdate) SetNillableLabels(v *string) *UserAccessTokenUpdate {
-	if v != nil {
-		_u.SetLabels(*v)
-	}
-	return _u
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (_u *UserAccessTokenUpdate) ClearLabels() *UserAccessTokenUpdate {
-	_u.mutation.ClearLabels()
-	return _u
-}
-
 // Mutation returns the UserAccessTokenMutation object of the builder.
 func (_u *UserAccessTokenUpdate) Mutation() *UserAccessTokenMutation {
 	return _u.mutation
@@ -309,14 +269,8 @@ func (_u *UserAccessTokenUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if _u.mutation.LastUsedCleared() {
 		_spec.ClearField(useraccesstoken.FieldLastUsed, field.TypeTime)
 	}
-	if value, ok := _u.mutation.Purpose(); ok {
-		_spec.SetField(useraccesstoken.FieldPurpose, field.TypeString, value)
-	}
 	if _u.mutation.PurposeCleared() {
 		_spec.ClearField(useraccesstoken.FieldPurpose, field.TypeString)
-	}
-	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(useraccesstoken.FieldLabels, field.TypeString, value)
 	}
 	if _u.mutation.LabelsCleared() {
 		_spec.ClearField(useraccesstoken.FieldLabels, field.TypeString)
@@ -479,46 +433,6 @@ func (_u *UserAccessTokenUpdateOne) ClearLastUsed() *UserAccessTokenUpdateOne {
 	return _u
 }
 
-// SetPurpose sets the "purpose" field.
-func (_u *UserAccessTokenUpdateOne) SetPurpose(v string) *UserAccessTokenUpdateOne {
-	_u.mutation.SetPurpose(v)
-	return _u
-}
-
-// SetNillablePurpose sets the "purpose" field if the given value is not nil.
-func (_u *UserAccessTokenUpdateOne) SetNillablePurpose(v *string) *UserAccessTokenUpdateOne {
-	if v != nil {
-		_u.SetPurpose(*v)
-	}
-	return _u
-}
-
-// ClearPurpose clears the value of the "purpose" field.
-func (_u *UserAccessTokenUpdateOne) ClearPurpose() *UserAccessTokenUpdateOne {
-	_u.mutation.ClearPurpose()
-	return _u
-}
-
-// SetLabels sets the "labels" field.
-func (_u *UserAccessTokenUpdateOne) SetLabels(v string) *UserAccessTokenUpdateOne {
-	_u.mutation.SetLabels(v)
-	return _u
-}
-
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_u *UserAccessTokenUpdateOne) SetNillableLabels(v *string) *UserAccessTokenUpdateOne {
-	if v != nil {
-		_u.SetLabels(*v)
-	}
-	return _u
-}
-
-// ClearLabels clears the value of the "labels" field.
-func (_u *UserAccessTokenUpdateOne) ClearLabels() *UserAccessTokenUpdateOne {
-	_u.mutation.ClearLabels()
-	return _u
-}
-
 // Mutation returns the UserAccessTokenMutation object of the builder.
 func (_u *UserAccessTokenUpdateOne) Mutation() *UserAccessTokenMutation {
 	return _u.mutation
@@ -651,14 +565,8 @@ func (_u *UserAccessTokenUpdateOne) sqlSave(ctx context.Context) (_node *UserAcc
 	if _u.mutation.LastUsedCleared() {
 		_spec.ClearField(useraccesstoken.FieldLastUsed, field.TypeTime)
 	}
-	if value, ok := _u.mutation.Purpose(); ok {
-		_spec.SetField(useraccesstoken.FieldPurpose, field.TypeString, value)
-	}
 	if _u.mutation.PurposeCleared() {
 		_spec.ClearField(useraccesstoken.FieldPurpose, field.TypeString)
-	}
-	if value, ok := _u.mutation.Labels(); ok {
-		_spec.SetField(useraccesstoken.FieldLabels, field.TypeString, value)
 	}
 	if _u.mutation.LabelsCleared() {
 		_spec.ClearField(useraccesstoken.FieldLabels, field.TypeString)

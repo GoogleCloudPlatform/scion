@@ -67,13 +67,18 @@ func (UserAccessToken) Fields() []ent.Field {
 
 		// E.1 descriptive credential metadata. Optional/Nillable additive
 		// columns: NULL means no metadata (always true for pre-E.1 rows).
-		// Immutable after issuance — there is no update path in E.1.
+		// Immutable() (review finding F9): ruling Q1 says these fields are
+		// immutable after issuance, and this makes the generated update
+		// builders enforce that at the store layer too, not just by
+		// convention in the service layer.
 		field.String("purpose").
 			Optional().
-			Nillable(),
+			Nillable().
+			Immutable(),
 		field.String("labels").
 			Optional().
-			Nillable(),
+			Nillable().
+			Immutable(),
 	}
 }
 
