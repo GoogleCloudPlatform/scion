@@ -292,7 +292,7 @@
             },
             {
               "timeUnixNano":  "0",
-              "observedTimeUnixNano":  "1790654368000000000",
+              "observedTimeUnixNano":  "1790656572493636995",
               "severityNumber":  9,
               "severityText":  "INFO",
               "eventName":  "event otel/src/events/session_telemetry.rs:1090",
@@ -318,7 +318,7 @@
                 {
                   "key":  "event.timestamp",
                   "value":  {
-                    "stringValue":  "2026-09-29T03:59:28.000Z"
+                    "stringValue":  "2026-09-29T04:36:12.493Z"
                   }
                 },
                 {

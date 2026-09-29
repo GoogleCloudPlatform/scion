@@ -137,8 +137,9 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 // this rule derives from: SSE frames of a model response, one of which is a
 // completed response carrying the turn's token usage (design §5).
 //
-// This rule does not gate on instrumentation scope. A local capture (below)
-// shows codex's real log-export scope name is "codex_otel.log_only" --
+// This rule does not gate on instrumentation scope. A local capture (see
+// loadCodexUsageFixture) shows codex's real log-export scope name is
+// "codex_otel.log_only" --
 // notably *not* the empty string opentelemetry-appender-tracing's
 // OpenTelemetryTracingBridge::new/::builder documents as its default
 // ("the default scope uses an empty scope name for the appender logger"),
@@ -199,10 +200,9 @@ const (
 // inclusive of cache hits, unlike Claude's exclusive counts); output =
 // output_token_count; cache_read = cached_token_count; reasoning =
 // reasoning_token_count, informational only. cache_write_token_count exists
-// in the source but has no mapping in design §5's codex row, so it is read
-// from neither this rule nor emitted as a token_type; tool_token_count (the
-// turn total) is likewise not part of the canonical contract and is
-// ignored.
+// in the source but has no mapping in design §5's codex row, so this rule
+// neither reads it nor emits it as a token_type; tool_token_count (the turn
+// total) is likewise not part of the canonical contract and is ignored.
 type codexUsageRule struct{}
 
 func (codexUsageRule) Harness() string { return "codex" }

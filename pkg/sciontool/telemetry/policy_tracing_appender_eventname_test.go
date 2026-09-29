@@ -17,13 +17,12 @@ import (
 // tracing::event! with no explicit name: field, and codex-rs's
 // log_event!/log_and_trace_event! macros never set one, so every real
 // codex log record's EventName is this callsite default -- alongside the
-// real event name carried separately as an event.name attribute. Before
-// this fix, normalizedLogEventName treated that pairing as
-// "conflicting event name representations" and rejected the whole batch,
-// so codex's native logs (and this project's usage derivation) never
-// worked at all. See usage.go's codexUsageRule and
-// TestPipelineDerivesCodexUsageThroughValidation in usage_codex_test.go
-// for the end-to-end consequence.
+// real event name carried separately as an event.name attribute. Without
+// this exemption, normalizedLogEventName treats that pairing as
+// "conflicting event name representations" and rejects the whole batch,
+// so every codex native log record (not just usage) is dropped. See
+// usage.go's codexUsageRule and TestPipelineDerivesCodexUsageThroughValidation
+// in usage_codex_test.go for the end-to-end consequence.
 
 // TestNormalizedLogEventName_AcceptsCallsiteDefaultWithAttribute is the
 // accept case: a tracing-appender callsite EventName alongside a real

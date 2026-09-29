@@ -50,9 +50,11 @@ const codexUsageFixturePath = "testdata/usage/codex-0.158.0.pb.json"
 // response.created frame and a response.output_item.done frame were
 // emitted too but are omitted here, since the rule ignores every
 // event.kind other than the two included ones. Every other attribute key,
-// value type (stringValue vs intValue), the scope name, and (for the
-// failure record) the error.message text are exactly what the capture
-// produced.
+// value type (stringValue vs intValue), the scope name, and every
+// record's observedTimeUnixNano/event.timestamp are exactly what the
+// capture produced (verified by diffing each fixture record against its
+// raw captured record: the only differences are the scrubbing and
+// substitutions listed above).
 //
 // See codexUsageRule's doc comment for which emitter each record models
 // and why. Every record's LogRecord.EventName is the literal
@@ -179,12 +181,13 @@ func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleExcludesPerFrameMarker pins: sse_event() emits a
-// record with the same event.name/event.kind as sse_event_completed for
-// every SSE frame, including a plain "response.completed" frame with no
-// usage attached yet. Matching it as a second, zero-token call would
-// double-count one model response as two calls. The discriminator is
-// duration_ms, which only the per-frame emitter ever sets.
+// TestCodexUsageRuleExcludesPerFrameMarker pins that the per-frame marker
+// is excluded: sse_event() emits a record with the same event.name/
+// event.kind as sse_event_completed for every SSE frame, including a
+// plain "response.completed" frame with no usage attached yet. Matching
+// it as a second, zero-token call would double-count one model response
+// as two calls. The discriminator is duration_ms, which only the
+// per-frame emitter ever sets.
 func TestCodexUsageRuleExcludesPerFrameMarker(t *testing.T) {
 	record := codexFixtureRecordByEventNameAndKind(t, codexFixtureSseEventCallsite, codexUsageEventKind)
 	if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
@@ -192,7 +195,7 @@ func TestCodexUsageRuleExcludesPerFrameMarker(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleMapsFailedResponseToError pins:
+// TestCodexUsageRuleMapsFailedResponseToError pins that
 // see_event_completed_failed reports a failed request (a transport or API
 // error client.rs's map_api_error produced), mirroring the Claude rule's
 // api_error arm -- Calls=1, Status=error, no tokens, and not malformed (a
@@ -239,7 +242,7 @@ func TestCodexUsageRuleIgnoresUnrelatedEvents(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleScopeIsNotReliedOn pins: the rule does not gate on
+// TestCodexUsageRuleScopeIsNotReliedOn pins that the rule does not gate on
 // instrumentation scope (unlike Claude's, which does). An arbitrary,
 // non-empty scope name must not stop a real match.
 func TestCodexUsageRuleScopeIsNotReliedOn(t *testing.T) {
