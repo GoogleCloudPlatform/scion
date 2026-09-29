@@ -243,7 +243,8 @@ func TestOpencodeDialectFixtureDrivesCanonicalUsage(t *testing.T) {
 // every other hook signal (tool calls, sessions) still is.
 func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
 	t.Setenv("SCION_HARNESS", "opencode")
-	// Deliberately not setting SCION_USAGE_SOURCE.
+	// An empty value is treated as unset.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	md := loadOpencodeDialect(t)
 	records := loadOpencodeHookPayloadFixture(t)
