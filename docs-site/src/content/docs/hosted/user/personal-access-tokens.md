@@ -34,16 +34,16 @@ permissions). Available scopes:
 |-------|--------|
 | `project:read` | Read project metadata |
 | `project:update` | Update project settings, configurations, and annotations |
+| `project:manage` | Manage project administration (membership operations) |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
 | `agent:lifecycle` | Start, stop, suspend, restart, restore, and reincarnate agents |
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
-| `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) |
-| `agent:dispatch` | Dispatch agents (create + start) |
+| `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants |
 | `agent:manage` | All agent scopes except `agent:attach` and `agent:port_access` (convenience alias) |
-| `project:manage` | All project scopes (convenience alias) |
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
@@ -53,6 +53,39 @@ curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
      https://scion.example.com/api/v1/auth/scopes
 ```
 
+### Scopes are restrictions, not grants
+
+Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
+access to anything. Whether a request actually succeeds is still checked against your current
+authority on the specific target, every time the token is used.
+
+This matters most for `agent:attach` and `agent:port_access`: you may select either scope for a
+project before you have created a single agent in it. The token gains no access from selection
+alone — each later attach or port request is independently checked against the specific agent,
+and succeeds only for your own agents and their descendants. Losing project access (for example,
+being removed from the project) makes every request against that project fail immediately, even
+though the token itself is still otherwise valid.
+
+### Checking what you can select
+
+Before minting a token, you can ask which scopes you are currently eligible to select for a given
+project, and why a particular scope is not available to you:
+
+```bash
+scion hub token scopes --project my-project
+```
+
+Or via the API:
+```bash
+curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
+     "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
+```
+
+This answers only "may I select this restriction" — it never lists which agents or other targets
+the resulting token could reach. If you request eligibility for a project you cannot access, or
+one that does not exist, the request is denied identically in both cases, so the response cannot
+be used to discover whether a given project ID exists.
+
 ## Creating a token
 
 Generate a new token with the Scion CLI:
@@ -61,7 +94,7 @@ Generate a new token with the Scion CLI:
 scion hub token create \
   --project my-project \
   --name "github-actions" \
-  --scopes agent:dispatch,agent:read,agent:stop \
+  --scopes agent:create,agent:read,agent:attach \
   --expires 90d
 ```
 
@@ -71,7 +104,9 @@ scion hub token create \
 - `--expires` — a duration (`30d`, `90d`, `1y`) or an RFC 3339 date
   (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
 
-The command prints the token value **once**. Store it securely — it cannot be retrieved later.
+The command prints the token value **once**. Store it securely — it cannot be retrieved later. If
+a requested scope is denied, the error names the scope and the reason; run `scion hub token
+scopes --project <project>` to see the full picture before retrying.
 
 ## Using a token
 
