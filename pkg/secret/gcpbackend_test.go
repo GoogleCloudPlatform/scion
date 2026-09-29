@@ -2498,3 +2498,236 @@ func TestSPREV4_ABABetweenGCPWriteAndCASRevertsOldBinaryRotation(t *testing.T) {
 		t.Errorf("BUG: ref-only CAS applied after a same-ref Version bump; hub now serves %q, want %q", sv.Value, "v2-old-binary")
 	}
 }
+
+// =============================================================================
+// Round 5 review regression tests (ptone/scion#2152 PR 2171, sp-rev-5.md)
+// =============================================================================
+
+// TestSPREV5_CASRefusedAfterWriteReportsConflictNotSilence reproduces round-5
+// review finding 2, adapted: the round-4 doc claimed the residual window
+// left a value stale only "briefly" and that a concurrent write was "never
+// silently overwritten". Neither was true — a concurrent new-binary Set()
+// whose GCP write lands on the prefixed name, and whose DB upsert lands
+// between this attempt's own AddSecretVersion and its CAS, causes this
+// attempt's CAS to refuse *after* it already wrote a (now stale) version.
+// Before the round-5 fix, the outer retry loop would then see
+// rec.SecretRef == prefixedRef and silently return ("", nil) — nothing
+// logged, nothing returned, the hub permanently serving the wrong value.
+// This test pins the fixed behavior: that exact interleaving is reported as
+// ErrConflictingWrite with a WARN log carrying the secret's identity (no
+// value, no full GCP path), not silence.
+func TestSPREV5_CASRefusedAfterWriteReportsConflictNotSilence(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	rec := &recordingHandler{}
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	defer slog.SetDefault(origLogger)
+
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	prefixedRef := "gcpsm:" + prefixedFull
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-conflict"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before the prefixed read (2nd AccessSecretVersion): a new-binary
+	// Set()'s GCP half lands (container + v2).
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() {
+		seedMockSecret(t, mock, backend.projectID, prefixedName, "v2-new-binary-set")
+	}
+	// After our AddSecretVersion on the prefixed name: the Set's DB half
+	// lands, repointing the ref and bumping Version.
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+			Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: prefixedRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	composite := &sprev5CompositeSMClient{mockSMClient: mock, access: race, add: hooked}
+	raceBackend := NewGCPBackendWithClient(backend.store, composite, backend.projectID, backend.hubID)
+
+	action, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	if !errors.Is(err, ErrConflictingWrite) {
+		t.Fatalf("expected ErrConflictingWrite, got action=%q err=%v", action, err)
+	}
+	if action != "" {
+		t.Errorf("expected no claimed action when reporting a conflict, got %q", action)
+	}
+
+	if !rec.hasWarnContaining("lost a race") {
+		t.Error("expected a WARN log about the lost race, none found")
+	}
+	rec.mu.Lock()
+	for _, r := range rec.records {
+		if r.Level != slog.LevelWarn {
+			continue
+		}
+		var msg string
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "name" || a.Key == "scope" || a.Key == "scope_id" {
+				msg += a.Key + "=" + a.Value.String() + " "
+			}
+			// No secret value or full GCP resource path should be logged.
+			if strings.Contains(a.Value.String(), "v1") || strings.Contains(a.Value.String(), "v2-new-binary-set") {
+				t.Errorf("WARN log attribute %s=%q leaks a secret value", a.Key, a.Value.String())
+			}
+			if strings.Contains(a.Value.String(), "projects/") {
+				t.Errorf("WARN log attribute %s=%q leaks a full GCP resource path", a.Key, a.Value.String())
+			}
+			return true
+		})
+		if !strings.Contains(msg, "name=API_KEY") {
+			t.Errorf("expected the WARN log to carry the secret's identity, got attrs: %s", msg)
+		}
+	}
+	rec.mu.Unlock()
+}
+
+// sprev5CompositeSMClient composes independent hooks on AccessSecretVersion
+// and AddSecretVersion so a single interleaving can inject a concurrent
+// event at two different points in planOrRepairRefAttempt's read/write
+// sequence.
+type sprev5CompositeSMClient struct {
+	*mockSMClient
+	access *onceAtCallAccessSMClient
+	add    *addHookSMClient
+}
+
+func (c *sprev5CompositeSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	return c.access.AccessSecretVersion(ctx, req)
+}
+
+func (c *sprev5CompositeSMClient) AddSecretVersion(ctx context.Context, req *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
+	return c.add.AddSecretVersion(ctx, req)
+}
+
+// TestSPREV5_DeleteLegacySecretName_OrphanIsNotAFailure reproduces round-5
+// review finding 1 (a round-4 regression): canDeleteLegacyName refused
+// before ever reading the legacy name once hasRecord && !refIsPrefixed held,
+// so an ORPHAN record (a stored ref whose target is gone) could never pass
+// --delete-legacy, in either mode, forever.
+func TestSPREV5_DeleteLegacySecretName_OrphanIsNotAFailure(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	orphanedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, "scion-deadbeefcafe-user-aaaaaaaaaaaa-GONE")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-orphan-secret"), Key: "GONE", Scope: ScopeUser, ScopeID: "user-1", SecretRef: orphanedRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	planned, err := backend.PlanLegacyDeletion(ctx, "GONE", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("expected no error for an ORPHAN record (nothing to delete), got: %v", err)
+	}
+	if planned {
+		t.Error("expected nothing to delete for an ORPHAN record")
+	}
+
+	if err := backend.DeleteLegacySecretName(ctx, "GONE", ScopeUser, "user-1"); err != nil {
+		t.Errorf("expected DeleteLegacySecretName to succeed as a no-op for an ORPHAN record, got: %v", err)
+	}
+}
+
+// TestSPREV5_DeleteLegacySecretName_NoRefNoValueIsNotAFailure is the
+// no-ref/no-legacy-value counterpart of the ORPHAN case above.
+func TestSPREV5_DeleteLegacySecretName_NoRefNoValueIsNotAFailure(t *testing.T) {
+	backend, _ := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-noref-secret"), Key: "GHOST", Scope: ScopeUser, ScopeID: "user-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	planned, err := backend.PlanLegacyDeletion(ctx, "GHOST", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("expected no error for a no-ref/no-value record, got: %v", err)
+	}
+	if planned {
+		t.Error("expected nothing to delete for a no-ref/no-value record")
+	}
+}
+
+// TestSPREV5_DeleteLegacySecretName_PermissionDeniedOnUnrepairedRecordStillFatal
+// pins that the classifier arm the round-4 reorder made unreachable
+// (PermissionDenied on the legacy name for a genuinely unmigrated record) is
+// reachable again after the round-5 fix restores the legacy-read-first order.
+func TestSPREV5_DeleteLegacySecretName_PermissionDeniedOnUnrepairedRecordStillFatal(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("K", ScopeUser, "u1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v")
+	legacyRef := "gcpsm:" + legacyFull
+	if err := backend.store.CreateSecret(ctx, &store.Secret{ID: tid("sprev5-denied-unrepaired"), Key: "K", Scope: ScopeUser, ScopeID: "u1", SecretRef: legacyRef}); err != nil {
+		t.Fatal(err)
+	}
+	denyBackend := NewGCPBackendWithClient(backend.store, &denyAccessSMClient{mockSMClient: mock, denyName: legacyFull}, "test-project", "test-hub-id")
+
+	_, err := denyBackend.PlanLegacyDeletion(ctx, "K", ScopeUser, "u1")
+	if err == nil {
+		t.Error("expected PermissionDenied on an unrepaired record's legacy name to remain fatal")
+	}
+}
+
+// TestSPREV5_CopyHubSecretForward_ReportsConflictNotSilence is the hub-boot
+// copy-forward counterpart of TestSPREV5_CASRefusedAfterWriteReportsConflictNotSilence:
+// CopyHubSecretForward (called from ensureSigningKey and
+// OIDCKeyManager.loadOrCreateKey) is a thin wrapper over RepairRefToPrefixed
+// for a hub-scope key with an existing DB record, so the same
+// CAS-refused-after-write interleaving must surface through it the same way
+// -- as a returned ErrConflictingWrite, which its callers already WARN-log
+// (see ensureSigningKey's "Failed to copy hub signing key forward" WARN,
+// which fires on any non-ErrNotFound error) -- not swallowed as a plain
+// success.
+func TestSPREV5_CopyHubSecretForward_ReportsConflictNotSilence(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	const keyName = "user_signing_key"
+	legacyName := backend.legacyGCPSecretName(keyName, store.ScopeHub, backend.hubID)
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	prefixedName := backend.gcpSecretName(keyName, store.ScopeHub, backend.hubID)
+	prefixedFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	prefixedRef := "gcpsm:" + prefixedFull
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev5-copyforward-conflict"), Key: keyName, Scope: store.ScopeHub, ScopeID: backend.hubID, SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() {
+		seedMockSecret(t, mock, backend.projectID, prefixedName, "v2-new-binary-set")
+	}
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+			Key: keyName, Scope: store.ScopeHub, ScopeID: backend.hubID, SecretRef: prefixedRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	composite := &sprev5CompositeSMClient{mockSMClient: mock, access: race, add: hooked}
+	raceBackend := NewGCPBackendWithClient(backend.store, composite, backend.projectID, backend.hubID)
+
+	err := raceBackend.CopyHubSecretForward(ctx, keyName)
+	if !errors.Is(err, ErrConflictingWrite) {
+		t.Errorf("expected CopyHubSecretForward to return ErrConflictingWrite, got: %v", err)
+	}
+}

@@ -1022,14 +1022,24 @@ func (b *GCPBackend) PlanLegacyDeletion(ctx context.Context, name, scope, scopeI
 // problem for this record), and a non-nil error when deletion would be
 // unsafe or a check failed for a reason that must be surfaced.
 //
-// The DB-ref check runs *before* interpreting the legacy read, because
-// whether a PermissionDenied/FailedPrecondition on the legacy name is fatal
-// depends on it (ptone/scion#2152 round-4 review finding 2 — see
-// legacyReadErrIsFatal): a record whose ref already designates the prefixed
-// name, or one with no DB record at all, has nothing further riding on being
-// able to read the legacy name, so an unreadable legacy name there is
-// "nothing to delete", not a failure. Only a record whose ref is not yet the
-// prefixed name keeps that unconditionally fatal (round-2 finding 3).
+// The legacy read runs *before* the "not yet repaired" refusal, and its
+// error (if any) is classified by legacyReadErrIsFatal, which already knows
+// how to weigh hasRecord/refIsPrefixed (ptone/scion#2152 round-5 review
+// finding 1, a regression from round 4's reordering): an ORPHAN record (a
+// stored ref whose target is gone) or one with no ref and no legacy value
+// either has nothing accessible under the legacy name at all, so
+// legacyReadErrIsFatal(NotFound, ...) correctly says "nothing to delete" —
+// but only if that NotFound is actually observed, which requires reading the
+// legacy name first. Refusing "not yet repaired" before checking whether the
+// legacy name even has anything to protect made that refusal permanent and
+// unconditional for exactly the records ptone/scion#2152 round-3/4 review
+// findings 4 and the ORPHAN classification exist to let through. The refusal
+// still fires — now correctly gated on the legacy read having found a real,
+// live value only a repair could safely supersede — for a genuinely
+// unmigrated record whose only copy is the legacy one, and
+// legacyReadErrIsFatal's PermissionDenied-when-unrepaired arm (round-2
+// finding 3) is what makes an unreadable legacy name fatal in that specific
+// case.
 func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scopeID string) (bool, error) {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
@@ -1039,9 +1049,6 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 	if err != nil {
 		return false, fmt.Errorf("failed to check DB record before deleting legacy secret %s: %w", legacyFull, err)
 	}
-	if hasRecord && !refIsPrefixed {
-		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
-	}
 
 	legacyValue, err := b.accessLatestVersion(ctx, legacyName)
 	if err != nil {
@@ -1049,6 +1056,14 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 			return false, fmt.Errorf("failed to read legacy secret %s: %w", legacyFull, err)
 		}
 		return false, nil
+	}
+
+	// The legacy name is readable, so there is a real value that deleting it
+	// would destroy. Only now does an unrepaired ref matter: an ORPHAN or
+	// no-ref record never reaches this line, since its legacy read above
+	// returned NotFound.
+	if hasRecord && !refIsPrefixed {
+		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
 	}
 
 	if hasRecord && refIsPrefixed {
@@ -1087,6 +1102,18 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 // to an operator, rather than a silent no-op or a hard failure — there is
 // nothing for it to copy.
 var ErrOrphanedRef = errors.New("secret record's SecretRef designates no accessible GCP SM value")
+
+// ErrConflictingWrite indicates that planOrRepairRef wrote a version to the
+// prefixed name during this attempt, but the subsequent ref-update CAS then
+// found the record's (SecretRef, Version) had already changed — a
+// concurrent writer's ref update won the race after this attempt's write
+// landed (ptone/scion#2152 round-5 review finding 2). The prefixed name's
+// latest version may now be the value this attempt just wrote rather than
+// the concurrent writer's, with no cheap, mechanism-free way to tell which;
+// this is surfaced rather than retried so an operator can verify or re-set
+// the secret. See planOrRepairRefAttempt's CAS-refused-after-write handling
+// and .design/secret-id-hub-refactor.md §7 for the full explanation.
+var ErrConflictingWrite = errors.New("a concurrent write to the prefixed secret was detected after this attempt already wrote a version to it; verify or re-set the secret")
 
 // maxPlanOrRepairRefAttempts bounds the retry loop in planOrRepairRef (see
 // its doc comment for why a retry is needed at all).
@@ -1142,21 +1169,38 @@ const (
 // same (SecretRef, Version) pair, not the ref alone, so a rotation landing
 // during the labels/AddSecretVersion RPCs between the recheck and the CAS is
 // caught too: the version predicate fails to match and the CAS reports
-// applied=false. Either detection discards the whole attempt and retries
-// with fresh reads, up to maxPlanOrRepairRefAttempts times, then fails loudly
-// for that secret rather than clobbering silently.
+// applied=false. When that happens and this attempt had NOT yet written to
+// the prefixed name (the RefRepairRepaired path), it's cheap to just retry
+// with fresh reads. When this attempt HAD already written a version to the
+// prefixed name before the CAS refused, a plain retry would instead read the
+// concurrent writer's now-current ref and conclude "nothing to do" — see the
+// residual-window paragraph below for why that's the wrong thing to do
+// silently. That specific case is reported as ErrConflictingWrite (logged at
+// WARN, ptone/scion#2152 round-5 review finding 2) instead of retried, up to
+// maxPlanOrRepairRefAttempts times for every other case.
 //
 // What this does and does not guarantee, precisely: any concurrent write
 // that is visible in the DB row (a changed SecretRef, or a changed Version
 // from any UpsertSecret — including a same-ref old-binary rotation) by the
-// time of the recheck or the CAS is detected and never silently overwritten.
-// The residual window is narrower, not zero: a concurrent writer whose own
-// AddSecretVersion lands on the *prefixed* name itself between our final
-// recheck and our own AddSecretVersion call can still leave our (already
-// stale) version as latest for a moment, even though the version-aware CAS
-// then correctly refuses to move the ref onto it. In this codebase only a
-// new-binary Set() writes the prefixed name directly, so this window is
-// narrow; see .design/secret-id-hub-refactor.md #7 for the full statement.
+// time of the recheck or the CAS is detected, and the ref is never
+// repointed onto a value this attempt didn't itself confirm — the ref-CAS
+// failing IS that detection and is never silent (see ErrConflictingWrite
+// above). What is NOT prevented, and IS silent at the GCP SM layer itself
+// (ptone/scion#2152 round-5 review finding 2 — round-3/4 understated this as
+// "brief"): GCP Secret Manager has no compare-and-swap on AddSecretVersion,
+// so if a concurrent writer's own AddSecretVersion to the *prefixed* name
+// lands at any point before this attempt's AddSecretVersion call — even
+// before this attempt's very first read — this attempt's (now-stale) value
+// can still become the prefixed name's latest version, silently, at the GCP
+// SM layer, regardless of what the DB-level CAS above does afterward. The
+// DB-level detection still fires in that case (this is exactly when
+// ErrConflictingWrite is returned instead of silently retrying), so the
+// operator IS told to verify or re-set the secret — but the stale GCP SM
+// value itself is not automatically corrected, and persists until the key
+// is next written. In this codebase only a new-binary Set() writes the
+// prefixed name directly, so this interleaving requires exactly that kind of
+// concurrent write; see .design/secret-id-hub-refactor.md #7 for the full
+// statement.
 //
 // Returns:
 //   - ("", nil) if there is nothing to do: no DB record, the ref already
@@ -1301,10 +1345,27 @@ func (b *GCPBackend) planOrRepairRefAttempt(ctx context.Context, name, scope, sc
 		return "", false, fmt.Errorf("failed to update DB ref: %w", err)
 	}
 	if !applied {
-		// The record's ref or Version changed concurrently between our
-		// recheck above and this CAS call (or, for a same-ref rotation, the
-		// version predicate alone caught it): retry with fresh reads rather
-		// than claiming an action that may already be stale.
+		if action != RefRepairRepaired {
+			// We already wrote a version to the prefixed name this attempt,
+			// and the CAS then found the ref/Version had moved: a concurrent
+			// writer's ref update won the race after our write landed. A
+			// plain retry would now read rec.SecretRef == prefixedRef and
+			// return "nothing to do", silently accepting whatever the
+			// prefixed name's latest version happens to be — which may be
+			// the stale value we just wrote, permanently, with nobody told
+			// (ptone/scion#2152 round-5 review finding 2). Report it instead
+			// of retrying: this can't be resolved automatically without a
+			// mechanism this fix deliberately doesn't add, so it's surfaced
+			// for a human to verify or re-set the secret. No secret value or
+			// full GCP resource path is logged, only the scion identity.
+			slog.Warn("secret ref update lost a race after this attempt already wrote a version to the prefixed name; its latest version may be stale and needs manual verification",
+				"name", name, "scope", scope, "scope_id", scopeID)
+			return "", false, ErrConflictingWrite
+		}
+		// The repaired path performs no GCP write, so a lost race here just
+		// means someone else already made some change first: retry with
+		// fresh reads rather than claiming an action that may already be
+		// stale.
 		return "", true, nil
 	}
 	return action, false, nil
