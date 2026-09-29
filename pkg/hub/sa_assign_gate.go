@@ -312,11 +312,12 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 	}
 }
 
-// saAssignGenericForbiddenMsg is the response for every SA-assign policy
-// denial that has no more specific diagnosis — ordinary policy denials, a
-// ceiling store fault (DenyCauseCeilingError), and the no-authz-service
-// guard. It must stay byte-identical: it predates DenyCause and callers may
-// already match on it.
+// saAssignGenericForbiddenMsg is the response for every SA-assign denial that
+// has no more specific diagnosis. That spans both layers: Layer 1 (Hub
+// policy) uses it for ordinary policy denials, a ceiling store fault
+// (DenyCauseCeilingError), and the no-authz-service guard; Layer 2 (GCP
+// actAs) uses it when the caller principal cannot be resolved. It must stay
+// byte-identical: it predates DenyCause and callers may already match on it.
 const saAssignGenericForbiddenMsg = "You don't have permission to assign this GCP service account"
 
 // saAssignForbiddenMessage maps a Decision.DenyCause to the 403 body Layer 1
@@ -407,7 +408,7 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if err != nil {
 		logAuthzDenial(r, identity, resource, ActionAssign, "caller principal: "+err.Error())
 		return &saAssignDenial{kind: saAssignDenyForbidden,
-			msg: "You don't have permission to assign this GCP service account"}
+			msg: saAssignGenericForbiddenMsg}
 	}
 
 	// The decision sequence — same-account propagation, no-GCP-identity denial,

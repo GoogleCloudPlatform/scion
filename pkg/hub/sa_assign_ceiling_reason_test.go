@@ -56,7 +56,11 @@ func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServic
 	return sa
 }
 
-const scaGenericDenyMsg = saAssignGenericForbiddenMsg
+// scaGenericDenyMsg is the literal generic 403 body, deliberately not a
+// reference to saAssignGenericForbiddenMsg: tests that compare against this
+// constant must fail if the production constant's value ever drifts, not
+// just if it disappears.
+const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
 
 // TestEvaluateSAAssignment_CeilingOrphanedDelegator covers the case that
 // motivated the issue: the agent's delegator (its creator, here a user) no
@@ -132,6 +136,58 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 		denial.msg)
 	assert.NotContains(t, denial.msg, delegatorID, "the 403 body must not name the delegator's ID")
 	assert.NotContains(t, denial.msg, agentID, "the 403 body must not name the agent's ID")
+}
+
+// TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission covers the
+// agent-delegator twin of TestEvaluateSAAssignment_CeilingDelegatorLacksPermission:
+// the immediate delegator is itself an agent (not a user) whose recorded role
+// no longer carries the scope that maps to gcp_service_account.assign.
+//
+// Chain: user U (exists, holds project:agent:create) -> agent A (role
+// readonly, so it lacks the agent-create scope) -> agent B (role full). B
+// requests the SA assignment. Layer 0 allows via B's own agent-jwt-scope
+// synthetic binding; Step 10 walks the chain, finds A holds the permission
+// but recurses no further because the check on A itself already fails, and
+// denies with DenyCauseCeilingDelegatorLacksPermission before ever resolving
+// U. This exercises the agent branch of that check, the twin of the
+// user-delegator branch the sibling test above covers.
+func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("sca-agentlacks-proj")
+	userID := tid("sca-agentlacks-user")
+	agentAID := tid("sca-agentlacks-agent-a")
+	agentBID := tid("sca-agentlacks-agent-b")
+
+	createDCProject(t, s, projectID, "sca-agentlacks-project")
+	createDCUser(t, s, userID, "sca-agentlacks-user@example.com", projectID, store.ProjectRoleOwner)
+	assertNotSystemAdmin(t, srv.authzService, ctx, userID)
+	createDCAgent(t, s, agentAID, projectID, userID, AgentRoleReadOnly)
+	createDCAgent(t, s, agentBID, projectID, agentAID, AgentRoleFull)
+	sa := scaCreateSA(t, s, projectID)
+
+	createDCEdge(t, s, store.DelegationPrincipalUser, userID,
+		store.DelegationPrincipalAgent, agentAID,
+		store.RoleScopeProject, projectID, string(AgentRoleReadOnly))
+	createDCEdge(t, s, store.DelegationPrincipalAgent, agentAID,
+		store.DelegationPrincipalAgent, agentBID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+
+	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
+	agentBCtx := contextWithIdentity(ctx, agentB)
+
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	require.NotNil(t, denial, "an agent delegator that lacks the permission must deny the assignment")
+	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
+	assert.Equal(t,
+		"This agent cannot assign service accounts: a principal in its delegation chain "+
+			"(the user or agent that created it, or one of their creators) does not hold permission "+
+			"to assign this service account.",
+		denial.msg)
+	assert.NotContains(t, denial.msg, userID, "the 403 body must not name the grandparent user's ID")
+	assert.NotContains(t, denial.msg, agentAID, "the 403 body must not name the delegator agent's ID")
+	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
 }
 
 // TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage pins that a
@@ -219,11 +275,11 @@ func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
 		"a genuine store fault must classify as ceiling_error, not orphaned or lacks-permission")
 }
 
-// TestSAAssignForbiddenMessage_AllCauses is the table test finding 4 asked
-// for: it drives saAssignForbiddenMessage (the helper evaluateSAAssignment's
-// Layer 1 calls) directly with every DenyCause value, including one no
-// constant names, rather than relying on the switch's default case being
-// exercised only implicitly through the ceiling_error store-fault test above.
+// TestSAAssignForbiddenMessage_AllCauses drives saAssignForbiddenMessage (the
+// helper evaluateSAAssignment's Layer 1 calls) directly with every DenyCause
+// value, including one no constant names, rather than relying on the
+// switch's default case being exercised only implicitly through the
+// ceiling_error store-fault test above.
 func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -268,19 +324,19 @@ func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
 	}
 }
 
-// TestEvaluateSAAssignment_CeilingOrphanedGrandparent covers finding 5 and
-// pins finding 1's fix: an agent created by an agent, where the FAILING link
-// is the grandparent (a user), not the agent's immediate creator.
+// TestEvaluateSAAssignment_CeilingOrphanedGrandparent covers an agent created
+// by an agent, where the FAILING link is the grandparent (a user), not the
+// agent's immediate creator.
 //
 // Chain: user U (never created — orphaned) -> agent A (holds
 // project:agent:create) -> agent B. B requests the SA assignment. Layer 0
 // allows via B's own agent-jwt-scope synthetic binding; Step 10 walks the
 // chain: B's delegator A still holds the permission, so the walk recurses
 // into A's own chain, finds A's delegator U does not resolve, and denies the
-// mint with DenyCauseCeilingOrphaned — propagated back through B's result
-// (authz_delegation_ceiling.go:368, the cause pointer threaded through the
-// recursive call). Before finding 1's fix, the message would have wrongly
-// named B's immediate creator (A, which exists) as the missing principal.
+// mint with DenyCauseCeilingOrphaned — propagated back through B's result via
+// the cause pointer threaded through walkDelegationChain's recursive call.
+// The message must not name B's immediate creator (A, which exists) as the
+// missing principal — it names the delegation chain generically instead.
 func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
