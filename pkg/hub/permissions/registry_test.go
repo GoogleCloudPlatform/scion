@@ -273,6 +273,44 @@ func TestSelectorAllowedBoundaries_AliasIsIntersectionOfMembers(t *testing.T) {
 	}
 }
 
+// TestResolveSelector_ReturnsIndependentCopy proves ResolveSelector's
+// PermissionIDs/AllowedBoundaries are copies, not aliases of the
+// process-wide cached selectorRegistry: mutating the returned slices (and
+// appending to them) must not affect what a later, independent call to
+// ResolveSelector for the same selector returns.
+func TestResolveSelector_ReturnsIndependentCopy(t *testing.T) {
+	m1, ok := ResolveSelector("agent:manage")
+	if !ok {
+		t.Fatal("expected agent:manage to resolve")
+	}
+	if len(m1.PermissionIDs) < 2 || len(m1.AllowedBoundaries) < 1 {
+		t.Fatalf("test assumption broken: agent:manage needs at least 2 PermissionIDs and 1 AllowedBoundaries entry, got %+v", m1)
+	}
+
+	// Mutate in place and append -- if ResolveSelector returned aliases of
+	// the cached map's backing arrays, this would corrupt them for every
+	// later caller.
+	m1.PermissionIDs[0] = "corrupted.permission.id"
+	m1.AllowedBoundaries[0] = BoundaryKind("corrupted-boundary")
+	m1.PermissionIDs = append(m1.PermissionIDs, "appended.permission.id")
+	m1.AllowedBoundaries = append(m1.AllowedBoundaries, BoundaryKind("appended-boundary"))
+
+	m2, ok := ResolveSelector("agent:manage")
+	if !ok {
+		t.Fatal("expected agent:manage to resolve on the second call")
+	}
+	for _, id := range m2.PermissionIDs {
+		if id == "corrupted.permission.id" || id == "appended.permission.id" {
+			t.Errorf("a mutation of the first call's PermissionIDs leaked into a later call: %v", m2.PermissionIDs)
+		}
+	}
+	for _, b := range m2.AllowedBoundaries {
+		if b == BoundaryKind("corrupted-boundary") || b == BoundaryKind("appended-boundary") {
+			t.Errorf("a mutation of the first call's AllowedBoundaries leaked into a later call: %v", m2.AllowedBoundaries)
+		}
+	}
+}
+
 // TestMintEligibilityRegistry_AttachAndPortAccess pins the reviewed
 // disposition #2092 depends on: agent.attach and agent.port_access are
 // mintable before any target exists, via a relationship source only (no

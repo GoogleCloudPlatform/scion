@@ -77,9 +77,9 @@ func decodeErrorCode(t *testing.T, body []byte) string {
 // authenticated, authorized, non-upgrade request against an agent with no
 // runtime broker configured (422 ErrCodeNoRuntimeBroker) — a status/code
 // pair which a GET on this path only produces when it reaches the PTY
-// handler. The old /attach pattern is no
-// longer a recognized agent sub-action at all and falls through to the
-// generic, POST-only action dispatcher (405 for GET).
+// handler. The /attach pattern is not a recognized agent sub-action; it
+// falls through to the generic, POST-only action dispatcher (405 for
+// GET).
 func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -101,7 +101,7 @@ func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 		t.Errorf("GET %s: error code = %q, want %q", path, code, ErrCodeNoRuntimeBroker)
 	}
 
-	// The old /attach pattern is not one of handleAgentByID's recognized
+	// The /attach pattern is not one of handleAgentByID's recognized
 	// sub-resources (deliberately NOT read from the catalog -- this proves
 	// the absence of a catalog entry for it), so it falls through to
 	// handleAgentAction, which is POST-only and returns 405 for GET -- the

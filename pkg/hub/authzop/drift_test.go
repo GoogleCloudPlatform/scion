@@ -33,12 +33,12 @@ func TestAgentAttachCatalogMatchesRoute(t *testing.T) {
 	}
 }
 
-// TestAgentAttachCatalogDoesNotMatchOldPattern pins the other direction of
+// TestAgentAttachCatalogRejectsAttachPattern pins the other direction of
 // the same rule: the catalog pattern must match the registered route, so
-// if the discovered route were the "/attach" pattern instead of "/pty",
-// the live/catalog comparison must report a mismatch rather than silently
+// if the discovered route were "/attach" instead of "/pty", the
+// live/catalog comparison must report a mismatch rather than silently
 // agreeing.
-func TestAgentAttachCatalogDoesNotMatchOldPattern(t *testing.T) {
+func TestAgentAttachCatalogRejectsAttachPattern(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
 		"agent.attach": {
 			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/attach", Method: "GET"},
@@ -46,7 +46,7 @@ func TestAgentAttachCatalogDoesNotMatchOldPattern(t *testing.T) {
 	}
 	findings := CheckDrift(discovered)
 	if len(findings) != 1 {
-		t.Fatalf("expected exactly one drift finding for a stale /attach pattern, got %+v", findings)
+		t.Fatalf("expected exactly one drift finding for the /attach pattern, got %+v", findings)
 	}
 	if findings[0].Kind != DriftPatternMismatch {
 		t.Errorf("expected DriftPatternMismatch, got %v", findings[0].Kind)

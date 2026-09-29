@@ -1171,8 +1171,13 @@ type projectAdmissionCacheKey struct {
 // ProjectAdmissionCache is an optional request-scoped memo shared across
 // multiple ProjectTargetAdmission calls in one request (e.g. B.2's
 // request-local authority cache). nil is safe (unmemoized). Never persisted
-// or shared ACROSS requests. Errors are NEVER cached — a failed lookup is
-// recomputed on the next call, never remembered as a denial or an allow.
+// or shared ACROSS requests. An error returned FROM ProjectAdmissionForClass
+// is NEVER cached — a failed lookup is recomputed on the next call, never
+// remembered as a denial or an allow. This does not cover every failure
+// inside the call: a failure to load the access-constraint table is reduced
+// to a deny-all restriction by loadAccessConstraintRestrictions rather than
+// returned as an error, so on the system-authority path it IS memoized, as
+// an ordinary (fail-safe) denial for the remainder of the request.
 type ProjectAdmissionCache struct {
 	mu    sync.Mutex
 	cache map[projectAdmissionCacheKey]ProjectAdmissionResult
@@ -1233,10 +1238,15 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 //
 // Composes ProjectMembershipEvidence(ctx, principal, projectID) OR
 // SystemAuthorityProof(ctx, principal, projectID, permissionID, class). Any
-// error denies. The memo (nil-safe) is keyed on
-// (principal, projectID, permissionID, class); errors are NEVER memoized —
-// a failed lookup is recomputed on the next call, never remembered as a
-// denial or an allow.
+// error RETURNED BY THIS FUNCTION denies and is never memoized — a failed
+// lookup is recomputed on the next call, never remembered as a denial or an
+// allow. The memo (nil-safe) is keyed on
+// (principal, projectID, permissionID, class). This does not cover every
+// internal failure: a failure to load the access-constraint table is
+// reduced to a deny-all restriction by loadAccessConstraintRestrictions
+// rather than returned as an error, so on the system-authority path it IS
+// memoized, as an ordinary (fail-safe) denial for the remainder of the
+// request.
 //
 // class.ScopeKind must be exactly empty for a resource type with no
 // reviewed scope-kind semantics, and one of validRealProjectScopeKinds's
@@ -1342,7 +1352,8 @@ var ErrEmptySelectorList = errors.New("no selectors requested")
 // admitted := membershipOK; if not, admitted requires EVERY permission ID in
 // the expansion (all alias members) to individually pass
 // SystemAuthorityProof(ctx, principal, boundary.ProjectID, permID,
-// ContemplatedProjectClass(permID)). If admitted, each permission without a
+// ContemplatedProjectClass(permID)).
+//
 // If admitted, each permission without a MintEligibilityRegistry descriptor
 // additionally requires the project role's own flat permission subset
 // (hasProjectRoleFlatPermission), regardless of whether admission came from

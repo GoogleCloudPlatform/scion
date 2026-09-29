@@ -535,6 +535,7 @@ func intersectAllowedBoundaries(ids []string) (boundaries []BoundaryKind, ok boo
 // unmapped, unreviewed, or (defensively) empty-after-expansion selectors
 // return ok=false — callers must fail closed rather than reconstruct a
 // selector from resource/action.
+//
 // ResolveSelector returns a COPY of the derived mapping: PermissionIDs and
 // AllowedBoundaries are cloned so a caller mutating the returned slices
 // cannot corrupt the process-wide cached selectorRegistry.
