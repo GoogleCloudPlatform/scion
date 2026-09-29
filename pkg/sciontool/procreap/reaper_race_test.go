@@ -273,3 +273,16 @@ func waitUntilZombie(t *testing.T, pid int) {
 	}
 	t.Fatalf("pid %d never became a zombie within the timeout", pid)
 }
+
+// zombiePIDs scans /proc and returns the PIDs of processes currently in
+// zombie state. It exists only for tests (waitUntilZombie above, and
+// TestReapUnmanagedZombies_ReapsUnmanagedZombie): production code calls
+// scanZombies directly since it also needs each zombie's name.
+func zombiePIDs() []int {
+	zombies := scanZombies()
+	pids := make([]int, len(zombies))
+	for i, z := range zombies {
+		pids[i] = z.pid
+	}
+	return pids
+}

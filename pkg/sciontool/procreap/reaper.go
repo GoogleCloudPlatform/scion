@@ -108,15 +108,25 @@ type zombieProc struct {
 	name string
 }
 
-// scanZombies performs a single /proc walk and returns every current zombie
-// child along with its process name. A reap pass used to do this as two
-// separate full /proc walks back-to-back — snapshotProcessNames() reading
-// every process's name, then zombiePIDs() separately reading every
-// process's state — both running while execGate.Lock() was held, which
-// blocked managed Start() calls for roughly twice as long as necessary.
-// Reading the name only for processes already confirmed to be zombies
-// (instead of for every process in /proc) makes this both a single walk
-// and strictly less work per walk.
+// parseProcPID parses a /proc directory entry name as a process ID, and
+// reports whether it identifies a process scanZombies should ever consider:
+// non-numeric entries (most of /proc's other files) are rejected, and so is
+// PID 1 — init (this process, when running as PID 1) is never a reapable
+// child of itself.
+func parseProcPID(name string) (int, bool) {
+	pid, err := strconv.Atoi(name)
+	if err != nil || pid <= 1 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// scanZombies does one /proc walk and returns every current zombie child
+// along with its process name, so callers never need a second walk just to
+// resolve names. Reading /proc/<pid>/comm only for entries already confirmed
+// zombie by /proc/<pid>/stat (rather than for every process in /proc) keeps
+// that second read cheap: it happens only for the processes a reap pass is
+// actually going to act on.
 func scanZombies() []zombieProc {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -127,8 +137,8 @@ func scanZombies() []zombieProc {
 		if !entry.IsDir() {
 			continue
 		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
+		pid, ok := parseProcPID(entry.Name())
+		if !ok {
 			continue
 		}
 		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
@@ -147,20 +157,6 @@ func scanZombies() []zombieProc {
 		zombies = append(zombies, zombieProc{pid: pid, name: name})
 	}
 	return zombies
-}
-
-// zombiePIDs scans /proc and returns the PIDs of processes currently in
-// zombie state ('Z' in /proc/<pid>/stat) — i.e. processes that have exited
-// but have not yet been reaped by their parent. It is a thin wrapper around
-// scanZombies, kept as its own function since tests (and nothing else) want
-// just the PIDs without paying for name lookups they don't use.
-func zombiePIDs() []int {
-	zombies := scanZombies()
-	pids := make([]int, len(zombies))
-	for i, z := range zombies {
-		pids[i] = z.pid
-	}
-	return pids
 }
 
 // isZombieStat reports whether the contents of a /proc/<pid>/stat file

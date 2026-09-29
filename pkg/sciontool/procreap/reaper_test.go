@@ -10,9 +10,11 @@ import (
 	"testing"
 )
 
-// TestScanZombies_IncludesNameForZombie verifies the single-pass replacement
-// for the old two-walk design (snapshotProcessNames + zombiePIDs) still
-// resolves a process name for a genuine zombie, not just its PID.
+// TestScanZombies_IncludesNameForZombie verifies scanZombies resolves the
+// *actual* process name for a genuine zombie, not just a non-empty
+// placeholder: scanZombies defaults an unresolved name to "unknown", so
+// asserting only "!= \"\"" would pass even if the /proc/<pid>/comm read
+// were silently broken.
 func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("skipping test on non-linux platform")
@@ -33,8 +35,8 @@ func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 			continue
 		}
 		found = true
-		if z.name == "" {
-			t.Errorf("scanZombies() returned empty name for zombie pid %d", pid)
+		if z.name != "true" {
+			t.Errorf("scanZombies() returned name %q for zombie pid %d, want %q", z.name, pid, "true")
 		}
 	}
 	if !found {
@@ -42,11 +44,32 @@ func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 	}
 }
 
-func TestZombiePIDs_PID1Excluded(t *testing.T) {
-	for _, pid := range zombiePIDs() {
-		if pid == 1 {
-			t.Error("zombiePIDs() should exclude PID 1")
-		}
+func TestParseProcPID(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantPID int
+		wantOK  bool
+	}{
+		{name: "2", wantPID: 2, wantOK: true},
+		{name: "10", wantPID: 10, wantOK: true},
+		{name: "999999", wantPID: 999999, wantOK: true},
+		{name: "1", wantOK: false},  // PID 1 (init) is never a reapable child
+		{name: "0", wantOK: false},  // not a valid PID
+		{name: "-5", wantOK: false}, // Atoi parses this, but it's <= 1
+		{name: "abc", wantOK: false},
+		{name: "1abc", wantOK: false},
+		{name: "", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pid, ok := parseProcPID(tc.name)
+			if ok != tc.wantOK {
+				t.Fatalf("parseProcPID(%q) ok = %v, want %v", tc.name, ok, tc.wantOK)
+			}
+			if ok && pid != tc.wantPID {
+				t.Errorf("parseProcPID(%q) = %d, want %d", tc.name, pid, tc.wantPID)
+			}
+		})
 	}
 }
 
