@@ -403,10 +403,15 @@ user  user_id  email  on_behalf_of  delegate  delegator  delegation  ancestry
 creator  created_by  owner  project_id  broker_id  credential  credential_id
 token  token_id  role  scope  scopes  permission  permissions  verified
 system  executor  initiator
+actor_agent_id  authorizing_user_id  source_grant_id  delegation_edge_id
+parent_grant_id  exchange_agent_credential_id  actor_kind
 ```
 
-`actor_binding` is reserved for a future verified-agent-binding extension
-(execution area G); it is not itself implemented by E.1.
+`actor_binding` and the seven `actor_agent_id`…`actor_kind` names are reserved
+for a future verified-agent-actor extension (execution area G); they are not
+themselves implemented by E.1. The seven are exact matches only — no
+`actor_`/`source_` prefix is reserved — and are the single canonical list a
+same-package test pins against G's structured audit-record field names.
 
 In addition, any label key starting with `scion.`, `hub.`, or `x-` (again
 case-insensitively) is rejected outright, reserving those namespaces for the

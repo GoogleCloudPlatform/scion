@@ -352,6 +352,19 @@ func TestValidateCredentialMetadata_Rejects(t *testing.T) {
 		{name: "actor_binding reserved for G's verified agent binding", token: "n", labels: map[string]string{"actor_binding": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
 		{name: "actor_binding dotted-prefix match", token: "n", labels: map[string]string{"actor_binding.id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
 		{name: "actor-binding hyphen variant reserved", token: "n", labels: map[string]string{"actor-binding": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		// G's verified-agent-actor structured audit field names (ruling N3):
+		// reserved as exact label keys, one case per name, plus separator and
+		// case normalization on a couple of them (the same normalization
+		// every other reserved key already goes through).
+		{name: "actor_agent_id reserved", token: "n", labels: map[string]string{"actor_agent_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "authorizing_user_id reserved", token: "n", labels: map[string]string{"authorizing_user_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "source_grant_id reserved", token: "n", labels: map[string]string{"source_grant_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "delegation_edge_id reserved", token: "n", labels: map[string]string{"delegation_edge_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "parent_grant_id reserved", token: "n", labels: map[string]string{"parent_grant_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "exchange_agent_credential_id reserved", token: "n", labels: map[string]string{"exchange_agent_credential_id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor_kind reserved", token: "n", labels: map[string]string{"actor_kind": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor-agent-id hyphen variant reserved", token: "n", labels: map[string]string{"actor-agent-id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
+		{name: "actor_agent_id dotted-prefix match", token: "n", labels: map[string]string{"actor_agent_id.raw": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
 		{name: "agent-id hyphen variant reserved", token: "n", labels: map[string]string{"agent-id": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
 		{name: "on-behalf-of hyphen variant reserved", token: "n", labels: map[string]string{"on-behalf-of": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
 		{name: "x- prefix reserved", token: "n", labels: map[string]string{"x-custom": "placeholderval"}, wantField: "labels", wantRule: ruleLabelKeyReserved},
