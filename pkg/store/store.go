@@ -1312,20 +1312,27 @@ type ScheduleStore interface {
 	// ListSchedules returns schedules matching the filter criteria.
 	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
 
-	// UpdateSchedule updates an existing schedule's mutable fields (name,
-	// cron_expr, event_type, payload, status, next_run_at). Returns
-	// ErrNotFound if the schedule doesn't exist.
+	// UpdateSchedule writes the schedule's mutable fields named by `fields`
+	// (name, cron_expr, event_type, payload, status, next_run_at) from
+	// `schedule`; a field not named in `fields` is left completely untouched
+	// in the row, so a struct built from a stale read can never revert a
+	// column this call didn't intend to change.
 	//
-	// When attribution is non-nil, the same write also replaces
-	// schedule.InitiatorAttribution, conditioned on the schedule's current
-	// authorization_revision matching attribution.PrevRevision (or being
-	// NULL, when PrevRevisionKnown is false) — an optimistic-concurrency
-	// guard (ruling Q2; review R2/R3) that stops a stale read from silently
-	// reverting a concurrent re-attribution. Returns ErrRevisionConflict if
-	// attribution is non-nil and no row matched that condition. When
-	// attribution is nil, InitiatorAttribution columns are left completely
-	// untouched, so a metadata-only update can never affect them.
-	UpdateSchedule(ctx context.Context, schedule *Schedule, attribution *ScheduleAttributionUpdate) error
+	// The write is ALWAYS conditioned on the schedule's current
+	// authorization_revision matching prevRevision (or being NULL, when
+	// prevRevisionKnown is false) — the revision the caller read just before
+	// building this write — regardless of whether attribution is also being
+	// replaced. This closes the same race for every field: a write built
+	// from a stale read can never land once a newer, revision-bumping write
+	// has landed first.
+	//
+	// When attribution is non-nil, the same conditional write also replaces
+	// schedule.InitiatorAttribution.
+	//
+	// Returns ErrRevisionConflict when the schedule exists but its revision
+	// no longer matches, and ErrNotFound if the schedule itself does not
+	// exist.
+	UpdateSchedule(ctx context.Context, schedule *Schedule, fields ScheduleFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 
 	// UpdateScheduleStatus updates only the status of a schedule.
 	// Returns ErrNotFound if the schedule doesn't exist.
