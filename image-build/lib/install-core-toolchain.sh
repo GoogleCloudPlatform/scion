@@ -110,11 +110,19 @@ ensure_google_keyring() {
 # it is the one package whose availability differs between the two bases, and
 # it gets its own step so that difference is visible rather than buried in a
 # 30-line install list that fails as a unit.
+#
+# ffmpeg is the heaviest entry here (~88 packages / ~61 MB download under
+# --no-install-recommends, which is how this list installs). It is present
+# because multimodal agent work generates and inspects media fixtures, and
+# without it those tasks fail as a misleading capability error rather than a
+# missing-tool error. The distro build already carries the encoders that use
+# case needs (libx264, libmp3lame, aac, pcm_s16le) — recommends add only
+# hardware VA/VDPAU drivers and speech models, which a container never uses.
 COMMON_PACKAGES="
   tmux ca-certificates libexpat1 zlib1g python3 python3-venv make g++ man-db
   curl wget dnsutils less jq bc unzip rsync ripgrep procps psmisc lsof socat
   sudo fzf zsh gnupg2 iptables ipset iproute2 aggregate nano vim openssh-client
-  lsb-release dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools
+  lsb-release dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools ffmpeg
 "
 
 step_apt_common() {
