@@ -2920,6 +2920,7 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		Op:        op,
 		Args:      argsJSON,
 	}
+	setBrokerDispatchInitiator(ctx, dispatch)
 	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
 		unsub()
 		return nil, fmt.Errorf("insert dispatch intent: %w", err)
@@ -2988,6 +2989,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 		Op:        op,
 		Args:      argsJSON,
 	}
+	setBrokerDispatchInitiator(ctx, dispatch)
 	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
 		unsub()
 		return fmt.Errorf("insert dispatch intent: %w", err)

@@ -72,9 +72,22 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		if rec := s.dispatchMetrics; rec != nil {
 			rec.IncClaimed(ctx, 1, opAttr)
 		}
-		result, execErr := s.execDispatch(ctx, d)
+		// E.2b: this node is executing a durable intent recorded by another
+		// request (possibly on another node), so mark it as deferred
+		// execution and log the initiator it was opened under, alongside the
+		// dispatch row's own correlation id.
+		dispatchCtx := ContextWithExecutor(ctx, ExecutorContext{Kind: "broker_dispatch", ID: d.ID})
+		initiatorLogArgs := []any{
+			"id", d.ID, "op", d.Op,
+			"initiator_principal_kind", d.InitiatorPrincipalKind,
+			"initiator_principal_id", d.InitiatorPrincipalID,
+			"initiator_credential_kind", d.InitiatorCredentialKind,
+			"initiator_credential_id", d.InitiatorCredentialID,
+			"correlation_id", d.CorrelationID,
+		}
+		result, execErr := s.execDispatch(dispatchCtx, d)
 		if execErr != nil {
-			s.agentLifecycleLog.Warn("reconcile: dispatch op failed", "id", d.ID, "op", d.Op, "error", execErr)
+			s.agentLifecycleLog.Warn("reconcile: dispatch op failed", append(initiatorLogArgs, "error", execErr)...)
 			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error()); err != nil {
 				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
 			}
@@ -89,6 +102,7 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		if err := s.store.CompleteBrokerDispatch(ctx, d.ID, result); err != nil {
 			s.agentLifecycleLog.Error("reconcile: complete dispatch failed", "id", d.ID, "error", err)
 		}
+		s.agentLifecycleLog.Info("reconcile: dispatch op completed", initiatorLogArgs...)
 		if rec := s.dispatchMetrics; rec != nil {
 			rec.IncDone(ctx, 1, opAttr)
 			latencyMs := float64(time.Since(d.CreatedAt).Milliseconds())
