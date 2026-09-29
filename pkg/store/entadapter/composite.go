@@ -47,7 +47,6 @@ const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
 const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
-const harnessConfigColumnBackfillMarkerSection = "migration_harness_config_column_backfilled"
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -664,52 +663,90 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 }
 
 // BackfillHarnessConfigColumn populates the harness_config shadow column
-// (pkg/ent/schema/agent.go) for agents created before the column existed, by
-// extracting it from each row's applied_config JSON document. New rows never
-// need this: CreateAgent/UpdateAgent keep the column in sync going forward
-// (agent_store.go's harnessConfigOf).
+// (pkg/ent/schema/agent.go) for agents whose column hasn't caught up with
+// their applied_config yet, by extracting it from each row's applied_config
+// JSON document. New rows never need this: CreateAgent/UpdateAgent keep the
+// column in sync going forward (agent_store.go's harnessConfigOf).
 //
-// A row whose applied_config fails to parse is skipped, not failed —
-// matching entAgentToStore's own tolerance for corrupt applied_config
-// (log and continue), not BackfillEmptyAgentRoles' stricter fail-the-whole-
-// migration behavior above. A single historically corrupt row blocking every
-// future Hub boot would be a far worse outcome than that one row simply
-// never matching a --harness filter, which is the same "corrupt row means
-// no match" behavior the HarnessConfig filter already guarantees elsewhere
-// (ptone/scion#2146 review R3-1).
+// Despite the name (kept for continuity — this was a one-shot migration
+// through round 3), this now runs on **every boot**, not once behind a
+// marker (ptone/scion#2146 review R4-5, option (b)). The one-shot version
+// left a gap during a mixed-version rollout: an old-binary replica can still
+// create or update agents with a NULL harness_config after a new-binary
+// replica has already run the backfill and set the marker, and those rows
+// would then never be reconciled. Running on every boot closes that gap for
+// the common case (a new-binary boot eventually reconciles what an
+// old-binary replica left behind) at negligible cost, because the query is
+// now scoped to exactly the rows that still need it
+// (`harness_config IS NULL AND applied_config IS NOT NULL`, R4-4) rather
+// than every agent row — on a Hub where the backfill has already caught up,
+// this is a single empty-result query, not a full table scan. See
+// "Release notes" in dev-notes.md for the one residual case this still
+// doesn't cover (a row whose harness_config was set to a stale value by an
+// old-binary replica and is not NULL).
+//
+// A row whose applied_config fails to parse as JSON at all is skipped, not
+// failed — matching entAgentToStore's own tolerance for corrupt
+// applied_config (log and continue), not BackfillEmptyAgentRoles' stricter
+// fail-the-whole-migration behavior above. A single historically corrupt row
+// blocking every future Hub boot would be a far worse outcome than that one
+// row simply never matching a --harness filter, which is the same "corrupt
+// row means no match" behavior the HarnessConfig filter already guarantees
+// elsewhere (ptone/scion#2146 review R3-1).
+//
+// A row that parses but needed sanitizing (parseAppliedConfig returns a
+// non-nil cfg AND a non-nil error — e.g. an invalid GCP metadata mode) is
+// NOT skipped: its HarnessConfig is still backfilled. entAgentToStore
+// applies the identical tolerance to build the response-facing
+// store.Agent.HarnessConfig, so treating "sanitized" the same as "corrupt"
+// here silently dropped agents from every future --harness match, forever
+// (they'd never be revisited once the old one-shot marker was set)
+// (ptone/scion#2146 review R4-1).
 func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error {
-	if _, err := c.GetHubSetting(ctx, harnessConfigColumnBackfillMarkerSection); err == nil {
-		return nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
-	}
-
 	const pageSize = 500
-	var offset int
-	var totalUpdated, totalSkipped int
+	var (
+		lastID                         uuid.UUID
+		totalUpdated, totalInvalidJSON int
+	)
 
 	for {
-		agents, err := c.client.Agent.Query().
+		query := c.client.Agent.Query().
+			Where(agent.HarnessConfigIsNil(), agent.AppliedConfigNotNil()).
 			Order(ent.Asc(agent.FieldID)).
-			Limit(pageSize).
-			Offset(offset).
-			All(ctx)
+			Limit(pageSize)
+		if lastID != uuid.Nil {
+			query = query.Where(agent.IDGT(lastID))
+		}
+		agents, err := query.Select(agent.FieldID, agent.FieldAppliedConfig).All(ctx)
 		if err != nil {
 			return fmt.Errorf("query agents for harness_config backfill: %w", err)
 		}
+		if len(agents) == 0 {
+			break
+		}
 
 		for _, a := range agents {
+			lastID = a.ID
 			if a.AppliedConfig == "" {
 				continue
 			}
-			parsed, err := parseAppliedConfig(a.AppliedConfig)
-			if err != nil {
-				slog.Warn("harness_config backfill: failed to parse applied_config, skipping agent",
-					"agent_id", a.ID, "error", err)
-				totalSkipped++
+			parsed, perr := parseAppliedConfig(a.AppliedConfig)
+			if parsed == nil {
+				// Not valid JSON at all — nothing usable to extract.
+				slog.Warn("harness_config backfill: applied_config is not valid JSON, skipping agent",
+					"agent_id", a.ID, "error", perr)
+				totalInvalidJSON++
 				continue
 			}
-			if parsed == nil || parsed.HarnessConfig == "" {
+			if perr != nil {
+				// Parsed, but needed sanitizing (e.g. an invalid GCP
+				// metadata mode). The rest of the document, including
+				// HarnessConfig, is still used — see the doc comment above
+				// (R4-1).
+				slog.Warn("harness_config backfill: applied_config needed sanitizing; harness_config is still used",
+					"agent_id", a.ID, "error", perr)
+			}
+			if parsed.HarnessConfig == "" {
 				continue
 			}
 			if err := c.client.Agent.UpdateOneID(a.ID).
@@ -723,20 +760,14 @@ func (c *CompositeStore) BackfillHarnessConfigColumn(ctx context.Context) error 
 		if len(agents) < pageSize {
 			break
 		}
-		offset += pageSize
 	}
 
-	if totalUpdated > 0 || totalSkipped > 0 {
+	if totalUpdated > 0 || totalInvalidJSON > 0 {
 		slog.Info("backfilled harness_config column for existing agents",
-			"rows_updated", totalUpdated, "rows_skipped_corrupt", totalSkipped)
+			"rows_updated", totalUpdated, "rows_skipped_invalid_json", totalInvalidJSON)
 	}
 
-	_, err := c.UpsertHubSetting(ctx, harnessConfigColumnBackfillMarkerSection,
-		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
-	if errors.Is(err, store.ErrRevisionConflict) {
-		return nil
-	}
-	return err
+	return nil
 }
 
 // determineDelegator determines the delegator type and ID for a delegation edge
