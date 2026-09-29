@@ -71,8 +71,8 @@ func TestInitiatorAttributionMixin_IdenticalColumns(t *testing.T) {
 }
 
 // TestScheduledInitiator_LegacyRowReadsAsLegacyUnknown covers design check
-// (c) and review R1: a row written before E.2b (AttributionVersion 0/NULL)
-// must read InitiatorCredentialKind as the explicit
+// (c): a row written before E.2b (AttributionVersion 0/NULL) must read
+// InitiatorCredentialKind as the explicit
 // store.InitiatorCredentialKindLegacyUnknown at the STORE level (not merely
 // through the scheduledInitiator helper), and scheduledInitiator must in
 // turn treat it as LegacyUnknown with every other field cleared, never as an
@@ -100,8 +100,8 @@ func TestScheduledInitiator_LegacyRowReadsAsLegacyUnknown(t *testing.T) {
 		got, err := s.GetScheduledEvent(ctx, evt.ID)
 		require.NoError(t, err)
 		assert.Equal(t, 0, got.AttributionVersion, "a row created without InitiatorAttribution must have no attribution_version")
-		// Review R1: the adapter itself, not just scheduledInitiator, must
-		// surface legacy_unknown rather than "".
+		// The adapter itself, not just scheduledInitiator, must surface
+		// legacy_unknown rather than "".
 		assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, got.InitiatorCredentialKind)
 		assert.Empty(t, got.InitiatorPrincipalKind)
 		assert.Empty(t, got.InitiatorPrincipalID)
@@ -141,8 +141,8 @@ func TestScheduledInitiator_LegacyRowReadsAsLegacyUnknown(t *testing.T) {
 }
 
 // TestScheduledInitiator_CredentialKindLegacyUnknownClearsEvenWithVersion
-// covers review R5's extension: a row can have a real AttributionVersion (it
-// was genuinely captured by E.2b) yet still have InitiatorCredentialKind
+// covers the case where a row has a real AttributionVersion (it was
+// genuinely captured by E.2b) yet still has InitiatorCredentialKind
 // legacy_unknown (no recordable provenance at capture time, e.g. a dev or
 // federated credential). scheduledInitiator must treat this exactly like a
 // version-0 row: LegacyUnknown, every other field cleared.
@@ -165,8 +165,8 @@ func TestScheduledInitiator_CredentialKindLegacyUnknownClearsEvenWithVersion(t *
 // TestCreateScheduledEvent_CapturesInitiatorAttribution covers plan §3.5's
 // one-shot create row: the authoring request's identity/credential are
 // captured atomically with the event row (design check (a): a single
-// CreateScheduledEvent insert). Assertions read the row from the store
-// (review R6: the wire response no longer carries these fields).
+// CreateScheduledEvent insert). Assertions read the row from the store: the
+// wire response never carries these fields.
 func TestCreateScheduledEvent_CapturesInitiatorAttribution(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 
@@ -189,8 +189,8 @@ func TestCreateScheduledEvent_CapturesInitiatorAttribution(t *testing.T) {
 	assert.Equal(t, 1, stored.AuthorizationRevision)
 	assert.Equal(t, "dev", stored.InitiatorPrincipalKind) // doRequest authenticates via the dev-auth identity
 	assert.Equal(t, DevUserID, stored.InitiatorPrincipalID)
-	// Review R5: dev auth has no interactive session and no UAT/agent
-	// credential, so it is recorded as legacy_unknown, never "session".
+	// Dev auth has no interactive session and no UAT/agent credential, so
+	// it is recorded as legacy_unknown, never "session".
 	assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, stored.InitiatorCredentialKind)
 }
 
@@ -315,9 +315,8 @@ func TestSchedulerFireEvent_RestartReplayPreservesInitiatorAttribution(t *testin
 
 // e2bFailingScheduleStore injects a store failure into CreateScheduledEvent,
 // CreateSchedule, or UpdateSchedule, to prove that a failed authoring or
-// mutation write leaves neither the row nor a partial attribution behind
-// (review O2), and that a failed resume is reported as an error rather than
-// a false 200 (review R3).
+// mutation write leaves neither the row nor a partial attribution behind,
+// and that a failed resume is reported as an error rather than a false 200.
 type e2bFailingScheduleStore struct {
 	store.Store
 	createScheduledEventErr error
@@ -339,11 +338,14 @@ func (f *e2bFailingScheduleStore) CreateSchedule(ctx context.Context, sc *store.
 	return f.Store.CreateSchedule(ctx, sc)
 }
 
-func (f *e2bFailingScheduleStore) UpdateSchedule(ctx context.Context, sc *store.Schedule, attribution *store.ScheduleAttributionUpdate) error {
+func (f *e2bFailingScheduleStore) UpdateSchedule(
+	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
+	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
+) error {
 	if f.updateScheduleErr != nil {
 		return f.updateScheduleErr
 	}
-	return f.Store.UpdateSchedule(ctx, sc, attribution)
+	return f.Store.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
 }
 
 // TestCreateScheduledEvent_StoreFailureLeavesNoPartialAttribution covers the
@@ -385,10 +387,10 @@ func TestCreateSchedule_StoreFailureLeavesNoPartialAttribution(t *testing.T) {
 	assert.Empty(t, result.Items, "a failed create must leave no row, partial or otherwise")
 }
 
-// TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess covers review R3:
-// resume is now a single UpdateSchedule write (status, next_run_at and
-// attribution together); when it fails, the handler must report an error,
-// never a 200 naming an attribution that was never persisted.
+// TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess covers resume's
+// single UpdateSchedule write (status, next_run_at and attribution
+// together): when it fails, the handler must report an error, never a 200
+// naming an attribution that was never persisted.
 func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 
@@ -414,10 +416,11 @@ func TestResumeSchedule_UpdateFailureReturnsErrorNotSuccess(t *testing.T) {
 	assert.Equal(t, 1, stored.AuthorizationRevision, "a failed resume write must not bump the revision")
 }
 
-// TestUpdateSchedule_StaleRevisionReturnsConflict reproduces review R2's
-// probe P2 at the store level: a write built from a stale read (an old
-// authorization_revision) must be rejected rather than silently reverting a
-// concurrent re-attribution.
+// TestUpdateSchedule_StaleRevisionReturnsConflict: a write built from a
+// stale read (an old authorization_revision) must be rejected rather than
+// silently reverting a concurrent re-attribution, even when the write itself
+// does not touch attribution (attribution == nil) — the revision check
+// applies to every write, not only ones that replace attribution.
 func TestUpdateSchedule_StaleRevisionReturnsConflict(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
@@ -440,19 +443,10 @@ func TestUpdateSchedule_StaleRevisionReturnsConflict(t *testing.T) {
 	require.Equal(t, 2, current.AuthorizationRevision)
 
 	// Now a write built from a STALE read (prevRevision=1, as if it had been
-	// read before the pause/resume above) must be rejected.
+	// read before the pause/resume above) must be rejected, even though this
+	// write carries no attribution replacement of its own.
 	current.CronExpr = "0 11 * * *"
-	err = s.UpdateSchedule(ctx, current, &store.ScheduleAttributionUpdate{
-		Attribution: store.InitiatorAttribution{
-			InitiatorPrincipalKind:  "user",
-			InitiatorPrincipalID:    tid("e2b-r2-stale-user"),
-			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
-			AttributionVersion:      1,
-			AuthorizationRevision:   2,
-		},
-		PrevRevision:      1,
-		PrevRevisionKnown: true,
-	})
+	err = s.UpdateSchedule(ctx, current, store.ScheduleFieldMask{CronExpr: true}, 1, true, nil)
 	assert.ErrorIs(t, err, store.ErrRevisionConflict)
 
 	after, err := s.GetSchedule(ctx, created.ID)
@@ -461,9 +455,54 @@ func TestUpdateSchedule_StaleRevisionReturnsConflict(t *testing.T) {
 	assert.NotEqual(t, "0 11 * * *", after.CronExpr, "a rejected conditional write must not apply any of its fields")
 }
 
-// TestUpdateSchedule_RevisionConflictMapsTo409 covers the handler side of
-// review R2: the store's ErrRevisionConflict must map to an HTTP 409, not a
-// generic 500.
+// TestUpdateSchedule_MetadataOnlyStaleWriteAfterReattributionReturnsConflict
+// reproduces the scenario where a name-only edit is built from a read taken
+// BEFORE a payload-changing re-attribution lands. The stale write must be
+// rejected outright: it must never apply the old payload under the new
+// attribution, and it must not apply its own field (the rename) either, once
+// rejected.
+func TestUpdateSchedule_MetadataOnlyStaleWriteAfterReattributionReturnsConflict(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "p1"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	// The stale read: taken before any re-attribution.
+	staleRead, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	originalPayload := staleRead.Payload
+
+	// A payload-changing update lands, re-attributing to revision 2.
+	updateReq := UpdateScheduleRequest{Payload: `{"agentName":"all","message":"p2"}`}
+	rec2 := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	afterReattribution, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, afterReattribution.AuthorizationRevision)
+	require.NotEqual(t, originalPayload, afterReattribution.Payload)
+
+	// The stale name-only write, built from staleRead (revision 1), must be
+	// rejected rather than silently applied.
+	staleRead.Name = "renamed-from-stale-read"
+	err = s.UpdateSchedule(ctx, staleRead, store.ScheduleFieldMask{Name: true},
+		staleRead.AuthorizationRevision, staleRead.AuthorizationRevision != 0, nil)
+	assert.ErrorIs(t, err, store.ErrRevisionConflict)
+
+	final, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, afterReattribution.Payload, final.Payload, "the payload must never revert to the stale value")
+	assert.Equal(t, afterReattribution.InitiatorPrincipalID, final.InitiatorPrincipalID,
+		"the attribution must never end up paired with the stale payload")
+	assert.NotEqual(t, "renamed-from-stale-read", final.Name, "a rejected conditional write must not apply any field")
+}
+
+// TestUpdateSchedule_RevisionConflictMapsTo409 covers the handler side: the
+// store's ErrRevisionConflict must map to an HTTP 409, not a generic 500.
 func TestUpdateSchedule_RevisionConflictMapsTo409(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 
@@ -503,10 +542,11 @@ func setupTwoScheduleUsers(t *testing.T, srv *Server, s store.Store, projectID s
 	return userA, userB
 }
 
-// TestUpdateSchedule_MetadataOnlyDoesNotReattribute covers review R7's
-// complaint about the original version of this test: creator and mutator
-// are now different real users, so the assertion that the initiator is
-// unchanged is not trivially true.
+// TestUpdateSchedule_MetadataOnlyDoesNotReattribute uses two distinct real
+// users as creator and mutator, so the assertion that the initiator is
+// unchanged is not trivially true (a shared identity would make the "before"
+// and "after" initiator look the same regardless of whether re-attribution
+// happened).
 func TestUpdateSchedule_MetadataOnlyDoesNotReattribute(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	userA, userB := setupTwoScheduleUsers(t, srv, s, projectID)
@@ -535,9 +575,9 @@ func TestUpdateSchedule_MetadataOnlyDoesNotReattribute(t *testing.T) {
 		"a metadata-only edit by a DIFFERENT user must not change the initiator")
 }
 
-// TestUpdateSchedule_ReattributesToMutatorNotCreator covers review R7: a
-// future-dispatch-changing update replaces the FULL InitiatorAttribution
-// with the mutator's, not the creator's — and CreatedBy stays the creator.
+// TestUpdateSchedule_ReattributesToMutatorNotCreator: a future-dispatch-
+// changing update replaces the FULL InitiatorAttribution with the mutator's,
+// not the creator's — and CreatedBy stays the creator.
 func TestUpdateSchedule_ReattributesToMutatorNotCreator(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	userA, userB := setupTwoScheduleUsers(t, srv, s, projectID)
@@ -596,9 +636,53 @@ func TestResumeSchedule_ReattributesToResumer(t *testing.T) {
 	assert.Equal(t, userA.ID, after.CreatedBy, "CreatedBy must never be touched by a re-attribution")
 }
 
-// TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution covers
-// review R6: none of the initiator/attribution fields may appear on the
-// wire, in create or list responses, for either resource.
+// TestResumeSchedule_RevisionSetButVersionNilSucceeds covers a schedule
+// whose authorization_revision is set but attribution_version is NULL (a
+// row read as legacy by version, but which nonetheless carries a revision
+// value). Resume must still succeed and bump the revision: the write's
+// "known previous revision" predicate must come from AuthorizationRevision
+// itself, not be derived from AttributionVersion, or this combination can
+// never satisfy either the EQ or the IS NULL branch and every re-attributing
+// write permanently conflicts.
+func TestResumeSchedule_RevisionSetButVersionNilSucceeds(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	sched := &store.Schedule{
+		ID:        tid("e2b-p7-sched"),
+		ProjectID: projectID,
+		Name:      "p7",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		Payload:   `{"agentName":"all","message":"hi"}`,
+		Status:    store.ScheduleStatusPaused,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateSchedule(ctx, sched))
+
+	// Give the row authorization_revision=1 while leaving attribution_version
+	// NULL, via a direct conditional write against the freshly created
+	// (legacy, revision-less) row.
+	require.NoError(t, s.UpdateSchedule(ctx, sched, store.ScheduleFieldMask{}, 0, false,
+		&store.InitiatorAttribution{AuthorizationRevision: 1}))
+
+	stored, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, stored.AttributionVersion)
+	require.Equal(t, 1, stored.AuthorizationRevision)
+
+	resumeRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID+"/resume", nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+
+	after, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleStatusActive, after.Status)
+	assert.Equal(t, 2, after.AuthorizationRevision, "resume must succeed and bump the revision even when attribution_version was NULL")
+}
+
+// TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution: none of
+// the initiator/attribution fields may appear on the wire, in create or list
+// responses, for either resource.
 func TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution(t *testing.T) {
 	srv, _, projectID := setupScheduleTest(t)
 
@@ -635,9 +719,9 @@ func TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution(t *testing.
 }
 
 // TestPauseSchedule_EmitsMutationAudit, TestDeleteSchedule_EmitsMutationAudit
-// and TestCancelScheduledEvent_EmitsMutationAudit cover review O1: pause,
-// delete and cancel record the actor, with no re-attribution (there is no
-// future dispatch left to attribute).
+// and TestCancelScheduledEvent_EmitsMutationAudit: pause, delete and cancel
+// record the actor, with no re-attribution (there is no future dispatch left
+// to attribute).
 func TestPauseSchedule_EmitsMutationAudit(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 
@@ -698,12 +782,12 @@ func TestCancelScheduledEvent_EmitsMutationAudit(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "cancel must emit a mutation audit record")
 }
 
-// TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential covers
-// review R4 and R7's executor/pairing gap: firing a dispatch_agent event via
-// the scheduler test hook must produce a success mutation-audit record with
-// executor_kind=scheduler/executor_id=scheduled_event:<id>, and the
-// initiator's credential is copied onto the audit only when the initiator is
-// the same principal as the creator — mapped back into hub.CredentialKind's
+// TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential:
+// firing a dispatch_agent event via the scheduler test hook must produce a
+// success mutation-audit record AND a log line, both carrying
+// executor_kind=scheduler/executor_id=scheduled_event:<id>. The initiator's
+// credential is copied onto the audit only when the initiator is the same
+// principal as the creator — mapped back into hub.CredentialKind's
 // vocabulary.
 func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *testing.T) {
 	f := bypassAgentsSetup(t)
@@ -712,6 +796,11 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
 	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+
+	capture := &capturingHandler{}
+	restoreLog := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(restoreLog) })
 
 	waitForAudit := func(t *testing.T, agentID string) *store.MutationAuditRecord {
 		t.Helper()
@@ -757,6 +846,16 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		assert.Equal(t, "scheduler", rec.ExecutorKind)
 		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 		assert.Equal(t, "allow", rec.CanDelegateResult)
+
+		// bypassAgentsSetup configures no dispatcher, so dispatchAgentEventHandler
+		// takes the "no dispatcher available" branch rather than the success
+		// log — both carry the same executor fields, from the same
+		// ExecutorContext read.
+		logRec, ok := findRecord(capture.all(), "Scheduler: no dispatcher available, agent created but not started")
+		require.True(t, ok, "expected a dispatch log line")
+		attrs := recordAttrs(logRec)
+		assert.Equal(t, "scheduler", attrs["executor_kind"])
+		assert.Equal(t, "scheduled_event:"+evt.ID, attrs["executor_id"])
 	})
 
 	t.Run("different principal: credential fields left empty", func(t *testing.T) {
@@ -846,20 +945,21 @@ func TestCaptureInitiatorAttribution_ScopedUATFixture(t *testing.T) {
 
 // TestCaptureInitiatorAttribution_NoIdentityReadsAsLegacyUnknown covers the
 // defensive branch: a context with no ambient identity (should not happen on
-// an authenticated path) still produces a zero attribution, which
-// scheduledInitiator reads back as legacy_unknown.
+// an authenticated path) still produces an explicit legacy_unknown
+// credential kind (every other field stays empty), which scheduledInitiator
+// reads back as legacy_unknown.
 func TestCaptureInitiatorAttribution_NoIdentityReadsAsLegacyUnknown(t *testing.T) {
 	srv := &Server{}
 	attr := captureInitiatorAttribution(context.Background())
-	assert.Equal(t, store.InitiatorAttribution{}, attr)
+	assert.Equal(t, store.InitiatorAttribution{InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown}, attr)
 	assert.True(t, srv.scheduledInitiator(attr).LegacyUnknown)
 }
 
 // TestInitiatorCredentialKindFor pins the committed
-// session|uat|agent|legacy_unknown domain (rulings "E.2b field names"),
-// tightened by review R5: only a genuine interactive session maps to
-// "session". Absent, federation, broker and dev credentials all map to
-// legacy_unknown, never to an interactive-style value.
+// session|uat|agent|legacy_unknown domain (rulings "E.2b field names"): only
+// a genuine interactive session maps to "session". Absent, federation,
+// broker and dev credentials all map to legacy_unknown, never to an
+// interactive-style value.
 func TestInitiatorCredentialKindFor(t *testing.T) {
 	cases := []struct {
 		kind CredentialKind
@@ -878,7 +978,7 @@ func TestInitiatorCredentialKindFor(t *testing.T) {
 	}
 }
 
-// TestHubCredentialKindForInitiator pins review R4's reverse mapping: only
+// TestHubCredentialKindForInitiator pins the reverse mapping: only
 // uat/agent/session round-trip to a real hub.CredentialKind; legacy_unknown
 // (or anything else) means "leave the column unset".
 func TestHubCredentialKindForInitiator(t *testing.T) {
@@ -913,6 +1013,20 @@ func TestSetBrokerDispatchInitiator(t *testing.T) {
 	// session, correctly distinct from legacy_unknown.
 	assert.Equal(t, store.InitiatorCredentialKindSession, d.InitiatorCredentialKind)
 	assert.Equal(t, "e2b-corr-123", d.CorrelationID)
+}
+
+// TestSetBrokerDispatchInitiator_NoIdentityRecordsLegacyUnknown covers a
+// context with no ambient identity at all (e.g. a cross-node op opened
+// outside a live request): the credential kind must be the explicit
+// legacy_unknown, never an empty string that would look like "no value
+// recorded" rather than "no recordable provenance."
+func TestSetBrokerDispatchInitiator_NoIdentityRecordsLegacyUnknown(t *testing.T) {
+	d := &store.BrokerDispatch{}
+	setBrokerDispatchInitiator(context.Background(), d)
+
+	assert.Empty(t, d.InitiatorPrincipalKind)
+	assert.Empty(t, d.InitiatorPrincipalID)
+	assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, d.InitiatorCredentialKind)
 }
 
 // TestBrokerDispatch_StoreRoundTripCarriesInitiatorAndCorrelation covers the
