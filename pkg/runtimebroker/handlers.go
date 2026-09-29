@@ -1944,7 +1944,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, ErrAgentListUnavailable) {
-			AgentLookupUnavailable(w, id, "stop", err, "")
+			AgentLookupUnavailable(w, err, id, "stop", "")
 			return
 		}
 		RuntimeError(w, "Failed to stop agent: "+err.Error())
@@ -2064,7 +2064,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// during the stop-target lookup would leave two containers running
 		// for the same agent.
 		if errors.Is(err, ErrAgentListUnavailable) {
-			AgentLookupUnavailable(w, id, "restart", err, "")
+			AgentLookupUnavailable(w, err, id, "restart", "")
 			return
 		}
 		RuntimeError(w, "Failed to restart agent: "+err.Error())
@@ -2264,7 +2264,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		AgentLookupUnavailable(w, id, "exec", err, "")
+		AgentLookupUnavailable(w, err, id, "exec", "")
 		return
 	}
 	if err != nil || target == "" {
@@ -2318,7 +2318,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		AgentLookupUnavailable(w, id, "reset_auth", err, "")
+		AgentLookupUnavailable(w, err, id, "reset_auth", "")
 		return
 	}
 	if err != nil || target == "" {

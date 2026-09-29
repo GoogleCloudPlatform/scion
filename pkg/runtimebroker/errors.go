@@ -128,6 +128,27 @@ func RuntimeUnavailable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeUnavailable, message, nil)
 }
 
+// agentLookupUnavailableMessage builds the generic "please retry" sentence
+// used whenever an agent lookup fails because the container runtime itself
+// is unavailable, rather than because the agent is genuinely missing.
+// retrySuffix, if non-empty, is inserted into the sentence (e.g. PTY attach
+// passes "the attach" to produce "please retry the attach in a moment");
+// pass "" for the plain "please retry in a moment".
+//
+// This is factored out of AgentLookupUnavailable so that call sites which
+// need the same wording but log their own distinct message (e.g. PTY
+// attach's nil-result guard, which has no err to log) can build it without
+// duplicating the sentence.
+func agentLookupUnavailableMessage(agentID, retrySuffix string) string {
+	retry := "retry"
+	if retrySuffix != "" {
+		retry = "retry " + retrySuffix
+	}
+	return fmt.Sprintf(
+		"Unable to look up agent %q: the container runtime is temporarily unavailable. Please %s in a moment.",
+		agentID, retry)
+}
+
 // AgentLookupUnavailable logs the underlying runtime error that caused an
 // agent lookup to fail (server-side only — see #2164 for keeping raw runtime
 // error text out of response bodies generally) and writes a generic 503
@@ -143,16 +164,9 @@ func RuntimeUnavailable(w http.ResponseWriter, message string) {
 // retrySuffix, if non-empty, is inserted into the generic "please retry"
 // sentence (e.g. PTY attach passes "the attach" to produce "please retry the
 // attach in a moment"); pass "" for the plain "please retry in a moment".
-func AgentLookupUnavailable(w http.ResponseWriter, agentID, op string, err error, retrySuffix string) {
+func AgentLookupUnavailable(w http.ResponseWriter, err error, agentID, op, retrySuffix string) {
 	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "op", op, "error", err)
-	retry := "retry"
-	if retrySuffix != "" {
-		retry = "retry " + retrySuffix
-	}
-	message := fmt.Sprintf(
-		"Unable to look up agent %q: the container runtime is temporarily unavailable. Please %s in a moment.",
-		agentID, retry)
-	RuntimeUnavailable(w, message)
+	RuntimeUnavailable(w, agentLookupUnavailableMessage(agentID, retrySuffix))
 }
 
 // HubUnreachableError writes a 503 Service Unavailable response for Hub connectivity issues.

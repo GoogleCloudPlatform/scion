@@ -607,7 +607,7 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 			// retries) — this is not the same as the agent not existing, so
 			// don't tell the user "Agent not found". Give them something
 			// actionable instead.
-			AgentLookupUnavailable(w, agentID, "pty_attach", err, "the attach")
+			AgentLookupUnavailable(w, err, agentID, "pty_attach", "the attach")
 			return
 		}
 		slog.Info("PTY attach: agent not found", "agent_id", agentID, "error", err)
@@ -619,8 +619,7 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		// dereference it or guess the agent is gone if one does — treat it
 		// the same as a list-unavailable failure and retry.
 		slog.Error("PTY attach: agent lookup returned no result and no error", "agent_id", agentID)
-		RuntimeUnavailable(w, fmt.Sprintf(
-			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry the attach in a moment.", agentID))
+		RuntimeUnavailable(w, agentLookupUnavailableMessage(agentID, "the attach"))
 		return
 	}
 
