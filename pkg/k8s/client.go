@@ -166,8 +166,8 @@ func newClientFromConfig(
 // Verify performs a lightweight API call (ServerVersion) to validate that
 // cluster connectivity and credentials work. If the kubeconfig uses an
 // exec-based credential plugin (e.g. gke-gcloud-auth-plugin) and it fails,
-// Verify attempts to fall back to GCE metadata-based auth when running on
-// a GCE instance.
+// Verify attempts to fall back to Application Default Credentials when
+// running on a GCE instance.
 func (c *Client) Verify() error {
 	_, err := c.Clientset.Discovery().ServerVersion()
 	if err == nil {
@@ -181,13 +181,14 @@ func (c *Client) Verify() error {
 		return fmt.Errorf("failed to connect to Kubernetes cluster: %w", err)
 	}
 
-	// On GCE, transparently fall back to metadata-based auth instead of
-	// requiring gcloud/exec plugins to be configured in the process env.
+	// On GCE, transparently fall back to Application Default Credentials
+	// instead of requiring gcloud/exec plugins to be configured in the
+	// process env.
 	if metadata.OnGCE() {
-		slog.Info("Exec credential plugin failed, falling back to GCE metadata auth",
+		slog.Info("Exec credential plugin failed, falling back to Application Default Credentials (ADC) auth",
 			"original_error", errMsg)
 		if fallbackErr := c.fallbackToGCEAuth(); fallbackErr != nil {
-			return fmt.Errorf("exec credential plugin failed and GCE metadata auth fallback also failed: %v — original error: %w", fallbackErr, err)
+			return fmt.Errorf("exec credential plugin failed and Application Default Credentials (ADC) auth fallback also failed: %v — original error: %w", fallbackErr, err)
 		}
 		return nil
 	}
@@ -219,9 +220,8 @@ func (c *Client) Verify() error {
 // only mint scopes within the instance's (or node pool's) configured access
 // scopes; the VM must already include userinfo.email, or be granted it, for
 // this to take effect there. The GKE metadata server backing Workload
-// Identity honours the requested scopes directly. Either way this change
-// cannot regress the existing cloud-platform-only behavior — it only adds a
-// scope to the request.
+// Identity honors the requested scopes directly. Requesting the extra scope
+// never narrows what cloud-platform alone would grant.
 var gceFallbackAuthScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
@@ -264,10 +264,10 @@ func (c *Client) fallbackToGCEAuth() error {
 
 	// Verify the fallback actually works
 	if _, err := newClientset.Discovery().ServerVersion(); err != nil {
-		return fmt.Errorf("GCE metadata auth connected but cluster rejected credentials: %w", err)
+		return fmt.Errorf("ADC auth connected but cluster rejected credentials: %w", err)
 	}
 
-	slog.Info("Successfully authenticated to Kubernetes via GCE metadata")
+	slog.Info("Successfully authenticated to Kubernetes via Application Default Credentials")
 	c.Clientset = newClientset
 	c.dynamic = newDynamic
 	c.Config = newConfig
