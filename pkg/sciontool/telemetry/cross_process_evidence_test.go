@@ -383,6 +383,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 }
 
 func TestPhase5ExplicitAllowKeepsMandatoryRedaction(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
