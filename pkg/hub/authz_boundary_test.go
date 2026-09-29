@@ -1818,6 +1818,43 @@ func TestGetProjectScopedPermissions_GroupResolutionFailureLogsAndErrors(t *test
 	}
 }
 
+// TestGetProjectScopedPermissions_ConstraintLoadFailureDeniesAllWithoutError
+// pins getProjectScopedPermissions's other half of the parity with
+// projectScopedPermissionsStrict: on a constraint-table load failure,
+// getProjectScopedPermissions returns an empty permission set with a nil
+// error (the deny-all restriction from loadAccessConstraintRestrictions),
+// which is the contract useraccesstoken.go's caller relies on --
+// projectScopedPermissionsStrict, on the identical failure, returns an error
+// wrapping ErrProjectAccessDenied instead.
+func TestGetProjectScopedPermissions_ConstraintLoadFailureDeniesAllWithoutError(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("gpsp-cle")
+	projectID := tid("gpsp-cle-proj")
+	createDelegateTestProject(t, s, projectID, "gpsp-cle-proj", "test")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "gpspcle@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+	rd := createTestRoleDefinition(t, s, "gpsp-cle-role", store.RoleScopeProject, []string{"agent.read"})
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+
+	failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+	authz := NewAuthzService(failing, slog.Default())
+
+	perms, err := authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	require.NoError(t, err)
+	require.Empty(t, perms)
+
+	// The other side of the same fixture: projectScopedPermissionsStrict
+	// denies the identical failure with an error instead.
+	_, strictErr := authz.projectScopedPermissionsStrict(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	require.Error(t, strictErr)
+	require.ErrorIs(t, strictErr, ErrProjectAccessDenied)
+}
+
 // --- Full contradiction matrix ----------------------------------------------
 
 func TestResolveTargetScope_InstanceOnlyPermission_CollectionEvidenceDenied(t *testing.T) {
