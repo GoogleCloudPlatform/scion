@@ -26,27 +26,68 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// E.2a (ptone/scion#2127, plan §3.7): G's fields are written only by G's own
-// code paths; E's writers leave them zero. G adds its own columns in its own
-// migration, in the same store.DecisionAuditRecord/MutationAuditRecord types
-// (ruling, G integration 22:06: the wrapper emits one record, "G fields in
-// their own block") — so this test asserts a behavior that survives that
-// addition, not a type shape that a struct-literal reflection check would
-// break the moment G lands its fields.
+// G's verified-agent-actor fields land in the same store.DecisionAuditRecord/
+// MutationAuditRecord types, in G's own field block. E's writers never
+// populate them — this file asserts that behavior, not a type shape that
+// would break the moment G's migration lands its fields.
 // ---------------------------------------------------------------------------
 
-// gReservedFieldNames are the field names plan §3.7 and the rulings reserve
-// for G's verified-agent actor extension. None of E's writers may populate
-// them, whether or not the field exists yet on the record types. G's
-// migration commit adds more (ParentGrantID, ExchangeAgentCredentialID, an
-// actor kind, and the aggregated record's kind/counts) and keeps this list
-// in sync with the final names it lands.
+// gReservedFieldNames are the store-record Go struct field names E's writers
+// must never populate. G's migration commit adds more (ParentGrantID,
+// ExchangeAgentCredentialID, an actor-kind field, and the aggregated
+// record's kind/counts) and updates this list, and
+// gReservedFieldNameToLabelKey below, in the same commit.
 var gReservedFieldNames = []string{
 	"ActorAgentID",
 	"AuthorizingUserID",
 	"SourceGrantID",
 	"DelegationEdgeID",
 	"AgentDelegationCode",
+}
+
+// gReservedFieldNameToLabelKey maps each actor-identity entry in
+// gReservedFieldNames to its corresponding entry in gVerifiedActorFieldNames
+// (credential_decoration.go), the single canonical, E.1-owned reserved
+// label-key set. AgentDelegationCode is a denial fine-code, not an actor
+// identity, and is deliberately absent: it is not a reserved label key.
+var gReservedFieldNameToLabelKey = map[string]string{
+	"ActorAgentID":      "actor_agent_id",
+	"AuthorizingUserID": "authorizing_user_id",
+	"SourceGrantID":     "source_grant_id",
+	"DelegationEdgeID":  "delegation_edge_id",
+}
+
+// TestGReservedFieldNames_MatchCanonicalLabelKeys pins gReservedFieldNames
+// against gVerifiedActorFieldNames through gReservedFieldNameToLabelKey, so
+// the store-record field list and the label-key reservation list cannot
+// silently drift apart. AgentDelegationCode is explicitly excluded: it is a
+// denial fine-code, not an actor identity, and must not be a reserved label
+// key — TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey,
+// below, proves the exclusion holds in the validator itself, not just in
+// this list.
+func TestGReservedFieldNames_MatchCanonicalLabelKeys(t *testing.T) {
+	canonical := make(map[string]bool, len(gVerifiedActorFieldNames))
+	for _, k := range gVerifiedActorFieldNames {
+		canonical[k] = true
+	}
+	for _, fieldName := range gReservedFieldNames {
+		labelKey, mapped := gReservedFieldNameToLabelKey[fieldName]
+		if fieldName == "AgentDelegationCode" {
+			require.False(t, mapped, "AgentDelegationCode must stay excluded from gReservedFieldNameToLabelKey")
+			continue
+		}
+		require.True(t, mapped, "gReservedFieldNames entry %q has no corresponding label key in gReservedFieldNameToLabelKey", fieldName)
+		require.True(t, canonical[labelKey], "gReservedFieldNames entry %q maps to label key %q, which is not in gVerifiedActorFieldNames (credential_decoration.go)", fieldName, labelKey)
+	}
+	require.NotContains(t, gVerifiedActorFieldNames, "agent_delegation_code", "agent_delegation_code must not be a reserved label key")
+}
+
+// TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey proves
+// the exclusion is real at the validator, not just in the list above: a
+// token issuer can use "agent_delegation_code" as a label key today.
+func TestValidateCredentialMetadata_AcceptsAgentDelegationCodeAsALabelKey(t *testing.T) {
+	err := ValidateCredentialMetadata("n", "", map[string]string{"agent_delegation_code": "v"})
+	require.NoError(t, err)
 }
 
 // assertReservedFieldsZero uses reflection to assert that every field of v
@@ -77,35 +118,39 @@ func assertReservedFieldsZero(t *testing.T, label string, v any) {
 	}
 }
 
-// gLikeDecoration builds a credential decoration whose labels use G-reserved
-// key names (as an adversarial/careless issuer might try, or as a row
-// written directly to the store rather than through the validator would
-// allow — ValidateCredentialMetadata itself rejects these keys at mint,
-// which is E.1's job and is covered there; this test is about what E's
-// audit writers do with such a decoration if one reaches them).
+// gLikeLabelValue is the synthetic value used for every reserved key in
+// gLikeDecoration's labels, distinct enough to search for but not resembling
+// any real identifier.
+const gLikeLabelValue = "label-value-"
+
+// gLikeDecoration builds a credential decoration whose labels use every name
+// in gVerifiedActorFieldNames, the canonical reserved label-key set — the
+// same keys ValidateCredentialMetadata now rejects at mint (E.1). This
+// decoration is constructed directly, outside that validator, to test what
+// E's audit writers do if such a decoration reaches them regardless (for
+// example, a row present before the reservation existed).
 func gLikeDecoration(tokenID, projectID string) *CredentialDecoration {
+	labels := make(map[string]string, len(gVerifiedActorFieldNames))
+	for i, key := range gVerifiedActorFieldNames {
+		labels[key] = gLikeLabelValue + string(rune('a'+i))
+	}
 	return &CredentialDecoration{
 		Kind:      CredentialKindUAT,
 		TokenID:   tokenID,
 		TokenName: "g-like-token",
 		Boundary:  decorationBoundary{Kind: "project", ProjectID: projectID},
-		Labels: map[string]string{
-			"actor_agent_id":      "evil-agent-id",
-			"authorizing_user_id": "evil-user-id",
-		},
+		Labels:    labels,
 	}
 }
 
-// assertLabelsOnlyInCredentialLabels asserts the adversarial label values
-// appear only inside the bounded CredentialLabels snapshot, never in any
-// identity/credential-ID field.
+// assertLabelsOnlyInCredentialLabels asserts every gLikeLabelValue-prefixed
+// value appears only inside the bounded CredentialLabels snapshot, never in
+// any identity/credential-ID field.
 func assertLabelsOnlyInCredentialLabels(t *testing.T, label, principalID, credentialID, credentialLabels string) {
 	t.Helper()
-	require.NotContains(t, principalID, "evil-agent-id", "%s: label value leaked into PrincipalID", label)
-	require.NotContains(t, principalID, "evil-user-id", "%s: label value leaked into PrincipalID", label)
-	require.NotContains(t, credentialID, "evil-agent-id", "%s: label value leaked into CredentialID", label)
-	require.NotContains(t, credentialID, "evil-user-id", "%s: label value leaked into CredentialID", label)
-	require.Contains(t, credentialLabels, "evil-agent-id", "%s: expected the label value to survive in CredentialLabels", label)
+	require.NotContains(t, principalID, gLikeLabelValue, "%s: label value leaked into PrincipalID", label)
+	require.NotContains(t, credentialID, gLikeLabelValue, "%s: label value leaked into CredentialID", label)
+	require.Contains(t, credentialLabels, gLikeLabelValue, "%s: expected the label values to survive in CredentialLabels", label)
 }
 
 // TestNoEPathWritesGColumns_DecisionAudit runs Decide on allow, deny, and

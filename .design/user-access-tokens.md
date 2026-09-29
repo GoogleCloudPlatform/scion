@@ -462,12 +462,16 @@ distinguishable end to end — including in denied and rejected requests.
   mutable `*RequestMeta` this middleware installs; `auth_type` and any
   `user_id`/`principal_kind`/`credential` attributes are read back after the
   handler chain returns, not before.
-- A rejected UAT produces one `"credential rejected"` warning line with
-  `auth_type=uat` and `reason` ∈ `{invalid, revoked, expired, user_suspended,
-  reserved_identity}`. `credential.id` is included only when the presented
-  value matched a stored token row (revoked/expired/suspended) — an unknown
-  or malformed bearer value never yields an asserted identity, not even a
-  rejected one. The presented token string is never logged, in either case.
+- A rejected UAT produces one `"credential rejected"` line with `auth_type=uat`
+  and `reason` ∈ `{invalid, revoked, expired, user_suspended,
+  reserved_identity, lookup_error}`, at Warn level except `lookup_error`,
+  which logs at Error level: it means the token store or database call itself
+  failed, not that a client presented a bad credential, and it never carries
+  `credential.id`. `credential.id` is otherwise included only when the
+  presented value matched a stored token row (revoked/expired/suspended) — an
+  unknown or malformed bearer value never yields an asserted identity, not
+  even a rejected one. The presented token string is never logged, in either
+  case.
 
 ### Decision and mutation audit
 
@@ -515,10 +519,12 @@ through its own columns (`actor_agent_id`, `authorizing_user_id`,
 `store.MutationAuditRecord` types in G's own migration, in G's own field
 block. G's fields are written only by G's code paths; E's writers leave them
 zero — `pkg/hub/e2a_no_g_column_test.go` runs E's decision- and
-mutation-audit writers with a decoration carrying G-reserved-looking label
-keys and asserts those fields stay zero (once they exist) and that the label
-values surface only inside the bounded `credential_labels` snapshot, never in
-a principal or credential ID field. A decoration label such as
+mutation-audit writers with a decoration carrying every name in
+`gVerifiedActorFieldNames` (E.1's reserved label-key set, above) and asserts
+those fields stay zero (once they exist) and that the label values surface
+only inside the bounded `credential_labels` snapshot, never in a principal or
+credential ID field. A separate test pins the two lists together so they
+cannot silently drift apart. A decoration label such as
 `"nightly-cleanup-agent"` therefore always stays under `credential.labels.*`
 with `labels_source=issuer`, and cannot occupy where G's verified actor
 fields will live.
