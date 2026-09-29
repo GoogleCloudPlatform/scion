@@ -17,11 +17,14 @@
 package hub
 
 // Tests for skillProgenyAdapter (ptone/scion#2128), which consolidates the
-// former dedicated creator-user-skill grant into B.1's common progeny
+// former dedicated creator-user-skill grant into the common progeny
 // evaluator. TestAgentCreatorUserSkillGrant_Conditions (which called the
 // retired agentCreatorUserSkillGrant directly) is replaced by
-// TestSkillProgenyRead_Conditions below, exercising the same shapes through
-// Decide end to end.
+// TestSkillProgenyRead_Conditions below, exercising the same shapes at the
+// relationship stage (evaluateRelationshipCandidates), isolated from the
+// rest of Decide. Decide-level coverage for this grant lives in the
+// characterization test and in skill_agent_read_test.go — see the doc on
+// TestSkillProgenyRead_Conditions.
 
 import (
 	"context"
@@ -75,10 +78,23 @@ func TestSkillProgenyAdapter_FactResourceID(t *testing.T) {
 
 // TestSkillProgenyRead_Conditions ports TestAgentCreatorUserSkillGrant_Conditions
 // (retired with agentCreatorUserSkillGrant) to exercise the same shapes
-// end to end through Decide instead of the removed pure function. The
-// personal-skill progeny read matches only a read of a user-scoped skill
-// owned by a hub-attested agent's origin user. A child agent (ancestry
-// [U, parent]) gets U's bucket, never its parent's or anyone else's.
+// through evaluateRelationshipCandidates, the same isolation level the
+// retired pure-function test had, instead of full Decide (see the isolation
+// note in the loop below). The personal-skill progeny read matches only a
+// read of a user-scoped skill owned by a hub-attested agent's origin user. A
+// child agent (ancestry [U, parent]) gets U's bucket, never its parent's or
+// anyone else's.
+//
+// Decide-level (end-to-end) coverage for this grant, beyond the isolated
+// candidate shapes tested here, lives in:
+//   - TestRelationshipCharacterization_ProgenySkillRead (origin allow /
+//     other-user deny, provenance)
+//   - TestAgentSkillRead_ChildAgentSeesParentGrantedSet (child agent)
+//   - TestAgentSkillRead_CreatorSuspendedOrDeletedLosesUserSkills and
+//     TestRelationshipRules_SkillProgenySourceInactive (suspended/deleted
+//     source)
+//   - skill_agent_read_test.go's write-action assertions (writes never
+//     widened)
 func TestSkillProgenyRead_Conditions(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	u := createCharacterizationUser(t, s, tid("sp-user-u"))
@@ -135,15 +151,20 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 }
 
 // TestSkillProgenyRead_ScopeOwnerDiffersFromCreator pins that the grant
-// keys only on Resource.ScopeUserID: a skill's OwnerID (and CreatedBy,
-// which Resource does not even carry) never widens or narrows it. An agent
-// of the scope owner is allowed; an agent of the creator/owner is not.
+// keys only on Resource.ScopeUserID: a skill's OwnerID/CreatedBy (which
+// Resource does not even carry) never widens or narrows it. An agent of the
+// scope owner is allowed; an agent of the creator/owner is not.
 func TestSkillProgenyRead_ScopeOwnerDiffersFromCreator(t *testing.T) {
 	f := newGoldenFixture(t)
 	creator := createCharacterizationUser(t, f.store, tid("sp-creator"))
 	sk := createTestSkill(t, f.store, "sp-mismatched", store.SkillScopeUser, f.projectOwnerID, creator.ID())
 	require.Equal(t, f.projectOwnerID, sk.ScopeID)
 	require.Equal(t, creator.ID(), sk.OwnerID)
+	// Pin OwnerID/CreatedBy literally, per the acceptance criterion wording,
+	// even though the guarantee is structural: Resource carries no CreatedBy
+	// at all, so the adapter cannot consult it regardless of this value.
+	sk.CreatedBy = creator.ID()
+	require.NoError(t, f.store.UpdateSkill(context.Background(), sk))
 
 	agentOfScopeOwner := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims: jwt.Claims{Subject: tid("sp-agent-scope-owner")}, ProjectID: f.projectBeta.ID,
@@ -195,4 +216,120 @@ func TestSkillProgenyRead_ListAndPointReadAgree(t *testing.T) {
 	assert.False(t, otherBucketAllowed)
 	assert.Equal(t, otherBucketAllowed, pred.Matches(otherSrc))
 	assert.Equal(t, otherBucketAllowed, f.authz.EvaluateProgeny(ctx, principal, otherSrc))
+}
+
+// TestSkillProgenyRead_ProvenanceNamesGrantAndSource pins the provenance
+// acceptance criterion ("common path used; provenance names the progeny
+// grant and source U"): an accepted candidate must report MatchedGrant
+// "builtin:relationship:progeny_skill_read" and a RelationshipSource with
+// Kind "skill" and OwnerID/ID equal to U. Checked for both the bucket-level
+// probe agentSkillAccessScope issues and a concrete point read, since the
+// point read is the shape where Source.ID (U) differs from Resource.ID (the
+// skill record).
+func TestSkillProgenyRead_ProvenanceNamesGrantAndSource(t *testing.T) {
+	f := newGoldenFixture(t)
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: tid("sp-provenance-agent")}, ProjectID: f.projectBeta.ID,
+		Ancestry: []string{f.projectOwnerID}, Scopes: allRegisteredAgentScopes(),
+	}}
+
+	d := decidePerm(f.authz, agent, skillScopeResource(store.SkillScopeUser, f.projectOwnerID), ActionRead, "skill.read", true)
+	require.True(t, d.Allowed, "bucket probe: reason %q", d.Reason)
+	assert.Equal(t, "builtin:relationship:progeny_skill_read", d.MatchedGrant)
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	require.True(t, r.Accepted)
+	require.NotNil(t, r.Source)
+	assert.Equal(t, "skill", r.Source.Kind)
+	assert.Equal(t, f.projectOwnerID, r.Source.OwnerID)
+	assert.Equal(t, f.projectOwnerID, r.Source.ID)
+
+	sk := createTestSkill(t, f.store, "sp-provenance-skill", store.SkillScopeUser, f.projectOwnerID, f.projectOwnerID)
+	d = decidePerm(f.authz, agent, skillResource(sk), ActionRead, "skill.read", true)
+	require.True(t, d.Allowed, "point read: reason %q", d.Reason)
+	assert.Equal(t, "builtin:relationship:progeny_skill_read", d.MatchedGrant)
+	r = relationshipResult(t, d, RelationshipRuleProgeny)
+	require.True(t, r.Accepted)
+	require.NotNil(t, r.Source)
+	assert.Equal(t, "skill", r.Source.Kind)
+	assert.Equal(t, f.projectOwnerID, r.Source.OwnerID)
+	assert.Equal(t, f.projectOwnerID, r.Source.ID)
+	assert.NotEqual(t, sk.ID, r.Source.ID, "the source ID is the owning user, not the skill record ID")
+}
+
+// TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant is a
+// characterization test, kept separate from the acceptance tests above: it
+// pins the CURRENT allow, not a target behaviour. This consolidation of the
+// pre-existing personal-skill grant does not add a skill-only
+// execution-project admission check. Today, an agent whose
+// project access has been removed still reads its origin user's personal
+// skills as long as that user remains active, because this grant is keyed
+// only on the user's live status and the ancestry chain, never on the
+// agent's own project membership. ptone/scion#2120 is the tracked closure
+// that adds the missing execution-project admission step and flips this
+// case to deny.
+func TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	u := createCharacterizationUser(t, s, tid("sp-projgone-u"))
+	project := tid("sp-projgone-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: project, Name: "sp-projgone", Slug: "sp-projgone", CreatedBy: u.ID(),
+	}))
+	createTestUserWithProjectRole(t, s, u.ID(), u.ID()+"@relchar.test", project, store.ProjectRoleMember)
+
+	// Remove U's project membership while U itself stays active.
+	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID())
+	require.NoError(t, err)
+	require.Positive(t, n, "the user's project membership must actually be removed")
+
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: tid("sp-projgone-agent")}, ProjectID: project,
+		Scopes: allRegisteredAgentScopes(), Ancestry: []string{u.ID()},
+	}}
+	sk := createTestSkill(t, s, "sp-projgone-skill", store.SkillScopeUser, u.ID(), u.ID())
+
+	d := authz.CheckAccess(ctx, agent, skillScopeResource(store.SkillScopeUser, u.ID()), ActionRead)
+	assert.True(t, d.Allowed, "bucket probe: reason %q", d.Reason)
+	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
+
+	d = authz.CheckAccess(ctx, agent, skillResource(sk), ActionRead)
+	assert.True(t, d.Allowed, "point read: reason %q", d.Reason)
+	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
+}
+
+// TestSkillProgenyRead_ListScopeAgreesForChildAndSuspendedSource extends the
+// point/list parity assertion to the two cases the grant's own tests
+// exercise at the Decide/HTTP level (child agent, suspended source),
+// against agentSkillAccessScope's CallerID specifically — the value
+// listSkills (skill_handlers.go) actually uses, rather than the
+// ProgenyListPredicate/EvaluateProgeny path TestSkillProgenyRead_ListAndPointReadAgree
+// already covers.
+func TestSkillProgenyRead_ListScopeAgreesForChildAndSuspendedSource(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	u := createCharacterizationUser(t, s, tid("sp-scope-u"))
+	sk := createTestSkill(t, s, "sp-scope-skill", store.SkillScopeUser, u.ID(), u.ID())
+
+	// A grandchild agent (ancestry [U, parent]) gets U's bucket, exactly as
+	// a direct child would.
+	child := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: tid("sp-scope-child")}, ProjectID: tid("sp-scope-proj"),
+		Scopes: allRegisteredAgentScopes(), Ancestry: []string{u.ID(), tid("sp-scope-parent")},
+	}}
+	scope := srv.agentSkillAccessScope(ctx, child)
+	pointAllowed := srv.authzService.CheckAccess(ctx, child, skillResource(sk), ActionRead).Allowed
+	assert.True(t, pointAllowed, "grandchild reads origin user's skill")
+	assert.Equal(t, pointAllowed, scope.CallerID == u.ID())
+
+	// Suspend the source user: the bucket scope and the point read must
+	// drop together.
+	fresh, err := s.GetUser(ctx, u.ID())
+	require.NoError(t, err)
+	fresh.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, fresh))
+
+	scope = srv.agentSkillAccessScope(ctx, child)
+	pointAllowed = srv.authzService.CheckAccess(ctx, child, skillResource(sk), ActionRead).Allowed
+	assert.False(t, pointAllowed, "suspended source denies the point read")
+	assert.Empty(t, scope.CallerID, "suspended source drops the bucket scope too")
 }

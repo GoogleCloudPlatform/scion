@@ -24,7 +24,7 @@ package permissions
 // pkg/hub); ResourceType is always explicit, never a wildcard.
 type RelationshipPolicy struct {
 	// Relationship is the canonical rule name: "owner", "ancestor",
-	// "progeny", "hub_member_sa_assign", "creator_user_skill" — matching
+	// "progeny", "hub_member_sa_assign" — matching
 	// hub.RelationshipType / B.1's RelationshipRuleID strings.
 	Relationship string
 	// PrincipalKinds lists which principal kinds this row applies to, e.g.
@@ -48,9 +48,9 @@ type RelationshipPolicy struct {
 
 // RelationshipPolicies ships with the two rows A.1 needs for agent
 // owner/ancestor attach and port access. B.1 extends this table (progeny,
-// hub_member_sa_assign, creator_user_skill, additional PrincipalKinds such
-// as agent-ancestor) from its characterization of today's
-// owner/ancestor/progeny-reachable permissions.
+// hub_member_sa_assign, additional PrincipalKinds such as agent-ancestor)
+// from its characterization of today's owner/ancestor/progeny-reachable
+// permissions.
 var RelationshipPolicies = []RelationshipPolicy{
 	{
 		Relationship:   "owner",

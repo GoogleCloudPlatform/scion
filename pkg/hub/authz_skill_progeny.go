@@ -22,25 +22,23 @@ import (
 
 // skillProgenyAdapter is the ProgenyFactAdapter for personal (user-scoped)
 // skills (ptone/scion#2128). It consolidates the former dedicated
-// creator-user-skill grant (agentCreatorUserSkillGrant, retired) into B.1's
-// common progeny evaluator.
+// creator-user-skill grant (agentCreatorUserSkillGrant, retired) into the
+// common progeny evaluator (authz_relationship_rules.go).
 //
 // A personal skill's sharing source is the bucket itself, not a per-record
 // fact: skillScopeResource sets Resource.ScopeUserID to the owning user for
 // both a concrete skill (skillResource, which also sets Resource.ID) and the
 // ID-less bucket probe agentSkillAccessScope uses
 // (skillScopeResource(store.SkillScopeUser, origin), which never sets an
-// ID). relationshipCandidates (authz_relationship_rules.go) passes
-// Resource.ScopeUserID as the progeny fact's query ID for skill resources
-// precisely so this one adapter serves both shapes identically — this
-// adapter itself never inspects a Resource and never queries the store; it
+// ID). FactResourceID below is what makes both shapes resolve to the same
+// query ID; Sources itself never reads the store or inspects a Resource — it
 // only echoes back the ID it is asked about as a synthetic sharing source
 // owned by that same ID.
 //
 // This adapter never consults Resource.OwnerID or a skill's CreatedBy: a
-// skill's creator can differ from its ScopeUserID after a transfer, and the
-// sharing source is deliberately keyed on ScopeUserID alone (F.1 ruling
-// Q5 — never union both keys to broaden recipients).
+// skill's OwnerID/CreatedBy can differ from its ScopeUserID, and the sharing
+// source is deliberately keyed on ScopeUserID alone — never union both keys
+// to broaden recipients.
 type skillProgenyAdapter struct{}
 
 // Kind implements ProgenyFactAdapter.
@@ -51,10 +49,12 @@ func (skillProgenyAdapter) Kind() string { return "skill" }
 func (skillProgenyAdapter) ReadPermissions() []string { return []string{"skill.read"} }
 
 // Sources implements ProgenyFactAdapter. q.ResourceID carries the owning
-// user's ID (see relationshipCandidates), not a skill record ID. A personal
-// skill bucket is available to its owning user's descendants by default,
-// never opt-in (SharingPolicyOriginDescendants) — no mandatory opt-in flag
-// is introduced by this consolidation (F.1 exclusion).
+// user's ID (see FactResourceID/relationshipCandidates), not a skill record
+// ID. Sources never reads the store or a Resource — it only synthesizes the
+// sharing source from the ID it is asked about. A personal skill bucket is
+// available to its owning user's descendants by default, never opt-in
+// (SharingPolicyOriginDescendants) — no mandatory opt-in flag is introduced
+// by this consolidation.
 func (skillProgenyAdapter) Sources(_ context.Context, q ProgenyQuery) ([]SharingSource, error) {
 	if q.ResourceID == "" {
 		return nil, nil

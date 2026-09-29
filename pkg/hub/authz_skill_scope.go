@@ -138,11 +138,3 @@ func filterHubWideSkillGrants(candidates []CandidateBinding, roleDefs map[string
 	}
 	return filtered
 }
-
-// agentCreatorUserSkillGrant and originUserActive were the dedicated
-// creator-user-skill relationship grant (ptone/scion#1968) and its
-// origin-user-active check. ptone/scion#2128 consolidated both into the
-// common progeny evaluator: the shape check now lives in
-// skillProgenyAdapter.FactResourceID and the source-active check in
-// relationshipSourceActive (authz_relationship_rules.go), which every
-// relationship candidate shares. See authz_skill_progeny.go.

@@ -477,11 +477,6 @@ func agentPredicateMatches(scope *store.SkillAccessScope, sk *store.Skill) bool 
 	return false
 }
 
-// The personal-skill progeny grant's condition matrix (formerly
-// agentCreatorUserSkillGrant, retired by ptone/scion#2128) is now pinned end
-// to end through Decide: see TestSkillProgenyRead_Conditions in
-// authz_skill_progeny_test.go.
-
 // A15: the synthetic catalog grant applies to no
 // non-hub scope kind, including empty and unknown values.
 func TestAgentSkillCatalogBinding_FilteredOutsideHubScope(t *testing.T) {

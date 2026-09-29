@@ -17,9 +17,8 @@ package hub
 // Relationship candidates (ptone/scion#2119).
 //
 // A named relationship (owner, ancestor, progeny, hub-member service-account
-// assign, creator user skill) produces a typed candidate for the requested
-// permission. Every candidate passes the same ordered stages before it may
-// grant anything:
+// assign) produces a typed candidate for the requested permission. Every
+// candidate passes the same ordered stages before it may grant anything:
 //
 //  1. relationship_policy  — the permission is listed for the relationship,
 //     principal kind and resource type in permissions.RelationshipPolicies;
@@ -91,7 +90,7 @@ func relationshipAncestryAttested(principal PrincipalContext) bool {
 // RelationshipSource identifies the record a relationship derives from.
 // It carries identifiers only, never material.
 type RelationshipSource struct {
-	// Kind is the source kind, e.g. "secret", "user_skill".
+	// Kind is the source kind, e.g. "secret", "skill".
 	Kind string `json:"kind"`
 	// ID is the source record ID. Recorded only for accepted candidates.
 	ID string `json:"id,omitempty"`
