@@ -29,6 +29,14 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionTokenList: any;
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -105,6 +113,17 @@ function eligibilityResponse(projectId: string) {
   };
 }
 
+/** Like eligibilityResponse, but agent:attach is ineligible -- used to tell
+ * two different projects' responses apart in race-condition tests. */
+function eligibilityResponseIneligible(projectId: string) {
+  const resp = eligibilityResponse(projectId);
+  resp.scopes[0] = {
+    ...resp.scopes[0],
+    eligibility: { boundary: { kind: 'project', projectId }, eligible: false, reason: 'no_relationship_candidacy' },
+  };
+  return resp;
+}
+
 async function createComponent(
   fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
@@ -121,7 +140,7 @@ async function createComponent(
 /** Default fetch router: empty tokens/projects, plain catalog for scopes. */
 function baseFetch(
   overrides: Partial<{
-    scopes: (url: string) => Response;
+    scopes: (url: string) => Response | Promise<Response>;
     projects: () => Response;
     tokens: () => Response;
     create: (init?: RequestInit) => Response;
@@ -302,5 +321,65 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
     await (el as any).handleCreate(new Event('submit'));
 
     expect((el as any).createError).toContain('agent:delete');
+  });
+
+  it('a 403 on project switch does not keep the previous project eligibility on screen', async () => {
+    const el = await createComponent(
+      baseFetch({
+        scopes: (url) => {
+          if (url.includes('projectId=proj-a')) return jsonResponse(eligibilityResponse('proj-a'));
+          if (url.includes('projectId=proj-b')) {
+            return jsonResponse({ error: { code: 'forbidden', message: 'forbidden' } }, 403);
+          }
+          return jsonResponse(CATALOG_RESPONSE);
+        },
+      })
+    );
+
+    await (el as any).loadScopes('proj-a');
+    await el.updateComplete;
+    let del = (el as any).availableScopes.find((s: any) => s.value === 'agent:delete');
+    expect(del.eligible).toBe(false); // sanity: project A's eligibility loaded first
+
+    (el as any).handleProjectChange('proj-b');
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    // Project B's fetch failed: must show the plain catalog, not A's
+    // eligibility, and must record which project failed.
+    del = (el as any).availableScopes.find((s: any) => s.value === 'agent:delete');
+    expect(del.eligible).toBeUndefined();
+    expect((el as any).scopesErrorProjectId).toBe('proj-b');
+  });
+
+  it('an older, slower project response cannot overwrite a newer one that already resolved', async () => {
+    const gateA = deferred<Response>();
+    const el = await createComponent(
+      baseFetch({
+        scopes: (url) => {
+          if (url.includes('projectId=proj-a')) return gateA.promise;
+          if (url.includes('projectId=proj-b')) return jsonResponse(eligibilityResponseIneligible('proj-b'));
+          return jsonResponse(CATALOG_RESPONSE);
+        },
+      })
+    );
+
+    // Start A (slow, gated) then switch to B (fast) before A resolves.
+    const loadA = (el as any).loadScopes('proj-a') as Promise<void>;
+    const loadB = (el as any).loadScopes('proj-b') as Promise<void>;
+    await loadB;
+    await el.updateComplete;
+
+    let attach = (el as any).availableScopes.find((s: any) => s.value === 'agent:attach');
+    expect(attach.eligible).toBe(false); // B's (ineligible) fixture, confirming B applied
+
+    // Now let A's slow response land after B's.
+    gateA.resolve(jsonResponse(eligibilityResponse('proj-a')));
+    await loadA;
+    await el.updateComplete;
+
+    // A must not have overwritten B's already-applied, newer state.
+    attach = (el as any).availableScopes.find((s: any) => s.value === 'agent:attach');
+    expect(attach.eligible).toBe(false);
   });
 });

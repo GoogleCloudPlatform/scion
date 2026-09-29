@@ -79,9 +79,9 @@ const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
   boundary_not_allowed: 'not selectable for a project-scoped token',
   unknown_selector: 'unknown scope',
   // Appears per-scope only when at least one other scope in the response
-  // was eligible (ptone/scion#2122 DTO v3); a project with zero eligible
-  // scopes fails the whole request instead, so this label is never the
-  // only signal that the project itself is inaccessible.
+  // was eligible (ptone/scion#2122); a project with zero eligible scopes
+  // fails the whole request instead, so this label is never the only
+  // signal that the project itself is inaccessible.
   project_access_required:
     'you do not currently have authority for this permission in this project',
 };
@@ -520,6 +520,22 @@ export class ScionTokenList extends LitElement {
   @state() private availableScopes: ScopeOption[] = [...FALLBACK_SCOPES];
   /** Cached scope responses, keyed by projectId ('' for the plain catalog). */
   private scopesCache: Map<string, ScopeOption[]> = new Map();
+  /**
+   * Monotonic counter guarding against out-of-order responses: each
+   * loadScopes() call captures the value at its start and checks it again
+   * after every await, so a slower, older request cannot overwrite the
+   * state a newer one already applied.
+   */
+  private scopesRequestSeq = 0;
+  /**
+   * Set to the projectId whose eligibility fetch failed (403, or any other
+   * non-OK/network failure), so the picker can say so instead of silently
+   * showing a different project's eligibility. Cleared on any successful
+   * fetch for that project. Compared against createProjectId at render
+   * time, so switching away from the failed project hides the message
+   * without an explicit reset.
+   */
+  @state() private scopesErrorProjectId: string | null = null;
 
   // Create dialog
   @state() private createDialogOpen = false;
@@ -806,22 +822,29 @@ export class ScionTokenList extends LitElement {
   }
 
   /**
-   * Fetch scopes from /api/v1/auth/scopes and cache the result per project
-   * (ptone/scion#2122). With projectId set, each entry additionally carries
-   * mint eligibility for that project -- computed fresh by the server for
-   * the current user, never inferred or cached across projects. Falls back
-   * to the hardcoded FALLBACK_SCOPES list (with no eligibility at all) on
-   * failure, and leaves whatever was previously loaded in place rather than
-   * clobbering it with an empty list.
+   * Fetch scopes from /api/v1/auth/scopes and cache the result per project.
+   * With projectId set, each entry additionally carries mint eligibility
+   * for that project -- computed fresh by the server for the current user,
+   * never inferred or cached across projects. Falls back to the hardcoded
+   * FALLBACK_SCOPES list (with no eligibility at all) on failure.
+   *
+   * Guards against two races when the user switches projects quickly:
+   * responses are matched against a monotonic sequence number so a slower,
+   * older request cannot overwrite state a newer one already applied, and
+   * a non-OK response never leaves a DIFFERENT project's eligibility on
+   * screen -- it falls back to the plain catalog (no eligibility) and
+   * records which project failed, for an inline message.
    *
    * Scopes are enriched with `resource` (for grouping) and `isAlias` fields.
    * Aliases are listed first within their resource group for visual separation.
    */
   private async loadScopes(projectId: string): Promise<void> {
+    const seq = ++this.scopesRequestSeq;
     const cacheKey = projectId || '';
     const cached = this.scopesCache.get(cacheKey);
     if (cached) {
       this.availableScopes = cached;
+      this.scopesErrorProjectId = null;
       return;
     }
     try {
@@ -829,7 +852,17 @@ export class ScionTokenList extends LitElement {
         ? `/api/v1/auth/scopes?projectId=${encodeURIComponent(projectId)}`
         : '/api/v1/auth/scopes';
       const res = await apiFetch(url);
-      if (!res.ok) return; // keep whatever list is currently shown
+      if (seq !== this.scopesRequestSeq) return; // superseded by a newer request
+      if (!res.ok) {
+        // Never keep a different project's eligibility on screen: fall
+        // back to the plain catalog (server enforcement still applies
+        // regardless of what this picker shows) and surface the failure --
+        // only when a specific project was requested; the parameterless
+        // catalog call has no project to blame.
+        this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+        if (projectId) this.scopesErrorProjectId = projectId;
+        return;
+      }
       const data = (await res.json()) as {
         scopes?: Array<{
           id: string;
@@ -846,6 +879,7 @@ export class ScionTokenList extends LitElement {
           eligibility?: { eligible: boolean; ineligibleMembers?: string[] };
         }>;
       };
+      if (seq !== this.scopesRequestSeq) return; // superseded while parsing
       const scopes: ScopeOption[] = [];
       for (const s of data.scopes || []) {
         scopes.push({
@@ -883,10 +917,13 @@ export class ScionTokenList extends LitElement {
       if (scopes.length > 0) {
         this.scopesCache.set(cacheKey, scopes);
         this.availableScopes = scopes;
+        this.scopesErrorProjectId = null;
       }
     } catch {
-      // Keep whatever list is currently shown — log for debugging.
-      console.warn('Failed to fetch scopes from /api/v1/auth/scopes, keeping previous list');
+      if (seq !== this.scopesRequestSeq) return; // superseded before the catch
+      this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+      if (projectId) this.scopesErrorProjectId = projectId;
+      console.warn('Failed to fetch scopes from /api/v1/auth/scopes');
     }
   }
 
@@ -1372,6 +1409,13 @@ export class ScionTokenList extends LitElement {
                   >`
                 : nothing}
             </div>
+            ${this.scopesErrorProjectId && this.scopesErrorProjectId === this.createProjectId
+              ? html`<div class="dialog-error">
+                  Could not check which scopes you can select for this project (no access, or it no
+                  longer exists). Showing the full catalog with no eligibility -- the server still
+                  enforces access when you submit.
+                </div>`
+              : nothing}
             <div class="scope-selector">
               <div class="scope-search">
                 <sl-input
