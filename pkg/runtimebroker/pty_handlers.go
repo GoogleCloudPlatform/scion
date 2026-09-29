@@ -635,7 +635,12 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 	// support interactive attach at all (runtime.HasAttachSupport, asked of
 	// the live instance LookupAgent actually matched) — otherwise the
 	// caller only learns this after the upgrade, from an abnormal close
-	// instead of a clean HTTP error.
+	// instead of a clean HTTP error. This is the direct-connect counterpart
+	// of the control-channel gate's 4501/attach_unsupported (controlchannel.go):
+	// same policy, but since no WebSocket has been upgraded yet here, there is
+	// no close frame to send — the already-distinct 501/runtime_attach_unsupported
+	// HTTP response below already tells the caller this is a definitive
+	// refusal, not a retriable readiness failure, so it stays as it is.
 	if !runtime.HasAttachSupport(result.Runtime) {
 		slog.Info("PTY attach: runtime does not support attach", "agent_id", agentID, "runtime", result.RuntimeName)
 		RuntimeAttachUnsupported(w, "attach is not supported for agents on this runtime")
