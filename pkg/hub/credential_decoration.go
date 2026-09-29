@@ -435,14 +435,14 @@ func sanitizeForLog(s string, maxBytes int) string {
 	if len(out) <= maxBytes {
 		return out
 	}
-	// Truncate at a rune boundary at or before maxBytes.
+	// Truncate at a rune boundary at or before maxBytes. out is valid UTF-8
+	// (rebuilt rune-by-rune above), so cutting mid-rune can only ever
+	// produce a split final rune — checking utf8.ValidString directly
+	// (review-2 nit 3) drops exactly that one incomplete rune, unlike the
+	// previous byte-scan, which over-trimmed a complete multi-byte rune
+	// whenever it happened to end exactly at maxBytes.
 	truncated := out[:maxBytes]
-	for len(truncated) > 0 && !utf8.RuneStart(truncated[len(truncated)-1]) {
-		truncated = truncated[:len(truncated)-1]
-	}
-	// If the last rune we kept is itself incomplete (a start byte with no
-	// continuation bytes because we happened to cut here), drop it too.
-	if r, size := utf8.DecodeLastRuneInString(truncated); r == utf8.RuneError && size <= 1 && len(truncated) > 0 {
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
 		truncated = truncated[:len(truncated)-1]
 	}
 	return truncated + "…"
