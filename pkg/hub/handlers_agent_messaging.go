@@ -974,6 +974,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Build storeMsg and structuredMsg from the routing result.
+	// deliveryUserDirect below persists this row as the dispatch itself;
+	// Ent defaults dispatch_state to "pending" if left unset (nc-promote-busy).
+	// A no-op on the deliveryUserBroker path, which persists its own row.
 	storeMsg := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      agent.ProjectID,
@@ -989,6 +992,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ThreadID:       result.ThreadID,
 		ConversationID: result.ConversationID,
 		GroupID:        result.GroupID,
+		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now(),
 	}
 
@@ -2635,7 +2639,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				Urgent:      userMsg.Urgent,
 				AgentID:     anchorAgent.ID,
 				GroupID:     groupID,
-				CreatedAt:   time.Now(),
+				// This persist *is* the delivery; Ent defaults
+				// dispatch_state to "pending" if left unset (nc-promote-busy).
+				DispatchState: store.MessageDispatchDispatched,
+				CreatedAt:     time.Now(),
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message to user.
 			// B5 SECURITY: derive sender from authenticated context, never payload.

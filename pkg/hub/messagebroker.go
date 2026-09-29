@@ -463,7 +463,10 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		AgentID:     agentID,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		CreatedAt:   time.Now(),
+		// This delivery *is* the dispatch; Ent defaults dispatch_state to
+		// "pending" if left unset (nc-promote-busy).
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now(),
 	}
 	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
 	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
