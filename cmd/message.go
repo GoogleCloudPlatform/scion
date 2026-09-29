@@ -755,12 +755,11 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
-			// A25.15 (upstream gemini-code-assist review, GoogleCloudPlatform/scion#2079):
-			// apiclient.DecodeResponse returns (nil, nil) on a 204 No Content,
-			// so result can be nil here even though err is nil. Print the
-			// minimal confirmation instead of dereferencing a nil result.
+			// apiclient.DecodeResponse returns (nil, nil) on 204 No Content, so
+			// result can be nil with a nil err; print the minimal confirmation
+			// instead of dereferencing a nil result.
 			if result == nil {
-				fmt.Printf("Message sent to %s.\n", ref.Raw)
+				fmt.Printf("Message dispatched to %s.\n", ref.Raw)
 			} else {
 				// Distinguish accepted dispatch from confirmed delivery.
 				switch result.Status {

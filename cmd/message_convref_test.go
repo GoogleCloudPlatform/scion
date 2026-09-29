@@ -1046,12 +1046,10 @@ func new204OutboundMockServer(t *testing.T) *httptest.Server {
 }
 
 // TestSendMessageViaConversation_ConvRef_204NoContent_PlainOutput pins the
-// A25.15 nil-result guard (upstream gemini-code-assist review,
-// GoogleCloudPlatform/scion#2079): apiclient.DecodeResponse returns
-// (nil, nil) on a 204 No Content response, so SendOutboundMessage's result
-// can be nil even though err is nil. The CLI must not panic dereferencing
-// result.Status in plain-output mode; it must print the minimal
-// confirmation instead.
+// nil-result guard: apiclient.DecodeResponse returns (nil, nil) on a 204 No
+// Content response, so SendOutboundMessage's result can be nil even though
+// err is nil. The CLI must not panic dereferencing result.Status in
+// plain-output mode; it must print the minimal confirmation instead.
 func TestSendMessageViaConversation_ConvRef_204NoContent_PlainOutput(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -1102,7 +1100,7 @@ func TestSendMessageViaConversation_ConvRef_204NoContent_PlainOutput(t *testing.
 	_ = r.Close()
 	output := string(buf[:n])
 
-	assert.Equal(t, "Message sent to conv:"+convID+".\n", output)
+	assert.Equal(t, "Message dispatched to conv:"+convID+".\n", output)
 }
 
 // TestSendMessageViaConversation_ConvRef_204NoContent_JSONOutput is the

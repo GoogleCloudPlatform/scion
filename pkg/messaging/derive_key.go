@@ -329,13 +329,8 @@ func ResolveOrCreateConversationByKey(
 // gap is logged as a WARN and self-repairs on the next resolve, it must
 // never deny or unwind the send.
 func ensureConversationParticipants(ctx context.Context, pe ParticipantEnsurer, log *slog.Logger, conversationID, externalRef string) {
-	// Defence in depth (upstream gemini-code-assist review, GoogleCloudPlatform/scion#2079,
-	// design.md A25.15): both call sites already guard against a nil pe before
-	// calling this helper (ResolveOrCreateConversationByKey's `cfg.participants
-	// != nil` check in this file, and ResolveOrCreateDMConversation's B7
-	// nil-pe guard in conversation.go). This makes that invariant local to the
-	// helper too, so a future call site that forgets the guard fails safe
-	// (no-op) instead of panicking on a nil interface method call.
+	// Callers are expected to skip this helper when no ParticipantEnsurer is
+	// configured; fail safe (no-op) rather than panic if one does not.
 	if pe == nil {
 		return
 	}

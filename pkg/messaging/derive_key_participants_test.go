@@ -134,42 +134,11 @@ func TestResolveOrCreateConversationByKey_Participants(t *testing.T) {
 		}
 	})
 
-	t.Run("direct_with_explicit_nil_participants_zero_calls_no_panic", func(t *testing.T) {
-		// A25.15 (upstream gemini-code-assist review, GoogleCloudPlatform/scion#2079):
-		// WithParticipants(nil) is reachable in principle — unlike omitting the
-		// option entirely (the case above), this explicitly sets
-		// cfg.participants to a typed nil ParticipantEnsurer interface value.
-		// The sink's existing `cfg.participants != nil` guard already prevents
-		// ensureConversationParticipants from being called in this case, but
-		// this test exercises the option end-to-end to prove that path stays a
-		// clean no-op (no panic, no EnsureParticipant calls) rather than just
-		// asserting the unexported helper in isolation.
-		mock := &mockConversationUpserter{
-			returnConv: &store.Conversation{ID: "c-nilopt", ExternalRef: participantsTestDMRef, Kind: "direct"},
-		}
-		logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-
-		var got *ConversationResult
-		var err error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("must not panic with an explicit nil ParticipantEnsurer, got: %v", r)
-				}
-			}()
-			got, err = ResolveOrCreateConversationByKey(context.Background(), mock, logger,
-				participantsTestDMRef, "direct", nil, WithParticipants(nil))
-		}()
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got == nil {
-			t.Fatal("expected non-nil result")
-		}
-		if len(mock.ensuredParticipants) != 0 {
-			t.Fatalf("expected 0 ensured participants with an explicit nil ParticipantEnsurer, got %d: %+v", len(mock.ensuredParticipants), mock.ensuredParticipants)
-		}
-	})
+	// Note: WithParticipants(nil) given an untyped nil stores a nil
+	// interface, the same state as the no-option case directly above — it is
+	// not a distinct case, so there is no separate subtest for it here. The
+	// nil-pe guard itself is pinned directly by
+	// TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic below.
 
 	t.Run("first_ensure_fails_second_still_attempted", func(t *testing.T) {
 		// Kills m12: an early `return` after the first EnsureParticipant
@@ -296,16 +265,11 @@ func TestResolveOrCreateThreadConversation_NonDMThread_NoThreadParticipants(t *t
 }
 
 // TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic is a
-// direct unit test of the unexported helper itself (A25.15, upstream
-// gemini-code-assist review on GoogleCloudPlatform/scion#2079): both current
-// callers already guard against a nil ParticipantEnsurer before calling
-// ensureConversationParticipants (ResolveOrCreateConversationByKey's
-// `cfg.participants != nil` check in this file, and
-// ResolveOrCreateDMConversation's B7 nil-pe guard in conversation.go), but
-// the helper must also be safe on its own — a nil pe must cause no panic and
-// no work (no EnsureParticipant call, which is trivially true here since
-// there is no non-nil interface value to call a method on if this doesn't
-// panic).
+// direct unit test of the unexported helper: a nil ParticipantEnsurer must
+// cause no panic and no work (no EnsureParticipant call, which is trivially
+// true here since there is no non-nil interface value to call a method on if
+// this doesn't panic). Existing callers already avoid passing a nil pe, so
+// this is the only test that exercises the helper's own guard directly.
 func TestEnsureConversationParticipants_NilParticipantEnsurer_NoPanic(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
