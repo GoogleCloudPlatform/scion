@@ -391,13 +391,14 @@ formula can never drift apart):
     a real, counted failure, and so is CONFLICT (a concurrent writer's ref
     update raced with this run's own write to the prefixed name — see
     "Resync and concurrency" below for the precise guarantee and what to do
-    about it). **Known inconsistency (round-6 review non-blocking finding
-    6, not fixed in this round — see dev-notes):** a DB record with *no*
-    stored ref at all (not yet migrated by `hub secret migrate`, or one
-    with a non-`gcpsm:` ref) is treated identically to a no-DB-record
-    candidate by the copy/resync step (`PermissionDenied` on the computed
-    legacy name is absent, not fatal), but as a genuinely unmigrated record
-    by `--delete-legacy`'s check (fatal once the legacy grant is narrowed).
+    about it). **Known inconsistency, tracked in ptone/scion#2254:** a DB
+    record with *no* stored ref at all (not yet migrated by `hub secret
+    migrate`, or one with a non-`gcpsm:` ref) is treated identically to a
+    no-DB-record candidate by the copy/resync step (`PermissionDenied` on
+    the computed legacy name is absent, not fatal), but as a genuinely
+    unmigrated record by `--delete-legacy`'s check (fatal once the legacy
+    grant is narrowed). Pinned by `TestR7_Item6_NoStoredRefPermissionDenied`
+    in `pkg/secret/gcpbackend_test.go`.
     The two steps disagree for this specific, narrow case; both fail
     closed, so no secret is put at risk, but the failure/skip classification
     differs depending which step encounters it first.
@@ -465,14 +466,10 @@ formula can never drift apart):
     finding 1(b)): a rotation landing during the labels/`AddSecretVersion`
     RPCs between the recheck and the CAS still fails the CAS's version
     predicate and is retried, rather than silently applying.
-  - **What this guarantees, precisely** (ptone/scion#2152 round-6 review
-    findings 1 and 2 — this bullet replaces a round-5 version that claimed a
-    single, uniform guarantee and used "briefly"; round 5's own commit never
-    actually landed this edit, despite the commit message and dev-notes
-    claiming it did): whether a concurrent writer's own `AddSecretVersion`
-    to the *prefixed* name is caught depends on **when its DB upsert lands
-    relative to this attempt's recheck and CAS**, not on when its GCP write
-    landed:
+  - **What this guarantees, precisely**: whether a concurrent writer's own
+    `AddSecretVersion` to the *prefixed* name is caught depends on **when
+    its DB upsert lands relative to this attempt's recheck and CAS**, not
+    on when its GCP write landed:
     - If the concurrent writer's DB upsert lands **between this attempt's
       recheck and its CAS** (or is otherwise visible in the DB row by CAS
       time), the CAS's version predicate fails to match. If this attempt
@@ -496,35 +493,47 @@ formula can never drift apart):
     transaction, so neither case can be closed without a new mechanism.
   - **`ErrConflictingWrite` / `CONFLICT` remediation**: when `migrate-names`
     reports a candidate as `CONFLICT` (or hub-boot `CopyHubSecretForward`
-    logs the same `WARN`), **re-running `migrate-names` does not detect or
-    repair it** — by then the ref already matches whatever this run or the
-    concurrent writer left behind, so a re-run takes the "nothing to do"
-    path and the `CONFLICT` simply disappears from the report while the
-    stale value remains. The only correct remediation is to **re-set the
-    secret directly to its intended value** through the normal secret-set
-    path, which writes a fresh version and moves the ref forward
-    unambiguously. For a hub-scope signing key specifically, a `CONFLICT`
-    from two replicas of the *same* hub booting together and racing on the
-    same key is benign — both wrote identical key material, the key is
-    preserved, and startup continues; the `WARN` is noise in that case, not
-    a sign of anything lost.
+    logs the same `WARN`), for a *true* conflict — the ref itself was
+    repointed by a concurrent write — **re-running `migrate-names` does not
+    detect or repair it**: by then the ref already matches whatever this
+    run or the concurrent writer left behind, so a re-run takes the
+    "nothing to do" path and the `CONFLICT` simply disappears from the
+    report while the stale value remains. The correct remediation for a
+    true conflict is to **re-set the secret directly to its intended
+    value** through the normal secret-set path, which writes a fresh
+    version and moves the ref forward unambiguously. (A `CONFLICT` can also
+    be a *false positive*, where a re-run does help — see the "Known false
+    positive" bullet below for how to tell the two apart.) For a hub-scope
+    signing key specifically, a `CONFLICT` from two replicas of the *same*
+    hub booting together and racing on the same key is benign — both wrote
+    identical key material, the key is preserved, and startup continues;
+    the `WARN` is noise in that case, not a sign of anything lost.
   - A record with a *stored* ref whose designated value is gone (`NotFound`)
     is reported as `ErrOrphanedRef`, distinct from `store.ErrNotFound` (no
     ref and no legacy-name value either — genuinely nothing to migrate).
     `migrate-names` treats both as non-failures, but reports the former as a
     visible ORPHAN line since it reflects a record making a claim that no
     longer holds.
-  - **Known false positive, not fixed in this round (round-6 review
-    non-blocking finding 5):** any DB write that bumps `Version` without
-    changing `SecretRef` — a metadata-only edit (`UpdateSecretMeta`), or an
-    old-binary rotation through a name other than the prefixed one — can
-    also make the CAS's version predicate fail, and is currently reported
-    as the same `ErrConflictingWrite` / `CONFLICT` even though the ref never
-    actually moved and a plain retry would have converged safely. Avoiding
-    this false positive needs a code change (re-reading the record and only
-    reporting a conflict when its ref has actually become the prefixed
-    ref), which is a behavior change out of scope for this docs-only round;
-    see dev-notes.md's "Round-6 review dispositions" for the deferred fix.
+  - **Known false positive, tracked in ptone/scion#2254:** any DB write
+    that bumps `Version` without changing `SecretRef` — a metadata-only
+    edit (`UpdateSecretMeta`), or an old-binary rotation through a name
+    other than the prefixed one — can also make the CAS's version predicate
+    fail, and is currently reported as the same `ErrConflictingWrite` /
+    `CONFLICT` even though the ref never actually moved and a plain retry
+    (a single re-run of `migrate-names`, or the hub's own next boot) always
+    converges to the correct value. This means the "re-set directly, a
+    re-run will not help" remediation above is accurate only for a *true*
+    conflict (the ref itself was repointed by a concurrent write); for this
+    false-positive case a re-run does help. Since nothing here can tell the
+    two apart without re-reading the record and checking whether its ref
+    has actually become the prefixed ref — a behavior change tracked
+    separately rather than made in this PR — the practical guidance is: a
+    re-run is always safe to try first, and its result distinguishes the
+    two cases (an action reported means it was a false positive and is now
+    resolved; nothing further to do means it was a true conflict). Pinned by
+    `TestSPREV6_MetaEditDuringCopyIsFalsePositiveConflict`,
+    `TestR7_Item5_MetaEdit_RerunConverges`, and
+    `TestR7_Item5_OldBinaryRotationFalsePositive_RerunConverges`.
 - **Deploy ordering**: grant the new hub-prefixed IAM condition to a hub's
   service account *before* deploying a binary built from this change —
   every `Set` (new secret, new version, signing-key rotation) targets the
