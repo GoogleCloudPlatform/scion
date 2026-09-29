@@ -158,11 +158,13 @@ func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
 		ID:      sa.ID,
 		OwnerID: sa.CreatedBy,
 	}
-	// Only project-scoped service accounts are children of a project, so the
-	// project owner/admin bypass applies to them alone (mirrors
-	// harnessConfigResource). For hub- and user-scoped accounts ScopeID is a hub
-	// or user ID, not a project ID: claiming a project parent there would hand
-	// the bypass to the owner of whatever project happened to share that ID.
+	// Only project-scoped service accounts get a project ParentType/ParentID
+	// (mirrors harnessConfigResource). That link — not any SA-specific rule in
+	// the kernel — is what makes the ComputeCapabilities owner/admin
+	// short-circuit below apply to project-scoped accounts alone. For hub- and
+	// user-scoped accounts ScopeID is a hub or user ID, not a project ID:
+	// giving them a project parent would hand the short-circuit to the owner
+	// of whatever project happened to share that ID.
 	if sa.Scope == store.ScopeProject && sa.ScopeID != "" {
 		r.ParentType = "project"
 		r.ParentID = sa.ScopeID
@@ -183,9 +185,18 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
-	// Project owner/admin short-circuit: full access on project and project-scoped
-	// resources. Mirrors the kernel evaluation so capability lists match what
-	// the user can actually do.
+	// Project owner/admin short-circuit: full access on project and
+	// project-scoped resources, computed locally (no per-action CheckAccess
+	// round trip — see projectOwnerAdminCapabilities) rather than read from the
+	// kernel. It agrees with the kernel at least wherever the
+	// project-owner/-admin RoleDefinition grants the action outright (for
+	// gcp_service_account.assign see
+	// TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel);
+	// resource-owner relationship grants also produce agreement. For an action
+	// the RoleDefinition does not grant, this list can show a capability that a
+	// later per-action CheckAccess call would deny, e.g. gcp_service_account
+	// read/delete/verify on a project-scoped account the owner/admin did not
+	// register.
 	if user, ok := identity.(UserIdentity); ok {
 		if projectID := projectIDForResource(resource); projectID != "" {
 			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {

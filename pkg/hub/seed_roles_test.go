@@ -965,6 +965,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
+				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.delete", "project.list", "project.manage",
@@ -984,6 +985,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.read",
 				"agent.stop_all", "agent.update",
+				"gcp_service_account.assign",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.list", "project.manage",
@@ -1001,6 +1003,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			perms: projectMemberCuratedPermissionIDs(),
 			want: []string{
 				"agent.create", "agent.list", "agent.read",
+				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.list", "harness_config.read",
 				"project.list", "project.read",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
@@ -1020,9 +1023,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  3,
-		store.ProjectRoleAdmin:  3,
-		store.ProjectRoleMember: 3,
+		store.ProjectRoleOwner:  4,
+		store.ProjectRoleAdmin:  4,
+		store.ProjectRoleMember: 4,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1045,9 +1048,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 3, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 3, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 3, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 4, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 4, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 4, projectMemberCuratedPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {
