@@ -191,7 +191,7 @@ This command replaces the removed `--broadcast` / `--all` flags on `scion messag
 
 ### `scion keys`
 
-Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. This command replaces the deprecated `--raw` flag on `scion message`.
+Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. Works for Hub-managed agents as well as local ones. When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused; a human operator using `--project` can still target other projects. This command replaces the deprecated `--raw` flag on `scion message`.
 
 **Usage:** `scion keys <agent-name> <keys>`
 

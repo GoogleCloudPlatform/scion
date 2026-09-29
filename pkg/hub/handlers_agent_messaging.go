@@ -1882,6 +1882,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				TargetAgent:    agent,
 				Msg:            plainMessage,
 				Type:           structuredMsg.Type,
+				Raw:            structuredMsg.Raw,
+				Plain:          structuredMsg.Plain,
 				Urgent:         structuredMsg.Urgent,
 				Interrupt:      req.Interrupt,
 				Attachments:    structuredMsg.Attachments,

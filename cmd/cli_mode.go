@@ -37,6 +37,7 @@ var assistantDenied = map[string]bool{
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
+	"keys":                        true,
 	"list":                        true,
 	"logs":                        true,
 	"look":                        true,
