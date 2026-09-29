@@ -2250,9 +2250,9 @@
 | http_route | DELETE | `/api/v1/agents/{id}/ports/{port}/proxy` |
 | http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy/{subpath}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `agent.port_access`
 

@@ -261,14 +261,21 @@ func containsString(list []string, want string) bool {
 // RelationshipPrincipalKind maps a runtime principal kind string to the
 // canonical kind RelationshipPolicies rows are authored against: user, dev
 // and federated_user all collapse to "user"; agent and federated_agent
-// collapse to "agent". Any other value passes through unchanged. Both the
-// flat mint path and the relationship mint path must normalize through this
-// one function before calling RelationshipPolicyAllows/
-// RelationshipPolicyMintEligible, so a dev or federated principal cannot
-// diverge between the two paths on which PrincipalKinds row it matches.
-// This mapping only changes which existing row a call matches — it does not
-// widen which principal kinds may reach the relationship or mint paths at
-// all; that gate is enforced earlier, by each caller's own principal check.
+// collapse to "agent". Any other value passes through unchanged. The
+// relationship mint path (hubPermissionEligible/selectorMintEligible,
+// authz_boundary.go) must normalize through this function before calling
+// RelationshipPolicyAllows/RelationshipPolicyMintEligible, so a dev or
+// federated principal is not silently unmatched against a row authored for
+// its base kind. This mapping only changes which existing row a call
+// matches — it does not widen which principal kinds may reach the
+// relationship or mint paths at all; that gate is enforced earlier, by each
+// caller's own principal check.
+//
+// This is the SAME mapping hub.NormalizePrincipalType implements for the
+// flat mint path and Decide's constraint matching — duplicated, not shared,
+// because this package cannot import hub. The two must never diverge;
+// hub's TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind pins
+// agreement across every PrincipalKind constant plus an unknown value.
 func RelationshipPrincipalKind(kind string) string {
 	switch kind {
 	case "user", "dev", "federated_user":
