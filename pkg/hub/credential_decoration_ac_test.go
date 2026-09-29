@@ -366,6 +366,68 @@ func TestCredentialDecoration_AC3_LegacyRowRendersSanitized(t *testing.T) {
 	}
 }
 
+// TestCredentialDecoration_AC3_LegacyRowWithBadLabelKeyRendersSanitized is
+// the F11 regression test (review-2 finding 2(a)): a row with a label key
+// that could never pass ValidateCredentialMetadata (control character),
+// inserted directly via the store as a pre-E.1/out-of-band row would be,
+// still renders with the key sanitized, not just the value.
+func TestCredentialDecoration_AC3_LegacyRowWithBadLabelKeyRendersSanitized(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("e1-ac3-legacy-key-p")
+	ownerID := tid("e1-ac3-legacy-key-o")
+	rs4Project(t, s, projectID, ownerID)
+
+	plaintext := store.UATPrefix + "legacykeylegacykeylegacykey12345"
+	hash := sha256.Sum256([]byte(plaintext))
+	tok := &store.UserAccessToken{
+		ID:        uuid.New().String(),
+		UserID:    ownerID,
+		Name:      "legacy-key-test",
+		Prefix:    plaintext[:UATPrefixLength],
+		KeyHash:   hex.EncodeToString(hash[:]),
+		ProjectID: projectID,
+		Scopes:    []string{"agent:read"},
+		Labels:    map[string]string{"bad\nkey": "v"},
+		Created:   time.Now(),
+	}
+	if err := s.CreateUserAccessToken(context.Background(), tok); err != nil {
+		t.Fatalf("failed to insert legacy token: %v", err)
+	}
+
+	identity, err := srv.uatService.ValidateToken(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	dec := identity.Decoration()
+	if dec == nil {
+		t.Fatal("expected a decoration even for a legacy row with an out-of-schema label key")
+	}
+	if dec.Labels["bad\nkey"] != "v" {
+		t.Fatalf("expected the raw stored label key preserved pre-render, got %+v", dec.Labels)
+	}
+
+	attrs := attrMap(t, dec.LogValue().Group())
+	labelsGroup, ok := attrs["labels"]
+	if !ok {
+		t.Fatalf("expected a labels group in the rendered decoration, got %+v", attrs)
+	}
+	labelAttrs := attrMap(t, labelsGroup.Group())
+	for k := range labelAttrs {
+		if strings.Contains(k, "\n") {
+			t.Fatalf("rendered label key still contains a raw control character: %q", k)
+		}
+	}
+	foundSanitized := false
+	for k := range labelAttrs {
+		if strings.Contains(k, "�") {
+			foundSanitized = true
+		}
+	}
+	if !foundSanitized {
+		t.Fatalf("expected a label key containing U+FFFD in place of the control character, got %+v", labelAttrs)
+	}
+}
+
 // AC4: no token plaintext or hash ever appears in logs for a full,
 // real-middleware UAT request, and existing (pre-E.1) project UATs continue
 // to work without any hub-boundary support.
@@ -399,6 +461,12 @@ func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
 	}
 
 	logged := buf.String()
+	// Review-2 nit 5: without this, a future change to what the server logs
+	// through (e.g. no longer using slog.Default()) would make every
+	// !strings.Contains check below pass vacuously.
+	if !strings.Contains(logged, "Request completed") {
+		t.Fatalf("log capture is empty or missing the request log line; the absence assertions below would be vacuous: %q", logged)
+	}
 	if strings.Contains(logged, key) {
 		t.Fatal("logs contain the plaintext token")
 	}

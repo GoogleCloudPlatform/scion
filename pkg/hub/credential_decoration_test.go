@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,36 @@ func TestCredentialDecorationFromContext_CopiesLabels(t *testing.T) {
 	}
 }
 
+// TestScopedUserIdentity_Decoration_ReturnsDeepCopy is the F14 regression
+// test (review-2 finding 2(c)): mutating the Labels map returned by
+// ScopedUserIdentity.Decoration() must not affect the identity's stored
+// decoration, so a second call still observes the original value.
+func TestScopedUserIdentity_Decoration_ReturnsDeepCopy(t *testing.T) {
+	user := NewAuthenticatedUser("u1", "u1@test.com", "User One", "member", "api")
+	identity := NewScopedUserIdentityWithDecoration(user, "proj-1", []string{"agent:read"}, "tok-1",
+		&CredentialDecoration{
+			Kind: CredentialKindUAT, TokenID: "tok-1", TokenName: "n",
+			Labels: map[string]string{"a": "b"},
+		})
+
+	first := identity.Decoration()
+	if first == nil {
+		t.Fatal("expected a non-nil decoration")
+	}
+	first.Labels["a"] = "mutated"
+
+	second := identity.Decoration()
+	if second == nil || second.Labels["a"] != "b" {
+		t.Fatalf("Decoration() did not return a deep copy: second read observed mutated state: %+v", second)
+	}
+
+	// A nil decoration must report nil, not a copy of a zero value.
+	nilIdentity := NewScopedUserIdentityWithDecoration(user, "proj-1", []string{"agent:read"}, "tok-2", nil)
+	if d := nilIdentity.Decoration(); d != nil {
+		t.Fatalf("expected nil for an identity with no decoration, got %+v", d)
+	}
+}
+
 // TestCredentialDecoration_LogValue_SanitizesAndGroups pins the log-safe
 // rendering shape: a group with sanitized name/purpose/labels, labels
 // nested (never promoted), and a labels_source marker.
@@ -187,6 +218,32 @@ func TestCredentialDecoration_LogValue_TruncatesOversizeText(t *testing.T) {
 	}
 }
 
+// TestCredentialDecoration_LogValue_TruncatesMultiByteExactly is the nit-3
+// regression test (review-2): truncation must keep every complete rune that
+// fits, not drop one extra multi-byte rune when the cut happens to land
+// exactly on a rune boundary. 65 copies of "é" (2 bytes each = 130 bytes)
+// with a 128-byte max must keep exactly 64 runes (128 bytes), not 63.
+func TestCredentialDecoration_LogValue_TruncatesMultiByteExactly(t *testing.T) {
+	d := CredentialDecoration{
+		Kind:      CredentialKindUAT,
+		TokenID:   "tok-1",
+		TokenName: strings.Repeat("é", 65),
+		Boundary:  decorationBoundary{Kind: "project", ProjectID: "p"},
+	}
+	attrs := attrMap(t, d.LogValue().Group())
+	name := attrs["name"].String()
+	if !strings.HasSuffix(name, "…") {
+		t.Fatalf("expected a truncation marker, got %q", name)
+	}
+	kept := strings.TrimSuffix(name, "…")
+	if len(kept) != uatMaxNameBytes {
+		t.Fatalf("expected exactly %d bytes kept before the truncation marker, got %d bytes (%q)", uatMaxNameBytes, len(kept), kept)
+	}
+	if !utf8.ValidString(kept) {
+		t.Fatalf("truncated output is not valid UTF-8: %q", kept)
+	}
+}
+
 func TestCredentialDecoration_LogValue_ZeroValueIsEmptyGroup(t *testing.T) {
 	v := CredentialDecoration{}.LogValue()
 	if len(v.Group()) != 0 {
@@ -208,8 +265,13 @@ func attrMap(t *testing.T, attrs []slog.Attr) map[string]slog.Value {
 // ---------------------------------------------------------------------------
 
 func TestValidateCredentialMetadata_Accepts(t *testing.T) {
+	// token is the value actually passed as the token name, distinct from
+	// name (the subtest label) — review-2 nit 4: the "max length name" case
+	// previously put its 128-byte string in purpose, so no case ever
+	// exercised a 128-byte token name at all. Defaults to "n" when unset.
 	cases := []struct {
 		name    string
+		token   string
 		purpose string
 		labels  map[string]string
 	}{
@@ -219,11 +281,16 @@ func TestValidateCredentialMetadata_Accepts(t *testing.T) {
 		{name: "empty label value allowed", labels: map[string]string{"note": ""}},
 		{name: "label value looks like an agent name but key is not reserved",
 			labels: map[string]string{"automation_role": "nightly-cleanup-agent"}},
-		{name: "max length name", purpose: strings.Repeat("p", uatMaxPurposeBytes)},
+		{name: "max length purpose", purpose: strings.Repeat("p", uatMaxPurposeBytes)},
+		{name: "max length name", token: strings.Repeat("n", uatMaxNameBytes)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ValidateCredentialMetadata(tc.name, tc.purpose, tc.labels); err != nil {
+			token := tc.token
+			if token == "" {
+				token = "n"
+			}
+			if err := ValidateCredentialMetadata(token, tc.purpose, tc.labels); err != nil {
 				t.Fatalf("expected acceptance, got error: %v", err)
 			}
 		})
