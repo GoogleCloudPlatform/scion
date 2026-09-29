@@ -88,6 +88,9 @@ func TestPipeline_DoubleStart(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -199,6 +202,9 @@ func TestPipeline_MetricHandlerRegistered(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -268,6 +274,9 @@ func TestPipeline_LogHandlerRegistered(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {

@@ -108,6 +108,10 @@ func TestRuntimeDeliverySnapshotsSurviveBrokenDestination(t *testing.T) {
 }
 
 func TestDeliverySnapshotsCoverDisabledAndFailedStartup(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	path := filepath.Join(t.TempDir(), "collector.log")
 	scionlog.SetLogPath(path)
 	t.Cleanup(func() { scionlog.SetLogPath("/tmp/agent.log") })
