@@ -142,7 +142,7 @@ func isHubScopedServiceAccount(resource Resource) bool {
 // relationshipCandidates lists, in a stable order (ancestor, owner,
 // hub-member assign, creator skill, progeny), the relationships that
 // structurally hold for this principal and resource.
-func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action) []relationshipCandidate {
+func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate
 
 	// Ancestor: the principal is in the resource's creation chain.
@@ -203,9 +203,11 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 	// former dedicated creator-user-skill grant into this common path: the
 	// registered "skill" adapter (skillProgenyAdapter, authz_skill_progeny.go)
 	// supplies the per-kind fact-resource-ID and shape refusal that used to
-	// live here.
+	// live here. Every kind with a progeny adapter (built-in or registered)
+	// gets a candidate, so point reads and ProgenyListPredicate evaluate the
+	// same kinds.
 	if isAgentPrincipal(principal.Kind) && action == ActionRead {
-		if relType := relationshipTypeForResource(resource.Type); relType != "" {
+		if relType := a.progenyRelationshipType(resource.Type); relType != "" {
 			if agent, ok := principal.Identity.(AgentIdentity); ok {
 				resourceType := resource.Type
 				resourceID, eligible := a.progenyFactResourceID(resourceType, resource)
@@ -215,7 +217,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 						rule:         RelationshipRuleProgeny,
 						usesAncestry: true,
 						fact: func(ctx context.Context) (*SharingSource, bool, string) {
-							return a.progenySourceFor(ctx, agent, resourceType, resourceID)
+							return a.progenySourceFor(ctx, agent, resourceType, resourceID, permissionID)
 						},
 						decision: Decision{
 							Allowed:      true,
@@ -262,7 +264,7 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 	var out relationshipOutcome
 	policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
 
-	for _, c := range a.relationshipCandidates(principal, resource, action) {
+	for _, c := range a.relationshipCandidates(principal, resource, action, permissionID) {
 		res := RelationshipCandidateResult{Rule: c.rule, Permission: permissionID}
 		reject := func(kind, detail string) {
 			res.RejectedBy = kind
@@ -478,16 +480,27 @@ func registryPermission(id string) (permissions.Permission, bool) {
 // accepted.
 var errProgenyAdapter = errors.New("invalid progeny adapter")
 
+// progenyOptInKinds are the sharing-source kinds served by the built-in
+// store adapter. Their sources are shared only through an explicit opt-in:
+// a source of one of these kinds with any other SharingPolicy is never
+// shared, whichever adapter supplies it.
+var progenyOptInKinds = map[string]bool{"secret": true, "envvar": true, "skill_injection": true}
+
 // progenyAdapterRegistry holds adapters registered through
 // RegisterProgenyAdapter, keyed by kind.
 type progenyAdapterRegistry struct {
 	mu       sync.RWMutex
 	adapters map[string]ProgenyFactAdapter
+	// builtinReleased lists built-in kinds whose store adapter has been
+	// explicitly released so another adapter may register for the kind.
+	// Only test helpers set it.
+	builtinReleased map[string]bool
 }
 
 // RegisterProgenyAdapter registers an adapter for one sharing-source kind.
 // Every read permission must be a registered read-class permission; a kind
-// may be registered once.
+// may be registered once. A kind served by the built-in store adapter
+// (progenyOptInKinds) is refused.
 func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error {
 	if adapter == nil || adapter.Kind() == "" {
 		return fmt.Errorf("%w: adapter must name a kind", errProgenyAdapter)
@@ -513,6 +526,9 @@ func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error 
 	if _, exists := a.progenyAdapters.adapters[adapter.Kind()]; exists {
 		return fmt.Errorf("%w: %s: already registered", errProgenyAdapter, adapter.Kind())
 	}
+	if progenyOptInKinds[adapter.Kind()] && !a.progenyAdapters.builtinReleased[adapter.Kind()] {
+		return fmt.Errorf("%w: %s: served by the built-in store adapter", errProgenyAdapter, adapter.Kind())
+	}
 	a.progenyAdapters.adapters[adapter.Kind()] = adapter
 	return nil
 }
@@ -526,10 +542,43 @@ func (a *AuthzService) progenyAdapter(kind string) ProgenyFactAdapter {
 	if adapter != nil {
 		return adapter
 	}
-	if a.store == nil || relationshipTypeForResource(kind) == "" {
+	if a.store == nil || !progenyOptInKinds[kind] {
 		return nil
 	}
 	return storeProgenyAdapter{kind: kind, store: a.store}
+}
+
+// hasRegisteredProgenyAdapter reports whether an adapter was registered
+// for kind through RegisterProgenyAdapter.
+func (a *AuthzService) hasRegisteredProgenyAdapter(kind string) bool {
+	a.progenyAdapters.mu.RLock()
+	defer a.progenyAdapters.mu.RUnlock()
+	return a.progenyAdapters.adapters[kind] != nil
+}
+
+// progenyRelationshipType names the progeny relationship for a resource
+// type: the built-in relationship type, or, for a kind with a registered
+// adapter, "progeny_<kind>_read". It is empty when the kind has no
+// progeny adapter, in which case no progeny candidate is built.
+func (a *AuthzService) progenyRelationshipType(kind string) RelationshipType {
+	if relType := relationshipTypeForResource(kind); relType != "" {
+		return relType
+	}
+	if kind != "" && a.hasRegisteredProgenyAdapter(kind) {
+		return RelationshipType("progeny_" + kind + "_read")
+	}
+	return ""
+}
+
+// adapterServesPermission reports whether permissionID is one of the
+// adapter's read permissions.
+func adapterServesPermission(adapter ProgenyFactAdapter, permissionID string) bool {
+	for _, id := range adapter.ReadPermissions() {
+		if id == permissionID {
+			return true
+		}
+	}
+	return false
 }
 
 // storeProgenyAdapter serves opt-in sharing sources from the store's
@@ -597,9 +646,13 @@ type ProgenyPredicate struct {
 }
 
 // shared reports whether the source is shared with the ancestry chain:
-// same kind, owner in the chain, and the sharing policy satisfied.
+// same kind, owner in the chain, and the sharing policy satisfied. Kinds in
+// progenyOptInKinds are shared only under SharingPolicyOptInRequired.
 func (p ProgenyPredicate) shared(src SharingSource) bool {
 	if len(p.AttestedAncestry) == 0 || src.Kind != p.Kind || src.OwnerID == "" {
+		return false
+	}
+	if progenyOptInKinds[src.Kind] && src.Policy != SharingPolicyOptInRequired {
 		return false
 	}
 	switch src.Policy {
@@ -667,9 +720,10 @@ func (a *AuthzService) EvaluateProgeny(ctx context.Context, principal PrincipalC
 }
 
 // progenySourceFor resolves the progeny fact for one resource: the
-// sharing source for resourceID, if the ancestry chain can see it and its
-// sharing policy is satisfied. Attestation has already been checked.
-func (a *AuthzService) progenySourceFor(ctx context.Context, agent AgentIdentity, kind, resourceID string) (*SharingSource, bool, string) {
+// sharing source for resourceID, if the adapter serves permissionID, the
+// ancestry chain can see the source and its sharing policy is satisfied.
+// Attestation has already been checked.
+func (a *AuthzService) progenySourceFor(ctx context.Context, agent AgentIdentity, kind, resourceID, permissionID string) (*SharingSource, bool, string) {
 	ancestry := agent.Ancestry()
 	if len(ancestry) == 0 {
 		return nil, false, "agent has no ancestry chain"
@@ -677,6 +731,9 @@ func (a *AuthzService) progenySourceFor(ctx context.Context, agent AgentIdentity
 	adapter := a.progenyAdapter(kind)
 	if adapter == nil {
 		return nil, false, "no sharing-source adapter for " + kind
+	}
+	if !adapterServesPermission(adapter, permissionID) {
+		return nil, false, "permission is not a read permission of the sharing-source adapter"
 	}
 	sources, err := adapter.Sources(ctx, ProgenyQuery{Kind: kind, ResourceID: resourceID, Ancestry: ancestry})
 	if err != nil {

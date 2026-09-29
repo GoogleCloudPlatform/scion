@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -116,6 +117,7 @@ func TestRelationshipRules_CredentialScopeRestrictsAncestor(t *testing.T) {
 	assert.Equal(t, "relationship grant restricted by credential_scope", d.Reason)
 	r := relationshipResult(t, d, RelationshipRuleAncestor)
 	assert.Equal(t, "credential_scope", r.RejectedBy)
+	require.NotEmpty(t, d.Provenance.DenyReasons)
 	assert.Equal(t, d.Reason, d.Provenance.DenyReasons[0])
 
 	d = decidePerm(authz, ancestor, desc, Action("notify"), "agent.notify", false)
@@ -413,6 +415,22 @@ func TestRegisterProgenyAdapter_Validation(t *testing.T) {
 		"a kind registers once")
 }
 
+// Kinds served by the built-in store adapter cannot be registered unless a
+// test releases the built-in adapter first.
+func TestRegisterProgenyAdapter_BuiltinKindsRefused(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+	for kind := range progenyOptInKinds {
+		err := authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: kind, perms: []string{permissionProjectSecretRead}})
+		assert.ErrorIs(t, err, errProgenyAdapter, "kind %q", kind)
+		_, isStore := authz.progenyAdapter(kind).(storeProgenyAdapter)
+		assert.True(t, isStore, "kind %q keeps the built-in store adapter", kind)
+	}
+	releaseBuiltinProgenyAdapter(t, authz, "secret")
+	require.NoError(t, authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{permissionProjectSecretRead}}))
+	_, isFake := authz.progenyAdapter("secret").(fakeProgenyAdapter)
+	assert.True(t, isFake)
+}
+
 // A registered adapter replaces the built-in store adapter for its kind.
 // Opted-in sources of an active owner are readable; others are not; a
 // lookup error denies.
@@ -428,6 +446,7 @@ func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 		{Kind: "secret", ID: "opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true},
 		{Kind: "secret", ID: "not-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired},
 	}}
+	releaseBuiltinProgenyAdapter(t, f.authz, "secret")
 	require.NoError(t, f.authz.RegisterProgenyAdapter(adapter))
 
 	d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: "opted"}, ActionRead, permissionProjectSecretRead, false)
@@ -436,10 +455,35 @@ func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 	assert.False(t, d.Allowed)
 	assert.Equal(t, RelationshipRejectFact, relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 
-	failing, _ := authzTestSetup(t)
-	require.NoError(t, failing.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{permissionProjectSecretRead}, err: errors.New("unavailable")}))
-	d = decidePerm(failing, agent, Resource{Type: "secret", ID: "opted"}, ActionRead, permissionProjectSecretRead, false)
-	assert.False(t, d.Allowed, "a sharing-source lookup failure denies")
+}
+
+// A sharing-source lookup failure rejects the progeny candidate at the
+// fact stage, with an active owner and every other stage satisfied.
+func TestProgenyAdapter_SourcesErrorRejectsAtFactStage(t *testing.T) {
+	f := newGoldenFixture(t)
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("relrule-adapter-err-agent")},
+		ProjectID: f.projectBeta.ID,
+		Ancestry:  []string{f.projectOwnerID},
+		Scopes:    allRegisteredAgentScopes(),
+	}}
+	owner, err := f.store.GetUser(context.Background(), f.projectOwnerID)
+	require.NoError(t, err)
+	require.Equal(t, store.UserStatusActive, owner.Status, "the source owner is active")
+
+	releaseBuiltinProgenyAdapter(t, f.authz, "secret")
+	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{
+		kind: "secret", perms: []string{permissionProjectSecretRead}, err: errors.New("unavailable"),
+	}))
+	d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.False(t, r.Accepted)
+	assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
+	assert.Equal(t, "sharing-source lookup failed", r.Detail)
+
+	d = decidePerm(f.authz, agent, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, false)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
 }
 
 // List filtering and point reads agree for every fixture source.
@@ -460,16 +504,18 @@ func TestProgeny_ListAndPointReadConsistent(t *testing.T) {
 		{Kind: "secret", ID: "s-not-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired},
 		{Kind: "secret", ID: "s-foreign", OwnerID: f.memberNoneID, Policy: SharingPolicyOptInRequired, OptedIn: true},
 		{Kind: "secret", ID: "s-suspended", OwnerID: suspendedID, Policy: SharingPolicyOptInRequired, OptedIn: true},
-		{Kind: "secret", ID: "s-origin", OwnerID: f.projectOwnerID, Policy: SharingPolicyOriginDescendants},
-		{Kind: "secret", ID: "s-origin-mid", OwnerID: suspendedID, Policy: SharingPolicyOriginDescendants},
+		// Secrets are shared only through an opt-in, whatever policy the
+		// adapter declares.
+		{Kind: "secret", ID: "s-origin", OwnerID: f.projectOwnerID, Policy: SharingPolicyOriginDescendants, OptedIn: true},
 		{Kind: "secret", ID: "s-unknown-policy", OwnerID: f.projectOwnerID, Policy: SharingPolicy("other"), OptedIn: true},
 	}
+	releaseBuiltinProgenyAdapter(t, f.authz, "secret")
 	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{permissionProjectSecretRead}, sources: sources}))
 
 	ctx := context.Background()
 	principal := principalContextForIdentity(agent)
 	pred := f.authz.ProgenyListPredicate(ctx, principal, "secret")
-	want := map[string]bool{"s-opted": true, "s-origin": true}
+	want := map[string]bool{"s-opted": true}
 	for _, src := range sources {
 		listed := pred.Matches(src)
 		point := decidePerm(f.authz, agent, Resource{Type: "secret", ID: src.ID}, ActionRead, permissionProjectSecretRead, false).Allowed
@@ -487,14 +533,29 @@ func TestProgeny_ListAndPointReadConsistent(t *testing.T) {
 		assert.False(t, decidePerm(f.authz, fed, Resource{Type: "secret", ID: src.ID}, ActionRead, permissionProjectSecretRead, false).Allowed)
 	}
 
-	// A kind without a progeny policy row gets a predicate that matches
-	// nothing even with a registered adapter.
-	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "envvar", perms: []string{"skill.read"}, sources: sources}))
-	assert.False(t, f.authz.ProgenyListPredicate(ctx, principal, "envvar").Matches(SharingSource{Kind: "envvar", ID: "e", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}))
+	// Origin-descendants sharing, on a kind that is not pinned to opt-in:
+	// the predicate shares a source owned by the origin user and not one
+	// owned by a later member of the chain. The kind has no progeny policy
+	// row, so list filtering and point reads both admit nothing.
+	origin := []SharingSource{
+		{Kind: "template", ID: "t-origin", OwnerID: f.projectOwnerID, Policy: SharingPolicyOriginDescendants},
+		{Kind: "template", ID: "t-origin-mid", OwnerID: suspendedID, Policy: SharingPolicyOriginDescendants},
+	}
+	shape := ProgenyPredicate{Kind: "template", AttestedAncestry: agent.Ancestry()}
+	assert.True(t, shape.shared(origin[0]))
+	assert.False(t, shape.shared(origin[1]))
+	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "template", perms: []string{"template.read"}, sources: origin}))
+	tplPred := f.authz.ProgenyListPredicate(ctx, principal, "template")
+	for _, src := range origin {
+		listed := tplPred.Matches(src)
+		point := decidePerm(f.authz, agent, Resource{Type: "template", ID: src.ID}, ActionRead, "template.read", false).Allowed
+		assert.Equal(t, listed, point, "source %s: list and point read disagree", src.ID)
+		assert.False(t, listed, "source %s: no progeny row for template", src.ID)
+	}
 }
 
-// Actor and Purpose are recorded in provenance and do not change the
-// decision.
+// Actor and Purpose are recorded on the decision (and in its provenance
+// when present) and do not change the decision.
 func TestDecide_ActorAndPurposeAreAuditOnly(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-actor-owner"))
@@ -514,10 +575,282 @@ func TestDecide_ActorAndPurposeAreAuditOnly(t *testing.T) {
 			d := authz.Decide(context.Background(), req)
 			assert.Equal(t, base.Allowed, d.Allowed)
 			assert.Equal(t, base.Reason, d.Reason)
+			assert.Equal(t, actor, d.Actor)
+			assert.Equal(t, "delivery", d.Purpose)
 			if d.Provenance != nil {
 				assert.Equal(t, actor, d.Provenance.Actor)
 				assert.Equal(t, "delivery", d.Provenance.Purpose)
 			}
 		}
+	}
+}
+
+// releaseBuiltinProgenyAdapter lets a test register its own adapter for a
+// kind served by the built-in store adapter.
+func releaseBuiltinProgenyAdapter(t *testing.T, a *AuthzService, kind string) {
+	t.Helper()
+	require.True(t, progenyOptInKinds[kind], "kind %q has no built-in adapter", kind)
+	a.progenyAdapters.mu.Lock()
+	defer a.progenyAdapters.mu.Unlock()
+	if a.progenyAdapters.builtinReleased == nil {
+		a.progenyAdapters.builtinReleased = map[string]bool{}
+	}
+	a.progenyAdapters.builtinReleased[kind] = true
+}
+
+// --- sharing-source owner activity ---
+
+// sourceOwnerStore serves configured users and agents for source-owner
+// lookups and delegates everything else to the wrapped store. userErr
+// makes GetUser fail for an ID with an error other than store.ErrNotFound.
+type sourceOwnerStore struct {
+	store.Store
+	users   map[string]*store.User
+	agents  map[string]*store.Agent
+	userErr map[string]bool
+}
+
+func (s *sourceOwnerStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.userErr[id] {
+		return nil, errors.New("user lookup unavailable")
+	}
+	if u, ok := s.users[id]; ok {
+		return u, nil
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *sourceOwnerStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if a, ok := s.agents[id]; ok {
+		return a, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// Each sharing-source owner shape resolves to its own activity outcome;
+// every lookup failure and every inactive shape reports inactive.
+func TestRelationshipSourceActive_OwnerShapes(t *testing.T) {
+	base, s := authzTestSetup(t)
+	ctx := context.Background()
+	activeRoot := tid("srcact-root-active")
+	suspendedRoot := tid("srcact-root-suspended")
+	st := &sourceOwnerStore{
+		Store: s,
+		users: map[string]*store.User{
+			activeRoot:    {ID: activeRoot, Status: store.UserStatusActive},
+			suspendedRoot: {ID: suspendedRoot, Status: "suspended"},
+		},
+		agents: map[string]*store.Agent{
+			tid("srcact-agent-ok"):         {ID: tid("srcact-agent-ok"), Ancestry: []string{activeRoot, tid("srcact-agent-ok")}},
+			tid("srcact-agent-root-susp"):  {ID: tid("srcact-agent-root-susp"), Ancestry: []string{suspendedRoot, tid("srcact-agent-root-susp")}},
+			tid("srcact-agent-deleted"):    {ID: tid("srcact-agent-deleted"), Ancestry: []string{activeRoot}, DeletedAt: time.Now()},
+			tid("srcact-agent-no-chain"):   {ID: tid("srcact-agent-no-chain")},
+			tid("srcact-agent-self-root"):  {ID: tid("srcact-agent-self-root"), Ancestry: []string{tid("srcact-agent-self-root")}},
+			tid("srcact-agent-root-error"): {ID: tid("srcact-agent-root-error"), Ancestry: []string{tid("srcact-root-error")}},
+		},
+		userErr: map[string]bool{tid("srcact-user-error"): true, tid("srcact-root-error"): true},
+	}
+	authz := NewAuthzService(st, base.logger)
+
+	for _, tc := range []struct {
+		name, ownerID, detail string
+		active                bool
+	}{
+		{"active user", activeRoot, "", true},
+		{"suspended user", suspendedRoot, "sharing source owner is not active", false},
+		{"user lookup error", tid("srcact-user-error"), "sharing source owner lookup failed", false},
+		{"unknown owner", tid("srcact-unknown"), "sharing source owner not found", false},
+		{"agent with active root", tid("srcact-agent-ok"), "", true},
+		{"agent with suspended root", tid("srcact-agent-root-susp"), "sharing source owner agent's root user is not active", false},
+		{"deleted agent", tid("srcact-agent-deleted"), "sharing source owner agent is deleted", false},
+		{"agent without ancestry", tid("srcact-agent-no-chain"), "sharing source owner agent has no root user", false},
+		{"agent that is its own root", tid("srcact-agent-self-root"), "sharing source owner agent has no root user", false},
+		{"agent whose root lookup fails", tid("srcact-agent-root-error"), "sharing source owner agent's root user is not active", false},
+		{"no owner", "", "sharing source has no owner", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			active, detail := authz.relationshipSourceActive(ctx, tc.ownerID)
+			assert.Equal(t, tc.active, active)
+			assert.Equal(t, tc.detail, detail)
+		})
+	}
+}
+
+// Through Decide, an owner lookup error and an agent-owned source whose
+// root user is suspended each reject the progeny candidate as
+// source_inactive, while the active controls are admitted.
+func TestRelationshipRules_ProgenySourceOwnerLookupAndAgentOwner(t *testing.T) {
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+	activeRoot := f.projectOwnerID
+	suspendedRoot := tid("srcdec-root-suspended")
+	lookupErrOwner := tid("srcdec-owner-error")
+	okAgent := tid("srcdec-agent-ok")
+	suspAgent := tid("srcdec-agent-root-susp")
+	st := &sourceOwnerStore{
+		Store: f.store,
+		users: map[string]*store.User{suspendedRoot: {ID: suspendedRoot, Status: "suspended"}},
+		agents: map[string]*store.Agent{
+			okAgent:   {ID: okAgent, Ancestry: []string{activeRoot, okAgent}},
+			suspAgent: {ID: suspAgent, Ancestry: []string{suspendedRoot, suspAgent}},
+		},
+		userErr: map[string]bool{lookupErrOwner: true},
+	}
+	authz := NewAuthzService(st, f.authz.logger)
+	releaseBuiltinProgenyAdapter(t, authz, "secret")
+	optIn := func(id, owner string) SharingSource {
+		return SharingSource{Kind: "secret", ID: id, OwnerID: owner, Policy: SharingPolicyOptInRequired, OptedIn: true}
+	}
+	require.NoError(t, authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{permissionProjectSecretRead}, sources: []SharingSource{
+		optIn("s-user-ok", activeRoot),
+		optIn("s-user-error", lookupErrOwner),
+		optIn("s-agent-ok", okAgent),
+		optIn("s-agent-root-susp", suspAgent),
+	}}))
+	reader := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("srcdec-reader")},
+		ProjectID: f.projectBeta.ID,
+		Ancestry:  []string{activeRoot, lookupErrOwner, okAgent, suspAgent},
+		Scopes:    allRegisteredAgentScopes(),
+	}}
+	principal := principalContextForIdentity(reader)
+	pred := authz.ProgenyListPredicate(ctx, principal, "secret")
+
+	for _, tc := range []struct {
+		id, detail string
+		allowed    bool
+	}{
+		{"s-user-ok", "", true},
+		{"s-user-error", "sharing source owner lookup failed", false},
+		{"s-agent-ok", "", true},
+		{"s-agent-root-susp", "sharing source owner agent's root user is not active", false},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			res := Resource{Type: "secret", ID: tc.id}
+			d := decidePerm(authz, reader, res, ActionRead, permissionProjectSecretRead, true)
+			assert.Equal(t, tc.allowed, d.Allowed, "reason %q", d.Reason)
+			r := relationshipResult(t, d, RelationshipRuleProgeny)
+			if tc.allowed {
+				assert.True(t, r.Accepted)
+			} else {
+				assert.Equal(t, "relationship grant restricted by source_inactive", d.Reason)
+				assert.Equal(t, RelationshipRejectSourceInactive, r.RejectedBy)
+				assert.Equal(t, tc.detail, r.Detail)
+			}
+			assert.Equal(t, tc.allowed, decidePerm(authz, reader, res, ActionRead, permissionProjectSecretRead, false).Allowed)
+			assert.Equal(t, tc.allowed, pred.Matches(optIn(tc.id, map[string]string{
+				"s-user-ok": activeRoot, "s-user-error": lookupErrOwner, "s-agent-ok": okAgent, "s-agent-root-susp": suspAgent,
+			}[tc.id])), "list predicate agrees")
+		})
+	}
+}
+
+// --- progeny list/point parity for registered kinds ---
+
+// A kind with a registered adapter gets a progeny candidate on the point
+// path, so point reads and ProgenyListPredicate evaluate the same kinds.
+// The candidate carries the requested permission only when the adapter
+// serves it.
+func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+	agent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("relrule-regkind-agent")},
+		ProjectID: f.projectBeta.ID,
+		Ancestry:  []string{f.projectOwnerID},
+		Scopes:    allRegisteredAgentScopes(),
+	}}
+	principal := principalContextForIdentity(agent)
+
+	// No adapter for the kind: no progeny candidate.
+	d := decidePerm(f.authz, agent, Resource{Type: "template", ID: "t-opted"}, ActionRead, "template.read", true)
+	require.NotNil(t, d.Provenance)
+	for _, r := range d.Provenance.Relationships {
+		assert.NotEqual(t, RelationshipRuleProgeny, r.Rule)
+	}
+
+	sources := []SharingSource{
+		{Kind: "template", ID: "t-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true},
+		{Kind: "template", ID: "t-not-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired},
+	}
+	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "template", perms: []string{"template.read"}, sources: sources}))
+	pred := f.authz.ProgenyListPredicate(ctx, principal, "template")
+	for _, src := range sources {
+		d := decidePerm(f.authz, agent, Resource{Type: "template", ID: src.ID}, ActionRead, "template.read", true)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectPolicy, r.RejectedBy, "source %s: template has no progeny row", src.ID)
+		assert.Equal(t, pred.Matches(src), d.Allowed, "source %s: list and point read disagree", src.ID)
+		assert.False(t, d.Allowed, "source %s", src.ID)
+	}
+
+	// A permission the adapter does not serve is rejected at the fact
+	// stage, and the list predicate for the kind matches nothing.
+	other := newGoldenFixture(t)
+	releaseBuiltinProgenyAdapter(t, other.authz, "secret")
+	secretSrc := SharingSource{Kind: "secret", ID: other.secretID, OwnerID: other.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
+	require.NoError(t, other.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{secretSrc}}))
+	otherAgent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("relrule-regkind-agent-2")},
+		ProjectID: other.projectBeta.ID,
+		Ancestry:  []string{other.projectOwnerID},
+		Scopes:    allRegisteredAgentScopes(),
+	}}
+	d = decidePerm(other.authz, otherAgent, Resource{Type: "secret", ID: other.secretID}, ActionRead, permissionProjectSecretRead, true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
+	assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+	assert.False(t, other.authz.ProgenyListPredicate(ctx, principalContextForIdentity(otherAgent), "secret").Matches(secretSrc))
+}
+
+// --- Actor and Purpose on every decision ---
+
+// Every Decide return path records Actor and Purpose on the decision:
+// a missing principal, an unresolvable permission, a token project
+// mismatch before the kernel, a kernel decision, and a relationship allow
+// with and without explain.
+func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	owner := createCharacterizationUser(t, s, tid("relrule-actor-path-owner"))
+	projectID := tid("relrule-actor-path-proj")
+	agent := agentResource(&store.Agent{ID: tid("relrule-actor-path-agent"), ProjectID: projectID, OwnerID: owner.ID()})
+	otherProjectToken := NewScopedUserIdentity(owner, tid("relrule-actor-path-other-proj"), []string{"agent:read"})
+	actor := &DecisionActor{Kind: PrincipalKindAgent, ID: tid("relrule-actor-path-actor")}
+
+	request := func(ident Identity, res Resource, action Action, perm string, explain bool) AuthzRequest {
+		req := AuthzRequest{Resource: res, Action: action, Permission: perm, Explain: explain, Actor: actor, Purpose: "delivery"}
+		if ident != nil {
+			req.Principal = principalContextForIdentity(ident)
+			req.Credential = credentialContextForIdentity(ident)
+		}
+		return req
+	}
+	for _, tc := range []struct {
+		name    string
+		req     AuthzRequest
+		allowed bool
+		reason  string
+	}{
+		{"missing principal", request(nil, agent, ActionRead, "agent.read", false), false, "missing principal"},
+		{"unresolvable permission", request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", false), false, unresolvablePermissionReason},
+		{"unresolvable permission explain", request(owner, Resource{Type: "no_such_type", ID: "x"}, ActionRead, "", true), false, unresolvablePermissionReason},
+		{"token project mismatch", request(otherProjectToken, agent, ActionRead, "agent.read", false), false, "token not scoped for this project"},
+		{"relationship allow", request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
+		{"relationship allow explain", request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
+		{"relationship deny explain", request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := authz.Decide(context.Background(), tc.req)
+			assert.Equal(t, tc.allowed, d.Allowed, "reason %q", d.Reason)
+			if tc.reason != "" {
+				assert.Equal(t, tc.reason, d.Reason)
+			}
+			assert.Equal(t, actor, d.Actor)
+			assert.Equal(t, "delivery", d.Purpose)
+			if d.Provenance != nil {
+				assert.Equal(t, actor, d.Provenance.Actor)
+				assert.Equal(t, "delivery", d.Provenance.Purpose)
+			}
+		})
 	}
 }

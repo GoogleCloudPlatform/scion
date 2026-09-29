@@ -164,8 +164,9 @@ type AuthzRequest struct {
 
 	// Actor and Purpose describe who initiated the operation and why, when
 	// that differs from Principal (for example a delivery performed for a
-	// target agent). They are recorded in provenance for audit and never
-	// contribute to the decision.
+	// target agent). They are recorded on every decision (and in its
+	// provenance when present) for audit and never contribute to the
+	// decision.
 	Actor   *DecisionActor
 	Purpose string
 }
@@ -213,6 +214,11 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// Actor and Purpose echo AuthzRequest.Actor/Purpose on every decision.
+	// Audit-only: they never contribute to Allowed.
+	Actor   *DecisionActor `json:"actor,omitempty"`
+	Purpose string         `json:"purpose,omitempty"`
 
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
@@ -300,11 +306,11 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, request, principal, request.Credential)
 	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, request, derivedPrincipal, request.Credential)
 	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
@@ -319,9 +325,9 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, request, principal, credential)
 	case PrincipalKindBroker:
-		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
+		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, request, principal, credential)
 		// Emit the audit before returning so broker denies are diagnosable.
 		if a.decisionAuditEmitter != nil {
 			a.emitDecisionAudit(ctx, request, result)
@@ -349,7 +355,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 					MembershipPaths: []MembershipPathDetail{},
 				}
 			}
-			result := decorateDecision(d, principal, credential)
+			result := decorateDecision(d, request, principal, credential)
 			if a.decisionAuditEmitter != nil {
 				a.emitDecisionAudit(ctx, request, result)
 			}
@@ -366,7 +372,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential)
+					return decorateDecision(*denied, request, principal, credential)
 				}
 			}
 		}
@@ -396,7 +402,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -439,7 +445,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -464,7 +470,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, request, principal, credential)
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -634,11 +640,9 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		decision.Provenance.Actor = request.Actor
-		decision.Provenance.Purpose = request.Purpose
 	}
 
-	result := decorateDecision(decision, principal, credential)
+	result := decorateDecision(decision, request, principal, credential)
 
 	// Emit decision audit if emitter is configured.
 	if a.decisionAuditEmitter != nil {
@@ -1367,7 +1371,16 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 }
 
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+// decorateDecision fills the principal, credential and audit fields of a
+// decision. Every Decide return path goes through it, so Actor and Purpose
+// are recorded on every decision (and on its provenance when present).
+func decorateDecision(decision Decision, request AuthzRequest, principal PrincipalContext, credential CredentialContext) Decision {
+	decision.Actor = request.Actor
+	decision.Purpose = request.Purpose
+	if decision.Provenance != nil {
+		decision.Provenance.Actor = request.Actor
+		decision.Provenance.Purpose = request.Purpose
+	}
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
