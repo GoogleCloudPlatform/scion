@@ -243,18 +243,19 @@ are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
 is.
 
 A hook-sourced harness's dialect can populate all five `token_type` values on
-`scion.usage.tokens`, not just three: a Go dialect (via the `EventData`
+`scion.usage.tokens`, not just three. A Go dialect sets the `EventData`
 fields `InputTokens`, `OutputTokens`, `CachedTokens`, `CacheWriteTokens` and
-`ReasoningTokens`) or a bundled `dialect.yaml`'s `fields` mapping (via the
-yaml keys `input_tokens`, `output_tokens`, `cached_tokens` (→ `cache_read`),
-`cache_write_tokens` (→ `cache_write`) and `reasoning_tokens` (→
-`reasoning`, informational — already included in `output`, never added
-again)) sets these on the hook event data. `output_tokens`/`OutputTokens`
-must be the *total* output including reasoning (design §3.2): a `dialect.yaml`
-`fields` mapping is a pure path copy with no arithmetic, so a harness that
-reports output and reasoning as exclusive values needs a Go dialect or
-bridge-side summing to produce a combined `output_tokens` — the yaml mapping
-alone cannot add them together. A point is emitted only for a token type
+`ReasoningTokens`; a `dialect.yaml` `fields` mapping uses the yaml keys
+`input_tokens` (→ `input`), `output_tokens` (→ `output`), `cached_tokens`
+(→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
+`reasoning_tokens` (→ `reasoning`, informational, already included in
+`output` and never added again). `output_tokens`/`OutputTokens` must be the
+*total* output including reasoning (canonical usage contract,
+`.design/hosted/usage-telemetry.md` §3.2): a `dialect.yaml` `fields`
+mapping is a pure path copy with no arithmetic, so a harness that reports
+output and reasoning as exclusive values needs a Go dialect or bridge-side
+summing to produce a combined `output_tokens` — the yaml mapping alone
+cannot add them together. A point is emitted only for a token type
 whose field was actually populated (a positive value); a
 dialect that never maps a given field simply never emits that `token_type`.
 

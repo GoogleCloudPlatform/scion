@@ -587,11 +587,13 @@ Extractable fields include `prompt`, `tool_name`, `tool_input`,
 `file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
 (→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
 `cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
-`output_tokens` must be the *total* output including reasoning (design
-§3.2); a `fields` mapping is a pure path copy with no arithmetic, so if the
-tool reports output and reasoning as exclusive values, sum them into the
-field your mapping points `output_tokens` at before the payload reaches
-sciontool — in a Go dialect or in the hook/bridge script, not in yaml.
+`output_tokens` must be the *total* output including reasoning (canonical
+usage contract, `.design/hosted/usage-telemetry.md` §3.2); a `fields`
+mapping is a pure path copy with no arithmetic, so if the tool reports
+output and reasoning as exclusive values, the hook/bridge script must sum
+them into the payload field your `output_tokens` mapping reads, before the
+payload reaches sciontool. yaml cannot do this. (A built-in Go dialect
+would sum them in Go instead.)
 
 Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.
