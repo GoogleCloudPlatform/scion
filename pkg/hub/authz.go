@@ -1235,6 +1235,32 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 // the store. R-1 fix: the previous call used a fixed limit of 200 which
 // silently truncated constraints beyond that threshold.
 func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil {
+		cache.mu.Lock()
+		if cache.constraintsLoaded {
+			all, err := cache.constraints, cache.constraintsErr
+			cache.mu.Unlock()
+			return all, err
+		}
+		cache.mu.Unlock()
+
+		all, err := a.loadAllAccessConstraintsUncached(ctx)
+
+		cache.mu.Lock()
+		cache.constraintsLoaded = true
+		cache.constraints, cache.constraintsErr = all, err
+		cache.mu.Unlock()
+		return all, err
+	}
+	return a.loadAllAccessConstraintsUncached(ctx)
+}
+
+// loadAllAccessConstraintsUncached is loadAllAccessConstraints's body, split
+// out so the mint-eligibility cache wrapper above never duplicates this
+// logic. Every caller outside a CanMintSelector call (e.g. the ordinary
+// Decide path) reaches this directly, with no cache in context, and behaves
+// exactly as before.
+func (a *AuthzService) loadAllAccessConstraintsUncached(ctx context.Context) ([]*store.AccessConstraint, error) {
 	const pageSize = 500
 	var all []*store.AccessConstraint
 	offset := 0

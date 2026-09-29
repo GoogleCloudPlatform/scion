@@ -82,23 +82,6 @@ func relationshipRejectKeepsKernelReason(kind string) bool {
 	return kind == RelationshipRejectPolicy || kind == RelationshipRejectFact
 }
 
-// relationshipPolicyPrincipalKind maps a principal kind to the vocabulary
-// permissions.RelationshipPolicies rows use ("user", "agent"). Any other
-// kind maps to "" and matches no row.
-//
-// TODO(ptone/scion#2117): replace with permissions.RelationshipPrincipalKind
-// once A.1 publishes it.
-func relationshipPolicyPrincipalKind(kind PrincipalKind) string {
-	switch kind {
-	case PrincipalKindUser, PrincipalKindDev, PrincipalKindFederatedUser:
-		return "user"
-	case PrincipalKindAgent, PrincipalKindFederatedAgent:
-		return "agent"
-	default:
-		return ""
-	}
-}
-
 // relationshipAncestryAttested is the single check every ancestry-derived
 // relationship uses for hub attestation.
 func relationshipAncestryAttested(principal PrincipalContext) bool {
@@ -277,7 +260,7 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 	stopAtFirst bool,
 ) relationshipOutcome {
 	var out relationshipOutcome
-	policyKind := relationshipPolicyPrincipalKind(principal.Kind)
+	policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
 
 	for _, c := range a.relationshipCandidates(principal, resource, action) {
 		res := RelationshipCandidateResult{Rule: c.rule, Permission: permissionID}

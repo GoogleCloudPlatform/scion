@@ -202,6 +202,45 @@ func TestPermissionAllowedBoundaries_CoversEveryUATScope(t *testing.T) {
 	}
 }
 
+// permissionAllowedBoundariesPreReviewedWithoutUATScope is the explicit
+// allowlist for a PermissionAllowedBoundaries key that has no
+// Permission.UATScope yet: broker.create is pre-reviewed as Hub-only ahead
+// of its UATScope landing, so ResolveSelector resolves it correctly the
+// moment that field is added, with no second boundary-table change needed.
+// A key on neither this list nor a Registry row with a non-empty UATScope
+// is stale and must be removed.
+var permissionAllowedBoundariesPreReviewedWithoutUATScope = map[string]bool{
+	"broker.create": true,
+}
+
+// TestPermissionAllowedBoundaries_NoStaleKeys is the reverse of the coverage
+// test above: every PermissionAllowedBoundaries key must correspond to a
+// real, current Registry permission with a non-empty UATScope, or be an
+// explicit pre-reviewed exception — never a permission that was renamed,
+// removed, or never had a selector at all.
+func TestPermissionAllowedBoundaries_NoStaleKeys(t *testing.T) {
+	byID := make(map[string]Permission, len(Registry))
+	for _, p := range Registry {
+		byID[p.ID] = p
+	}
+	for key := range PermissionAllowedBoundaries {
+		if permissionAllowedBoundariesPreReviewedWithoutUATScope[key] {
+			if _, ok := byID[key]; !ok {
+				t.Errorf("PermissionAllowedBoundaries pre-reviewed key %q is not a Registry permission at all", key)
+			}
+			continue
+		}
+		p, ok := byID[key]
+		if !ok {
+			t.Errorf("PermissionAllowedBoundaries has stale key %q with no matching Registry permission", key)
+			continue
+		}
+		if p.UATScope == "" {
+			t.Errorf("PermissionAllowedBoundaries key %q has no UATScope and is not in the pre-reviewed allowlist; add it there or remove the entry", key)
+		}
+	}
+}
+
 // TestSelectorAllowedBoundaries_AliasIsIntersectionOfMembers proves the
 // alias boundary rule: a manage alias's AllowedBoundaries is the
 // intersection across every expanded member, not a separate guess. skill:
@@ -259,11 +298,10 @@ func TestMintEligibilityRegistry_AttachAndPortAccess(t *testing.T) {
 	}
 }
 
-// TestSupportedTargetClasses_CoversEveryUATScope is the drift coverage
-// pat-refactor's blocker #8 requires: every mintable permission (non-empty
-// UATScope) must have an explicit, reviewed SupportedTargetClasses entry --
-// never a guessed default from ProjectTargetApplicability or
-// PermissionAllowedBoundaries.
+// TestSupportedTargetClasses_CoversEveryUATScope is the drift coverage this
+// table requires: every mintable permission (non-empty UATScope) must have
+// an explicit, reviewed SupportedTargetClasses entry -- never a guessed
+// default from ProjectTargetApplicability or PermissionAllowedBoundaries.
 func TestSupportedTargetClasses_CoversEveryUATScope(t *testing.T) {
 	for _, p := range Registry {
 		if p.UATScope == "" {
@@ -291,7 +329,7 @@ func TestSupportedTargetClasses_NoStaleEntries(t *testing.T) {
 }
 
 // TestSupportedTargetClasses_HubOnlyMintablePermissionReviewed is the
-// explicit super-admin hub-only mint case pat-refactor required: user.invite
+// explicit super-admin hub-only mint case this table must cover: user.invite
 // (hub-only, ProjectTargetApplicability false) must still have a reviewed
 // SupportedTargetClasses entry so a super-admin can mint it under a hub
 // boundary.
@@ -307,7 +345,7 @@ func TestSupportedTargetClasses_HubOnlyMintablePermissionReviewed(t *testing.T) 
 }
 
 // TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess proves
-// blocker #8's core requirement: an unreviewed permission ID returns no
+// this table's core requirement: an unreviewed permission ID returns no
 // classes at all (deny), never a class inferred from ProjectTargetApplicability
 // or PermissionAllowedBoundaries.
 func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testing.T) {
@@ -324,7 +362,8 @@ func TestSupportedTargetClasses_UnknownPermissionDeniesRatherThanGuess(t *testin
 }
 
 // TestCollectionTargetClasses_CoversEveryRegistryPermission is the drift
-// coverage for R1: ResolveTargetScope's collection-evidence cross-check
+// coverage this table requires: ResolveTargetScope's collection-evidence
+// cross-check
 // needs a reviewed class set for every Registry permission, not just
 // mintable ones (project.create has no UATScope at all).
 func TestCollectionTargetClasses_CoversEveryRegistryPermission(t *testing.T) {
@@ -350,7 +389,7 @@ func TestCollectionTargetClasses_NoStaleEntries(t *testing.T) {
 }
 
 // TestCollectionTargetClasses_SkillListSupportsBothClasses pins the exact
-// R1 example: skill.list is ProjectTargetApplicability=true AND separately,
+// example this table exists for: skill.list is ProjectTargetApplicability=true AND separately,
 // legitimately, supports Hub-scope collection evidence for the global
 // catalog -- a single boolean cannot represent both.
 func TestCollectionTargetClasses_SkillListSupportsBothClasses(t *testing.T) {
