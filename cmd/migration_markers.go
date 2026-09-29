@@ -36,12 +36,12 @@ const migrationsSectionName = "_migrations"
 type MigrationName string
 
 const (
-	MigrationDMKey                            MigrationName = "dm_key_migration"
-	MigrationBackfill                         MigrationName = "message_backfill"
-	MigrationGroupRefRepair                   MigrationName = "group_ref_repair"
-	MigrationWorkspaceModeLabel               MigrationName = "workspace_mode_label_backfill"
-	MigrationBrokerOwnershipBackfill          MigrationName = "broker_ownership_backfill"
-	MigrationAgentToUserDispatchStateBackfill MigrationName = "agent_to_user_dispatch_state_backfill"
+	MigrationDMKey                         MigrationName = "dm_key_migration"
+	MigrationBackfill                      MigrationName = "message_backfill"
+	MigrationGroupRefRepair                MigrationName = "group_ref_repair"
+	MigrationWorkspaceModeLabel            MigrationName = "workspace_mode_label_backfill"
+	MigrationBrokerOwnershipBackfill       MigrationName = "broker_ownership_backfill"
+	MigrationNonAgentDispatchStateBackfill MigrationName = "non_agent_dispatch_state_backfill"
 )
 
 // migrationMarker records the completion state of a single migration.
@@ -192,7 +192,7 @@ var ErrUnknownMigration = errors.New("unknown migration name")
 func isKnownMigration(name MigrationName) bool {
 	switch name {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
-		MigrationBrokerOwnershipBackfill, MigrationAgentToUserDispatchStateBackfill:
+		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill:
 		return true
 	default:
 		return false

@@ -666,19 +666,13 @@ type BrokerDispatchStore interface {
 	// therefore never accept delivery. Returns the number of messages failed.
 	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 
-	// BackfillUserRecipientDispatchState repairs "user:"-recipient rows left
-	// by the pre-fix nc-promote-busy bug: an agent-to-user reply persisted
-	// with dispatch_state unset (falling through to the Ent schema's
-	// "pending" default), which ExpireStuckPendingMessages may since have
-	// advanced to "failed" with expiredReason. No code path legitimately
-	// writes a "user:" recipient row to "pending" — only an agent recipient
-	// is ever actually dispatched — so both shapes are safe to repair
-	// unconditionally. Matches expiredReason by exact string so a genuine,
-	// unrelated delivery failure (a different reason) is never touched. Sets
-	// dispatch_state="dispatched", clears dispatch_failure_reason, and
-	// stamps dispatched_at from the row's own created time when not already
-	// set. Returns the number of rows repaired.
-	BackfillUserRecipientDispatchState(ctx context.Context, expiredReason string) (int, error)
+	// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
+	// "pending", or "failed" with reason == expiredReason, by the pre-fix
+	// nc-promote-busy bug (a storeMsg persisted without stamping
+	// DispatchState). The exact complement of ExpireStuckPendingMessages'
+	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
+	// is ever legitimately in either state. Returns the number repaired.
+	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.

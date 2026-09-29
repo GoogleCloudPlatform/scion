@@ -384,12 +384,12 @@ func TestExpireStuckPendingMessages_SkipsUserRecipients(t *testing.T) {
 		"agent-recipient row is still expired")
 }
 
-// TestBackfillUserRecipientDispatchState is the regression test for
-// nc-promote-busy round 2 (R3): it seeds one row of each shape the pre-fix
-// bug (and the sweep that later "healed" it) could have left behind, plus a
-// genuine agent-recipient dispatch failure that must never be touched, and
-// asserts only the two nc-promote-busy shapes change.
-func TestBackfillUserRecipientDispatchState(t *testing.T) {
+// TestBackfillNonAgentDispatchState seeds every recipient shape the pre-fix
+// bug (and the sweep that later "healed" it) could have left behind —
+// "user:", "thread:", and "conv:" recipients, pending or TTL-expired-failed
+// — plus a differently-reasoned failure and a genuine agent-recipient
+// pending row, and asserts only the non-agent bug shapes are repaired.
+func TestBackfillNonAgentDispatchState(t *testing.T) {
 	const expiredReason = "expired: stuck in pending state beyond TTL"
 
 	client := enttest.NewClient(t)
@@ -402,38 +402,31 @@ func TestBackfillUserRecipientDispatchState(t *testing.T) {
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 
-	// Shape 1: a user-recipient row still exactly as the bug left it —
-	// dispatch_state defaults to "pending" because nothing stamped it.
-	userPending := &store.Message{
-		ID: uuid.NewString(), ProjectID: proj.ID,
-		Sender: "agent:a", Recipient: "user:alice", Msg: "reply 1",
-		CreatedAt: time.Now().Add(-2 * time.Hour),
+	seed := func(recipient, msg string, age time.Duration) *store.Message {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: proj.ID,
+			Sender: "agent:a", Recipient: recipient, Msg: msg,
+			CreatedAt: time.Now().Add(-age),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m
 	}
-	require.NoError(t, cs.CreateMessage(ctx, userPending))
 
-	// Shape 2: the same bug, but the stuck-message sweep has since flipped
-	// it to "failed" with the exact TTL-expiry reason.
-	userExpiredFailed := &store.Message{
-		ID: uuid.NewString(), ProjectID: proj.ID,
-		Sender: "agent:a", Recipient: "user:bob", Msg: "reply 2",
-		CreatedAt: time.Now().Add(-30 * time.Hour),
-	}
-	require.NoError(t, cs.CreateMessage(ctx, userExpiredFailed))
-	require.NoError(t, cs.MarkMessageFailed(ctx, userExpiredFailed.ID, expiredReason))
+	// Bug shapes: still pending, or swept to failed with the exact TTL
+	// reason, across every non-agent recipient prefix the writer bug could
+	// produce (DM, group thread, conv-ref group).
+	userPending := seed("user:alice", "reply 1", 2*time.Hour)
+	threadPending := seed("thread:space-42", "reply 2", 2*time.Hour)
+	convExpiredFailed := seed("conv:"+uuid.NewString(), "reply 3", 30*time.Hour)
+	require.NoError(t, cs.MarkMessageFailed(ctx, convExpiredFailed.ID, expiredReason))
 
-	// Negative control 1: a user-recipient row that failed for a genuine,
-	// unrelated reason. Must stay failed with its own reason untouched —
-	// only the exact TTL-expiry string is eligible.
-	userOtherFailed := &store.Message{
-		ID: uuid.NewString(), ProjectID: proj.ID,
-		Sender: "agent:a", Recipient: "user:carol", Msg: "reply 3",
-		CreatedAt: time.Now().Add(-30 * time.Hour),
-	}
-	require.NoError(t, cs.CreateMessage(ctx, userOtherFailed))
+	// Negative control 1: failed for a genuine, unrelated reason — only the
+	// exact TTL-expiry string is eligible.
+	userOtherFailed := seed("user:carol", "reply 4", 30*time.Hour)
 	require.NoError(t, cs.MarkMessageFailed(ctx, userOtherFailed.ID, "some unrelated delivery failure"))
 
 	// Negative control 2: an agent-recipient row, genuinely pending. Only a
-	// "user:" recipient is ever eligible for this backfill.
+	// message addressed to an agent is ever legitimately pending.
 	agentPending := &store.Message{
 		ID: uuid.NewString(), ProjectID: proj.ID,
 		Sender: "user:x", Recipient: "agent:b", Msg: "instruction",
@@ -441,23 +434,19 @@ func TestBackfillUserRecipientDispatchState(t *testing.T) {
 	}
 	require.NoError(t, cs.CreateMessage(ctx, agentPending))
 
-	repaired, err := cs.BackfillUserRecipientDispatchState(ctx, expiredReason)
+	repaired, err := cs.BackfillNonAgentDispatchState(ctx, expiredReason)
 	require.NoError(t, err)
-	assert.Equal(t, 2, repaired, "only the two nc-promote-busy shapes are repaired")
+	assert.Equal(t, 3, repaired, "user:, thread:, and conv: bug shapes are all repaired")
 
-	gotPending, err := cs.GetMessage(ctx, userPending.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchDispatched, gotPending.DispatchState)
-	assert.Nil(t, gotPending.DispatchFailureReason)
-	require.NotNil(t, gotPending.DispatchedAt)
-	assert.WithinDuration(t, userPending.CreatedAt, *gotPending.DispatchedAt, time.Second,
-		"dispatched_at is backdated to the row's own created time")
-
-	gotExpiredFailed, err := cs.GetMessage(ctx, userExpiredFailed.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchDispatched, gotExpiredFailed.DispatchState)
-	assert.Nil(t, gotExpiredFailed.DispatchFailureReason)
-	require.NotNil(t, gotExpiredFailed.DispatchedAt)
+	for _, m := range []*store.Message{userPending, threadPending, convExpiredFailed} {
+		got, err := cs.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, got.DispatchState, "recipient %q", m.Recipient)
+		assert.Nil(t, got.DispatchFailureReason, "recipient %q", m.Recipient)
+		require.NotNil(t, got.DispatchedAt, "recipient %q", m.Recipient)
+		assert.WithinDuration(t, m.CreatedAt, *got.DispatchedAt, time.Second,
+			"dispatched_at is backdated to the row's own created time")
+	}
 
 	gotOtherFailed, err := cs.GetMessage(ctx, userOtherFailed.ID)
 	require.NoError(t, err)
@@ -472,9 +461,52 @@ func TestBackfillUserRecipientDispatchState(t *testing.T) {
 		"an agent-recipient row is never touched by this backfill")
 
 	// Idempotent: running again repairs nothing further.
-	repairedAgain, err := cs.BackfillUserRecipientDispatchState(ctx, expiredReason)
+	repairedAgain, err := cs.BackfillNonAgentDispatchState(ctx, expiredReason)
 	require.NoError(t, err)
 	assert.Equal(t, 0, repairedAgain, "a second pass finds nothing left to repair")
+}
+
+// TestBackfillNonAgentDispatchState_PagesAcrossMultipleBatches shrinks the
+// page size and seeds more rows than one page holds, proving the
+// self-draining pagination (each page's repaired rows drop out of the
+// eligible predicate, so the next call naturally fetches the remainder)
+// terminates and repairs every eligible row, not just the first page.
+func TestBackfillNonAgentDispatchState_PagesAcrossMultipleBatches(t *testing.T) {
+	origPageSize := backfillPageSize
+	backfillPageSize = 3
+	t.Cleanup(func() { backfillPageSize = origPageSize })
+
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	const rowCount = 7 // more than 2x backfillPageSize(3), forcing 3 pages
+	ids := make([]string, rowCount)
+	for i := 0; i < rowCount; i++ {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: proj.ID,
+			Sender: "agent:a", Recipient: "user:bulk", Msg: "reply",
+			CreatedAt: time.Now().Add(-2 * time.Hour),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		ids[i] = m.ID
+	}
+
+	repaired, err := cs.BackfillNonAgentDispatchState(ctx, "expired: stuck in pending state beyond TTL")
+	require.NoError(t, err)
+	assert.Equal(t, rowCount, repaired, "every row across every page is repaired")
+
+	for _, id := range ids {
+		got, err := cs.GetMessage(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, got.DispatchState)
+	}
 }
 
 func TestFailPendingMessagesWithMissingRecipient(t *testing.T) {

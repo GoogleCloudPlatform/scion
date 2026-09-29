@@ -72,7 +72,7 @@ func (f *fakeDispatchStore) ExpireStuckPendingMessages(_ context.Context, _ time
 func (f *fakeDispatchStore) FailPendingMessagesWithMissingRecipient(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
-func (f *fakeDispatchStore) BackfillUserRecipientDispatchState(_ context.Context, _ string) (int, error) {
+func (f *fakeDispatchStore) BackfillNonAgentDispatchState(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
 
