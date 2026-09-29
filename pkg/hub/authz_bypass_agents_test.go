@@ -1168,8 +1168,8 @@ func (d *bypassAgentsDevIdentity) Type() string { return "dev" }
 // inside canDispatchToBroker's own "user"/"dev" switch, which is unaffected
 // and still keys on Type()). Those two classifier functions key on concrete
 // type, not Type(), so a wrapper type distinct from the production DevUser
-// must opt in explicitly, matching what the Type()-keyed switch used to
-// produce for it.
+// must opt in explicitly, naming the dev principal/credential kinds
+// directly.
 func (d *bypassAgentsDevIdentity) authzClassification() (PrincipalKind, CredentialKind) {
 	return PrincipalKindDev, CredentialKindDev
 }
