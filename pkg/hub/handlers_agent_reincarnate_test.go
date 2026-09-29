@@ -2844,7 +2844,15 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		// value.
 		var resp ReincarnateAgentResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.Contains(t, final.AppliedConfig.Task, reincarnationChangesLine(resp.Plan),
+		want := reincarnationChangesLine(resp.Plan)
+		// Amendment A26.6 R1: reincarnationChangesLine returns "" for a plan
+		// with no diffs, and assert.Contains(x, "") is always true — so
+		// without this, the assertion below would pass vacuously if the 202
+		// body ever lost or zeroed its plan (a response-side regression),
+		// even though the by-construction property this test exists to pin
+		// would then be false.
+		require.NotEmpty(t, want, "the 202 body must carry the non-empty plan the worker rendered")
+		assert.Contains(t, final.AppliedConfig.Task, want,
 			"the preamble's Changes: line must be exactly reincarnationChangesLine(<the 202 body's plan>)")
 	})
 
