@@ -2720,8 +2720,6 @@ var MutationClassifications = []MutationClassification{
 	// external-bearer auth path (auth_external_bearer.go). Extracted from
 	// ge_exchange.go's former resolveLocalUser/provisionNewUser.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user email update on binding match", Scope: "pkg/hub/google_identity_resolver.go"}},
-	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user profile update (displayName/avatar)", Scope: "pkg/hub/google_identity_resolver.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: orphan user cleanup after concurrent binding race", Scope: "pkg/hub/google_identity_resolver.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: new user provisioning (GE exchange and external-bearer)", Scope: "pkg/hub/google_identity_resolver.go"}},
 

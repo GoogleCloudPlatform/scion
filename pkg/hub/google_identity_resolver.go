@@ -63,8 +63,10 @@ type ResolvePolicy struct {
 //     (Google controls gserviceaccount.com).
 //   - The Hub sign-in policy (authorize) and role assignment (roleFor) for
 //     newly provisioned users, matching interactive OAuth.
-//   - Suspension enforcement on every call — no cache, so a suspension takes
-//     effect on the very next request.
+//   - The same live sign-in policy and account-state handling (suspension,
+//     authorization unless PreAuthorized, invited activation, role/grant
+//     sync) for every existing record too, on every call — no cache, so a
+//     suspension or policy change takes effect on the very next request.
 type GoogleIdentityResolver struct {
 	users     store.UserStore
 	extIDs    store.ExternalIdentityStore
@@ -92,17 +94,33 @@ type GoogleIdentityResolver struct {
 	policyDeps signInPolicyDeps
 }
 
-// SetSignInPolicyDeps wires the resolver's existing-record-by-email branch
-// to the same live sign-in policy and account-state handling that
-// interactive login uses (see applyLiveSignInPolicy), so a pre-existing
-// record picked up by this resolver cannot drift from login's behavior.
-// Optional: the sign-in policy check (authorize) and suspension enforcement
-// apply unconditionally either way; this only fills in role assignment,
-// super-admin binding, grant sync, and audit — the many callers that
-// construct a resolver without server-config wiring keep working with those
-// left as no-ops.
+// SetSignInPolicyDeps wires every existing-record branch of Resolve (bound
+// identity, email match, and the unique-email collision handback) to the
+// same live sign-in policy and account-state handling that interactive
+// login uses (see applyLiveSignInPolicy), so a pre-existing record picked up
+// by this resolver cannot drift from login's behavior. Optional: the
+// sign-in policy check (authorize) and suspension enforcement apply
+// unconditionally either way (see liveSignInPolicyDeps); this only fills in
+// role assignment, super-admin binding, grant sync, and audit — the many
+// callers that construct a resolver without server-config wiring keep
+// working with those left as no-ops.
 func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
 	r.policyDeps = deps
+}
+
+// liveSignInPolicyDeps returns r.policyDeps with the fields that must never
+// silently depend on SetSignInPolicyDeps having been called: authorize
+// (always r.authorize, the resolver's own injected policy check) and
+// UpdateUser (defaults to r.users.UpdateUser, since persisting a state
+// transition like invited -> active must not depend on optional wiring).
+// Used by every existing-record branch of Resolve.
+func (r *GoogleIdentityResolver) liveSignInPolicyDeps() signInPolicyDeps {
+	deps := r.policyDeps
+	deps.authorize = r.authorize
+	if deps.UpdateUser == nil {
+		deps.UpdateUser = r.users.UpdateUser
+	}
+	return deps
 }
 
 // SetPlatformAuthSA records the hub's configured platform/transport auth
@@ -157,10 +175,13 @@ func NewGoogleIdentityResolver(
 // is:
 //
 //  1. Look up existing binding by (provider, canonical issuer, sub).
-//  2. If found: verify the bound user exists and is not suspended, update
-//     email if changed. Return the user.
+//  2. If found: verify the bound user exists, apply the live sign-in policy
+//     and account-state handling (suspension, authorization unless
+//     PreAuthorized, invited activation, role/grant sync), update email if
+//     changed. Return the user.
 //  3. If not found: attempt first-time bootstrap via email, guarded by the
-//     authoritative email domain requirement.
+//     authoritative email domain requirement, and apply the same policy and
+//     account-state handling to the matched record.
 //  4. Create atomic binding and return user.
 func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *ValidatedGoogleIdentity, policy ResolvePolicy) (*store.User, error) {
 	if identity == nil {
@@ -197,11 +218,14 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			return nil, fmt.Errorf("bound user not found: %w", err)
 		}
 
-		if user.Status == "suspended" {
+		if user.Status == store.UserStatusSuspended {
 			return nil, ErrUserSuspended
 		}
 
-		// Update email if it changed (informational, does not relink).
+		// Update email if it changed (informational, does not relink). Kept
+		// separate from the policy/state persistence below: this mutation is
+		// unconditional (never relinks the subject-bound identity), while
+		// the policy call below may deny before persisting anything.
 		normalizedEmail := strings.ToLower(identity.Email)
 		if strings.ToLower(binding.Email) != normalizedEmail {
 			r.log.Info("google identity resolver: updating binding email",
@@ -211,22 +235,19 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			// Also update the user's profile email if it matches the old binding email.
 			if strings.EqualFold(user.Email, binding.Email) {
 				user.Email = normalizedEmail
-				_ = r.users.UpdateUser(ctx, user)
 			}
 		}
 
-		// Update display name / avatar if missing.
-		updated := false
-		if identity.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = identity.DisplayName
-			updated = true
-		}
-		if identity.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = identity.AvatarURL
-			updated = true
-		}
-		if updated {
-			_ = r.users.UpdateUser(ctx, user)
+		// Apply the same live sign-in policy and account-state handling
+		// every sign-in path shares (see applyLiveSignInPolicy): the live
+		// access policy (unless PreAuthorized), invited-record activation,
+		// and role/grant sync — identical to the email-match branch above,
+		// so an already-bound identity is re-checked on every issuance, not
+		// just at first link. Suspension was already checked above; the
+		// helper re-checks it too, matching every other caller.
+		user, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), user, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+		if err != nil {
+			return nil, err
 		}
 
 		return user, nil
@@ -278,18 +299,8 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// every sign-in path shares (see applyLiveSignInPolicy): suspension,
 		// the live access policy (unless PreAuthorized), invited-record
 		// activation, and role/grant sync. On denial, no identity link is
-		// created for this sign-in — deps.authorize is always r.authorize,
-		// so the policy check itself does not depend on SetSignInPolicyDeps
-		// having been called.
-		policyDeps := r.policyDeps
-		policyDeps.authorize = r.authorize
-		if policyDeps.UpdateUser == nil {
-			// Persistence of the state transition (e.g. invited -> active)
-			// must not silently depend on SetSignInPolicyDeps having been
-			// called; r.users is always present.
-			policyDeps.UpdateUser = r.users.UpdateUser
-		}
-		existingUser, err = applyLiveSignInPolicy(ctx, policyDeps, existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+		// created for this sign-in.
+		existingUser, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
 		if err != nil {
 			return nil, err
 		}
@@ -454,8 +465,13 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 					"email", normalizedEmail, "create_error", createErr, "lookup_error", lookupErr)
 				return nil, false, fmt.Errorf("create user: %w", createErr)
 			}
-			if winner.Status == "suspended" {
-				return nil, false, ErrUserSuspended
+			// The winner handback is policy-checked too, exactly like every
+			// other existing-record path (see applyLiveSignInPolicy): the
+			// winner is itself an existing record now, not a fresh
+			// provision, even though this call started out provisioning one.
+			winner, policyErr := applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), winner, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+			if policyErr != nil {
+				return nil, false, policyErr
 			}
 			r.log.Info("google identity resolver: resolved to existing user after email collision",
 				"email", normalizedEmail, "winner_user_id", winner.ID,
