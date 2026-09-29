@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -327,4 +328,141 @@ func sanitizeGCPSecretIDForTest(s string) string {
 		s = s[:255]
 	}
 	return s
+}
+
+// --- ptone/scion#2152 round-1 review fixes ---
+
+// TestRunMigrateNames_TwoStepDeleteLegacyWorkflow reproduces review finding 1:
+// the documented workflow is a plain run followed by a separate
+// --delete-legacy run. Before the fix, the second run saw the prefixed copy
+// already present, reported "0 migrated, N skipped", and never reached the
+// delete step.
+func TestRunMigrateNames_TwoStepDeleteLegacyWorkflow(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{ID: tid("two-step"), Key: "API_KEY", Scope: "user", ScopeID: "user-1"}))
+	mock.seed(t, "test-project", legacyName, "v")
+
+	var out1 bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out1))
+	assert.Contains(t, out1.String(), "MIGRATED")
+
+	var out2 bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true /* deleteLegacy */, &out2))
+	t.Logf("second run output:\n%s", out2.String())
+	assert.Contains(t, out2.String(), "DELETED LEGACY")
+
+	assert.False(t, mock.has(fmt.Sprintf("projects/test-project/secrets/%s", legacyName)),
+		"legacy secret must be gone after the documented plain-then---delete-legacy workflow")
+}
+
+// TestRunMigrateNames_RepairsRefLeftByCopyForward reproduces review finding
+// 2/3: a signing key copied forward at hub startup (not via migrate-names)
+// gets its DB ref repaired the next time migrate-names runs, even though no
+// copy is needed that run.
+func TestRunMigrateNames_RepairsRefLeftByCopyForward(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("user_signing_key", "hub", migrateNamesTestHubID)
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("copy-forward-sk"), Key: "user_signing_key", Scope: "hub", ScopeID: migrateNamesTestHubID, SecretRef: legacyRef,
+	}))
+	mock.seed(t, "test-project", legacyName, "k")
+
+	// Simulate the hub-startup copy-forward: it creates the prefixed copy.
+	// (Whether or not CopyHubSecretForward itself also repairs the ref is
+	// covered at the pkg/secret level; this test's point is that
+	// migrate-names repairs it regardless, since it must not assume the
+	// startup path already did.)
+	_, err := backend.MigrateNameForward(ctx, "user_signing_key", "hub", migrateNamesTestHubID)
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out))
+	t.Logf("output:\n%s", out.String())
+
+	rec, err := db.GetSecret(ctx, "user_signing_key", "hub", migrateNamesTestHubID)
+	require.NoError(t, err)
+	assert.NotEqual(t, legacyRef, rec.SecretRef, "SecretRef must move off the legacy path")
+	prefixedName := prefixedNameForTest("user_signing_key", "hub", migrateNamesTestHubID)
+	assert.Equal(t, "gcpsm:projects/test-project/secrets/"+prefixedName, rec.SecretRef)
+}
+
+// TestRunMigrateNames_DryRunPlansRefRepairAndDelete extends the dry-run
+// coverage to the ref-repair and delete-legacy planning branches (not just
+// the copy branch), since finding 1's restructure added those as
+// independently-triggered actions.
+func TestRunMigrateNames_DryRunPlansRefRepairAndDelete(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{ID: tid("dry-run-ref"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: legacyRef}))
+	mock.seed(t, "test-project", legacyName, "v")
+	// Prefixed copy already exists (as if copied forward already), so a real
+	// run would only need to repair the ref and (if asked) delete legacy.
+	_, err := backend.MigrateNameForward(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+
+	var out bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true /* dryRun */, true /* deleteLegacy */, &out))
+	assert.Contains(t, out.String(), "REPAIR REF")
+	assert.Contains(t, out.String(), "DELETE LEGACY")
+	assert.NotContains(t, out.String(), "MIGRATE ") // no copy needed; guard against matching "MIGRATE AND ..."
+
+	// Still must not have written anything.
+	rec, err := db.GetSecret(ctx, "user_signing_key", "hub", migrateNamesTestHubID)
+	if err == nil {
+		t.Fatalf("unexpected record found: %+v", rec)
+	}
+	rec2, err := db.GetSecret(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, legacyRef, rec2.SecretRef, "dry-run must not repair the ref")
+}
+
+func TestOpenMigrateNamesStore_UnsupportedDriver(t *testing.T) {
+	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "mysql", URL: "unused"}}
+	_, err := openMigrateNamesStore(context.Background(), cfg, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mysql")
+}
+
+func TestOpenMigrateNamesStore_SQLiteDefaultAndExplicit(t *testing.T) {
+	for _, driver := range []string{"", "sqlite"} {
+		t.Run(fmt.Sprintf("driver=%q", driver), func(t *testing.T) {
+			dbPath := "file:" + t.TempDir() + "/migrate-names-test.db"
+			cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: driver, URL: dbPath}}
+			cs, err := openMigrateNamesStore(context.Background(), cfg, false)
+			require.NoError(t, err)
+			defer func() { _ = cs.Close() }()
+			// Migration ran (dryRun=false): a real query against the schema
+			// must succeed.
+			_, err = cs.ListSecrets(context.Background(), store.SecretFilter{})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestOpenMigrateNamesStore_DryRunSkipsSchemaMigration(t *testing.T) {
+	dbPath := "file:" + t.TempDir() + "/migrate-names-dry-run-test.db"
+	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "sqlite", URL: dbPath}}
+	cs, err := openMigrateNamesStore(context.Background(), cfg, true /* dryRun */)
+	require.NoError(t, err)
+	defer func() { _ = cs.Close() }()
+	// The schema was never created, so a real query against it must fail —
+	// proof that --dry-run didn't migrate the database as a side effect
+	// (ptone/scion#2152 review finding 6).
+	_, err = cs.ListSecrets(context.Background(), store.SecretFilter{})
+	assert.Error(t, err)
 }

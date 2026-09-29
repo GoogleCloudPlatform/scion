@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -36,10 +37,14 @@ import (
 // reset that left the value only in GCP SM). This is a short, explicit list —
 // not a GCP SM listing call, per the ptone/scion#2152 decision to enumerate
 // legacy secrets from the Hub DB and known hub-scope key names only, never
-// from Secret Manager itself.
+// from Secret Manager itself. Every key here is one ensureSigningKey or
+// OIDCKeyManager.loadOrCreateKey resolves through syncSigningKeyToBackend /
+// CopyHubSecretForward (review finding 5).
 var knownHubScopeSecretKeys = []string{
 	hub.SecretKeyAgentSigningKey,
 	hub.SecretKeyUserSigningKey,
+	hub.SecretKeyOIDCSigningKey,
+	hub.SecretKeyDownloadSigningKey,
 }
 
 var (
@@ -69,16 +74,28 @@ secrets with a conditioned role binding:
 
 (note: PROJECT_NUMBER, not project ID)
 
-For each secret it finds under its legacy name, this command:
-  1. Copies the latest version's value (and GCP SM labels) to the new,
-     hub-prefixed name.
-  2. Updates the secret's Hub DB record to reference the new name.
-  3. Leaves the legacy secret in place, unless --delete-legacy is passed.
+For each candidate secret identity, this command independently checks three
+things and performs whichever apply, so it is safe to run repeatedly at any
+point in the migration and always converges:
+  1. If the legacy name has a value the prefixed name doesn't yet, copy the
+     latest version's value (and GCP SM labels) to the prefixed name.
+  2. If the secret's Hub DB record exists and its SecretRef isn't the
+     prefixed name yet (whether because this run just copied it, an earlier
+     run partially failed, or the hub-startup signing-key copy-forward
+     created the copy without ever being asked to touch the DB), repair the
+     ref.
+  3. If --delete-legacy is set and the legacy name still exists, delete it —
+     but only once step 2 has confirmed the DB ref no longer depends on it,
+     so a secret can never become unreadable as a result.
 
-It is idempotent: a secret already migrated is skipped, so a partially
-completed or interrupted run can simply be re-run. Legacy secrets are only
-deleted as an explicit, separate step (--delete-legacy) after this command has
-verified the new copy is readable and matches.
+Deploy ordering: grant the new hub-prefixed IAM condition to this hub's
+service account BEFORE deploying a binary built from this or a later commit —
+every write immediately targets the prefixed name, so writes fail with a
+permission error otherwise. Keep the legacy grant in place until
+--delete-legacy has been run and verified; only then remove it.
+
+It is idempotent: re-running is always safe, and any candidate already fully
+migrated (copied, ref repaired, legacy gone or never existed) is skipped.
 
 Examples:
   # Show what would be migrated without making changes
@@ -118,15 +135,11 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	entClient, err := entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", entc.PoolConfig{})
+	db, err := openMigrateNamesStore(ctx, cfg, migrateNamesDryRun)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
-	db := entadapter.NewCompositeStore(entClient)
 	defer func() { _ = db.Close() }()
-	if err := db.Migrate(ctx); err != nil {
-		return fmt.Errorf("failed to migrate database: %w", err)
-	}
 
 	credentialsJSON := ""
 	if migrateNamesCredentials != "" {
@@ -141,6 +154,13 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	if hubID == "" {
 		hubID = config.ResolveHubIDFromEnv()
 	}
+	if hubID == "" {
+		// An empty hubID still produces a valid, deterministic prefix
+		// (sha256("")[:12]), so this would silently migrate every secret
+		// into a shared, meaningless namespace instead of failing loudly
+		// (ptone/scion#2152 review finding 15).
+		return fmt.Errorf("resolved hub ID is empty; pass --hub-id explicitly or configure server.hub.hub_id")
+	}
 	fmt.Printf("Using hub ID: %s\n", hubID)
 
 	gcpBackend, err := secret.NewGCPBackend(ctx, db, secret.GCPBackendConfig{
@@ -152,6 +172,56 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	}
 
 	return runMigrateNames(ctx, gcpBackend, db, hubID, migrateNamesDryRun, migrateNamesDeleteLegacy, os.Stdout)
+}
+
+// openMigrateNamesStore opens the Hub database using the driver configured in
+// server settings (sqlite or postgres), mirroring openRecoveryStore in
+// cmd/server_recover_authz.go. Unlike that helper, schema migration is
+// skipped when dryRun is set, so --dry-run's "changes nothing" guarantee also
+// covers the database schema, not just GCP SM (ptone/scion#2152 review
+// finding 6: the previous version of this command always opened a local
+// SQLite file regardless of the configured driver, silently migrating
+// nothing — and writing to a stray file — on a Postgres hub).
+func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun bool) (*entadapter.CompositeStore, error) {
+	pool := entc.PoolConfig{}
+	var cs *entadapter.CompositeStore
+
+	switch strings.ToLower(cfg.Database.Driver) {
+	case "sqlite", "":
+		dsn := cfg.Database.URL
+		if !strings.HasPrefix(dsn, "file:") {
+			dsn = "file:" + dsn
+		}
+		if !strings.Contains(dsn, "cache=") {
+			if strings.Contains(dsn, "?") {
+				dsn += "&cache=shared"
+			} else {
+				dsn += "?cache=shared"
+			}
+		}
+		ec, err := entc.OpenSQLite(dsn, pool)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+		}
+		cs = entadapter.NewCompositeStore(ec)
+	case "postgres":
+		ec, err := entc.OpenPostgres(cfg.Database.URL, pool)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open postgres database: %w", err)
+		}
+		cs = entadapter.NewCompositeStore(ec)
+	default:
+		return nil, fmt.Errorf("unsupported database driver %q", cfg.Database.Driver)
+	}
+
+	if dryRun {
+		return cs, nil
+	}
+	if err := cs.Migrate(ctx); err != nil {
+		_ = cs.Close()
+		return nil, fmt.Errorf("failed to run database migration: %w", err)
+	}
+	return cs, nil
 }
 
 // migrateNamesCandidate identifies one secret identity to check for name
@@ -169,6 +239,14 @@ type migrateNamesCandidate struct {
 // records, and the fixed list of known hub-scope signing-key names — never
 // from a GCP Secret Manager listing call (ptone/scion#2152 decision: no
 // secrets.list anywhere in the migration path).
+//
+// Each candidate is independently checked for three, separately-applicable
+// actions (copy, ref-repair, legacy-delete) rather than an early-exit
+// if/else chain, so that re-running after a partial success or after the
+// hub-startup signing-key copy-forward (which creates the prefixed copy
+// without going through this command) still finishes the job instead of
+// reporting "already migrated" and skipping the remaining steps
+// (ptone/scion#2152 review findings 1 and 2).
 func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.SecretStore, hubID string, dryRun, deleteLegacy bool, out io.Writer) error {
 	seen := make(map[migrateNamesCandidate]bool)
 	var candidates []migrateNamesCandidate
@@ -210,54 +288,31 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 
 	var migrated, skipped, failed, deletedLegacy int
 	for _, c := range candidates {
-		needs, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
-		if err != nil {
-			if err == store.ErrNotFound {
-				// Not present in GCP SM under either name (e.g. a DB record
-				// whose GCP SM write never completed, or a signing key never
-				// provisioned). Nothing to do.
-				skipped++
-				continue
-			}
-			fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to check: %v\n", c.name, c.scope, c.scopeID, err)
-			failed++
-			continue
-		}
-		if !needs {
-			// Already migrated (or never had a legacy name).
-			skipped++
-			continue
-		}
-
 		if dryRun {
-			action := "WOULD MIGRATE"
-			if deleteLegacy {
-				action = "WOULD MIGRATE AND DELETE LEGACY"
-			}
-			fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", action, c.name, c.scope, c.scopeID)
-			migrated++
-			continue
-		}
-
-		if _, err := backend.MigrateNameForward(ctx, c.name, c.scope, c.scopeID); err != nil {
-			fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to migrate: %v\n", c.name, c.scope, c.scopeID, err)
-			failed++
-			continue
-		}
-		if err := backend.UpdateSecretRefToPrefixed(ctx, c.name, c.scope, c.scopeID); err != nil {
-			fmt.Fprintf(out, "  WARN  %s (scope: %s/%s) - migrated GCP SM value but failed to update DB ref: %v\n", c.name, c.scope, c.scopeID, err)
-		}
-		fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
-		migrated++
-
-		if deleteLegacy {
-			if err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID); err != nil {
-				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to delete legacy secret: %v\n", c.name, c.scope, c.scopeID, err)
+			acted, err := planMigrateNamesCandidate(ctx, backend, c, deleteLegacy, out)
+			if err != nil {
+				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - failed to check: %v\n", c.name, c.scope, c.scopeID, err)
 				failed++
 				continue
 			}
-			fmt.Fprintf(out, "  DELETED LEGACY  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
-			deletedLegacy++
+			if acted {
+				migrated++
+			} else {
+				skipped++
+			}
+			continue
+		}
+
+		acted, err := migrateOneCandidate(ctx, backend, c, deleteLegacy, out, &deletedLegacy)
+		if err != nil {
+			fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
+			failed++
+			continue
+		}
+		if acted {
+			migrated++
+		} else {
+			skipped++
 		}
 	}
 
@@ -272,4 +327,112 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 		return fmt.Errorf("migrate-names finished with %d failure(s); re-run to retry (idempotent)", failed)
 	}
 	return nil
+}
+
+// migrateOneCandidate performs whichever of copy / ref-repair / legacy-delete
+// apply to one secret identity, in that order, stopping at the first error.
+// acted is true if any of the three actions actually did something (used for
+// the migrated/skipped counters); an identity that was already fully
+// migrated and has nothing left to do returns (false, nil).
+func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migrateNamesCandidate, deleteLegacy bool, out io.Writer, deletedLegacy *int) (acted bool, err error) {
+	// Step 1: copy the value forward if the prefixed name doesn't have one yet.
+	needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			// Not present in GCP SM under either name (e.g. a DB record
+			// whose GCP SM write never completed, or a signing key never
+			// provisioned). Nothing to do for this identity at all.
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check name migration status: %w", err)
+	}
+	if needsCopy {
+		if _, err := backend.MigrateNameForward(ctx, c.name, c.scope, c.scopeID); err != nil {
+			return false, fmt.Errorf("failed to migrate: %w", err)
+		}
+		fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+		acted = true
+	}
+
+	// Step 2: repair the DB ref whenever the prefixed copy exists — whether
+	// this call just created it, a previous run copied it but failed to
+	// update the ref, or the hub-startup signing-key copy-forward created it
+	// without touching the DB at all.
+	hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, c.name, c.scope, c.scopeID)
+	if err != nil {
+		return acted, fmt.Errorf("failed to check DB ref: %w", err)
+	}
+	if hasRecord && !refIsPrefixed {
+		if err := backend.UpdateSecretRefToPrefixed(ctx, c.name, c.scope, c.scopeID); err != nil {
+			// Counted as a failure (not a WARN-and-continue): a resumable
+			// migration must not report success while a DB ref still
+			// depends on the legacy name (ptone/scion#2152 review finding 2).
+			return acted, fmt.Errorf("migrated GCP SM value but failed to update DB ref: %w", err)
+		}
+		fmt.Fprintf(out, "  REPAIRED REF  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+		acted = true
+	}
+
+	// Step 3: delete the legacy name, only once nothing (that we can detect)
+	// still depends on it. DeleteLegacySecretName independently re-verifies
+	// the DB ref and the GCP SM value match before deleting, so this is
+	// defense in depth, not the only check.
+	if deleteLegacy {
+		legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+		if err != nil {
+			return acted, fmt.Errorf("failed to check legacy secret: %w", err)
+		}
+		if legacyPresent {
+			if err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID); err != nil {
+				return acted, fmt.Errorf("failed to delete legacy secret: %w", err)
+			}
+			fmt.Fprintf(out, "  DELETED LEGACY  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+			*deletedLegacy++
+			acted = true
+		}
+	}
+
+	return acted, nil
+}
+
+// planMigrateNamesCandidate is the --dry-run counterpart of
+// migrateOneCandidate: it performs the same three checks, using only
+// read-only backend calls, and prints what would happen instead of doing it.
+func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, c migrateNamesCandidate, deleteLegacy bool, out io.Writer) (planned bool, err error) {
+	var actions []string
+
+	needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
+	if err != nil && err != store.ErrNotFound {
+		return false, fmt.Errorf("failed to check name migration status: %w", err)
+	}
+	absent := err == store.ErrNotFound
+	if needsCopy {
+		actions = append(actions, "MIGRATE")
+	}
+
+	if !absent {
+		hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, c.name, c.scope, c.scopeID)
+		if err != nil {
+			return false, fmt.Errorf("failed to check DB ref: %w", err)
+		}
+		if hasRecord && !refIsPrefixed {
+			actions = append(actions, "REPAIR REF")
+		}
+
+		if deleteLegacy {
+			legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+			if err != nil {
+				return false, fmt.Errorf("failed to check legacy secret: %w", err)
+			}
+			if legacyPresent {
+				actions = append(actions, "DELETE LEGACY")
+			}
+		}
+	}
+
+	if len(actions) == 0 {
+		return false, nil
+	}
+	fmt.Fprintf(out, "  WOULD %s  %s (scope: %s/%s)\n", strings.Join(actions, " AND "), c.name, c.scope, c.scopeID)
+	return true, nil
 }
