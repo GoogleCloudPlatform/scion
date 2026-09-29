@@ -386,9 +386,21 @@ formula can never drift apart):
     output (no ref, and no value under the legacy name either — truly
     nothing to migrate), or a visible ORPHAN (a *stored* ref whose
     designated value is gone — reported for operator awareness, but not a
-    failure: there is nothing to copy). Only an unreadable *stored* ref
-    (e.g. `PermissionDenied` on a legacy name a record's ref still depends
-    on) is a real, counted failure.
+    failure: there is nothing to copy). An unreadable *stored* ref (e.g.
+    `PermissionDenied` on a legacy name a record's ref still depends on) is
+    a real, counted failure, and so is CONFLICT (a concurrent writer's ref
+    update raced with this run's own write to the prefixed name — see
+    "Resync and concurrency" below for the precise guarantee and what to do
+    about it). **Known inconsistency (round-6 review non-blocking finding
+    6, not fixed in this round — see dev-notes):** a DB record with *no*
+    stored ref at all (not yet migrated by `hub secret migrate`, or one
+    with a non-`gcpsm:` ref) is treated identically to a no-DB-record
+    candidate by the copy/resync step (`PermissionDenied` on the computed
+    legacy name is absent, not fatal), but as a genuinely unmigrated record
+    by `--delete-legacy`'s check (fatal once the legacy grant is narrowed).
+    The two steps disagree for this specific, narrow case; both fail
+    closed, so no secret is put at risk, but the failure/skip classification
+    differs depending which step encounters it first.
   - `--delete-legacy` deletes a legacy secret once the DB ref (if any)
     already designates the prefixed name and that prefixed copy is
     confirmed readable — it does **not** additionally require the legacy
@@ -453,25 +465,66 @@ formula can never drift apart):
     finding 1(b)): a rotation landing during the labels/`AddSecretVersion`
     RPCs between the recheck and the CAS still fails the CAS's version
     predicate and is retried, rather than silently applying.
-  - **What this guarantees, precisely**: any concurrent write that is
-    visible in the DB row — a changed `SecretRef`, or a changed `Version`
-    from any `UpsertSecret`, including a same-ref old-binary rotation — by
-    the time of the recheck or the CAS is detected and never silently
-    overwritten. This is narrower than "never clobbers a concurrent edit":
-    the residual window is a concurrent writer whose own `AddSecretVersion`
-    lands on the *prefixed* name itself between the final recheck and this
-    call's own `AddSecretVersion` — that write can briefly leave a stale
-    version as `latest`, even though the version-aware CAS then correctly
-    refuses to move the ref onto it. In this codebase only a new-binary
-    `Set()` writes the prefixed name directly, so this window is narrow, but
-    two cross-system operations (GCP SM and the DB) can't be made a single
-    transaction, so it isn't zero.
+  - **What this guarantees, precisely** (ptone/scion#2152 round-6 review
+    findings 1 and 2 — this bullet replaces a round-5 version that claimed a
+    single, uniform guarantee and used "briefly"; round 5's own commit never
+    actually landed this edit, despite the commit message and dev-notes
+    claiming it did): whether a concurrent writer's own `AddSecretVersion`
+    to the *prefixed* name is caught depends on **when its DB upsert lands
+    relative to this attempt's recheck and CAS**, not on when its GCP write
+    landed:
+    - If the concurrent writer's DB upsert lands **between this attempt's
+      recheck and its CAS** (or is otherwise visible in the DB row by CAS
+      time), the CAS's version predicate fails to match. If this attempt
+      had already written a version to the prefixed name, that is reported
+      as `ErrConflictingWrite` — logged at `WARN` with the secret's identity
+      only (no value, no full GCP path) — instead of silently retried
+      (`migrate-names` reports this as a `CONFLICT` outcome; see below).
+      Otherwise (the "repaired" path, no GCP write yet) the attempt is
+      simply retried with fresh reads.
+    - If the concurrent writer's DB upsert lands **after this attempt's CAS
+      has already applied**, nothing detects it: the CAS already succeeded
+      against the values this attempt read, no further recheck or CAS runs,
+      and this attempt's now-stale value can be left as the prefixed name's
+      latest version — silently, with no error and no log — until the key
+      is next written. This is not "brief": nothing in this design repairs
+      it on its own, and it can persist indefinitely.
+    In this codebase only a new-binary `Set()` (or another replica's boot
+    copy-forward) writes the prefixed name directly, so either interleaving
+    requires exactly that kind of concurrent write on the same key; two
+    cross-system operations (GCP SM and the DB) can't be made a single
+    transaction, so neither case can be closed without a new mechanism.
+  - **`ErrConflictingWrite` / `CONFLICT` remediation**: when `migrate-names`
+    reports a candidate as `CONFLICT` (or hub-boot `CopyHubSecretForward`
+    logs the same `WARN`), **re-running `migrate-names` does not detect or
+    repair it** — by then the ref already matches whatever this run or the
+    concurrent writer left behind, so a re-run takes the "nothing to do"
+    path and the `CONFLICT` simply disappears from the report while the
+    stale value remains. The only correct remediation is to **re-set the
+    secret directly to its intended value** through the normal secret-set
+    path, which writes a fresh version and moves the ref forward
+    unambiguously. For a hub-scope signing key specifically, a `CONFLICT`
+    from two replicas of the *same* hub booting together and racing on the
+    same key is benign — both wrote identical key material, the key is
+    preserved, and startup continues; the `WARN` is noise in that case, not
+    a sign of anything lost.
   - A record with a *stored* ref whose designated value is gone (`NotFound`)
     is reported as `ErrOrphanedRef`, distinct from `store.ErrNotFound` (no
     ref and no legacy-name value either — genuinely nothing to migrate).
     `migrate-names` treats both as non-failures, but reports the former as a
     visible ORPHAN line since it reflects a record making a claim that no
     longer holds.
+  - **Known false positive, not fixed in this round (round-6 review
+    non-blocking finding 5):** any DB write that bumps `Version` without
+    changing `SecretRef` — a metadata-only edit (`UpdateSecretMeta`), or an
+    old-binary rotation through a name other than the prefixed one — can
+    also make the CAS's version predicate fail, and is currently reported
+    as the same `ErrConflictingWrite` / `CONFLICT` even though the ref never
+    actually moved and a plain retry would have converged safely. Avoiding
+    this false positive needs a code change (re-reading the record and only
+    reporting a conflict when its ref has actually become the prefixed
+    ref), which is a behavior change out of scope for this docs-only round;
+    see dev-notes.md's "Round-6 review dispositions" for the deferred fix.
 - **Deploy ordering**: grant the new hub-prefixed IAM condition to a hub's
   service account *before* deploying a binary built from this change —
   every `Set` (new secret, new version, signing-key rotation) targets the
@@ -485,6 +538,18 @@ formula can never drift apart):
   the legacy name, any legacy-delete failure (including `PermissionDenied`)
   is fatal, so a delete can never silently drop a DB row while the secret's
   only copy survives untracked in GCP SM.
+  - **`--delete-legacy` precondition (round-6 review finding 4):** GCP SM
+    has no conditional delete, so `DeleteLegacySecretName`'s check-then-act
+    is not atomic with the actual delete call. Run `--delete-legacy` only
+    after every replica of this hub is running a binary that includes this
+    change — i.e. no replica still writes legacy names. If an older binary
+    is still a live writer during a mixed-version rolling deploy, its `Set`
+    can land between the check and the delete, and the delete then destroys
+    that write's only copy along with the legacy container it lived in.
+    This cannot be closed in code without a new mechanism; it is fully
+    avoided by the operator precondition above. Once satisfied, a delete
+    cannot make a secret unreadable (the check above already guarantees
+    that in the single-writer case).
 - **Rollback**: rolling back to a pre-ptone/scion#2152 binary continues to
   resolve existing secrets via their stored `SecretRef` (unchanged by this
   feature unless `migrate-names` has run and rewritten it to the prefixed
