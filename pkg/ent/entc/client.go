@@ -134,6 +134,26 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
 func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, false, opts...)
+}
+
+// OpenPostgresReadOnly creates an Ent client backed by PostgreSQL with the
+// session-level default_transaction_read_only GUC set to "on" for every
+// connection in the pool (ptone/scion#2152 round-3 review finding 10): every
+// transaction starts read-only, so a write attempted by a tool that should
+// never perform one (e.g. `hub secret migrate-names --dry-run`) fails
+// loudly at the database itself instead of relying solely on the caller
+// never issuing one. This is defense in depth on top of that caller
+// discipline — an application-level read-only call (e.g. PlanRefRepair)
+// choosing to write due to a bug elsewhere still hits this and fails,
+// rather than silently succeeding.
+func OpenPostgresReadOnly(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, true, opts...)
+}
+
+// openPostgres is the shared implementation behind OpenPostgres and
+// OpenPostgresReadOnly.
+func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option) (*ent.Client, error) {
 	// Parse the DSN with pgx (accepts both keyword/value DSNs "host=... port=..."
 	// and URL-style "postgres://..." connection strings) so we can attach TCP
 	// keepalive settings to the connection before handing it to database/sql via
@@ -145,6 +165,9 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
 	}
 	applyKeepalives(connConfig.RuntimeParams)
+	if readOnly {
+		connConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	}
 	if connConfig.ConnectTimeout == 0 {
 		connConfig.ConnectTimeout = connectTimeout
 	}

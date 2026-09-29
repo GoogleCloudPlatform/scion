@@ -257,6 +257,42 @@ func (c *HubServerConfig) ResolveHubID() string {
 	return ResolveHubIDFromEnv()
 }
 
+// ResolveHubIDFromEnvReadOnly mirrors ResolveHubIDFromEnv's environment
+// fallback precedence (SCION_SERVER_HUB_HUBID, then K_SERVICE, then the
+// persisted workstation ID) but never derives-and-persists a fresh ID to
+// disk (ptone/scion#2152 round-3 review finding 1). It reports ok=false when
+// the only way to resolve an ID would be to create ~/.scion/hub-id for the
+// first time via PersistentHubID — a write a read-only caller (e.g.
+// `hub secret migrate-names --dry-run`) must not perform, since a value
+// derived-but-not-persisted here could disagree with whatever a later real
+// run ends up persisting.
+//
+// This does not use or populate ResolveHubIDFromEnv's process-lifetime
+// cache: the two are expected to disagree on the first-boot, no-file-yet
+// case, for exactly the reason above.
+func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
+	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+		return v, true
+	}
+	if kService := os.Getenv("K_SERVICE"); kService != "" {
+		h := sha256.Sum256([]byte(kService))
+		return hex.EncodeToString(h[:6]), true
+	}
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return "", false
+	}
+	stored := strings.TrimSpace(string(data))
+	if stored == "" {
+		return "", false
+	}
+	return stored, true
+}
+
 // IsHubIDUnconfigured returns true when hub_id was not explicitly set in
 // config. On Cloud Run, ResolveHubID() will still produce a stable ID via
 // K_SERVICE, but this method checks whether the operator explicitly pinned
