@@ -104,10 +104,10 @@ func TestDecide_PermissionIDPopulated(t *testing.T) {
 	require.Empty(t, emitter.records[len(emitter.records)-1].PermissionID)
 }
 
-// TestDecide_AlwaysAuditBypassesSampling proves the always-audit marker (for
+// TestDecide_AlwaysAuditOverridesSampling proves the always-audit marker (for
 // G's delegated-agent events) forces an audit record for an allow decision
 // even when the sample rate would otherwise have dropped it.
-func TestDecide_AlwaysAuditBypassesSampling(t *testing.T) {
+func TestDecide_AlwaysAuditOverridesSampling(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	emitter := &recordingDecisionAuditEmitter{}
@@ -127,15 +127,15 @@ func TestDecide_AlwaysAuditBypassesSampling(t *testing.T) {
 	req.AlwaysAudit = true
 	decision = srv.authzService.Decide(ctx, req)
 	require.True(t, decision.Allowed)
-	require.Equal(t, before+1, len(emitter.records), "AlwaysAudit must bypass allow-sampling")
+	require.Equal(t, before+1, len(emitter.records), "AlwaysAudit must override allow-sampling")
 }
 
-// TestDecide_DecisionAlwaysAuditBypassesSampling proves Decision.AlwaysAudit
+// TestDecide_DecisionAlwaysAuditOverridesSampling proves Decision.AlwaysAudit
 // (settable from inside decide's body, e.g. a delegated-agent branch that
 // only learns partway through evaluation that this decision must not be
 // sampled away) forces an audit record the same way AuthzRequest.AlwaysAudit
 // does, even when the request-level flag is false.
-func TestDecide_DecisionAlwaysAuditBypassesSampling(t *testing.T) {
+func TestDecide_DecisionAlwaysAuditOverridesSampling(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	emitter := &recordingDecisionAuditEmitter{}
@@ -150,7 +150,7 @@ func TestDecide_DecisionAlwaysAuditBypassesSampling(t *testing.T) {
 
 	before := len(emitter.records)
 	srv.authzService.emitDecisionAudit(ctx, req, Decision{Allowed: true, AlwaysAudit: true})
-	require.Equal(t, before+1, len(emitter.records), "Decision.AlwaysAudit must bypass allow-sampling on its own")
+	require.Equal(t, before+1, len(emitter.records), "Decision.AlwaysAudit must override allow-sampling on its own")
 }
 
 // TestBuildDecisionAuditRecord_MatchesEmittedShape proves the exported
