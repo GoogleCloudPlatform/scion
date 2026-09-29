@@ -111,6 +111,8 @@ Connects to the interactive session of a running agent.
 
 When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach` automatically attempts to resolve transport-layer authentication (Google OIDC ID tokens) *before* evaluating the application-level access token gate. If transport auth can be successfully established (e.g., using your local Google Cloud SDK identity or GKE Workload Identity), the application token check is bypassed, enabling seamless attachment in proxy-auth/IAP mode.
 
+If the agent is stopped, the attach ends immediately rather than waiting and retrying (see [PTY close codes](/scion/reference/api/#pty-close-codes)).
+
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
