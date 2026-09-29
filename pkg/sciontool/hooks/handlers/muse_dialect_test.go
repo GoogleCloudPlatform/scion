@@ -67,8 +67,9 @@ func TestMuseCodeHookTokensReachUsageMetric(t *testing.T) {
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 	// PostLLMCall arrives as its own `sciontool hook` invocation with no
-	// matching model-start in this process -- the normal hook-per-process
-	// case (findings.md Q1.4).
+	// matching model-start in this process: each harness event invokes a
+	// separate sciontool process, so a start and its matching end rarely
+	// land in the same one -- this is the normal hook-per-process case.
 	if err := h.Handle(event); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
