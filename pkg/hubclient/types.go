@@ -134,9 +134,14 @@ type ProjectProvider struct {
 	// AgentLimit is the broker's effective max_agents_per_broker ceiling
 	// (ptone/scion#2161). Unset (nil) when the broker is unlimited.
 	AgentLimit *int64 `json:"agentLimit,omitempty"`
-	// AgentCount is the broker's current active agent reservation count
-	// (ptone/scion#2161). Unset (nil) only when the hub could not resolve
-	// it for this provider; a broker with no agents reports 0, not unset.
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// on this broker (ptone/scion#2161) — broker-wide, across every project
+	// linked to it, and distinct from a project's own agentCount (e.g.
+	// Project.AgentCount). It is exact when the broker has a limit. When the
+	// broker is unlimited, reservations are only backfilled by the periodic
+	// broker-quota-reconcile job, so the value may lag by up to the reconcile
+	// interval. Unset (nil) only when the hub could not resolve it for this
+	// provider; a broker with no agents reports 0, not unset.
 	AgentCount *int64 `json:"agentCount,omitempty"`
 }
 

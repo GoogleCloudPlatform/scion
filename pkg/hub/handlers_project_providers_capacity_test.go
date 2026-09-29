@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -28,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// providerCapacityView mirrors the fields of ProjectProviderView this test
+// providerCapacityView mirrors the fields of projectProviderView this test
 // class cares about, decoded from the GET .../providers response body.
 type providerCapacityView struct {
 	BrokerID   string `json:"brokerId"`
@@ -60,13 +61,19 @@ func listProviderCapacity(t *testing.T, srv *Server, projectID string) map[strin
 
 // TestListProjectProviders_AgentLimitDefaultNoBindings covers the common
 // path with no entitlement bindings at all: agentLimit must reflect the
-// max_agents_per_broker limit definition's default value (seeded at 12, see
+// max_agents_per_broker limit definition's default value (see
 // seedLimitDefinitions), and agentCount must reflect the one agent created
-// on the broker (ptone/scion#2161).
+// on the broker (ptone/scion#2161). The expected limit is read from the
+// store rather than hard-coded, since the seeded default value is not this
+// test's concern and is subject to change independently (e.g. other work
+// changing it from 12 to 100).
 func TestListProjectProviders_AgentLimitDefaultNoBindings(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 	brokerID := project.DefaultRuntimeBrokerID
+
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name: "capacity-default-1", ProjectID: project.ID,
@@ -78,13 +85,11 @@ func TestListProjectProviders_AgentLimitDefaultNoBindings(t *testing.T) {
 	require.True(t, ok, "response must include the project's provider")
 
 	require.NotNil(t, view.AgentLimit, "agentLimit must be set from the limit definition default")
-	assert.EqualValues(t, 12, *view.AgentLimit)
+	assert.EqualValues(t, def.DefaultValue, *view.AgentLimit)
 	require.NotNil(t, view.AgentCount)
 	assert.EqualValues(t, 1, *view.AgentCount)
 
 	// Sanity: the default-value path really did resolve with zero bindings.
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
 	bindings, err := s.ListEntitlementBindingsForSubject(context.Background(), store.EntitlementSubjectSystemDefault, "")
 	require.NoError(t, err)
 	for _, b := range bindings {
@@ -104,21 +109,29 @@ func TestListProjectProviders_AgentLimitBrokerScopedOverride(t *testing.T) {
 
 	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
-	require.EqualValues(t, 12, def.DefaultValue, "override must differ from the default to prove precedence")
+	const overrideValue = 3
+	require.NotEqualValues(t, overrideValue, def.DefaultValue, "override must differ from the default to prove precedence")
 
-	seedBinding(t, s, def.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeBroker, brokerID, 3)
+	seedBinding(t, s, def.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeBroker, brokerID, overrideValue)
 
 	byBroker := listProviderCapacity(t, srv, project.ID)
 	view, ok := byBroker[brokerID]
 	require.True(t, ok)
 	require.NotNil(t, view.AgentLimit)
-	assert.EqualValues(t, 3, *view.AgentLimit, "broker-scoped override must win over the limit definition default")
+	assert.EqualValues(t, overrideValue, *view.AgentLimit, "broker-scoped override must win over the limit definition default")
 }
 
 // TestListProjectProviders_AgentLimitUnsetWhenUnlimited covers the
 // unlimited case: when the effective limit resolves to <= 0, agentLimit
 // must be left unset (nil), distinguishing it from an actual limit of zero,
-// while agentCount is still reported (ptone/scion#2161).
+// while agentCount is still reported (ptone/scion#2161). It also pins the
+// documented lag on an unlimited broker (review finding #2): because
+// QuotaService.Reserve returns before creating a reservation when the
+// effective limit is <= 0 (quota.go), a running agent is not reflected in
+// agentCount until the periodic broker-quota-reconcile job
+// (ReconcileStaleBrokerQuotaReservations) backfills it. This exercises both
+// halves — before and after that backfill — rather than only the
+// no-agents-at-all case.
 func TestListProjectProviders_AgentLimitUnsetWhenUnlimited(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{createPhase: string(state.PhaseRunning)})
 	brokerID := project.DefaultRuntimeBrokerID
@@ -131,6 +144,28 @@ func TestListProjectProviders_AgentLimitUnsetWhenUnlimited(t *testing.T) {
 	assert.Nil(t, view.AgentLimit, "unlimited must leave agentLimit unset")
 	require.NotNil(t, view.AgentCount, "agentCount must still be reported when unlimited")
 	assert.EqualValues(t, 0, *view.AgentCount)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "capacity-unlimited-1", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	byBroker = listProviderCapacity(t, srv, project.ID)
+	view, ok = byBroker[brokerID]
+	require.True(t, ok)
+	assert.Nil(t, view.AgentLimit, "still unlimited")
+	require.NotNil(t, view.AgentCount)
+	assert.EqualValues(t, 0, *view.AgentCount,
+		"an unlimited broker takes no synchronous reservation, so a running agent doesn't move the count yet")
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	byBroker = listProviderCapacity(t, srv, project.ID)
+	view, ok = byBroker[brokerID]
+	require.True(t, ok)
+	require.NotNil(t, view.AgentCount)
+	assert.EqualValues(t, 1, *view.AgentCount,
+		"once the periodic reconcile backfills the reservation, the count catches up")
 }
 
 // TestListProjectProviders_AgentCountReflectsActiveReservations proves
@@ -173,6 +208,9 @@ func TestListProjectProviders_AgentCountReflectsActiveReservations(t *testing.T)
 func TestListProjectProviders_OwnerSeesCapacityFields(t *testing.T) {
 	f := providersAuthzSetup(t)
 
+	def, err := f.store.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.path(), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -182,7 +220,89 @@ func TestListProjectProviders_OwnerSeesCapacityFields(t *testing.T) {
 	view := resp.Providers[0]
 	assert.Equal(t, f.linked.ID, view.BrokerID)
 	require.NotNil(t, view.AgentLimit, "owner must see the resolved agent limit")
-	assert.EqualValues(t, 12, *view.AgentLimit)
+	assert.EqualValues(t, def.DefaultValue, *view.AgentLimit)
 	require.NotNil(t, view.AgentCount, "owner must see the resolved agent count")
 	assert.EqualValues(t, 0, *view.AgentCount)
+}
+
+// failCountReservationsStore wraps a store.Store so CountActiveReservations
+// fails only for one scopeID, letting a test simulate a per-provider
+// resolution failure without breaking every provider in the listing.
+type failCountReservationsStore struct {
+	store.Store
+	failScopeID string
+	err         error
+}
+
+func (f *failCountReservationsStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	if scopeID == f.failScopeID {
+		return 0, f.err
+	}
+	return f.Store.CountActiveReservations(ctx, limitDefinitionID, subjectID, scopeType, scopeID)
+}
+
+// TestListProjectProviders_ResolutionFailureLeavesOnlyThatProviderUnset
+// pins the "one provider's capacity resolution fails, the rest of the
+// listing still succeeds" contract (ptone/scion#2161 review, Required #1).
+// Two providers are linked to the project; the store is made to fail
+// CountActiveReservations for only one broker's scopeID. The listing must
+// still return 200, the failing provider's AgentLimit and AgentCount must
+// both be nil, and the healthy provider's fields must both still be set.
+func TestListProjectProviders_ResolutionFailureLeavesOnlyThatProviderUnset(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-capacity-partial"),
+		Name: "Capacity Partial Project",
+		Slug: "capacity-partial-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	healthyBroker := &store.RuntimeBroker{
+		ID:     tid("broker-capacity-healthy"),
+		Name:   "Healthy Broker",
+		Slug:   "healthy-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, healthyBroker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   healthyBroker.ID,
+		BrokerName: healthyBroker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	failingBroker := &store.RuntimeBroker{
+		ID:     tid("broker-capacity-failing"),
+		Name:   "Failing Broker",
+		Slug:   "failing-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, failingBroker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   failingBroker.ID,
+		BrokerName: failingBroker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	project.DefaultRuntimeBrokerID = healthyBroker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	srv.store = &failCountReservationsStore{Store: s, failScopeID: failingBroker.ID, err: errors.New("boom")}
+
+	byBroker := listProviderCapacity(t, srv, project.ID)
+	require.Len(t, byBroker, 2, "the listing must include both providers despite one failing")
+
+	failing, ok := byBroker[failingBroker.ID]
+	require.True(t, ok)
+	assert.Nil(t, failing.AgentLimit, "resolution failure must leave agentLimit unset")
+	assert.Nil(t, failing.AgentCount, "resolution failure must leave agentCount unset")
+
+	healthy, ok := byBroker[healthyBroker.ID]
+	require.True(t, ok)
+	require.NotNil(t, healthy.AgentLimit, "the healthy provider must still resolve its limit")
+	require.NotNil(t, healthy.AgentCount, "the healthy provider must still resolve its count")
+	assert.EqualValues(t, 0, *healthy.AgentCount)
 }

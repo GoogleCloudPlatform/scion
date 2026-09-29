@@ -624,3 +624,39 @@ func TestFormatProviderCapacity(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderCapacityIndicator covers the labeled, parenthesized suffix
+// `scion hub projects info` appends after a provider's status line (e.g.
+// " (agents: 12/12)"), so the value isn't shown as a bare, unlabeled number
+// next to the status and default indicators (ptone/scion#2161 review nit
+// #3).
+func TestProviderCapacityIndicator(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: " (agents: 12/12)",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: " (agents: 5)",
+		},
+		{
+			name: "neither known: capacity could not be resolved",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: " (agents: -)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, providerCapacityIndicator(tc.p))
+		})
+	}
+}
