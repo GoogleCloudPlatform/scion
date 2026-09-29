@@ -1413,8 +1413,8 @@ func formatProviderCapacity(p hubclient.ProjectProvider) string {
 // providerCapacityIndicator renders the parenthesized, labeled suffix shown
 // after a provider's status in `scion hub projects info` text output, e.g.
 // " (agents: 12/12)". Labeled so the number isn't mistaken for something
-// else next to the status and default indicators (ptone/scion#2161 review
-// nit: a bare "(12/12)" or "(-)" doesn't say what it measures).
+// else next to the status and default indicators (ptone/scion#2161): a bare
+// "(12/12)" or "(-)" doesn't say what it measures.
 func providerCapacityIndicator(p hubclient.ProjectProvider) string {
 	return fmt.Sprintf(" (agents: %s)", formatProviderCapacity(p))
 }

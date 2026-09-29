@@ -2058,22 +2058,25 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 type projectProviderView struct {
 	store.ProjectProvider
 	// AgentLimit is the effective max_agents_per_broker ceiling for this
-	// broker. Left unset (nil) when the broker is unlimited, so that
-	// "unlimited" is distinguishable from a limit of zero, and so older
-	// clients that don't know this field are unaffected.
+	// broker. Unset (nil) when the hub has no quota enforcement configured,
+	// no max_agents_per_broker definition exists, resolution failed for
+	// this provider, or the broker is unlimited — so that "unlimited" is
+	// distinguishable from a limit of zero, and so older clients that
+	// don't know this field are unaffected.
 	AgentLimit *int64 `json:"agentLimit,omitempty"`
 	// AgentCount is the number of active max_agents_per_broker reservations
-	// on this broker — i.e. agents, from any project linked to this broker,
-	// in a counted phase (see isBrokerQuotaCountedPhase). It is exact when
-	// the broker has a limit, since every admission and release goes through
+	// held by agents in a counted phase (see isBrokerQuotaCountedPhase),
+	// from any project on this broker. It is exact when the broker has a
+	// limit, since every admission and release goes through
 	// QuotaService.Reserve/Release synchronously. When the broker is
 	// unlimited, Reserve returns before creating a reservation (quota.go),
 	// so newly started agents are only reflected here once the periodic
 	// broker-quota-reconcile job backfills them; the value may lag by up to
 	// that reconcile interval. This is broker-wide and distinct from the
 	// project-level agentCount reported elsewhere (e.g. Project.AgentCount).
-	// Left unset (nil) only when it could not be computed — a zero count is
-	// reported as 0, not omitted.
+	// Unset (nil) when the hub has no quota enforcement configured, no
+	// max_agents_per_broker definition exists, or resolution failed for
+	// this provider — a zero count is reported as 0, not omitted.
 	AgentCount *int64 `json:"agentCount,omitempty"`
 }
 

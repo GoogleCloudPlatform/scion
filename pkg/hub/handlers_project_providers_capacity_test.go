@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -125,7 +126,7 @@ func TestListProjectProviders_AgentLimitBrokerScopedOverride(t *testing.T) {
 // unlimited case: when the effective limit resolves to <= 0, agentLimit
 // must be left unset (nil), distinguishing it from an actual limit of zero,
 // while agentCount is still reported (ptone/scion#2161). It also pins the
-// documented lag on an unlimited broker (review finding #2): because
+// documented lag on an unlimited broker: because
 // QuotaService.Reserve returns before creating a reservation when the
 // effective limit is <= 0 (quota.go), a running agent is not reflected in
 // agentCount until the periodic broker-quota-reconcile job
@@ -243,7 +244,7 @@ func (f *failCountReservationsStore) CountActiveReservations(ctx context.Context
 
 // TestListProjectProviders_ResolutionFailureLeavesOnlyThatProviderUnset
 // pins the "one provider's capacity resolution fails, the rest of the
-// listing still succeeds" contract (ptone/scion#2161 review, Required #1).
+// listing still succeeds" contract (ptone/scion#2161).
 // Two providers are linked to the project; the store is made to fail
 // CountActiveReservations for only one broker's scopeID. The listing must
 // still return 200, the failing provider's AgentLimit and AgentCount must
@@ -305,4 +306,83 @@ func TestListProjectProviders_ResolutionFailureLeavesOnlyThatProviderUnset(t *te
 	require.NotNil(t, healthy.AgentLimit, "the healthy provider must still resolve its limit")
 	require.NotNil(t, healthy.AgentCount, "the healthy provider must still resolve its count")
 	assert.EqualValues(t, 0, *healthy.AgentCount)
+}
+
+// failGetLimitDefinitionStore wraps a store.Store so GetLimitDefinitionByName
+// always fails with a non-store.ErrNotFound error, simulating a store
+// failure while looking up the shared max_agents_per_broker limit
+// definition — as opposed to the "no such definition" case, which
+// lookupAgentLimitDefinition treats as "no limit enforced".
+type failGetLimitDefinitionStore struct {
+	store.Store
+	err error
+}
+
+func (f *failGetLimitDefinitionStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	return nil, f.err
+}
+
+// TestListProjectProviders_LimitDefinitionLookupFailureLeavesAllUnset pins
+// the "one lookup per listing" behaviour from hoisting
+// lookupAgentLimitDefinition out of the per-provider loop: when that single
+// lookup fails with something other than store.ErrNotFound, every
+// provider's AgentLimit and AgentCount must be left unset, and the listing
+// must still return 200 rather than fail the whole request (ptone/scion#2161).
+func TestListProjectProviders_LimitDefinitionLookupFailureLeavesAllUnset(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "capacity-limitdef-failure-1", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	srv.store = &failGetLimitDefinitionStore{Store: s, err: errors.New("boom")}
+
+	byBroker := listProviderCapacity(t, srv, project.ID)
+	view, ok := byBroker[brokerID]
+	require.True(t, ok)
+	assert.Nil(t, view.AgentLimit, "limit definition lookup failure must leave agentLimit unset")
+	assert.Nil(t, view.AgentCount, "limit definition lookup failure must leave agentCount unset")
+}
+
+// failResolveEffectiveLimitStore wraps a store.Store so
+// ListEntitlementBindingsForSubject always fails, which makes
+// QuotaService.ResolveEffectiveLimit fail (it is the first store call
+// ResolveEffectiveLimit makes) without touching GetLimitDefinitionByName or
+// CountActiveReservations.
+type failResolveEffectiveLimitStore struct {
+	store.Store
+	err error
+}
+
+func (f *failResolveEffectiveLimitStore) ListEntitlementBindingsForSubject(ctx context.Context, subjectType, subjectID string) ([]*store.EntitlementBinding, error) {
+	return nil, f.err
+}
+
+// TestListProjectProviders_ResolveEffectiveLimitFailureLeavesUnset covers
+// the other resolveBrokerCapacity failure branch alongside
+// TestListProjectProviders_ResolutionFailureLeavesOnlyThatProviderUnset:
+// when ResolveEffectiveLimit itself fails, the provider's AgentLimit and
+// AgentCount must both be left unset and the listing must still return 200
+// (ptone/scion#2161).
+func TestListProjectProviders_ResolveEffectiveLimitFailureLeavesUnset(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "capacity-resolvelimit-failure-1", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	failingStore := &failResolveEffectiveLimitStore{Store: s, err: errors.New("boom")}
+	srv.quotaService = &QuotaService{store: failingStore, logger: slog.Default()}
+
+	byBroker := listProviderCapacity(t, srv, project.ID)
+	view, ok := byBroker[brokerID]
+	require.True(t, ok)
+	assert.Nil(t, view.AgentLimit, "ResolveEffectiveLimit failure must leave agentLimit unset")
+	assert.Nil(t, view.AgentCount, "ResolveEffectiveLimit failure must leave agentCount unset")
 }

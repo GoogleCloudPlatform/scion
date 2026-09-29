@@ -628,8 +628,7 @@ func TestFormatProviderCapacity(t *testing.T) {
 // TestProviderCapacityIndicator covers the labeled, parenthesized suffix
 // `scion hub projects info` appends after a provider's status line (e.g.
 // " (agents: 12/12)"), so the value isn't shown as a bare, unlabeled number
-// next to the status and default indicators (ptone/scion#2161 review nit
-// #3).
+// next to the status and default indicators (ptone/scion#2161).
 func TestProviderCapacityIndicator(t *testing.T) {
 	i64 := func(v int64) *int64 { return &v }
 
