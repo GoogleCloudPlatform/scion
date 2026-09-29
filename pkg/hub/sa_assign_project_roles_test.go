@@ -396,13 +396,15 @@ func TestSAAssign2147_ProjectDefault_OwnerNotSACreator_ActAsStillGates(t *testin
 		proj.Annotations[projectSettingDefaultGCPIdentitySAID] = sa.ID
 		require.NoError(t, f.store.UpdateProject(ctx, proj))
 
-		enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().
-			DenyTarget(sa.Email, "no actAs grant for this caller"))
+		checker := store.NewFakeCallerPermissionChecker().
+			DenyTarget(sa.Email, "no actAs grant for this caller")
+		enforceSAAssign(f.srv, checker)
 
 		rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "2147-default-deny-agent"})
 		require.Equal(t, http.StatusForbidden, rec.Code,
 			"Hub policy now allows the owner via gcp_service_account.assign, but actAs must still gate; got: %s",
 			rec.Body.String())
+		require.Equal(t, 1, checker.CallCount(), "the refusal must come from the actAs checker")
 	})
 
 	t.Run("actAs allowed -> request succeeds", func(t *testing.T) {
@@ -419,12 +421,14 @@ func TestSAAssign2147_ProjectDefault_OwnerNotSACreator_ActAsStillGates(t *testin
 		proj.Annotations[projectSettingDefaultGCPIdentitySAID] = sa.ID
 		require.NoError(t, f.store.UpdateProject(ctx, proj))
 
-		enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(sa.Email))
+		checker := store.NewFakeCallerPermissionChecker().AllowTarget(sa.Email)
+		enforceSAAssign(f.srv, checker)
 
 		rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "2147-default-allow-agent"})
 		require.Equal(t, http.StatusCreated, rec.Code,
 			"owner should be able to use a project-default SA registered by someone else once actAs allows; got: %s",
 			rec.Body.String())
+		require.Equal(t, 1, checker.CallCount(), "the actAs checker must be consulted exactly once")
 	})
 }
 
