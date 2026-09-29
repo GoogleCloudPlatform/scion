@@ -2355,8 +2355,8 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 // writeAgentGetResponse builds and writes the standard single-agent response
 // body (capabilities, harness info, messageability, env redaction) shared by
 // every route that returns a single agent. It performs no authorization --
-// callers must gate before calling this, since their rules differ (see
-// getAgent vs. getProjectAgent above).
+// callers must gate before calling this (see getAgent and getProjectAgent
+// above, which apply the same rule).
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 

@@ -690,36 +690,6 @@ func TestBypassAgents_BrokerCallerDenied(t *testing.T) {
 // TestBypassAgents_LegitimateFlowsStillWork matters as much as the denials. A
 // conversion that denies everything would pass every test above; these are what
 // distinguish a fix from an outage. If one of these fails, the change is wrong.
-// TestGetAgent_SelfRead covers `scion whoami --full`, which reads the agent's
-// own record through GET /api/v1/agents/{id}: every role with project:read
-// may read itself, a token without it may not, and peers stay denied.
-func TestGetAgent_SelfRead(t *testing.T) {
-	t.Run("baseline role reads itself", func(t *testing.T) {
-		f := bypassAgentsSetup(t)
-		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, ScopesForRole(AgentRoleBaseline)...)
-		require.Equal(t, http.StatusOK, rec.Code, "baseline self-read: %s", rec.Body.String())
-		var body map[string]interface{}
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		assert.Equal(t, f.caller.ID, body["id"], "the response must be the caller's own record")
-	})
-
-	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
-		f := bypassAgentsSetup(t)
-		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "peer read: %s", rec.Body.String())
-	})
-
-	t.Run("token without project:read cannot read itself", func(t *testing.T) {
-		f := bypassAgentsSetup(t)
-		svc := f.srv.GetAgentTokenService()
-		require.NotNil(t, svc)
-		tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-		require.NoError(t, err)
-		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "self-read without project:read: %s", rec.Body.String())
-	})
-}
-
 func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads itself", func(t *testing.T) {
 		// An agent may read its own record by ID, as it already may on the
@@ -823,6 +793,36 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 			"/api/v1/agents/"+f.sibling.ID, map[string]interface{}{"taskSummary": "owner edit"})
 		assert.Equal(t, http.StatusOK, rec.Code,
 			"the agent's owner must still be able to update it; got: %s", rec.Body.String())
+	})
+}
+
+// TestGetAgent_SelfRead covers `scion whoami --full`, which reads the agent's
+// own record through GET /api/v1/agents/{id}: every role with project:read
+// may read itself, a token without it may not, and peers stay denied.
+func TestGetAgent_SelfRead(t *testing.T) {
+	t.Run("baseline role reads itself", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, ScopesForRole(AgentRoleBaseline)...)
+		require.Equal(t, http.StatusOK, rec.Code, "baseline self-read: %s", rec.Body.String())
+		var body map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, f.caller.ID, body["id"], "the response must be the caller's own record")
+	})
+
+	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "peer read: %s", rec.Body.String())
+	})
+
+	t.Run("token without project:read cannot read itself", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		svc := f.srv.GetAgentTokenService()
+		require.NotNil(t, svc)
+		tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+		require.NoError(t, err)
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "self-read without project:read: %s", rec.Body.String())
 	})
 }
 

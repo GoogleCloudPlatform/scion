@@ -2265,15 +2265,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // shares that function's writeAgentGetResponse for the response body itself,
 // so the two routes cannot drift on what a single-agent response looks like.
 //
-// An agent-JWT caller reading itself is exempted from that permission check,
-// matching this route's existing, tested contract
+// An agent-JWT caller reading itself is exempted from that permission check
 // (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
-// has no AgentScopes mapping, so the strict check would deny even an agent
-// reading its own record, which is not this route's history and not what
-// that test expects. Reading a *different* agent -- project peer or not --
-// still goes through the same agent.read check as getAgent and is denied by
-// it (CO1), matching the security expectation the sibling test for that
-// route documents.
+// has no AgentScopes mapping, so the strict check would otherwise deny even
+// an agent reading its own record. getAgent applies the same exemption.
+// Reading a *different* agent -- project peer or not -- still goes through
+// the same agent.read check as getAgent and is denied by it (CO1).
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
 		return
