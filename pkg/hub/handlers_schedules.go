@@ -293,6 +293,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		Status:    store.ScheduleStatusActive,
 		NextRunAt: &nextRunAt,
 		CreatedBy: createdBy,
+		// E.2b: record the authoring request's initiator attribution in the
+		// same write as the schedule row (design check (a)).
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 	}
 
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {
@@ -361,6 +364,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		NotFound(w, "Schedule")
 		return
 	}
+	originalStatus := schedule.Status
 
 	var req UpdateScheduleRequest
 	if err := readJSON(r, &req); err != nil {
@@ -419,6 +423,18 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	if req.Status != "" {
 		schedule.Status = req.Status
+	}
+
+	// E.2b / ruling Q2: a fully reauthorized mutation that changes future
+	// dispatch (payload/target/type/timing, or an enable transition) replaces
+	// the attribution and bumps authorization_revision atomically in the same
+	// write. A metadata-only edit (name, or a status change other than an
+	// enable, e.g. pause) does not re-attribute. CreatedBy is never touched
+	// here.
+	changesFutureDispatch := req.CronExpr != "" || req.EventType != "" || req.Payload != "" ||
+		(req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive)
+	if changesFutureDispatch {
+		schedule.InitiatorAttribution = reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
 	}
 
 	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
@@ -514,6 +530,10 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// Update next_run_at
 	schedule.Status = store.ScheduleStatusActive
 	schedule.NextRunAt = &nextRunAt
+	// E.2b / ruling Q2: resume re-arms future dispatch, so it re-attributes to
+	// the resumer and bumps authorization_revision in the same write as
+	// next_run_at, below.
+	schedule.InitiatorAttribution = reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
 	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
 		// Status was updated, but next_run_at wasn't — still return success
 		writeJSON(w, http.StatusOK, schedule)

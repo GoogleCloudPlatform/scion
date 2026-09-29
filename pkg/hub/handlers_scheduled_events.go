@@ -323,6 +323,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		Payload:   payload,
 		Status:    store.ScheduledEventPending,
 		CreatedBy: createdBy,
+		// E.2b: record the authoring request's initiator attribution in the
+		// same write as the event row (design check (a): atomic by
+		// construction, since ScheduleEvent below issues a single insert).
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 	}
 
 	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {
