@@ -135,11 +135,16 @@ func TestProgenyPair_DeliverUnreachableForAgentToken(t *testing.T) {
 }
 
 // Pairs outside the reviewed list are denied, and the progeny candidate is
-// not built for them.
+// not built for them. Cases carrying a deliver action or a deliver
+// permission are denied first by the delivery credential gate; to test the
+// progeny pair check itself, they run a second time with the agent token
+// kind placed in the delivery set, so the gate passes and the pair check
+// in progenyActionAdmitted is the stage that rejects them.
 func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 	f := newGoldenFixture(t)
 	agent := progenyPairAgent(tid("pp-unreviewed-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
 	secret := Resource{Type: "secret", ID: f.secretID}
+	skill := Resource{Type: "skill_injection", ID: f.skillInjectionID}
 	cases := []struct {
 		name   string
 		res    Resource
@@ -153,25 +158,45 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 		{"compatibility permission with use action", secret, ActionUse, permissionProjectSecretRead},
 		{"env deliver with use action", Resource{Type: "env_var", ID: f.envVarID}, ActionUse, "env_var.deliver"},
 		{"use with an unrelated action", secret, ActionUpdate, "secret.use"},
+		{"skill injection deliver is not a progeny pair", skill, ActionDeliver, "skill_injection.deliver"},
+	}
+	assertNoProgeny := func(t *testing.T, d Decision) {
+		t.Helper()
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		require.NotNil(t, d.Provenance)
+		for _, r := range d.Provenance.Relationships {
+			assert.NotEqual(t, RelationshipRuleProgeny, r.Rule, "no progeny candidate for an unreviewed pair")
+		}
 	}
 	for _, tc := range cases {
+		gated := isDeliverRequest(tc.perm, tc.action)
 		t.Run(tc.name, func(t *testing.T) {
 			d := decidePerm(f.authz, agent, tc.res, tc.action, tc.perm, true)
-			assert.False(t, d.Allowed, "reason %q", d.Reason)
-			require.NotNil(t, d.Provenance)
-			for _, r := range d.Provenance.Relationships {
-				assert.NotEqual(t, RelationshipRuleProgeny, r.Rule, "no progeny candidate for an unreviewed pair")
+			assertNoProgeny(t, d)
+			if gated {
+				assert.Equal(t, deliveryGateReason, d.Reason, "the delivery gate rejects first")
+			} else {
+				assert.NotEqual(t, deliveryGateReason, d.Reason)
 			}
 		})
 	}
 
-	// skill_injection.deliver is not a progeny pair: the candidate is built
-	// for the action but the relationship policy rejects the permission.
-	d := decidePerm(f.authz, agent, Resource{Type: "skill_injection", ID: f.skillInjectionID}, ActionDeliver, "skill_injection.deliver", true)
-	assert.False(t, d.Allowed)
-	for _, r := range d.Provenance.Relationships {
-		assert.NotEqual(t, RelationshipRuleProgeny, r.Rule, "skill_injection.deliver is not a progeny pair")
+	withDeliveryCredentialKinds(t, CredentialKindAgentJWT)
+	for _, tc := range cases {
+		if !isDeliverRequest(tc.perm, tc.action) {
+			continue
+		}
+		t.Run(tc.name+"/pair check", func(t *testing.T) {
+			d := decidePerm(f.authz, agent, tc.res, tc.action, tc.perm, true)
+			assert.NotEqual(t, deliveryGateReason, d.Reason, "the gate passes, so the pair check is tested")
+			assertNoProgeny(t, d)
+		})
 	}
+
+	// Positive control for the second pass: with the same set, a reviewed
+	// deliver pair builds the progeny candidate.
+	d := decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
+	assert.Equal(t, "secret.deliver", relationshipResult(t, d, RelationshipRuleProgeny).Permission)
 }
 
 // secret.use is denied without a progeny relationship: unrelated ancestry,

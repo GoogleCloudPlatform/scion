@@ -177,6 +177,7 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 		readOnly bool
 	}
 	seenCells := map[rowCell]bool{}
+	cellRows := map[relationshipAllowKey]int{}
 	cellPerms := map[relationshipAllowKey]map[string]bool{}
 
 	for i, row := range permissions.RelationshipPolicies {
@@ -190,8 +191,11 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 			assert.True(t, relationshipPolicyPrincipalKinds[kind], "row %d: principal kind %q", i, kind)
 			key := relationshipAllowKey{row.Relationship, kind, row.ResourceType}
 
-			// At most one row per (cell, MintEligible, ReadOnly), and rows
-			// sharing a cell name disjoint permissions.
+			// At most two rows per cell, at most one row per (cell,
+			// MintEligible, ReadOnly), and rows sharing a cell name
+			// disjoint permissions (the RelationshipPolicy doc contract).
+			cellRows[key]++
+			assert.LessOrEqual(t, cellRows[key], 2, "row %d: more than two rows for %v", i, key)
 			rc := rowCell{key, row.MintEligible, row.ReadOnly}
 			assert.False(t, seenCells[rc], "row %d: duplicate row for %v mint=%v readOnly=%v", i, key, row.MintEligible, row.ReadOnly)
 			seenCells[rc] = true
