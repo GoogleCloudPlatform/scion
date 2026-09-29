@@ -272,8 +272,8 @@ func otherFileReference(req AuthzRequest) bool {
 	}
 	want := map[string]string{
 		"authz_direct_field.go:directFieldReference": "Decoration",
-		"authz_accessor.go:accessorReference":         "CredentialDecorationFromContext",
-		"capabilities_mut3.go:otherFileReference":     "Decoration",
+		"authz_accessor.go:accessorReference":        "CredentialDecorationFromContext",
+		"capabilities_mut3.go:otherFileReference":    "Decoration",
 	}
 
 	for name, src := range fixtures {
