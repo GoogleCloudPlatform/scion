@@ -28,15 +28,36 @@ import (
 // credential_decoration_ac_test.go.
 // ---------------------------------------------------------------------------
 
+// TestDecorationBoundaryFromToken is the one E test that imports A.1's
+// TokenBoundary type (plan §2.8, rulings Q8): it pins the mapping for
+// project, hub, and invalid boundaries at the single adapter function.
 func TestDecorationBoundaryFromToken(t *testing.T) {
 	t.Run("project", func(t *testing.T) {
-		b := decorationBoundaryFromToken("proj-1")
+		b := decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: "proj-1"})
 		if b.Kind != "project" || b.ProjectID != "proj-1" {
 			t.Fatalf("got %+v, want project boundary for proj-1", b)
 		}
 	})
-	t.Run("empty project ID is descriptively invalid", func(t *testing.T) {
-		b := decorationBoundaryFromToken("")
+	t.Run("hub", func(t *testing.T) {
+		b := decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindHub})
+		if b.Kind != "hub" || b.ProjectID != "" {
+			t.Fatalf("got %+v, want hub boundary with no project ID", b)
+		}
+	})
+	t.Run("invalid: project boundary with no project ID", func(t *testing.T) {
+		b := decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject})
+		if b.Kind != "invalid" {
+			t.Fatalf("got %+v, want invalid boundary", b)
+		}
+	})
+	t.Run("invalid: hub boundary carrying a project ID", func(t *testing.T) {
+		b := decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindHub, ProjectID: "proj-1"})
+		if b.Kind != "invalid" {
+			t.Fatalf("got %+v, want invalid boundary", b)
+		}
+	})
+	t.Run("invalid: unrecognized kind", func(t *testing.T) {
+		b := decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKind("bogus")})
 		if b.Kind != "invalid" {
 			t.Fatalf("got %+v, want invalid boundary", b)
 		}

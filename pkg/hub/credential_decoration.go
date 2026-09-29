@@ -137,22 +137,25 @@ func (d CredentialDecoration) LogValue() slog.Value {
 	return slog.GroupValue(attrs...)
 }
 
-// decorationBoundaryFromToken is the single place E derives its descriptive
-// boundary render. A.1's authoritative TokenBoundary type
-// (A/notes/contract-shapes.md, approved in structure) is not yet merged to
-// main, so this takes the token's stored project ID directly, matching
-// today's implicit "every UAT is project-scoped" model (plan §2.8, rulings
-// Q8). When A.1 merges, this function's signature changes to accept A's
-// TokenBoundary (calling .Valid()/.Kind/.ProjectID) and its unit test pins
-// the new mapping; the call site in ValidateToken does not otherwise change.
-// See the E.1 handoff note for the exact planned diff.
-func decorationBoundaryFromToken(projectID string) decorationBoundary {
-	if projectID == "" {
+// decorationBoundaryFromToken is the single place E reads A.1's authoritative
+// TokenBoundary type (pkg/hub/authz_boundary.go, ptone/scion#2117). It is the
+// only adaptation point named in plan §2.8/rulings Q8: if A's boundary shape
+// ever changes, only this function and its unit test
+// (TestDecorationBoundaryFromToken) need to change.
+//
+// D.1 has not yet persisted a boundary column on the UAT row, so the caller
+// (ValidateToken) builds the TokenBoundary input inline from the token's
+// stored project ID (every UAT is project-scoped today). When D.1 lands,
+// that call site changes to pass the persisted boundary through; this
+// function's signature does not change again.
+func decorationBoundaryFromToken(b TokenBoundary) decorationBoundary {
+	if !b.Valid() {
 		// Descriptive only: E does not enforce this, it only avoids
-		// asserting a project boundary with no project.
+		// asserting a boundary kind/project-ID combination A.1 itself
+		// would reject.
 		return decorationBoundary{Kind: "invalid"}
 	}
-	return decorationBoundary{Kind: "project", ProjectID: projectID}
+	return decorationBoundary{Kind: string(b.Kind), ProjectID: b.ProjectID}
 }
 
 // clone returns a deep copy of d: a fresh Labels map, so no caller can

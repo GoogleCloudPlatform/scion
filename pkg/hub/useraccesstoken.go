@@ -405,11 +405,16 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 	// server-validated token row this function already loaded. This is the
 	// single trustworthy derivation point — no header, query parameter, or
 	// body field ever contributes to it.
+	//
+	// D.1 has not yet persisted a boundary column on the UAT row, so this
+	// builds A.1's TokenBoundary inline from the token's stored project ID
+	// (every UAT is project-scoped today). This is the one call site that
+	// changes when D.1 lands, per the E.1 handoff note.
 	decoration := &CredentialDecoration{
 		Kind:      CredentialKindUAT,
 		TokenID:   token.ID,
 		TokenName: token.Name,
-		Boundary:  decorationBoundaryFromToken(token.ProjectID),
+		Boundary:  decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: token.ProjectID}),
 	}
 	if token.Purpose != nil {
 		decoration.Purpose = *token.Purpose
