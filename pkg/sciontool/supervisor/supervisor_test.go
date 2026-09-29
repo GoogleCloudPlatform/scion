@@ -6,6 +6,8 @@ package supervisor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -391,4 +393,137 @@ func TestMergeEnvOverlay_Helper(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink is a thin
+// call-site test proving chownRecursive delegates to the shared
+// dirfd.ChownTreeNoFollow walk unconditionally (every entry, not just
+// root-owned ones — unlike chownTreeRootOwned) and never follows a symlink.
+// The deeper intermediate-directory-swap race itself is covered once,
+// thoroughly, at the dirfd level
+// (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
+func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	victimFile := filepath.Join(victim, "secret")
+	if err := os.WriteFile(victimFile, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	before := lstatCtime(t, filepath.Join(root, "a"))
+	victimBefore := lstatCtime(t, victimFile)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid, false); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+
+	if lstatCtime(t, filepath.Join(root, "a")) == before {
+		t.Error("expected \"a\" to be chowned (unconditional, unlike chownTreeRootOwned's root-owned-only filter)")
+	}
+	if lstatCtime(t, victimFile) != victimBefore {
+		t.Error("victim file behind the symlink was chowned — the symlink was followed")
+	}
+}
+
+// TestChownRecursive_Enforced_SkipsHardlinkedRegularFile proves the
+// hard-link guard is enabled when requirePrivilegeDrop is true: a regular
+// file with more than one hard link is left unchowned.
+func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(root, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	before := lstatCtime(t, target)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid, true); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+	if lstatCtime(t, target) != before {
+		t.Error("hard-linked file was chowned despite requirePrivilegeDrop=true")
+	}
+}
+
+// TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile proves the
+// gating's other half: the hard-link guard is disabled (historical
+// behaviour) when requirePrivilegeDrop is false.
+func TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(root, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	before := lstatCtime(t, target)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid, false); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+	if lstatCtime(t, target) == before {
+		t.Error("expected the hard-linked file to be chowned when requirePrivilegeDrop is false")
+	}
+}
+
+func lstatCtime(t *testing.T, path string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no *syscall.Stat_t for %s", path)
+	}
+	return statCtime(st)
+}
+
+// TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials proves
+// that with RequirePrivilegeDrop left at its zero value, every one of a set
+// of UID/GID pairs — including a non-root UID paired with a root (0) GID,
+// which the credential-drop predicate itself (UID>0 && GID>0) does not
+// treat the same as UID>0 alone — still runs the child without a
+// Credential, a plain "no drop" rather than an error.
+func TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials(t *testing.T) {
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "both0", uid: 0, gid: 0},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "uid0", uid: 0, gid: 1000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			config := DefaultConfig()
+			config.UID = tc.uid
+			config.GID = tc.gid
+			sup := New(config)
+
+			exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
+			if err != nil || exitCode != 0 {
+				t.Fatalf("Run(UID=%d, GID=%d) = (%d, %v), want (0, nil)", tc.uid, tc.gid, exitCode, err)
+			}
+			if _, statErr := os.Stat(marker); statErr != nil {
+				t.Errorf("child did not run: %v", statErr)
+			}
+		})
+	}
 }
