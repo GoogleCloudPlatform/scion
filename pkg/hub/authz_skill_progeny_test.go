@@ -260,13 +260,13 @@ func TestSkillProgenyRead_ProvenanceNamesGrantAndSource(t *testing.T) {
 // characterization test, kept separate from the acceptance tests above: it
 // pins the CURRENT allow, not a target behaviour. This consolidation of the
 // pre-existing personal-skill grant does not add a skill-only
-// execution-project admission check. Today, an agent whose
-// project access has been removed still reads its origin user's personal
-// skills as long as that user remains active, because this grant is keyed
-// only on the user's live status and the ancestry chain, never on the
-// agent's own project membership. ptone/scion#2120 is the tracked closure
-// that adds the missing execution-project admission step and flips this
-// case to deny.
+// execution-project admission check. Today, when the agent's origin user
+// loses admission to the agent's project (here: U's project role binding is
+// removed while U stays active), the agent still reads U's personal skills,
+// because this grant is keyed only on the source user's live status and the
+// ancestry chain and does not check the source user's admission to the
+// agent's project. ptone/scion#2120 is the tracked closure that adds that
+// execution-project admission step and flips this case to deny.
 func TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
