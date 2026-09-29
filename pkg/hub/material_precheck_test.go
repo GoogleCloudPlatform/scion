@@ -522,10 +522,11 @@ func TestAgentSecretRead_SystemRoleUnrelatedPermissionDenied(t *testing.T) {
 
 // TestAgentSecretRead_HubAdminWithoutMembershipDenied covers check 5: a
 // hub-admin root without a project membership row is still denied.
-// hub-admin's curated permission set does not include secret.use, so
-// ProjectAdmissionForClass's system authority branch does not admit it
-// either. See TestAgentSecretRead_SuperAdminExactPermissionAdmitted below
-// for the super-admin case, which does hold secret.use and is admitted.
+// hub-admin's curated permission set does not include secret.use, so check
+// 5's system-authority leg (SystemAuthorityProof for the exact secret.use
+// permission) does not admit it either. See
+// TestAgentSecretRead_SuperAdminExactPermissionAdmitted below for the
+// super-admin case, which does hold secret.use and is admitted.
 func TestAgentSecretRead_HubAdminWithoutMembershipDenied(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
@@ -552,12 +553,12 @@ func TestAgentSecretRead_HubAdminWithoutMembershipDenied(t *testing.T) {
 }
 
 // TestAgentSecretRead_SuperAdminExactPermissionAdmitted covers check 5's
-// changed rule (ptone/scion#2129): a super-admin root without a project
-// membership row is now admitted, because super-admin holds every registry
-// permission (including secret.use) and ProjectAdmissionForClass's system
-// authority branch admits a target-applicable exact permission held through
-// an active system-scope role. Super-admin also holds project.secret_read,
-// so check 7 admits the item too and the value is delivered end to end.
+// system-authority leg: a super-admin root without a project membership row
+// is admitted, because super-admin holds every registry permission
+// (including secret.use) and SystemAuthorityProof admits a
+// target-applicable exact permission held through an active system-scope
+// role. Super-admin also holds project.secret_read, so check 7 admits the
+// item too and the value is delivered end to end.
 func TestAgentSecretRead_SuperAdminExactPermissionAdmitted(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
