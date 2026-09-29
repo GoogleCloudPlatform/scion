@@ -13,10 +13,10 @@ import (
 )
 
 // captureStdout redirects os.Stdout for the duration of fn and returns
-// everything written to it — the same technique used elsewhere to capture
-// the log package's stderr output, applied here since checkWorkspaceGit
-// writes with fmt.Println/Printf directly to os.Stdout rather than through
-// pkg/sciontool/log.
+// everything written to it — the same technique captureStderr
+// (substrate_rootfs_test.go) uses for the log package's stderr output,
+// applied here since checkWorkspaceGit writes with fmt.Println/Printf
+// directly to os.Stdout rather than through pkg/sciontool/log.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -36,8 +36,8 @@ func captureStdout(t *testing.T, fn func()) string {
 
 // TestCheckWorkspaceGit_NoOpWhenEnvUnset proves the function does nothing
 // at all — no output, no failure increment — when SCION_WORKSPACE_GIT
-// isn't set, which is the state every ordinary `doctor` invocation runs
-// under.
+// isn't set, which is the state every non-substrate `doctor` invocation
+// runs under.
 func TestCheckWorkspaceGit_NoOpWhenEnvUnset(t *testing.T) {
 	t.Setenv("SCION_WORKSPACE_GIT", "")
 	failures := 0
