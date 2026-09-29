@@ -85,6 +85,9 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 			if override.Image != "" {
 				result.Image = override.Image
 			}
+			if override.ImagePullPolicy != "" {
+				result.ImagePullPolicy = override.ImagePullPolicy
+			}
 			if override.User != "" {
 				result.User = override.User
 			}
@@ -1156,10 +1159,17 @@ type V1RuntimeDefaultsConfig struct {
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
 // The Harness field is required and specifies the harness type this config applies to.
+//
+// ImagePullPolicy is a Kubernetes-runtime-only default (Always, IfNotPresent,
+// or Never). It is ignored by non-Kubernetes runtimes. See ResolveHarnessConfig
+// and provision.go for its precedence relative to the on-disk harness-config
+// file default and an explicit template/agent kubernetes.imagePullPolicy
+// override.
 type HarnessConfigEntry struct {
 	Name             string               `json:"name,omitempty" yaml:"name,omitempty" koanf:"name"`
 	Harness          string               `json:"harness" yaml:"harness" koanf:"harness"`
 	Image            string               `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
+	ImagePullPolicy  string               `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty" koanf:"image_pull_policy"`
 	User             string               `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
 	Model            string               `json:"model,omitempty" yaml:"model,omitempty" koanf:"model"`
 	TaskFlag         string               `json:"task_flag,omitempty" yaml:"task_flag,omitempty" koanf:"task_flag"`
@@ -1262,6 +1272,7 @@ type HarnessMCPConfig struct {
 // Uses snake_case tags, unlike the legacy HarnessOverride (which uses camelCase auth_selectedType).
 type V1HarnessOverride struct {
 	Image            string            `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
+	ImagePullPolicy  string            `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty" koanf:"image_pull_policy"`
 	User             string            `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
 	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Volumes          []api.VolumeMount `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
@@ -2374,11 +2385,21 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
-			// Convert HarnessOverride → V1HarnessOverride (camelCase → snake_case tags)
+			// Convert HarnessOverride → V1HarnessOverride (camelCase → snake_case
+			// tags). Field-by-field, not a type conversion: the legacy struct has
+			// no ImagePullPolicy (that field is versioned-settings-only), so the
+			// two types no longer share an identical field set.
 			if pc.HarnessOverrides != nil {
 				profile.HarnessOverrides = make(map[string]V1HarnessOverride, len(pc.HarnessOverrides))
 				for hk, ho := range pc.HarnessOverrides {
-					profile.HarnessOverrides[hk] = V1HarnessOverride(ho)
+					profile.HarnessOverrides[hk] = V1HarnessOverride{
+						Image:            ho.Image,
+						User:             ho.User,
+						Env:              ho.Env,
+						Volumes:          ho.Volumes,
+						AuthSelectedType: ho.AuthSelectedType,
+						Resources:        ho.Resources,
+					}
 				}
 			}
 			vs.Profiles[name] = profile
@@ -2479,10 +2500,20 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
+			// Field-by-field, not a type conversion: V1HarnessOverride carries
+			// ImagePullPolicy, which the legacy HarnessOverride has no room for
+			// (and doesn't need — it's not part of the live resolution path).
 			if pc.HarnessOverrides != nil {
 				profile.HarnessOverrides = make(map[string]HarnessOverride, len(pc.HarnessOverrides))
 				for hk, ho := range pc.HarnessOverrides {
-					profile.HarnessOverrides[hk] = HarnessOverride(ho)
+					profile.HarnessOverrides[hk] = HarnessOverride{
+						Image:            ho.Image,
+						User:             ho.User,
+						Env:              ho.Env,
+						Volumes:          ho.Volumes,
+						AuthSelectedType: ho.AuthSelectedType,
+						Resources:        ho.Resources,
+					}
 				}
 			}
 			s.Profiles[name] = profile
