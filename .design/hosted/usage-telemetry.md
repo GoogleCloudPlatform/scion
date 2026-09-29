@@ -1,9 +1,10 @@
 # Design: holistic harness usage telemetry (fork issue ptone/scion#2053)
 
-Status: Agreed design (revision 4). Phases 1 and 2 (the Claude vertical slice, the canonical
-usage contract, the dashboard cumulative-math fix, and hook-side usage alignment) are
-implemented; phases 0, 3 and 4 (native-OTel routing, per-harness usage rules, build provenance)
-are follow-up work tracked against ptone/scion#2053.
+Status: Agreed design (revision 4). Phases 1, 2 and 3c (the Claude vertical slice, the canonical
+usage contract, the dashboard cumulative-math fix, hook-side usage alignment, and Codex native
+usage) are implemented; phases 0, 3a, 3b, 3d and 4 (native-OTel routing for copilot/grok-build,
+the remaining per-harness usage rules, build provenance) are follow-up work tracked against
+ptone/scion#2053.
 Updated: 2026-09-29.
 
 ptone agreed to every decision D1–D11. The opencode refinement from source investigation (§3.7) implements D9 as directed.

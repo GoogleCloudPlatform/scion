@@ -133,10 +133,108 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 	}
 }
 
+// codexUsageScope is Codex's native OTel log instrumentation scope: the
+// *empty* string. Codex's Rust OTel provider installs the log-export bridge
+// with OpenTelemetryTracingBridge::new(logger_provider)
+// (codex-rs/otel/src/provider.rs, logger_export_layer), which uses the
+// bridge's default constructor. That constructor documents "the default
+// scope uses an empty scope name for the appender logger"
+// (opentelemetry-appender-tracing layer.rs, OpenTelemetryTracingBridge::new
+// / ::builder). Unlike Claude, which names its scope, Codex never sets one,
+// so this rule matches on event.name/event.kind alone (design §5's codex
+// row states no scope requirement, unlike Claude's).
+const codexUsageScope = ""
+
+// codexUsageEventName and codexUsageEventKind identify the one codex.*
+// event this rule derives from: a completed SSE response carrying the
+// turn's token usage (design §5).
+const (
+	codexUsageEventName = "codex.sse_event"
+	codexUsageEventKind = "response.completed"
+)
+
+// codexUsageRule implements the codex row of design §5: one completed SSE
+// response is one call with tokens. Verified against
+// codex-rs/otel/src/events/session_telemetry.rs, function
+// sse_event_completed, at tag rust-v0.158.0 (commit
+// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex,
+// matching the @openai/codex 0.158.0 npm release that harnesses/codex
+// installs by default), which emits exactly:
+//
+//	event.name = "codex.sse_event", event.kind = "response.completed",
+//	input_token_count, output_token_count, cached_token_count,
+//	cache_write_token_count, reasoning_token_count, tool_token_count,
+//	ttft_ms, service_tier, model_reasoning_effort
+//
+// plus the common fields every codex.* event carries (model, slug, and so
+// on; codex-rs/otel/src/events/shared.rs, log_event!). No live codex binary
+// was available in this environment to capture a payload from, so
+// testdata/usage/codex-0.158.0.pb.json is built from this source citation
+// rather than a capture; see loadCodexUsageFixture.
+//
+// Token mapping (design §5, §3.2): input = input_token_count −
+// cached_token_count (Codex reports input_token_count inclusive of cache
+// hits, unlike Claude's exclusive counts); output = output_token_count;
+// cache_read = cached_token_count; reasoning = reasoning_token_count,
+// informational only. cache_write_token_count exists in the source but has
+// no mapping in design §5's codex row, so it is read from neither this rule
+// nor emitted as a token_type; tool_token_count (the turn total) is
+// likewise not part of the canonical contract and is ignored.
+type codexUsageRule struct{}
+
+func (codexUsageRule) Harness() string { return "codex" }
+
+func (codexUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if scopeName != codexUsageScope || record == nil || eventName != codexUsageEventName {
+		return usageIncrement{}, false, nil
+	}
+	if logAttrString(record.Attributes, "event.kind") != codexUsageEventKind {
+		return usageIncrement{}, false, nil
+	}
+
+	input, inputErr := logAttrInt(record.Attributes, "input_token_count")
+	output, outputErr := logAttrInt(record.Attributes, "output_token_count")
+	cached, cachedErr := logAttrInt(record.Attributes, "cached_token_count")
+	reasoning, reasoningErr := logAttrInt(record.Attributes, "reasoning_token_count")
+
+	var malformed error
+	for _, err := range []error{inputErr, outputErr, cachedErr, reasoningErr} {
+		if err != nil && malformed == nil {
+			malformed = fmt.Errorf("codex sse_event response.completed: %w", err)
+		}
+	}
+	if malformed == nil && cached > input {
+		malformed = fmt.Errorf("codex sse_event response.completed: cached_token_count %d exceeds input_token_count %d", cached, input)
+	}
+
+	increment := usageIncrement{
+		Model:  logAttrString(record.Attributes, "model"),
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+	}
+	if malformed == nil {
+		tokens := make(map[string]int64, 3)
+		if remaining := input - cached; remaining > 0 {
+			tokens[telemetrycontract.TokenTypeInput] = remaining
+		}
+		if output > 0 {
+			tokens[telemetrycontract.TokenTypeOutput] = output
+		}
+		if cached > 0 {
+			tokens[telemetrycontract.TokenTypeCacheRead] = cached
+		}
+		if reasoning > 0 {
+			tokens[telemetrycontract.TokenTypeReasoning] = reasoning
+		}
+		increment.Tokens = tokens
+	}
+	return increment, true, malformed
+}
+
 // usageRuleRegistry lists every rule this build knows about. rulesForHarness
 // filters it to the active harness, so an unrelated harness (or none) gets
 // an empty, no-op deriver.
-var usageRuleRegistry = []usageRule{claudeUsageRule{}}
+var usageRuleRegistry = []usageRule{claudeUsageRule{}, codexUsageRule{}}
 
 func rulesForHarness(harness string) []usageRule {
 	if harness == "" {

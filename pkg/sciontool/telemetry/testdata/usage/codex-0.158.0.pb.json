@@ -1,0 +1,317 @@
+{
+  "resourceLogs":  [
+    {
+      "resource":  {
+        "attributes":  [
+          {
+            "key":  "service.name",
+            "value":  {
+              "stringValue":  "codex"
+            }
+          },
+          {
+            "key":  "service.version",
+            "value":  {
+              "stringValue":  "0.158.0"
+            }
+          },
+          {
+            "key":  "env",
+            "value":  {
+              "stringValue":  "prod"
+            }
+          }
+        ]
+      },
+      "scopeLogs":  [
+        {
+          "scope":  {},
+          "logRecords":  [
+            {
+              "timeUnixNano":  "1790769598000000000",
+              "observedTimeUnixNano":  "1790769598000000000",
+              "attributes":  [
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "codex.sse_event"
+                  }
+                },
+                {
+                  "key":  "event.kind",
+                  "value":  {
+                    "stringValue":  "text_delta"
+                  }
+                },
+                {
+                  "key":  "duration_ms",
+                  "value":  {
+                    "stringValue":  "45"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-29T12:00:14.000Z"
+                  }
+                },
+                {
+                  "key":  "conversation.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key":  "app.version",
+                  "value":  {
+                    "stringValue":  "0.158.0"
+                  }
+                },
+                {
+                  "key":  "auth_mode",
+                  "value":  {
+                    "stringValue":  "chatgpt"
+                  }
+                },
+                {
+                  "key":  "originator",
+                  "value":  {
+                    "stringValue":  "codex_cli_rs"
+                  }
+                },
+                {
+                  "key":  "user.account_id",
+                  "value":  {
+                    "stringValue":  "scrubbed-account-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "vscode"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key":  "slug",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex-high"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790769600000000000",
+              "observedTimeUnixNano":  "1790769600000000000",
+              "attributes":  [
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "codex.sse_event"
+                  }
+                },
+                {
+                  "key":  "event.kind",
+                  "value":  {
+                    "stringValue":  "response.completed"
+                  }
+                },
+                {
+                  "key":  "input_token_count",
+                  "value":  {
+                    "stringValue":  "15000"
+                  }
+                },
+                {
+                  "key":  "output_token_count",
+                  "value":  {
+                    "stringValue":  "842"
+                  }
+                },
+                {
+                  "key":  "cached_token_count",
+                  "value":  {
+                    "intValue":  "12000"
+                  }
+                },
+                {
+                  "key":  "cache_write_token_count",
+                  "value":  {
+                    "intValue":  "0"
+                  }
+                },
+                {
+                  "key":  "reasoning_token_count",
+                  "value":  {
+                    "intValue":  "512"
+                  }
+                },
+                {
+                  "key":  "tool_token_count",
+                  "value":  {
+                    "stringValue":  "15842"
+                  }
+                },
+                {
+                  "key":  "ttft_ms",
+                  "value":  {
+                    "intValue":  "850"
+                  }
+                },
+                {
+                  "key":  "service_tier",
+                  "value":  {
+                    "stringValue":  "default"
+                  }
+                },
+                {
+                  "key":  "model_reasoning_effort",
+                  "value":  {
+                    "stringValue":  "high"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-29T12:00:16.000Z"
+                  }
+                },
+                {
+                  "key":  "conversation.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key":  "app.version",
+                  "value":  {
+                    "stringValue":  "0.158.0"
+                  }
+                },
+                {
+                  "key":  "auth_mode",
+                  "value":  {
+                    "stringValue":  "chatgpt"
+                  }
+                },
+                {
+                  "key":  "originator",
+                  "value":  {
+                    "stringValue":  "codex_cli_rs"
+                  }
+                },
+                {
+                  "key":  "user.account_id",
+                  "value":  {
+                    "stringValue":  "scrubbed-account-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "vscode"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key":  "slug",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex-high"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano":  "1790769605000000000",
+              "observedTimeUnixNano":  "1790769605000000000",
+              "attributes":  [
+                {
+                  "key":  "event.name",
+                  "value":  {
+                    "stringValue":  "codex.sse_event"
+                  }
+                },
+                {
+                  "key":  "event.kind",
+                  "value":  {
+                    "stringValue":  "response.completed"
+                  }
+                },
+                {
+                  "key":  "error.message",
+                  "value":  {
+                    "stringValue":  "failed to parse response.completed payload: missing usage"
+                  }
+                },
+                {
+                  "key":  "event.timestamp",
+                  "value":  {
+                    "stringValue":  "2026-09-29T12:00:21.000Z"
+                  }
+                },
+                {
+                  "key":  "conversation.id",
+                  "value":  {
+                    "stringValue":  "scrubbed-conversation-id"
+                  }
+                },
+                {
+                  "key":  "app.version",
+                  "value":  {
+                    "stringValue":  "0.158.0"
+                  }
+                },
+                {
+                  "key":  "auth_mode",
+                  "value":  {
+                    "stringValue":  "chatgpt"
+                  }
+                },
+                {
+                  "key":  "originator",
+                  "value":  {
+                    "stringValue":  "codex_cli_rs"
+                  }
+                },
+                {
+                  "key":  "user.account_id",
+                  "value":  {
+                    "stringValue":  "scrubbed-account-id"
+                  }
+                },
+                {
+                  "key":  "terminal.type",
+                  "value":  {
+                    "stringValue":  "vscode"
+                  }
+                },
+                {
+                  "key":  "model",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex"
+                  }
+                },
+                {
+                  "key":  "slug",
+                  "value":  {
+                    "stringValue":  "gpt-5.1-codex-high"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
