@@ -239,7 +239,8 @@ func labelValueCharsetOK(s string) bool {
 // reservedLabelKeys are exact (case-insensitive) matches that would let an
 // issuer-supplied label impersonate an attribution, ancestry, or
 // authorization field. Rejected both as an exact key and as a dotted prefix
-// (e.g. "user" rejects "user.name" too).
+// (e.g. "user" rejects "user.name" too). gVerifiedActorFieldNames' entries
+// are added at init time, below.
 var reservedLabelKeys = map[string]bool{
 	"agent": true, "agent_id": true, "actor": true, "principal": true,
 	"principal_id": true, "principal_kind": true, "user": true, "user_id": true,
@@ -253,6 +254,30 @@ var reservedLabelKeys = map[string]bool{
 	// "actor"'s dotted-prefix rule does not catch it (no "." between the
 	// words), so it is listed explicitly.
 	"actor_binding": true,
+}
+
+// gVerifiedActorFieldNames are G's verified-agent-actor structured audit
+// field names (ruling N3), reserved as exact label keys so an issuer-supplied
+// label can never occupy where a future verified actor field will live. This
+// is the single canonical list: a same-package consistency test pins it
+// against G's actual audit-record field names, so the two never drift apart.
+// No wildcard on "actor_"/"source_" — only these exact names are reserved.
+// If G renames a column before merging, this list and the pinning test are
+// updated in the same change.
+var gVerifiedActorFieldNames = []string{
+	"actor_agent_id",
+	"authorizing_user_id",
+	"source_grant_id",
+	"delegation_edge_id",
+	"parent_grant_id",
+	"exchange_agent_credential_id",
+	"actor_kind",
+}
+
+func init() {
+	for _, name := range gVerifiedActorFieldNames {
+		reservedLabelKeys[name] = true
+	}
 }
 
 // reservedLabelKeyPrefixes are case-insensitive prefixes rejected outright,
