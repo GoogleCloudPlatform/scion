@@ -29,9 +29,9 @@ import "net/http"
 // authorization is performed separately by authorizeScheduledAgentCreate in
 // server.go.
 //
-// The gate denies only scoped UATs. Every caller, whatever its credential
-// kind, must also be authorized by authorizeAgentCreate, which callers invoke
-// alongside this function.
+// The gate denies only scoped UATs. It supplements, and does not replace,
+// the caller's own authorization: create and update also require
+// authorizeAgentCreate, and resume requires schedule update access.
 func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter, r *http.Request) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
