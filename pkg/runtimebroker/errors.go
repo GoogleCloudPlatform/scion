@@ -161,9 +161,7 @@ func agentLookupUnavailableMessage(agentID, retrySuffix string) string {
 // "restart", "pty_attach") and is included in the log line so call-site
 // context isn't lost when several handlers share this one log message.
 //
-// retrySuffix, if non-empty, is inserted into the generic "please retry"
-// sentence (e.g. PTY attach passes "the attach" to produce "please retry the
-// attach in a moment"); pass "" for the plain "please retry in a moment".
+// retrySuffix is passed through to agentLookupUnavailableMessage.
 func AgentLookupUnavailable(w http.ResponseWriter, err error, agentID, op, retrySuffix string) {
 	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "op", op, "error", err)
 	RuntimeUnavailable(w, agentLookupUnavailableMessage(agentID, retrySuffix))

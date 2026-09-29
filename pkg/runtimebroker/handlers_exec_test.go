@@ -510,6 +510,9 @@ func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
 }
 
 // TestRestartAgent_NotFoundInProjectProceedsWithStart verifies the other side
