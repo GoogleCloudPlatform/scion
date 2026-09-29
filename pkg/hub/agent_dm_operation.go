@@ -397,7 +397,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			if wakeErr != nil {
 				return nil, wakeErr
 			}
-		} else if !(input.SkipPhaseGate && input.Type == messages.TypeMention) {
+		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
 			// send always gets the phase gate, regardless of the flag, so a
 			// caller cannot use it to bypass phase checks for a primary send.
