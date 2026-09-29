@@ -3185,6 +3185,14 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		cred, credErr := s.store.GetAgentCredentialByJTIHash(r.Context(),
 			hashJTI(agentIdent.TokenID()))
 		switch {
+		case credErr == nil && cred == nil:
+			// The store reported success without a credential record, so
+			// the credential's status could not be determined.
+			slog.Error("Token refresh: credential status lookup returned no credential",
+				"agent_id", id)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"unable to verify credential status", nil)
+			return
 		case credErr == nil && cred.RevokedAt != nil:
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"token has been revoked", nil)

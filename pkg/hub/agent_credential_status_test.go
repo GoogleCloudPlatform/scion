@@ -401,3 +401,96 @@ func TestAgentRefresh_MarkerAbsent_LegacyDeletedAgentDenied(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "deleted")
 }
+
+// --- Store returns a nil credential with a nil error ----------------------
+//
+// A credential store that reports success without a credential record gives
+// no status to evaluate. Each status-lookup site treats that as a store
+// failure: it does not authenticate or refresh, and the caller gets the
+// retryable 503 path.
+
+func TestEvaluateAgentCredentialStatus_NilCredentialNilErrorIsStoreFailure(t *testing.T) {
+	fake := &fakeAgentCredentialStore{}
+
+	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAgentCredentialMissing)
+	assert.False(t, errors.Is(err, errAgentCredentialRevoked))
+	assert.False(t, isLegacy)
+	assert.Nil(t, got)
+}
+
+func TestAgentAuthNilCredentialNilErrorReturns503(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+
+	agentID := tid("agent-auth-nil-cred")
+	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+
+	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	// A nil err makes the wrapper return (nil, nil).
+	srv.authConfig.CredentialStore = &erroringCredentialStore{Store: s}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentID, nil)
+	req.Header.Set("X-Scion-Agent-Token", token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	resp := decodeAPIError(t, rec.Body.Bytes())
+	assert.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+}
+
+func TestAgentRefresh_MarkerPresent_NilCredentialNilErrorReturns503(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+
+	agentID := tid("agent-refresh-marker-nil-cred")
+	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+
+	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	require.NoError(t, err)
+	cred, err := s.GetAgentCredentialByJTIHash(context.Background(), hashJTI(claims.ID))
+	require.NoError(t, err)
+
+	srv.store = &erroringCredentialStore{Store: s}
+
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	rec := httptest.NewRecorder()
+	srv.handleAgentTokenRefresh(rec, req, agentID)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	resp := decodeAPIError(t, rec.Body.Bytes())
+	assert.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+	assert.Equal(t, "unable to verify credential status", resp.Error.Message)
+
+	// Refresh did not proceed: the old credential is still active.
+	got, err := s.GetAgentCredentialByJTIHash(context.Background(), hashJTI(claims.ID))
+	require.NoError(t, err)
+	assert.Nil(t, got.RevokedAt)
+}
+
+func TestAgentRefresh_MarkerAbsent_NilCredentialNilErrorReturns503(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+
+	agentID := tid("agent-refresh-nomarker-nil-cred")
+	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+
+	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	require.NoError(t, err)
+
+	srv.store = &erroringCredentialStore{Store: s}
+
+	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	rec := httptest.NewRecorder()
+	srv.handleAgentTokenRefresh(rec, req, agentID)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	resp := decodeAPIError(t, rec.Body.Bytes())
+	assert.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+	assert.Equal(t, "unable to verify credential status", resp.Error.Message)
+}

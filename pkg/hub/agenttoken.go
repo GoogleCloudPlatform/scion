@@ -130,6 +130,12 @@ func hashJTI(jti string) string {
 // the looked-up credential has been revoked.
 var errAgentCredentialRevoked = errors.New("agent credential has been revoked")
 
+// errAgentCredentialMissing is returned by evaluateAgentCredentialStatus when
+// the credential store reports success but returns no credential record.
+// Callers treat it like any other store failure (retryable, not
+// authenticated), since the credential's status could not be determined.
+var errAgentCredentialMissing = errors.New("credential store returned no credential and no error")
+
 // evaluateAgentCredentialStatus performs the credential-status lookup that
 // agent-token authentication requires: given the JTI carried by a validated
 // agent token, it looks up the corresponding credential record in credStore
@@ -147,10 +153,17 @@ var errAgentCredentialRevoked = errors.New("agent credential has been revoked")
 //     credential. Callers must treat that as a retryable failure — never as
 //     successful authentication — since a store error means the credential's
 //     status could not actually be determined.
+//
+// A nil credential with a nil store error is classified as a store failure
+// and reported as errAgentCredentialMissing, so it follows the same
+// retryable path as any other store error.
 func evaluateAgentCredentialStatus(ctx context.Context, credStore store.AgentCredentialStore, jti string) (cred *store.AgentCredential, isLegacy bool, err error) {
 	cred, err = credStore.GetAgentCredentialByJTIHash(ctx, hashJTI(jti))
 	switch {
 	case err == nil:
+		if cred == nil {
+			return nil, false, errAgentCredentialMissing
+		}
 		if cred.RevokedAt != nil {
 			return nil, false, errAgentCredentialRevoked
 		}
