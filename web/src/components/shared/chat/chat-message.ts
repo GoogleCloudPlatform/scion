@@ -278,31 +278,52 @@ function styleEntityLinks(htmlStr: string): string {
  *   - Repo: `[A-Za-z0-9._-]+`, excluding a repo made up of only dots (`.`,
  *     `..`, ...) — GitHub forbids those as repo names, and without the
  *     exclusion they'd produce a wrong link that the browser silently
- *     resolves to a different URL.
+ *     resolves to a different URL. A repo merely starting with a dot, like
+ *     the real `.github` repo, is unaffected: `(?!\.+#)` only rejects dots
+ *     running all the way to `#`.
  *   - Number: one or more digits after `#`.
- * The leading negative lookbehind requires the owner not be preceded by a
- * Unicode letter, digit, `_`, `/`, or `.`. That is what keeps `foo/bar#1`
- * from double-linking inside a URL or file path, keeps `a/b/c#12` from also
- * matching the shorter `b/c#12` tail (a repo can never contain `/`, so a
- * match starting at `a` fails structurally, and a match starting at `b` or
- * `c` is blocked by the preceding `/`), keeps a scheme-less host like
- * `example.com/foo#12` or a dotted prefix like `user.name/repo#1` from
- * matching (both are blocked by the added `.` exclusion, since a GitHub
- * owner can never follow a `.`), and — using `\p{L}`/`\p{N}` with the `u`
- * flag rather than ASCII `\w` — keeps a non-ASCII prefix like `äptone` from
- * letting `ptone/scion#1` match mid-word. The trailing negative lookahead
- * excludes a following Unicode letter, digit, or `_`, so `#2217a` cannot be
- * split into a ref plus stray text.
+ *
+ * The leading group captures the boundary before the owner instead of using
+ * a lookbehind assertion, and the replacement re-emits it unchanged (see
+ * `styleGithubRefsInText`). A captured boundary is exactly equivalent to a
+ * lookbehind here, because the boundary can never itself be part of a valid
+ * match, but it parses on every JS engine that supports `u`-flag `\p{…}`
+ * classes — lookbehind additionally needs Safari 16.4+ (Mar 2023), and this
+ * is the only regex in `web/src` that would otherwise require it. A
+ * lookbehind that an older Safari can't parse is a `SyntaxError` at parse
+ * time, which would fail the whole `chat-message` module, not just ref
+ * linking — too large a blast radius for a linkifier.
+ *
+ * The boundary must be the start of the string, or a character that is not
+ * a Unicode letter, digit, `_`, `/`, `.`, or `-`. That is what keeps
+ * `foo/bar#1` from double-linking inside a URL or file path, keeps
+ * `a/b/c#12` from also matching the shorter `b/c#12` tail (a repo can never
+ * contain `/`, so a match starting at `a` fails structurally, and a match
+ * starting at `b` or `c` is blocked by the preceding `/`), keeps a
+ * scheme-less host like `example.com/foo#12` or a dotted prefix like
+ * `user.name/repo#1` from matching (blocked by the `.` exclusion, since a
+ * GitHub owner can never follow a `.`), keeps a hyphenated prefix like
+ * `user.foo-bar/repo#1` from sliding past the `.` and matching `bar/repo#1`
+ * at the `-` instead (blocked by the `-` exclusion), and — using
+ * `\p{L}`/`\p{N}` with the `u` flag rather than ASCII `\w` — keeps a
+ * non-ASCII prefix like `äptone` from letting `ptone/scion#1` match
+ * mid-word. The trailing negative lookahead excludes a following Unicode
+ * letter, digit, or `_`, so `#2217a` and `#12é` cannot be split into a ref
+ * plus stray text.
  */
 const GITHUB_REF_REGEX =
-  /(?<![\p{L}\p{N}_/.])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
+  /(^|[^\p{L}\p{N}_/.-])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
 
 /** Apply the GitHub-ref pattern to a text segment (outside code/HTML regions). */
 function styleGithubRefsInText(text: string): string {
-  return text.replace(GITHUB_REF_REGEX, (full, owner: string, repo: string, number: string) => {
-    const url = `https://github.com/${owner}/${repo}/issues/${number}`;
-    return `<a class="entity-link gh-ref-link" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${full} on GitHub">${full}</a>`;
-  });
+  return text.replace(
+    GITHUB_REF_REGEX,
+    (_full, boundary: string, owner: string, repo: string, number: string) => {
+      const ref = `${owner}/${repo}#${number}`;
+      const url = `https://github.com/${owner}/${repo}/issues/${number}`;
+      return `${boundary}<a class="entity-link gh-ref-link" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${ref} on GitHub">${ref}</a>`;
+    }
+  );
 }
 
 /**

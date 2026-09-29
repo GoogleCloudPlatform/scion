@@ -801,6 +801,30 @@ describe('scion-chat-message GitHub shortform refs', () => {
     const el = await mount(`see ${owner}/repo#1 for details`);
     expect(ghRefLinks(el)).toHaveLength(0);
   });
+
+  it('links a repo that starts with a dot, e.g. ptone/.github#1 (round 2 R1)', async () => {
+    const el = await mount('see ptone/.github#1 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/.github/issues/1');
+    expect(links[0].textContent).toBe('ptone/.github#1');
+  });
+
+  it('does not slide past a hyphen after the dot exclusion blocks it (N1)', async () => {
+    const el = await mount('see user.foo-bar/repo#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when a trailing unicode letter follows the number (N2)', async () => {
+    const el = await mount('see ptone/scion#12é for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when the owner is preceded by an underscore (N2)', async () => {
+    const el = await mount('see _ptone/scion#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
 });
 
 describe('scion-chat-message cross-project label', () => {
