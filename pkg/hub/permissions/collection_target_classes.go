@@ -226,6 +226,13 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// project.secret_read — agent self-service, no CapabilityKind, always
 	// an existing project's secret.
 	"project.secret_read": {},
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129):
+	// each always targets one existing secret, environment variable, skill
+	// reference or GCP service account. None has a collection/list shape, so
+	// every entry is reviewed empty, matching project.secret_read above.
+	"secret.deliver": {}, "env_var.deliver": {}, "skill_injection.deliver": {},
+	"secret.use": {}, "gcp_service_account.use": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

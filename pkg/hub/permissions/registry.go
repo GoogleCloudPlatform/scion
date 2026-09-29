@@ -39,6 +39,13 @@ const (
 	ResourceRoleBinding       = "role_binding"
 	ResourceScheduledEvent    = "scheduled_event"
 	ResourceAccessConstraint  = "access_constraint"
+	// ResourceSecret, ResourceEnvVar and ResourceSkillInjection are the
+	// material-delivery resource types (ptone/scion#2129): the typed target
+	// of an agent secret, stored environment variable or stored skill
+	// reference, as distinct from ResourceProject/ResourceSkill.
+	ResourceSecret         = "secret"
+	ResourceEnvVar         = "env_var"
+	ResourceSkillInjection = "skill_injection"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -65,6 +72,12 @@ const (
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
+	// ActionDeliver and ActionUse distinguish launch-time material delivery
+	// from an agent's own runtime retrieval or token-mint request over the
+	// same or a related resource (ptone/scion#2129). Neither is a read-only
+	// action.
+	ActionDeliver = "deliver"
+	ActionUse     = "use"
 
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
@@ -268,6 +281,19 @@ var Registry = []Permission{
 	{ID: "agent.token_refresh", Resource: ResourceAgent, Action: "token_refresh", AgentScopes: []string{"agent:token:refresh"}, Description: "Refresh own agent token", NonRouteUse: []string{"agent token refresh endpoint"}},
 	{ID: "agent.port_forward", Resource: ResourceAgent, Action: "port_forward", AgentScopes: []string{"agent:port:forward"}, Description: "Register and hold forwarded ports", NonRouteUse: []string{"agent port tunnel endpoints"}},
 	{ID: "agent.identity_token", Resource: ResourceAgent, Action: "identity_token", AgentScopes: []string{"agent:identity:token"}, Description: "Request OIDC identity tokens", NonRouteUse: []string{"agent identity token endpoint"}},
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129).
+	// *.deliver governs launch-time delivery of a secret, stored environment
+	// variable or stored skill reference to a target agent; it carries no
+	// AgentScopes and is admitted only under a hub-side delivery credential,
+	// never an agent JWT. secret.use and gcp_service_account.use govern an
+	// agent's own runtime retrieval or token-mint request and are admitted
+	// only under an agent JWT.
+	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
+	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.

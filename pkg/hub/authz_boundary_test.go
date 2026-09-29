@@ -2137,20 +2137,32 @@ func TestValidRealProjectScopeKinds_MatchesReviewedScopeKindResourceTypes(t *tes
 	}
 }
 
-// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered
-// pins the documented status of the three pre-registered material-delivery
-// rows: registryResourceType returns "" for a permission ID that does not
-// exist in Registry, so no permission today can produce a class whose
-// ResourceType equals "secret"/"env_var"/"skill_injection" — these rows
-// cannot be reached through validateRealProjectClass until F.2 adds the
-// corresponding Registry permission rows.
-func TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered(t *testing.T) {
+// TestValidRealProjectScopeKinds_MaterialRowsNowLive supersedes the former
+// ...MaterialDeliveryRowsAreInertUntilRegistered test now that ptone/scion#2129
+// registers the material permission rows: registryResourceType now resolves
+// "secret"/"env_var"/"skill_injection" to a live Registry permission, so
+// validateRealProjectClass can reach the pre-registered validRealProjectScopeKinds
+// rows for these types. A real material permission paired with one of its
+// registered ScopeKind values validates; a class whose ResourceType does not
+// match the permission's own resource type is still rejected.
+func TestValidRealProjectScopeKinds_MaterialRowsNowLive(t *testing.T) {
 	for _, rt := range []string{"secret", "env_var", "skill_injection"} {
+		found := false
 		for _, p := range permissions.Registry {
 			if p.Resource == rt {
-				t.Errorf("resource type %q now has a live Registry permission (%q) — validRealProjectScopeKinds's comment describing it as inert is stale and must be updated", rt, p.ID)
+				found = true
+				break
 			}
 		}
+		if !found {
+			t.Errorf("resource type %q has no live Registry permission", rt)
+		}
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: "secret", ScopeKind: "project"}); err != nil {
+		t.Errorf("secret.deliver with a registered scope kind should validate: %v", err)
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: "env_var", ScopeKind: "project"}); err == nil {
+		t.Error("a class resource type mismatched with the permission's own resource type must still be rejected")
 	}
 }
 
