@@ -183,10 +183,24 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 		_, _, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "ci", project.ID,
 			[]string{store.UATScopeAgentManage}, nil)
 		require.NoError(t, err)
+	})
 
-		_, _, err = srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "attach", project.ID,
+	// C.1 (ptone/scion#2092): explicit attach selection is relationship-
+	// eligible (owner/ancestor) and requires no existing target, per the
+	// design doc's "Resource-relative minting for #2092" and A.1's
+	// MintEligibilityRegistry. This replaces the pinned expectation above
+	// from before that eligibility existed, when owner role membership was
+	// the only mint path and an explicit attach token exceeded it.
+	t.Run("project owner can mint explicit attach for own agents", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+		project := &store.Project{ID: tid("uat-xattach-project-2"), Name: "UAT XAttach 2", Slug: "uat-xattach-2"}
+		require.NoError(t, s.CreateProject(ctx, project))
+		ownerID := tid("uat-xattach-owner-2")
+		createTestUserWithProjectRole(t, s, ownerID, "uat-owner-2@test.com", project.ID, store.ProjectRoleOwner)
+
+		_, _, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "attach", project.ID,
 			[]string{"agent:attach"}, nil)
-		assert.ErrorIs(t, err, ErrUATScopeViolation,
-			"owner role no longer carries agent.attach, so an explicit attach token exceeds issuer authority")
+		require.NoError(t, err, "project owner should be able to select explicit attach for their own agents")
 	})
 }
