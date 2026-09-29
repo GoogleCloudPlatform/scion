@@ -256,13 +256,13 @@ test_release_checksum_install_commands_verify_before_extract() {
     "the install commands must verify with sha256sum -c"
 
   local binary_verify_line binary_extract_line
-  binary_verify_line="$(line_number "grep -E '^[0-9a-f]{64}  scion-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
+  binary_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
   binary_extract_line="$(line_number "tar -xzf /tmp/scion-linux-amd64.tar.gz -C /tmp" "$log")"
   assert_true "$([[ -n "$binary_verify_line" && -n "$binary_extract_line" && "$binary_verify_line" -lt "$binary_extract_line" ]] && echo true || echo false)" \
     "the scion binary must be checksum-verified before it is extracted"
 
   local plugin_verify_line plugin_extract_line
-  plugin_verify_line="$(line_number "grep -E '^[0-9a-f]{64}  scion-plugin-telegram-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
+  plugin_verify_line="$(line_number "grep -E '^[0-9a-f]{64} [ *]scion-plugin-telegram-linux-amd64\.tar\.gz\$' SHA256SUMS | sha256sum -c -" "$log")"
   plugin_extract_line="$(line_number "tar -xzf /tmp/scion-plugin-telegram-linux-amd64.tar.gz -C /tmp" "$log")"
   assert_true "$([[ -n "$plugin_verify_line" && -n "$plugin_extract_line" && "$plugin_verify_line" -lt "$plugin_extract_line" ]] && echo true || echo false)" \
     "the telegram plugin must be checksum-verified before it is extracted"
@@ -351,6 +351,37 @@ test_release_checksum_dry_run_good_tarball_extracts() {
 
   assert_eq "0" "$rc" "a matching tarball and SHA256SUMS entry must verify and extract cleanly"
   assert_contains "$out" "OK" "sha256sum -c must report OK for a matching tarball"
+  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
+    "tar -xzf must actually have extracted the verified tarball's payload"
+  rm -rf "$work"
+}
+
+test_release_checksum_dry_run_binary_mode_sums_entry_verifies() {
+  fresh_gcloud_state
+  run_deploy_create_through_phase3 "$(release_checksum_config_json "$HUB")"
+  local snippet
+  snippet="$(_extract_binary_install_snippet "$(gcloud_log)")"
+
+  local fixdir work
+  fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
+  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "real-scion-binary-payload"
+  # `sha256sum --binary` writes the same hash but with a "*name" marker
+  # instead of the "  name" (two spaces) text-mode default that
+  # build-release.yml's own `sha256sum --` produces. On Linux the two modes
+  # hash identically; only the marker differs. A SHA256SUMS asset built by a
+  # future release process (or a different tool) using this marker must
+  # still verify.
+  (cd "$fixdir" && sha256sum --binary scion-linux-amd64.tar.gz > SHA256SUMS)
+
+  local out rc
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
+  rc=$?
+  rm -rf "$fixdir"
+
+  assert_eq "0" "$rc" \
+    "a binary-mode (asterisk-prefixed) SHA256SUMS entry must still verify and extract cleanly"
+  assert_contains "$out" "OK" "sha256sum -c must report OK for a matching binary-mode entry"
   assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
     "tar -xzf must actually have extracted the verified tarball's payload"
   rm -rf "$work"

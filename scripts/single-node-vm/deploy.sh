@@ -1545,7 +1545,10 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # preflight) explicitly opts out for a release published before checksums
 # existed. The match is anchored and the archive name's dots are escaped so
 # an unrelated entry (e.g. a suffixed "...tar.gz.old" line) cannot be
-# mistaken for this asset's checksum.
+# mistaken for this asset's checksum. The single space between the hash and
+# the "[ *]" class accepts either sha256sum output mode: two spaces in text
+# mode (what build-release.yml's `sha256sum --` produces), or a space and an
+# asterisk in binary mode.
 SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
 SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
 info "Installing scion binary (${VERSION})..."
@@ -1557,9 +1560,9 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
     echo 'Downloading release checksums...'
     if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-      if grep -qE '^[0-9a-f]{64}  ${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+      if grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
         echo 'Verifying checksum...'
-        (cd /tmp && grep -E '^[0-9a-f]{64}  ${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+        (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
       elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
         echo 'WARNING: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
       else
@@ -1594,8 +1597,8 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
         curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
         if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-          if grep -qE '^[0-9a-f]{64}  ${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
-            (cd /tmp && grep -E '^[0-9a-f]{64}  ${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+          if grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+            (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
           elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
             echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
           else
