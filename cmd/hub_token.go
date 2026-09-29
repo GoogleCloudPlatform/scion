@@ -170,8 +170,8 @@ func init() {
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
-	// B4/G3: --json was checked in runTokenCreate but never registered here,
-	// so it silently fell back to text output. Register it explicitly.
+	// --json was checked in runTokenCreate but never registered here, so it
+	// silently fell back to text output. Register it explicitly.
 	hubTokenCreateCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
@@ -224,7 +224,12 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	resp, err := client.Tokens().Create(ctx, req)
 	if err != nil {
 		if selector, reason, ok := hubclient.AsScopeViolation(err); ok {
-			fmt.Fprintf(os.Stderr, "Denied scope %q (%s).\n", selector, reason)
+			// An older hub's scope_violation body may carry no details; in
+			// that case naming an empty selector would be misleading, but
+			// the hint to check eligibility is still useful either way.
+			if selector != "" {
+				fmt.Fprintf(os.Stderr, "Denied scope %q (%s).\n", selector, reason)
+			}
 			fmt.Fprintf(os.Stderr, "Run `scion hub token scopes --project %s` to see which scopes you may currently select and why.\n", tokenCreateProject)
 		}
 		return fmt.Errorf("failed to create token: %w", err)
