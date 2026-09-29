@@ -15,10 +15,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,13 +72,36 @@ func clearAppTokenSources(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 }
 
+// mockAttachBrokerID is the fixed runtime broker ID the mock Hub servers in
+// this file put on agent records, and the ID they serve a matching
+// GET /api/v1/runtime-brokers/{id} response under — exercising the CLI's
+// broker-metadata attach check (attachSupportedByBroker) the same way a real
+// Hub round-trip would, rather than a name-based shortcut.
+const mockAttachBrokerID = "test-broker-1"
+
+// mockAttachBroker returns a minimal hubclient.RuntimeBroker whose
+// broker-wide Capabilities.Attach reflects whether runtimeType supports
+// attach. These fixtures set no agent profile, so attachSupportedByBroker
+// falls back to this broker-wide value rather than a per-profile one. Only
+// "noattach" is unsupported today.
+func mockAttachBroker(runtimeType string) hubclient.RuntimeBroker {
+	return hubclient.RuntimeBroker{
+		ID: mockAttachBrokerID,
+		Capabilities: &hubclient.BrokerCapabilities{
+			Attach: runtimeType != "noattach",
+		},
+	}
+}
+
 // newAttachMockHubServer creates a mock Hub server that handles the agent GET
-// request needed by attachViaHub(). The agent is returned in the "running" phase
+// request needed by attachViaHub(), plus the runtime-broker GET that backs
+// its attach-capability check. The agent is returned in the "running" phase
 // with the given runtime string (use "" for a normal non-managed agent).
 func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime string) *httptest.Server {
 	t.Helper()
 
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -84,12 +110,15 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			agent := hubclient.Agent{
-				ID:      agentID,
-				Name:    agentName,
-				Phase:   "running",
-				Runtime: runtime,
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         runtime,
+				RuntimeBrokerID: mockAttachBrokerID,
 			}
 			_ = json.NewEncoder(w).Encode(agent)
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(runtime))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -141,6 +170,77 @@ func TestAttachCmd_BadArgsDoesNotSilenceUsage(t *testing.T) {
 	require.Error(t, err, "expected an args error for a missing <agent> argument")
 	assert.False(t, attachCmd.SilenceUsage,
 		"a bad-arguments error must leave usage enabled")
+}
+
+// TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse verifies that
+// attachSupportedByBroker honors a named profile's own Attach=false, even
+// though the broker-wide Capabilities.Attach on this fixture is true — a
+// false result here can only come from the profile-level match, not the
+// broker-wide fallback.
+func TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse(t *testing.T) {
+	falseVal := false
+	const brokerID = "broker-profile-false"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
+			ID: brokerID,
+			Profiles: []hubclient.BrokerProfile{
+				{Name: "noattach-prof", Type: "noattach", Attach: &falseVal},
+			},
+			Capabilities: &hubclient.BrokerCapabilities{Attach: true},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	if attachSupportedByBroker(context.Background(), hubCtx, brokerID, "noattach-prof") {
+		t.Error("attachSupportedByBroker = true, want false for a profile with Attach=false")
+	}
+}
+
+// TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue verifies the
+// missing-field-⇒-supported default at the profile level: a profile entry
+// present in the broker's list, but whose JSON carries no "attach" key at
+// all (an older broker's exact wire shape), is treated as supported. The
+// response body here is raw JSON rather than a hubclient.BrokerProfile{}
+// literal, so this proves the *bool json:"attach,omitempty" decode itself
+// leaves Attach nil, not just that a Go zero value happens to be nil.
+func TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue(t *testing.T) {
+	const brokerID = "broker-profile-absent"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":%q,"profiles":[{"name":"old-prof","type":"docker","available":true}]}`, brokerID)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	if !attachSupportedByBroker(context.Background(), hubCtx, brokerID, "old-prof") {
+		t.Error(`attachSupportedByBroker = false, want true for a profile whose JSON omits "attach" entirely`)
+	}
+}
+
+// TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub proves
+// the missing-broker-ID default fires without making any Hub call:
+// hubCtx.Client is nil here, so calling it would panic.
+func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *testing.T) {
+	hubCtx := &HubContext{Client: nil}
+	if !attachSupportedByBroker(context.Background(), hubCtx, "", "any-profile") {
+		t.Error("attachSupportedByBroker = false, want true when runtimeBrokerID is empty")
+	}
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
@@ -275,12 +375,14 @@ func TestAttachViaHub_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 // exercising the attach path of startAgentViaHub() (site 2, the ready: label).
 // It handles the suspend-check GET, project GET (git-remote display), agent
 // CREATE POST, and the polling GET — all of which are reached before the token
-// gate in the non-workspace-upload code path.
-func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID string) *httptest.Server {
+// gate in the non-workspace-upload code path. The polling GET reports the
+// given agentRuntime (use "" for a normal non-managed, non-noattach agent).
+func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, agentRuntime string) *httptest.Server {
 	t.Helper()
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -292,12 +394,17 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID stri
 			// Git-remote display: return a project with no GitRemote to suppress output.
 			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
 
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(agentRuntime))
+
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and polling (post-create): return running.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID:    agentID,
-				Name:  agentName,
-				Phase: "running",
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         agentRuntime,
+				RuntimeBrokerID: mockAttachBrokerID,
 			})
 
 		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
@@ -379,7 +486,7 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 		agentID   = "start-plain-uuid"
 	)
 
-	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "")
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
@@ -395,6 +502,244 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "no access token found for Hub"),
 		"plain mode with empty token should reach 'no access token found for Hub' in startAgentViaHub site 2; got: %v", err)
+}
+
+// TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError directly
+// calls startAgentViaHub() with attach=true on an agent whose runtime is
+// "noattach" and exercises site 2 (the ready: label in the main polling
+// path). A noattach agent started with `-a` must fail with the same fixed,
+// explicit, non-zero-exit error as `scion attach` itself, and never reach the
+// WebSocket dial step — this is the same silent-failure bug on a sibling
+// code path.
+func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
+
+	const (
+		projectID = "proj-start-noattach-321"
+		agentName = "start-noattach-agent"
+		agentID   = "start-noattach-uuid"
+	)
+
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "noattach")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
+	}
+
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the noattach runtime"
+	assert.Equal(t, wantMsg, err.Error(), "noattach start -a must fail with the fixed message, got: %v", err)
+}
+
+// TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError mirrors
+// TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError, but drives
+// startAgentViaHub() through the workspace-upload branch (site 1, ~common.go
+// :1104) instead of the ready: label (site 2): a non-git project directory
+// with one file makes startAgentViaHub collect workspaceFiles, the mock
+// Create response returns a matching UploadURLs entry so the upload+finalize
+// path runs, and the post-finalize polling GET reports Runtime: "noattach".
+// The same fixed, explicit, non-zero-exit error must be returned, and the
+// WebSocket dial step must never be reached.
+func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
+
+	// A non-git project directory with one file, so the workspace-scan in
+	// startAgentViaHub collects it into workspaceFiles — the precondition for
+	// the create request to carry WorkspaceFiles and for a Hub response with
+	// UploadURLs to route into the workspace-upload branch.
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "hello.txt"), []byte("hi"), 0644))
+	scionDir := filepath.Join(projectDir, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+
+	const (
+		projectID = "proj-start-noattach-site1"
+		agentName = "start-noattach-site1-agent"
+		agentID   = "start-noattach-site1-uuid"
+	)
+
+	// A file:// upload URL short-circuits transfer.Client.UploadFile into a
+	// local file write, so the test doesn't need an HTTP PUT handler too.
+	uploadDest := filepath.Join(tmpDir, "uploaded", "hello.txt")
+
+	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	agentsPath := "/api/v1/projects/" + projectID + "/agents"
+	projectGetPath := "/api/v1/projects/" + projectID
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
+	// startAgentViaHub finalizes against resp.Agent.Slug, falling back to
+	// agentName when Slug is unset — the mock Create response below leaves
+	// Slug unset, so the finalize call lands on agentName.
+	finalizePath := "/api/v1/agents/" + agentName + "/workspace/sync-to/finalize"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.Method == http.MethodGet && r.URL.Path == projectGetPath:
+			// Git-remote display: return a project with no GitRemote to suppress output.
+			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
+
+		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
+			// Create: return UploadURLs for the one collected file, routing
+			// startAgentViaHub into the workspace-upload branch (site 1).
+			_ = json.NewEncoder(w).Encode(hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{ID: agentID, Name: agentName},
+				UploadURLs: []transfer.UploadURLInfo{
+					{Path: "hello.txt", URL: "file://" + uploadDest, Method: "PUT"},
+				},
+			})
+
+		case r.Method == http.MethodPost && r.URL.Path == finalizePath:
+			_ = json.NewEncoder(w).Encode(hubclient.SyncToFinalizeResponse{Applied: true, FilesApplied: 1})
+
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker("noattach"))
+
+		case r.Method == http.MethodGet && r.URL.Path == agentPath:
+			// Suspend check (pre-create) and post-finalize polling both hit
+			// this path; report running with a noattach runtime so the
+			// polling loop's running-phase branch is exercised.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         "noattach",
+				RuntimeBrokerID: mockAttachBrokerID,
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:      client,
+		Endpoint:    srv.URL,
+		ProjectID:   projectID,
+		ProjectPath: scionDir,
+	}
+
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the noattach runtime"
+	assert.Equal(t, wantMsg, err.Error(), "noattach start -a via the workspace-upload path must fail with the fixed message, got: %v", err)
+}
+
+// TestAttachViaHub_NoAttachAgent_ReturnsExplicitError verifies that attach on
+// an agent whose runtime is "noattach" fails with a fixed, explicit,
+// non-zero-exit error and never reaches the WebSocket dial step. It also
+// checks that the error text carries no infra-specific details (only the
+// fixed message is present).
+func TestAttachViaHub_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	const (
+		projectID = "proj-noattach-123"
+		agentName = "noattach-agent"
+		agentID   = "agent-uuid-noattach"
+	)
+
+	srv := newAttachMockHubServer(t, projectID, agentName, agentID, "noattach")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+	}
+
+	err = attachViaHub(hubCtx, agentName)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the noattach runtime"
+	assert.Equal(t, wantMsg, err.Error(), "noattach attach must fail with the fixed message, got: %v", err)
+
+	// No infra-specific details (namespaces, actor names, node/pod
+	// names, URLs, image refs) may leak into the user-facing message.
+	for _, leak := range []string{"namespace", "://", projectID, agentID, srv.URL} {
+		assert.NotContains(t, err.Error(), leak, "error message must not leak infra detail %q", leak)
+	}
+}
+
+// TestAttachViaHub_DockerAgent_UnaffectedByNoAttachCheck verifies that an
+// agent with a non-noattach, non-managed runtime (e.g. "docker") is
+// unaffected by the noattach guard and follows the existing path — reaching
+// the WebSocket dial step and failing there (the mock server doesn't
+// implement a WS upgrade), exactly as it did before the noattach check was
+// added.
+func TestAttachViaHub_DockerAgent_UnaffectedByNoAttachCheck(t *testing.T) {
+	clearAppTokenSources(t)
+
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return &fakeTransportSource{
+			token:  "fake-oidc-token",
+			expiry: time.Now().Add(1 * time.Hour),
+		}, transportauth.HeaderProxyAuthorization, nil
+	}
+	defer func() { resolveAttachTransportFn = orig }()
+
+	const (
+		projectID = "proj-docker-123"
+		agentName = "docker-agent"
+		agentID   = "agent-uuid-docker"
+	)
+
+	srv := newAttachMockHubServer(t, projectID, agentName, agentID, "docker")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+	}
+
+	err = attachViaHub(hubCtx, agentName)
+
+	require.Error(t, err, "expected a WS dial error — the docker path must reach the dial step unchanged")
+	assert.NotContains(t, err.Error(), "attach is not supported for agents on the noattach runtime",
+		"docker agent must not be rejected by the noattach guard, got: %v", err)
+	// Pin that the phase and token gates were actually passed and the
+	// WebSocket dial itself was reached (pkg/wsclient/pty.go:123/125), not
+	// some other, earlier failure that happens to also be non-nil.
+	assert.Contains(t, err.Error(), "connection failed",
+		"docker agent should fail at the WS dial step, got: %v", err)
 }
 
 // TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate directly calls
@@ -434,7 +779,7 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 		agentID   = "start-iap-uuid"
 	)
 
-	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "")
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 

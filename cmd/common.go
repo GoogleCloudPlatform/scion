@@ -1129,6 +1129,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if !attach {
 						return nil
 					}
+					if err := attachUnsupportedErr(pollCtx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
+						return err
+					}
 					// Fall through to attach logic below
 					agentID := agent.ID
 					if agentID == "" {
@@ -1196,6 +1199,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 	// Attach mode: wait for agent to be running, then attach via WebSocket
 	agentID := ""
+	agentRuntime := ""
+	agentBrokerID := ""
+	agentProfile := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
 	}
@@ -1222,10 +1228,20 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 			if agentPhase == string(state.PhaseRunning) {
-				// Use the agent's ID from the latest fetch
+				// agentID keeps its prior value (the create response's ID, or
+				// agentName) unless this fetch returned a non-empty one, since
+				// an empty ID here would be a regression, not new information.
 				if agent.ID != "" {
 					agentID = agent.ID
 				}
+				// agentRuntime, agentBrokerID and agentProfile always take
+				// this fetch's value, even if empty: unlike agentID there is
+				// no better fallback to protect, and "" is itself a
+				// meaningful attach-is-supported value to
+				// attachUnsupportedErr below.
+				agentRuntime = agent.Runtime
+				agentBrokerID = agent.RuntimeBrokerID
+				agentProfile = agentProfileName(agent)
 				goto ready
 			}
 			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
@@ -1239,6 +1255,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 ready:
+	if err := attachUnsupportedErr(pollCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
+		return err
+	}
+
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design, so transport auth must be
 	// determined before deciding whether an app token is required.

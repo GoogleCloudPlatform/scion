@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/creack/pty"
 	"github.com/stretchr/testify/require"
@@ -100,6 +101,102 @@ func TestHandleAgentAttach_RuntimeListUnavailable(t *testing.T) {
 	// distinguishing a transient runtime failure from a real not-found.
 	if strings.Contains(resp.Error.Message, "not found") {
 		t.Errorf("runtime-unavailable message should not read like a not-found error, got %q", resp.Error.Message)
+	}
+}
+
+// attachCapableTestRuntime is a MockRuntime that also implements the
+// optional runtime.AttachCapableRuntime capability, reporting the given
+// value. Mirrors perProfileRuntime in resolve_manager_capability_test.go.
+type attachCapableTestRuntime struct {
+	*runtime.MockRuntime
+	supportsAttach bool
+}
+
+func (r *attachCapableTestRuntime) SupportsAttach() bool { return r.supportsAttach }
+
+var _ runtime.AttachCapableRuntime = (*attachCapableTestRuntime)(nil)
+
+// TestHandleAgentAttach_DefaultRuntimeUnsupported_RejectsBeforeUpgrade
+// verifies that handleAgentAttach honors the attach capability
+// (runtime.HasAttachSupport) of the live instance LookupAgent matched
+// before the WebSocket upgrade: an agent found on the broker's default
+// runtime, which opts out of interactive attach, gets a clean 501 response
+// naming ErrCodeRuntimeAttachUnsupported, and never reaches
+// ptyUpgrader.Upgrade — the test request carries Upgrade/Connection headers
+// (newAttachTestRequest) but not a full WebSocket handshake, so a code path
+// that did reach Upgrade would itself fail, but with 400 Bad Request, not
+// the 501/ErrCodeRuntimeAttachUnsupported asserted here.
+func TestHandleAgentAttach_DefaultRuntimeUnsupported_RejectsBeforeUpgrade(t *testing.T) {
+	mgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1"}}}
+	rt := &attachCapableTestRuntime{
+		MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "fake" }},
+		supportsAttach: false,
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501 for a runtime that doesn't support attach, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeErrorResponse(t, rec)
+	if resp.Error.Code != ErrCodeRuntimeAttachUnsupported {
+		t.Errorf("expected code %q, got %q", ErrCodeRuntimeAttachUnsupported, resp.Error.Code)
+	}
+}
+
+// TestHandleAgentAttach_AuxRuntimeUnsupported_RejectsBeforeUpgrade proves the
+// AgentLookupResult.Runtime plumbing itself: the DEFAULT runtime here
+// supports attach, but the agent is only found via an AUXILIARY runtime
+// whose own instance opts out. The pre-upgrade gate must still reject,
+// which is only possible if LookupAgent set result.Runtime to the matched
+// auxiliary instance (aux.Runtime), not the default.
+func TestHandleAgentAttach_AuxRuntimeUnsupported_RejectsBeforeUpgrade(t *testing.T) {
+	mgr := &mockManager{} // empty: no match on the default manager, forcing the aux fallback
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1"}}}
+	auxRT := &attachCapableTestRuntime{
+		MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "aux-fake" }},
+		supportsAttach: false,
+	}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["aux-fake"] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501 for an auxiliary runtime that doesn't support attach, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeErrorResponse(t, rec)
+	if resp.Error.Code != ErrCodeRuntimeAttachUnsupported {
+		t.Errorf("expected code %q, got %q", ErrCodeRuntimeAttachUnsupported, resp.Error.Code)
+	}
+}
+
+// TestHandleAgentAttach_AttachSupported_ProceedsPastPreUpgradeGate verifies
+// the positive case: a default runtime that supports attach clears the
+// pre-upgrade gate. newAttachTestRequest sets Upgrade/Connection headers but
+// not a full WebSocket handshake (no Sec-WebSocket-Version/Key), so
+// ptyUpgrader.Upgrade itself still fails past the gate — with exactly 400
+// Bad Request (gorilla's handshake-rejection status). Asserting that exact
+// code, rather than merely "not 501", proves the gate was actually passed
+// and the failure came from the upgrader, not from some other, unrelated
+// early exit that would also happen to read as "not the pre-upgrade 501".
+func TestHandleAgentAttach_AttachSupported_ProceedsPastPreUpgradeGate(t *testing.T) {
+	mgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1"}}}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }} // doesn't implement AttachCapableRuntime at all
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	rec := httptest.NewRecorder()
+	srv.handleAgentAttach(rec, newAttachTestRequest("some-agent"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (upgrader handshake rejection, proving the pre-upgrade gate was passed), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

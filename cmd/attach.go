@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
@@ -141,6 +142,94 @@ func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource,
 	return opts, transportSrc, nil
 }
 
+// attachUnsupportedErr returns a fixed, explicit error for an agent that has
+// no exec/attach/TTY primitive to dial, or nil when attach is supported. It
+// covers managed agents (a `managed:`-prefixed runtime) and any agent whose
+// runtime broker advertises its profile — or, failing that, the broker as a
+// whole — as not supporting attach (see attachSupportedByBroker). A runtime
+// whose broker would otherwise reject the PTY stream only after the
+// WebSocket upgrade has already happened is rejected here instead, so that
+// rejection never reaches the CLI process. Every attach entry point (both
+// the direct `scion attach` path and the `scion start -a` / `scion resume
+// -a` paths) must call this before dialing.
+func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime, runtimeBrokerID, profile string) error {
+	if strings.HasPrefix(agentRuntime, "managed:") {
+		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
+	}
+	if !attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile) {
+		if agentRuntime == "" {
+			return fmt.Errorf("attach is not supported for this agent's runtime")
+		}
+		return fmt.Errorf("attach is not supported for agents on the %s runtime", agentRuntime)
+	}
+	return nil
+}
+
+// attachSupportedByBroker reports whether attach is supported for an agent
+// on runtimeBrokerID's profile, read from the Hub's own record of that
+// broker: runtimebroker.BrokerProfile.Attach / BrokerCapabilities.Attach,
+// mirrored into store.RuntimeBroker at registration and served back by
+// hubclient.RuntimeBrokers().Get — the same broker/provider read other CLI
+// commands already use (e.g. printAutoResolvedBroker), not a new endpoint.
+//
+// The named profile's own Attach wins when the broker reported one. When it
+// didn't — an older broker, or one whose registration producer has no live
+// runtime instance to ask for a non-default profile (see
+// buildBrokerProfiles) — this falls through to the broker-wide
+// Capabilities.Attach, and THAT answer is final: true (or the whole
+// Capabilities record being absent, an older broker's shape) means
+// supported, but an explicit broker-wide false means not, even though the
+// specific profile itself said nothing. A profile carrying no signal is not
+// itself information; the broker saying "my default runtime doesn't
+// support attach" is. This does mean a non-default-type profile on a
+// broker whose default runtime opts out of attach is refused before
+// dialing even though that specific profile's own runtime might support
+// it fine — an accepted, documented cost of not being able to ask a
+// specific profile's own runtime without a live instance for it (see
+// pkg/runtimebroker's resolver and its own equivalent unknown-profile
+// cases): a profile that is silent on attach refuses, never assumes
+// supported.
+//
+// No broker ID on the agent record, or a broker record the Hub couldn't
+// return at all, still defaults to supported — there is nothing to read in
+// that case, unlike a broker that answered but had nothing to say about
+// this specific profile.
+func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBrokerID, profile string) bool {
+	if hubCtx == nil || hubCtx.Client == nil || runtimeBrokerID == "" {
+		return true
+	}
+	broker, err := hubCtx.Client.RuntimeBrokers().Get(ctx, runtimeBrokerID)
+	if err != nil || broker == nil {
+		return true
+	}
+	if profile != "" {
+		for _, p := range broker.Profiles {
+			if p.Name != profile {
+				continue
+			}
+			if p.Attach != nil {
+				return *p.Attach
+			}
+			break // found the profile, but it said nothing; fall through below
+		}
+	}
+	if broker.Capabilities != nil {
+		return broker.Capabilities.Attach
+	}
+	return true
+}
+
+// agentProfileName returns the settings profile an agent was created with,
+// or "" when the agent record carries no applied config (an older broker,
+// or an agent created before AppliedConfig was tracked) — the "no profile"
+// case attachSupportedByBroker falls back to the broker-wide capability for.
+func agentProfileName(agent *hubclient.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil {
+		return ""
+	}
+	return agent.AppliedConfig.Profile
+}
+
 // attachViaHub attaches to an agent via Hub WebSocket connection.
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -160,8 +249,16 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
 	}
 
-	if strings.HasPrefix(agent.Runtime, "managed:") {
-		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
+	// Some runtimes have no exec/attach/TTY primitive to dial: managed agents
+	// never did, and a runtime that opts out of attach entirely (see
+	// attachUnsupportedErr) would otherwise have its broker reject the PTY
+	// stream only after the WebSocket upgrade has already happened, so that
+	// rejection never reaches this CLI process. Reject here instead, using
+	// the broker metadata already reachable from the agent GET above, so the
+	// user gets a fixed, explicit, non-zero-exit error before any WebSocket
+	// dial is attempted.
+	if err := attachUnsupportedErr(ctx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
+		return err
 	}
 
 	// Check agent lifecycle status - the agent must be running to attach.

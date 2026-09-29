@@ -530,14 +530,10 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 1: Create broker registration
 		createReq := &hubclient.CreateBrokerRequest{
-			BrokerID: stableBrokerID,
-			Name:     brokerName,
-			Capabilities: []string{
-				"sync",
-				"attach",
-				"reprovision",
-			},
-			AutoProvide: brokerAutoProvide,
+			BrokerID:     stableBrokerID,
+			Name:         brokerName,
+			Capabilities: brokerRegistrationCapabilities(),
+			AutoProvide:  brokerAutoProvide,
 			Labels: map[string]string{
 				"scion.io/broker-role": "remote",
 			},
@@ -559,16 +555,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 2: Complete broker join with join token
 		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:  createResp.BrokerID,
-			JoinToken: createResp.JoinToken,
-			Hostname:  brokerName,
-			Version:   version.Version,
-			Capabilities: []string{
-				"sync",
-				"attach",
-				"reprovision",
-			},
-			Profiles: profiles,
+			BrokerID:     createResp.BrokerID,
+			JoinToken:    createResp.JoinToken,
+			Hostname:     brokerName,
+			Version:      version.Version,
+			Capabilities: brokerRegistrationCapabilities(),
+			Profiles:     profiles,
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
@@ -1924,6 +1916,20 @@ func getLocalBrokerID() string {
 	}
 
 	return ""
+}
+
+// brokerRegistrationCapabilities builds the capability-name list this
+// command reports at registration/join time. There is no live runtime
+// instance available here to ask (this command only sends metadata to the
+// Hub; it does not start the broker daemon or construct a runtime), so
+// "attach" is always included — the same missing-capability-implies-
+// supported default used everywhere else this feature answers the
+// question, applied because there is nothing here to say otherwise. A
+// runtime that actually opts out reports it once the broker itself runs
+// and registers/heartbeats with a live instance in hand (see
+// buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
+func brokerRegistrationCapabilities() []string {
+	return []string{"sync", "attach", "reprovision"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
