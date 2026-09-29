@@ -110,7 +110,7 @@ func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
 
 // liveSignInPolicyDeps returns r.policyDeps with the fields that must never
 // silently depend on SetSignInPolicyDeps having been called: authorize
-// (always r.authorize, the resolver's own injected policy check) and
+// (always r.authorize, the resolver's own configured authorize check) and
 // UpdateUser (defaults to r.users.UpdateUser, since persisting a state
 // transition like invited -> active must not depend on optional wiring).
 // Used by every existing-record branch of Resolve.
@@ -222,20 +222,21 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			return nil, ErrUserSuspended
 		}
 
-		// Update email if it changed (informational, does not relink). Kept
-		// separate from the policy/state persistence below: this mutation is
-		// unconditional (never relinks the subject-bound identity), while
-		// the policy call below may deny before persisting anything.
+		// Email drift: the presented email no longer matches the binding's
+		// recorded email (informational, never relinks the subject-bound
+		// identity). Reassign user.Email here, before the policy call, only
+		// when the profile email still matched the old binding email — so
+		// authorize evaluates the presented email and the helper's UpdateUser
+		// persists it in the same write. The binding's own record of the
+		// email is updated further down, only after the policy call
+		// succeeds: on denial neither the binding nor the profile email may
+		// change (see the return below).
 		normalizedEmail := strings.ToLower(identity.Email)
-		if strings.ToLower(binding.Email) != normalizedEmail {
-			r.log.Info("google identity resolver: updating binding email",
-				"old", binding.Email, "new", normalizedEmail,
-				"sub", identity.Subject, "user_id", user.ID)
-			_ = r.extIDs.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
-			// Also update the user's profile email if it matches the old binding email.
-			if strings.EqualFold(user.Email, binding.Email) {
-				user.Email = normalizedEmail
-			}
+		bindingEmailStale := strings.ToLower(binding.Email) != normalizedEmail
+		callerChangedEmail := false
+		if bindingEmailStale && strings.EqualFold(user.Email, binding.Email) {
+			user.Email = normalizedEmail
+			callerChangedEmail = true
 		}
 
 		// Apply the same live sign-in policy and account-state handling
@@ -245,9 +246,25 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// so an already-bound identity is re-checked on every issuance, not
 		// just at first link. Suspension was already checked above; the
 		// helper re-checks it too, matching every other caller.
-		user, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), user, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+		//
+		// This branch runs on every issuance (e.g. every external-bearer
+		// request for an already-linked identity), unlike the one-time
+		// linking paths above, so it does NOT always-persist: persistence
+		// and grant sync only happen when something actually changed
+		// (activation, a role change, a profile backfill, or the presented-
+		// email update above) — an unconditional per-request full-row write
+		// would risk overwriting a concurrent admin suspension or role
+		// change with the stale value this request read.
+		user, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), user, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{CallerChanged: callerChangedEmail})
 		if err != nil {
 			return nil, err
+		}
+
+		if bindingEmailStale {
+			r.log.Info("google identity resolver: updating binding email",
+				"old", binding.Email, "new", normalizedEmail,
+				"sub", identity.Subject, "user_id", user.ID)
+			_ = r.extIDs.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
 		}
 
 		return user, nil
@@ -300,7 +317,7 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		// the live access policy (unless PreAuthorized), invited-record
 		// activation, and role/grant sync. On denial, no identity link is
 		// created for this sign-in.
-		existingUser, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+		existingUser, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{AlwaysPersist: true})
 		if err != nil {
 			return nil, err
 		}
@@ -469,7 +486,7 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 			// other existing-record path (see applyLiveSignInPolicy): the
 			// winner is itself an existing record now, not a fresh
 			// provision, even though this call started out provisioning one.
-			winner, policyErr := applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), winner, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+			winner, policyErr := applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), winner, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{AlwaysPersist: true})
 			if policyErr != nil {
 				return nil, false, policyErr
 			}

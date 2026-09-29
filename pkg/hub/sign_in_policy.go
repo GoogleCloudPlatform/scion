@@ -86,6 +86,26 @@ type signInPolicyDeps struct {
 	auditDenied    func(ctx context.Context, email string)
 }
 
+// signInPolicyPersistOpts controls when applyLiveSignInPolicy persists the
+// user record and syncs grants. A caller invoked once per interactive
+// sign-in (provisionUser, first-time linking) wants its existing
+// always-persist/always-sync behavior; a caller invoked on every request for
+// an already-linked identity (the resolver's bound-identity branch) must
+// not turn every request into a full-row write — persistence there should
+// happen only when something meaningful actually changed.
+type signInPolicyPersistOpts struct {
+	// AlwaysPersist persists and syncs grants unconditionally on success,
+	// matching interactive login's existing behavior (including a LastLogin
+	// bump on every call). Set by callers invoked once per sign-in event.
+	AlwaysPersist bool
+
+	// CallerChanged reports that the caller already mutated fields on user
+	// (e.g. a presented-email update) before calling, so the helper must
+	// still persist even if its own state-transition logic finds nothing
+	// to change. Ignored when AlwaysPersist is set.
+	CallerChanged bool
+}
+
 // applyLiveSignInPolicy enforces, for an already-existing user, the same
 // live access policy and account-state handling on every sign-in path:
 //
@@ -97,8 +117,10 @@ type signInPolicyDeps struct {
 //     evaluated as a new user, mirroring interactive login;
 //   - an already-active record has its role re-evaluated the same way login
 //     does (picking up admin_emails additions/removals);
-//   - the mutated record is persisted, any resulting super-admin binding
-//     change is applied, and hub role grants are synced to match.
+//   - the record is persisted and grants are synced when something
+//     meaningful changed (activation, a role change, a profile backfill, or
+//     opts.CallerChanged) or when opts.AlwaysPersist is set. A resulting
+//     super-admin binding change is applied whenever the record persists.
 //
 // preAuthorized skips the policy check only — never the suspension check —
 // and is for principals whose authorization decision was already made
@@ -109,6 +131,7 @@ func applyLiveSignInPolicy(
 	user *store.User,
 	displayName, avatarURL string,
 	preAuthorized bool,
+	opts signInPolicyPersistOpts,
 ) (*store.User, error) {
 	if user.Status == store.UserStatusSuspended {
 		slog.Warn("sign-in rejected: account suspended", "email", user.Email, "user_id", user.ID)
@@ -132,7 +155,14 @@ func applyLiveSignInPolicy(
 	// user.Role.
 	var bindingSuperAdmin string // "", "ensure", or "delete"
 
+	// activated / roleChanged / profileChanged track what actually changed,
+	// so a caller invoked on every request can persist only when it matters
+	// (see signInPolicyPersistOpts). activated implies a role/grant sync
+	// regardless of AlwaysPersist; profileChanged alone does not.
+	var activated, roleChanged, profileChanged bool
+
 	if user.Status == store.UserStatusInvited {
+		activated = true
 		slog.Info("user activated from invited state", "email", user.Email, "user_id", user.ID)
 		user.Status = store.UserStatusActive
 		if displayName != "" {
@@ -141,7 +171,6 @@ func applyLiveSignInPolicy(
 		if avatarURL != "" {
 			user.AvatarURL = avatarURL
 		}
-		user.LastLogin = time.Now()
 
 		oldRole := user.Role
 		newRole := user.Role
@@ -158,18 +187,20 @@ func applyLiveSignInPolicy(
 			deps.auditActivated(ctx, user.Email, user.ID)
 		}
 	} else {
-		user.LastLogin = time.Now()
 		if avatarURL != "" && user.AvatarURL == "" {
 			user.AvatarURL = avatarURL
+			profileChanged = true
 		}
 		if displayName != "" && user.DisplayName == "" {
 			user.DisplayName = displayName
+			profileChanged = true
 		}
 		if deps.roleFor != nil {
 			if newRole := deps.roleFor(ctx, user.Email, user.Role, user.ID); newRole != user.Role {
 				oldRole := user.Role
 				slog.Info("user role changed on sign-in", "email", user.Email, "old_role", oldRole, "new_role", newRole)
 				user.Role = newRole
+				roleChanged = true
 				if oldRole == store.UserRoleAdmin {
 					bindingSuperAdmin = "delete"
 				} else if newRole == store.UserRoleAdmin {
@@ -179,25 +210,35 @@ func applyLiveSignInPolicy(
 		}
 	}
 
-	if deps.UpdateUser != nil {
-		if err := deps.UpdateUser(ctx, user); err != nil {
-			slog.Error("failed to update user on sign-in", "email", user.Email, "user_id", user.ID, "error", err)
-			return nil, fmt.Errorf("update user: %w", err)
+	shouldPersist := opts.AlwaysPersist || opts.CallerChanged || activated || roleChanged || profileChanged
+	shouldSyncGrants := opts.AlwaysPersist || activated || roleChanged
+
+	if shouldPersist {
+		// A per-request full-row write is exactly the cost (and the lost-
+		// update risk on Status/Role) this bumps LastLogin to avoid paying
+		// when nothing else changed — only touch it as part of a write that
+		// is already happening for another reason.
+		user.LastLogin = time.Now()
+		if deps.UpdateUser != nil {
+			if err := deps.UpdateUser(ctx, user); err != nil {
+				slog.Error("failed to update user on sign-in", "email", user.Email, "user_id", user.ID, "error", err)
+				return nil, fmt.Errorf("update user: %w", err)
+			}
+		}
+
+		switch bindingSuperAdmin {
+		case "ensure":
+			if deps.ensureSuperAdminBinding != nil {
+				deps.ensureSuperAdminBinding(ctx, user.ID)
+			}
+		case "delete":
+			if deps.deleteSuperAdminBinding != nil {
+				deps.deleteSuperAdminBinding(ctx, user.ID)
+			}
 		}
 	}
 
-	switch bindingSuperAdmin {
-	case "ensure":
-		if deps.ensureSuperAdminBinding != nil {
-			deps.ensureSuperAdminBinding(ctx, user.ID)
-		}
-	case "delete":
-		if deps.deleteSuperAdminBinding != nil {
-			deps.deleteSuperAdminBinding(ctx, user.ID)
-		}
-	}
-
-	if deps.syncGrants != nil {
+	if shouldSyncGrants && deps.syncGrants != nil {
 		if err := deps.syncGrants(ctx, user.ID, user.Role); err != nil {
 			slog.Warn("failed to sync hub role grants on sign-in",
 				"email", user.Email, "user_id", user.ID, "role", user.Role, "error", err)

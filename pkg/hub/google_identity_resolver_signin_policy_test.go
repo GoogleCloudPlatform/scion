@@ -142,6 +142,154 @@ func TestGoogleIdentityResolver_ExistingBinding_NotAuthorized_DeniedNoMutation(t
 	}
 }
 
+// countingUserStore wraps a real store.UserStore, counting UpdateUser calls
+// so a test can assert that a repeat resolution with no state change
+// performs zero persistence — the bound branch must not turn every request
+// into a write.
+type countingUserStore struct {
+	store.UserStore
+	updateUserCalls int
+}
+
+func (s *countingUserStore) UpdateUser(ctx context.Context, user *store.User) error {
+	s.updateUserCalls++
+	return s.UserStore.UpdateUser(ctx, user)
+}
+
+// TestGoogleIdentityResolver_ExistingBinding_NoChange_ZeroUpdateUser is a
+// repeat-issuance regression: resolving an already-bound, already-active
+// identity whose profile has nothing to backfill and whose role does not
+// change must not write the user row at all. This branch runs on every
+// external-bearer request for an already-linked identity, so an
+// unconditional per-request write would risk overwriting a concurrent admin
+// change (status or role) with the stale value this request read.
+func TestGoogleIdentityResolver_ExistingBinding_NoChange_ZeroUpdateUser(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	ctx := context.Background()
+	userID := uuid.New().String()
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       identity.Email,
+		DisplayName: identity.DisplayName, // already matches: no profile backfill
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed active user: %v", err)
+	}
+	now := time.Now()
+	if err := h.extStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID:        uuid.New().String(),
+		Provider:  "google",
+		Issuer:    googleCanonicalIssuer,
+		Subject:   identity.Subject,
+		UserID:    userID,
+		Email:     identity.Email, // already matches: no email drift
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	counting := &countingUserStore{UserStore: h.store}
+	// No SetSignInPolicyDeps: liveSignInPolicyDeps defaults UpdateUser to
+	// r.users.UpdateUser, which is the counting wrapper here, so this
+	// measures exactly what a real request would write. A nil roleFor
+	// leaves role re-evaluation a no-op, which is fine — this test is about
+	// the write, not the role decision (covered elsewhere).
+	resolver := NewGoogleIdentityResolver(counting, h.extStore, h.srv.isUserAuthorized, nil, nil)
+
+	if _, err := resolver.Resolve(ctx, identity, ResolvePolicy{}); err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if counting.updateUserCalls != 0 {
+		t.Fatalf("expected zero UpdateUser calls when nothing changed, got %d", counting.updateUserCalls)
+	}
+}
+
+// TestGoogleIdentityResolver_ExistingBinding_EmailChange_NoMutationOnDenialThenSynced
+// is a regression on the "no mutation on denial" invariant for a presented-
+// email change: a denied re-issuance must leave both the profile email and
+// the binding's recorded email unchanged (not just the profile email), and
+// a later admitted re-issuance with the same presented email must update
+// both together.
+func TestGoogleIdentityResolver_ExistingBinding_EmailChange_NoMutationOnDenialThenSynced(t *testing.T) {
+	const oldEmail = "user@company.com"
+	const newEmail = "user@other.com"
+	const sub = "google-sub-email-change-1"
+
+	h := newSignInPolicyHarness(t, ServerConfig{
+		UserAccessMode:    "domain_restricted",
+		AuthorizedDomains: []string{"company.com"},
+	}, &fakeGoogleValidator{})
+
+	ctx := context.Background()
+	userID := uuid.New().String()
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID: userID, Email: oldEmail, Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed active user: %v", err)
+	}
+	now := time.Now()
+	if err := h.extStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID: uuid.New().String(), Provider: "google", Issuer: googleCanonicalIssuer, Subject: sub,
+		UserID: userID, Email: oldEmail, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	presentedIdentity := &ValidatedGoogleIdentity{
+		Subject: sub, Email: newEmail, EmailVerified: true, Issuer: googleCanonicalIssuer,
+		UpstreamExpiry: time.Now().Add(time.Hour),
+	}
+
+	// The new email fails the domain_restricted policy: denied.
+	if _, err := h.resolver.Resolve(ctx, presentedIdentity, ResolvePolicy{}); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("expected ErrAccessDenied, got %v", err)
+	}
+
+	stored, err := h.store.GetUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if stored.Email != oldEmail {
+		t.Fatalf("expected profile email unchanged after denial, got %q", stored.Email)
+	}
+	binding, err := h.extStore.GetExternalIdentity(ctx, "google", googleCanonicalIssuer, sub)
+	if err != nil {
+		t.Fatalf("get binding: %v", err)
+	}
+	if binding.Email != oldEmail {
+		t.Fatalf("expected binding email unchanged after denial, got %q", binding.Email)
+	}
+
+	// The same presented email is admitted later (PreAuthorized skips the
+	// still-failing domain policy) — both records must now update together.
+	user, err := h.resolver.Resolve(ctx, presentedIdentity, ResolvePolicy{PreAuthorized: true})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if user.Email != newEmail {
+		t.Fatalf("expected the returned user email to be %q, got %q", newEmail, user.Email)
+	}
+	stored, err = h.store.GetUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if stored.Email != newEmail {
+		t.Fatalf("expected profile email updated after admission, got %q", stored.Email)
+	}
+	binding, err = h.extStore.GetExternalIdentity(ctx, "google", googleCanonicalIssuer, sub)
+	if err != nil {
+		t.Fatalf("get binding: %v", err)
+	}
+	if binding.Email != newEmail {
+		t.Fatalf("expected binding email updated after admission, got %q", binding.Email)
+	}
+}
+
 // collisionUserStore wraps a real store.UserStore, deterministically
 // simulating the unique-email-collision window that a concurrent resolution
 // can hit in production without needing an actual race: the first
@@ -198,3 +346,4 @@ func TestGoogleIdentityResolver_CollisionWinner_DeniedFailClosed(t *testing.T) {
 		t.Fatalf("expected no external identity binding to be created on denial, lookup returned err=%v", lookupErr)
 	}
 }
+

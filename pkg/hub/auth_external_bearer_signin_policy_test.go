@@ -40,8 +40,8 @@ import (
 // Hub sign-in policy so it would deny that email. The external-bearer path's
 // own AllowedDomains gate still passes (the identity's domain is listed
 // there), but the resolver must still re-check the Hub policy on this
-// re-issuance and deny — proving the existing-binding branch is not
-// exempted the way it was before.
+// re-issuance and deny — confirming the existing-binding branch applies the
+// same policy check on every issuance.
 func TestExternalBearer_UserIDToken_ExistingBinding_PolicyAppliesOnReissuance(t *testing.T) {
 	kp := newGCVTestKeyPair("test-kid-1")
 	endpoints := newSAJWKSEndpoints(kp)
@@ -152,3 +152,4 @@ func TestExternalBearer_ServiceAccountIDToken_ExistingBinding_PreAuthorized_Susp
 		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
 	}
 }
+

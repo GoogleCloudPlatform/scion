@@ -1408,7 +1408,7 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 	// sign_in_policy.go). The sign-in policy was already checked above for
 	// both branches of this function, so preAuthorized=true here — the
 	// helper still enforces suspension unconditionally.
-	user, err = applyLiveSignInPolicy(ctx, s.signInPolicyDeps(), user, info.DisplayName, info.AvatarURL, true)
+	user, err = applyLiveSignInPolicy(ctx, s.signInPolicyDeps(), user, info.DisplayName, info.AvatarURL, true, signInPolicyPersistOpts{AlwaysPersist: true})
 	if err != nil {
 		return nil, err
 	}
@@ -1459,12 +1459,15 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		// preAuthorized=false and fails the authorize check — provisionUser
 		// itself already audited its denial before ever reaching the helper,
 		// so there is no double-audit for that path.
-		// auditDenied mirrors provisionUser's own denial-reason logic above.
-		// provisionUser calls the helper with preAuthorized=true, so this
-		// only fires from a caller (the resolver) that passes
-		// preAuthorized=false and fails the authorize check — provisionUser
-		// itself already audited its denial before ever reaching the helper,
-		// so there is no double-audit for that path.
+		//
+		// Volume note: the external-bearer path validates a cached credential
+		// on every request, so a token that keeps failing the sign-in policy
+		// writes one denial record per request for as long as the caller
+		// keeps presenting it. That is accepted deliberately: a policy
+		// denial is exactly the kind of event the audit trail exists to
+		// capture, an unauthorized caller retrying is expected to stop or be
+		// blocked at a layer above this one, and de-duplicating here would
+		// mean dropping legitimate repeat-denial records.
 		auditDenied: func(ctx context.Context, email string) {
 			reason := "not_on_allow_list"
 			if s.UserAccessMode() != "invite_only" {
