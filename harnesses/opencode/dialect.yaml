@@ -23,8 +23,7 @@
 #
 # Event coverage analysis against the full scion event grammar:
 #   session-start    <- session.created                    (direct match)
-#   session-end      <- session.error                       (error-path only; no clean-exit hook)
-#   agent-end        <- session.idle                        (agent turn completed)
+#   agent-end        <- session.idle, session.error         (see the session.error note below)
 #   tool-start       <- tool.execute.before                 (direct match)
 #   tool-end         <- tool.execute.after                  (direct match; fires on success only)
 #   prompt-submit    <- permission.replied                  (user/auto responded to a permission prompt)
@@ -34,8 +33,27 @@
 # Unmapped scion events (no OpenCode hook available):
 #   agent-start      - no hook fires when an agent turn begins
 #   subagent-end     - OpenCode has no subagent lifecycle concept
+#   session-end      - opencode has no clean-exit hook, and session.error is
+#                      deliberately NOT mapped here (see below), so this
+#                      dialect never emits session-end
 #   response-complete - no direct equivalent; session.idle covers turn end
 #   model-start      - no hook fires at model invocation start
+#
+# session.error maps to agent-end, not session-end. Before this bridge
+# rewrite, the keyed session.error hook never fired at all, so mapping it to
+# session-end (the design's original assumption, made before this event was
+# known to be reachable) would be a new regression, not a preserved
+# behaviour: session-end turns into hub PhaseStopped
+# (hooks/handlers/hub.go's EventSessionEnd case), and OpenCode's own
+# session.error is frequently recoverable (retried provider calls) or a
+# plain user abort (MessageAbortedError) -- opencode itself keeps running
+# afterwards (a real capture shows session.error followed by session.idle,
+# never session.error followed by process exit). agent-end is the closest
+# existing fit: it is already opencode's session.idle target, already
+# non-terminal (hub.go's EventAgentEnd case reports PhaseRunning/
+# ActivityWorking, not Stopped), and the event's error/reason fields are
+# still recorded on the span and log record regardless of which normalized
+# event name carries them.
 #
 # "message.part.updated.step-finish" is not an OpenCode wire event name; it
 # is scion-bridge.js's own key for a `message.part.updated` bus event whose
@@ -62,8 +80,10 @@ mappings:
     fields:
       session_id: session_id
 
+  # See the session.error note above: this intentionally maps to agent-end,
+  # not session-end.
   session.error:
-    event: session-end
+    event: agent-end
     fields:
       error: error
       reason: reason

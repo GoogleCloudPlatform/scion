@@ -425,3 +425,57 @@ func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
 		t.Errorf("token_type=cache_write total = %d, want 7", got)
 	}
 }
+
+// TestOpencodeDialectSessionErrorMapsToAgentEndNotSessionEnd guards a real
+// session.error event (bridge output derived from a real capture -- see the
+// literal payload below, produced by feeding run3's actual captured
+// session.error bus event through the real scion-bridge.js route()) against
+// ever mapping to session-end, which hooks/handlers/hub.go's EventSessionEnd
+// case turns
+// into hub PhaseStopped. OpenCode's own session.error is often recoverable
+// (a real capture shows session.error followed by session.idle, with
+// opencode continuing) or a plain user abort, so marking the whole agent
+// Stopped on it would be wrong. dialect.yaml now maps session.error to
+// agent-end instead -- the same target session.idle already used, and one
+// hub.go does not treat as terminal (EventAgentEnd reports
+// PhaseRunning/ActivityWorking).
+func TestOpencodeDialectSessionErrorMapsToAgentEndNotSessionEnd(t *testing.T) {
+	md := loadOpencodeDialect(t)
+
+	// The exact payload scion-bridge.js's route() emits for run3's real
+	// captured session.error event (mock model server returning HTTP 500,
+	// see the fixture's provenance), followed by the session.idle that
+	// really follows it in the same capture.
+	errorPayload := map[string]interface{}{
+		"hook_event_name": "session.error",
+		"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
+		"error":           "mock upstream failure",
+		"reason":          "error",
+	}
+	idlePayload := map[string]interface{}{
+		"hook_event_name": "session.idle",
+		"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
+	}
+
+	errorEvent, err := md.Parse(errorPayload)
+	if err != nil {
+		t.Fatalf("Parse(error): %v", err)
+	}
+	if errorEvent.Name != hooks.EventAgentEnd {
+		t.Errorf("session.error event.Name = %q, want %q", errorEvent.Name, hooks.EventAgentEnd)
+	}
+	if errorEvent.Name == hooks.EventSessionEnd {
+		t.Error("session.error must never map to session-end (would mark the agent Stopped on a recoverable error)")
+	}
+	if errorEvent.Data.Error != "mock upstream failure" {
+		t.Errorf("errorEvent.Data.Error = %q, want the real captured message", errorEvent.Data.Error)
+	}
+
+	idleEvent, err := md.Parse(idlePayload)
+	if err != nil {
+		t.Fatalf("Parse(idle): %v", err)
+	}
+	if idleEvent.Name != hooks.EventAgentEnd {
+		t.Errorf("session.idle event.Name = %q, want %q", idleEvent.Name, hooks.EventAgentEnd)
+	}
+}

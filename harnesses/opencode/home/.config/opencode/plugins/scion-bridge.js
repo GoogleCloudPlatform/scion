@@ -77,7 +77,12 @@ function numberOrZero(v) {
 // completion time: the capture shows a step-finish part can arrive some
 // time after its message's first `message.updated`, and a PATCH re-emit of
 // an already-handled part must still be deduped, so nothing here is safe to
-// evict "as soon as done".
+// evict "as soon as done". One accepted consequence: if a task-tool child
+// session is evicted from childSessionIds before that same child later goes
+// idle or errors, its event is treated as top-level (a spurious
+// session-start/agent-end pair). That needs more than MAX_CACHE_ENTRIES
+// other child sessions created in between -- for example a task resumed by
+// `task_id` much later in a very long-lived `opencode serve` process.
 const MAX_CACHE_ENTRIES = 4096;
 
 // evictOldest trims a Map or Set (both expose .size, .keys(), .delete()) down
@@ -128,14 +133,7 @@ export function route(state, event) {
     case 'session.idle':
       return routeSessionIdle(state, event);
     case 'session.error':
-      return [{
-        name: 'session.error',
-        data: {
-          session_id: event.properties?.sessionID,
-          error: getErrorString(event.properties?.error, 'Unknown error'),
-          reason: 'error',
-        },
-      }];
+      return routeSessionError(state, event);
     // Real runtime event names, confirmed against a live capture (npm
     // opencode-ai 1.18.33): "permission.asked" / "permission.replied", each
     // shaped as {properties: {id, sessionID, permission, patterns, ...}} /
@@ -189,6 +187,26 @@ function routeSessionIdle(state, event) {
   if (!sessionID) return [];
   if (state.childSessionIds.has(sessionID)) return [];
   return [{ name: 'session.idle', data: { session_id: sessionID } }];
+}
+
+// routeSessionError excludes a child session's error for the same reason as
+// routeSessionIdle: a subagent's error is not the parent agent's error, and
+// must not stand in for the parent's state. `session.error`'s own dialect
+// mapping (dialect.yaml) also deliberately targets agent-end, not
+// session-end -- see that file's comment -- but this filter applies
+// independently of what the event maps to, on the same principle as the
+// other two child-session filters.
+function routeSessionError(state, event) {
+  const sessionID = event.properties?.sessionID;
+  if (sessionID && state.childSessionIds.has(sessionID)) return [];
+  return [{
+    name: 'session.error',
+    data: {
+      session_id: sessionID,
+      error: getErrorString(event.properties?.error, 'Unknown error'),
+      reason: 'error',
+    },
+  }];
 }
 
 // routeMessageUpdated never emits a hook event by itself. It only updates

@@ -250,7 +250,7 @@ test('a synthetic non-zero cache_write step-finish maps through the bridge', () 
   assert.equal(emissions[0].data.cache_write_tokens, 7);
 });
 
-test('bridge caches evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
+test('bridge caches (liveMessageIds, modelByMessage) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
   const state = createBridgeState();
   const cap = 4096;
   for (let i = 0; i < cap + 10; i++) {
@@ -299,4 +299,90 @@ test('a session.created with no parentID (e.g. a fork) still fires session-start
   });
   assert.equal(emissions.length, 1);
   assert.equal(emissions[0].data.session_id, 'ses_no_parent');
+});
+
+test('a child session error is excluded, but a top-level session error still emits', () => {
+  // Labelled synthetic (not from a capture): pins that session.error is
+  // filtered for a task-tool child session the same way session.created and
+  // session.idle are, independent of dialect.yaml's own remapping of
+  // session.error away from session-end.
+  const state = createBridgeState();
+  const parentID = 'ses_synthetic_parent';
+  const childID = 'ses_synthetic_child';
+
+  route(state, { type: 'session.created', properties: { info: { id: parentID } } });
+  route(state, { type: 'session.created', properties: { info: { id: childID, parentID } } });
+
+  const childErrorEmissions = route(state, {
+    type: 'session.error',
+    properties: { sessionID: childID, error: { data: { message: 'child provider error' } } },
+  });
+  assert.deepEqual(childErrorEmissions, [], 'a child session error must not be routed');
+
+  const parentErrorEmissions = route(state, {
+    type: 'session.error',
+    properties: { sessionID: parentID, error: { data: { message: 'parent provider error' } } },
+  });
+  assert.equal(parentErrorEmissions.length, 1, 'a top-level session error must still be routed');
+  assert.match(parentErrorEmissions[0].data.error, /parent provider error/);
+});
+
+test('bridge caches (seenModelEnds, childSessionIds) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
+  const cap = 4096;
+
+  const modelEndState = createBridgeState();
+  for (let i = 0; i < cap + 10; i++) {
+    const sessionID = `ses_${i}`;
+    const messageID = `msg_${i}`;
+    route(modelEndState, {
+      type: 'message.updated',
+      properties: { info: { id: messageID, role: 'assistant', providerID: 'p', modelID: 'm', time: {} } },
+    });
+    route(modelEndState, {
+      type: 'message.part.updated',
+      properties: {
+        part: { id: `prt_${i}`, sessionID, messageID, type: 'step-finish', reason: 'stop', tokens: { total: 1, input: 1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } },
+      },
+    });
+  }
+  assert.ok(modelEndState.seenModelEnds.size <= cap, `seenModelEnds.size = ${modelEndState.seenModelEnds.size}, want <= ${cap}`);
+
+  const childState = createBridgeState();
+  for (let i = 0; i < cap + 10; i++) {
+    route(childState, {
+      type: 'session.created',
+      properties: { info: { id: `ses_child_${i}`, parentID: 'ses_parent' } },
+    });
+  }
+  assert.ok(childState.childSessionIds.size <= cap, `childSessionIds.size = ${childState.childSessionIds.size}, want <= ${cap}`);
+  assert.equal(childState.childSessionIds.has('ses_child_0'), false);
+  assert.equal(childState.childSessionIds.has(`ses_child_${cap + 9}`), true);
+});
+
+test('run5: child-session step-finish usage is still counted (not silently dropped)', () => {
+  const run5 = loadFixture().get('run5');
+  const stepFinishes = emissionsFor(run5, 'message.part.updated.step-finish');
+  assert.equal(stepFinishes.length, 4, 'expected 2 model-ends from the parent and 2 from the child');
+
+  const sessionCreatedRecords = run5.filter((r) => r.payload.type === 'session.created');
+  const parentID = sessionCreatedRecords[0].payload.properties.info.id;
+  const childID = sessionCreatedRecords[1].payload.properties.info.id;
+
+  const byInputTokens = (a, b) => a.data.input_tokens - b.data.input_tokens;
+  const childEmissions = stepFinishes.filter((e) => e.data.session_id === childID).sort(byInputTokens);
+  const parentEmissions = stepFinishes.filter((e) => e.data.session_id === parentID).sort(byInputTokens);
+  assert.equal(childEmissions.length, 2, 'expected 2 model-ends from the child session');
+  assert.equal(parentEmissions.length, 2, 'expected 2 model-ends from the parent session');
+
+  // Real captured values (the task mock's scripted usage): 200/10 then 250/8,
+  // for both the child (the subagent's own two steps) and the parent (its
+  // own two steps, driving the task tool then finishing).
+  assert.deepEqual(
+    childEmissions.map((e) => [e.data.input_tokens, e.data.output_tokens]),
+    [[200, 10], [250, 8]]
+  );
+  assert.deepEqual(
+    parentEmissions.map((e) => [e.data.input_tokens, e.data.output_tokens]),
+    [[200, 10], [250, 8]]
+  );
 });
