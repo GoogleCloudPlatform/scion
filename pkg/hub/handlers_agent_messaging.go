@@ -1539,16 +1539,36 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// The agent in the DM key must match the target agent; the user must match
 	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
 	// be spoofed).
+	//
+	// parseDMKeyIDs only recognizes the "dm:agent:<id>:user:<id>" shape — its
+	// second principal is always semantically a USER. R2 (A25.7, from p2a-u1
+	// FYI F1): the authenticated principal's KIND must also be "user", not
+	// just its ID. Without this, an agent sender authenticates with its own
+	// agent ID, and comparing IDs alone lets it pass a ThreadID such as
+	// "dm:agent:<target>:user:<itself>" — same UUID, wrong kind — because the
+	// numeric ID happens to match its own. That both passes this check AND
+	// gets registered verbatim as a phantom "user:<agent-uuid>" participant
+	// row by the new F1/F3 registration (A25.6), even though no third party
+	// gained anything (both slots already name the sender/recipient pair).
+	// The row is still semantically wrong: cross-project gates elsewhere
+	// match on PrincipalID alone, ignoring PrincipalKind. Requiring the
+	// authenticated principal to actually BE a user closes this — an agent
+	// sender has no legitimate reason to supply this ThreadID shape at all,
+	// since agent-to-agent DMs use a key shape parseDMKeyIDs doesn't even
+	// parse (it returns "", "" for "dm:agent:X:agent:Y", which already fails
+	// the dmAgentID/dmUserID comparison below).
 	if structuredMsg != nil && structuredMsg.ThreadID != "" &&
 		strings.HasPrefix(structuredMsg.ThreadID, "dm:") {
 		dmAgentID, dmUserID := parseDMKeyIDs(structuredMsg.ThreadID)
 		var authenticatedUserID string
+		isAuthenticatedUser := false
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			authenticatedUserID = user.ID()
+			isAuthenticatedUser = true
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			authenticatedUserID = agentIdent.ID()
 		}
-		if dmAgentID != agent.ID || dmUserID != authenticatedUserID {
+		if !isAuthenticatedUser || dmAgentID != agent.ID || dmUserID != authenticatedUserID {
 			BadRequest(w, "DM thread_id does not match the sender and recipient")
 			return
 		}
@@ -1851,9 +1871,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				}
 				// A25.6 F1/F3: register both DM principals as participants so
 				// the conversation is discoverable via `conversation list`
-				// (this is the handleAgentMessage no-ThreadID branch covering
-				// user->agent and agent->agent 1:1 sends, report-7-gteam-2a
-				// cases (a) and (b)).
+				// (this is handleAgentMessage's no-ConversationID branch,
+				// covering user->agent and agent->agent 1:1 sends,
+				// report-7-gteam-2a cases (a) and (b)). O3 (A25.7): despite
+				// the old name for this branch, it is NOT limited to a
+				// server-derived key — Case 1 of DeriveConversationKey (a
+				// caller-supplied "dm:" ThreadID) is reachable here too. That
+				// is safe only because the ownership check above (R2, A25.7)
+				// already verified the key names the authenticated sender
+				// (by kind AND id) and the target agent before this point.
 				keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
