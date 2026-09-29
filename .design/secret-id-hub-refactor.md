@@ -391,8 +391,19 @@ formula can never drift apart):
     and prefixed values to match once a ref-based authority determination
     has been made; see "Resync and concurrency" for why. Value equality is
     used only for the no-DB-record path, where there is no ref to establish
-    authority from. `--dry-run` shares this exact decision function, so it
-    reports precisely what a real `--delete-legacy` run would do.
+    authority from. `--dry-run` and the real run share the identical
+    decision (`canDeleteLegacyName`, via `PlanLegacyDeletion` and
+    `DeleteLegacySecretName`), including how each GCP error code from
+    reading the legacy name is classified (`legacyReadErrIsFatal`, shared
+    with `migrationCheck` and `LegacyStillPresent` — round-4 review finding
+    2): `NotFound`/`FailedPrecondition` are never fatal, and
+    `PermissionDenied` is fatal only for a record whose ref genuinely still
+    depends on reading the legacy name (not yet repaired). For the known
+    hub-scope signing keys with no DB record — or any record whose ref
+    already designates the prefixed name — a `PermissionDenied` legacy read
+    (e.g. after the legacy IAM grant has been removed per the removal
+    criterion below) is "nothing further to do," not a failure, in both
+    modes.
   - This is a human-mode-only CLI command (`cmd/cli_mode.go`
     `assistantDenied`) — not available to AI-assistant or in-container agent
     callers.
@@ -424,28 +435,33 @@ formula can never drift apart):
   - GCP Secret Manager has no conditional `AddSecretVersion`, so a
     concurrent write racing between the read of the authoritative value and
     the write to the prefixed name can't be prevented by the GCP SM API
-    alone. Immediately before writing, `planOrRepairRef` re-reads the DB
-    record and compares `(SecretRef, Version)` against what it read at the
-    start of the attempt; if either changed — a concurrent `Set()`, or an
-    old binary re-asserting the *same* ref string with a new value (`Version`
-    still bumps on every write, which is what catches this ABA case even
-    though the ref text didn't change) — the attempt is discarded and
-    retried with fresh reads (bounded, currently 3 attempts), rather than
-    writing a value that's already known to be stale. The ref update itself
-    is additionally a compare-and-swap (`store.UpdateSecretRefIfMatches`,
-    keyed on the exact ref string read at the start of the attempt) as a
-    second layer on top of that recheck.
-  - **What this guarantees, precisely**: a stale value read before a
-    concurrent write started is not written over that concurrent write's
-    result, because the recheck (or the CAS on the ref) will have observed
-    the change and aborted. It does **not** eliminate every race — there is
-    a residual window between the final recheck and the actual GCP SM write
-    where a *third* write could still land in between; two cross-system
-    operations (GCP SM and the DB) can't be made a single transaction. In
-    practice this window is narrow and the retry bound turns "stuck racing
-    forever" into a loud, re-runnable failure rather than a silent
-    clobber — but it is not a "never clobber, under any interleaving"
-    guarantee.
+    alone. Immediately before acting — including on the "repaired" path,
+    which performs no GCP write at all (round-4 review finding 1(a)) —
+    `planOrRepairRef` re-reads the DB record and compares `(SecretRef,
+    Version)` against what it read at the start of the attempt; if either
+    changed — a concurrent `Set()`, or an old binary re-asserting the *same*
+    ref string with a new value (`Version` still bumps on every write, which
+    is what catches this ABA case even though the ref text didn't change) —
+    the attempt is discarded and retried with fresh reads (bounded,
+    currently 3 attempts). The ref-update CAS
+    (`store.UpdateSecretRefIfMatches`) is *also* keyed on that same
+    `(SecretRef, Version)` pair, not the ref string alone (round-4 review
+    finding 1(b)): a rotation landing during the labels/`AddSecretVersion`
+    RPCs between the recheck and the CAS still fails the CAS's version
+    predicate and is retried, rather than silently applying.
+  - **What this guarantees, precisely**: any concurrent write that is
+    visible in the DB row — a changed `SecretRef`, or a changed `Version`
+    from any `UpsertSecret`, including a same-ref old-binary rotation — by
+    the time of the recheck or the CAS is detected and never silently
+    overwritten. This is narrower than "never clobbers a concurrent edit":
+    the residual window is a concurrent writer whose own `AddSecretVersion`
+    lands on the *prefixed* name itself between the final recheck and this
+    call's own `AddSecretVersion` — that write can briefly leave a stale
+    version as `latest`, even though the version-aware CAS then correctly
+    refuses to move the ref onto it. In this codebase only a new-binary
+    `Set()` writes the prefixed name directly, so this window is narrow, but
+    two cross-system operations (GCP SM and the DB) can't be made a single
+    transaction, so it isn't zero.
   - A record with a *stored* ref whose designated value is gone (`NotFound`)
     is reported as `ErrOrphanedRef`, distinct from `store.ErrNotFound` (no
     ref and no legacy-name value either — genuinely nothing to migrate).
@@ -476,10 +492,24 @@ formula can never drift apart):
   leaves a *stale* prefixed copy relative to the ref — this is exactly what
   the resync logic above corrects on the next `migrate-names` run or hub
   boot, not a manual "compare values" step for an operator to perform.
+  - **Known gap (round-4 review Consider 5, low-impact):** an old binary's
+    `Delete` during a rollback window removes the legacy name and the DB
+    row, but has no notion of the prefixed name, so it leaves that copy
+    behind. After rolling forward again, the no-record `Get` fallback
+    (`accessSecretByComputedName`) can find that orphaned prefixed copy and
+    serve a secret the user deleted. The blast radius is bounded — listings
+    come from the DB, so the orphan is invisible to `scion secret list` and
+    only reachable via a direct `Get` for that exact identity — but it is a
+    real gap, not fixed here. A future `migrate-names --delete-legacy` run
+    does not clean it up either, since there is no DB record to key off of.
 - **Removing the legacy fallback**: tracked in ptone/scion#2180, to be done
   one release after `migrate-names` has shipped and been run in production,
   once a fleet-wide `--dry-run` reports zero failures and zero pending
-  migrate/repair/resync plan lines.
+  migrate/repair/resync plan lines. **Check this before removing the legacy
+  IAM grant, not after** (round-4 review Consider 6): once the grant is gone,
+  `migrate-names` can no longer read legacy names at all, and a clean
+  `--dry-run` at that point only proves IAM is narrowed, not that every
+  secret was actually migrated first.
 
 See `pkg/secret/gcpbackend.go` (`secretNamePrefix`/`SecretNamePrefixForHubID`,
 `gcpSecretName`, `legacyGCPSecretName`, `MigrateNameForward`,
