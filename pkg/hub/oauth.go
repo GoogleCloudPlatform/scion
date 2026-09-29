@@ -1015,6 +1015,12 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 
 	email, err := requireVerifiedEmail(hubclient.OAuthProviderOIDC, userInfo.Email, userInfo.EmailVerified)
 	if err != nil {
+		if strings.TrimSpace(userInfo.Email) == "" {
+			// The shared message only names what's missing; OIDC configuration
+			// is the one case here where an operator can readily fix the
+			// upstream cause, so keep pointing at it.
+			return nil, fmt.Errorf("%w; ensure the 'email' scope is requested and the user has an email address configured in the identity provider", err)
+		}
 		return nil, err
 	}
 

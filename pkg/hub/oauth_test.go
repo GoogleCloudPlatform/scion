@@ -878,6 +878,9 @@ func TestOAuthService_GetOIDCUserInfo_MissingEmail(t *testing.T) {
 	if !strings.Contains(err.Error(), "did not return an email") {
 		t.Errorf("expected 'did not return an email' in error, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "'email' scope") {
+		t.Errorf("expected the 'email' scope configuration hint in error, got: %v", err)
+	}
 }
 
 func TestOAuthService_GetOIDCUserInfo_UnverifiedEmail(t *testing.T) {
