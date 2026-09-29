@@ -347,3 +347,49 @@ func TestGoogleIdentityResolver_CollisionWinner_DeniedFailClosed(t *testing.T) {
 	}
 }
 
+// TestGoogleIdentityResolver_CollisionWinner_InvitedActivatesConsistently is
+// an end-to-end regression on the unique-email collision-winner handback: an
+// invited winner must activate, be granted the correct role and hub-members
+// access, and have a binding created for it — the same outcome as every
+// other existing-record path, not just a suspension check.
+func TestGoogleIdentityResolver_CollisionWinner_InvitedActivatesConsistently(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	ctx := context.Background()
+	winnerID := uuid.New().String()
+	invitedBy := "admin@example.com"
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID:        winnerID,
+		Email:     identity.Email,
+		Role:      store.UserRoleMember, // placeholder role on an invited row
+		Status:    store.UserStatusInvited,
+		InvitedBy: &invitedBy,
+		Created:   time.Now(),
+	}); err != nil {
+		t.Fatalf("seed invited winner: %v", err)
+	}
+
+	resolver := NewGoogleIdentityResolver(&collisionUserStore{UserStore: h.store}, h.extStore, h.srv.isUserAuthorized, nil, nil)
+	resolver.SetSignInPolicyDeps(h.srv.signInPolicyDeps())
+
+	user, err := resolver.Resolve(ctx, identity, ResolvePolicy{})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if user.ID != winnerID {
+		t.Fatalf("expected the collision winner to be reused, got %q", user.ID)
+	}
+	if user.Status != store.UserStatusActive {
+		t.Fatalf("expected the invited winner to activate, got status=%q", user.Status)
+	}
+	if user.Role != store.UserRoleMember {
+		t.Fatalf("expected role %q, got %q", store.UserRoleMember, user.Role)
+	}
+	if !isHubMember(t, h.store, winnerID) {
+		t.Error("expected the activated winner to be granted hub-members access")
+	}
+	if _, lookupErr := h.extStore.GetExternalIdentity(ctx, "google", googleCanonicalIssuer, identity.Subject); lookupErr != nil {
+		t.Errorf("expected a binding to be created for the collision winner: %v", lookupErr)
+	}
+}

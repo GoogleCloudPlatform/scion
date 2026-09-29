@@ -153,3 +153,53 @@ func TestExternalBearer_ServiceAccountIDToken_ExistingBinding_PreAuthorized_Susp
 	}
 }
 
+// TestExternalBearer_ServiceAccountIDToken_ExistingBinding_PreAuthorized_ActiveAdmitted
+// is the positive half of PreAuthorized coverage on the existing-binding
+// branch: an active service-account principal admitted by
+// allowed_gcp_projects is still admitted against a deny-all Hub policy — the
+// project allowlist is itself the authorization decision on every issuance,
+// not just at first link.
+func TestExternalBearer_ServiceAccountIDToken_ExistingBinding_PreAuthorized_ActiveAdmitted(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	// A deny-all Hub sign-in policy: PreAuthorized must still admit the SA
+	// principal.
+	h := newSignInPolicyHarness(t, ServerConfig{
+		UserAccessMode:    "domain_restricted",
+		AuthorizedDomains: []string{"not-this-project.example.com"},
+	}, newTestValidator(endpoints))
+
+	const email = "worker@my-a2a-project.iam.gserviceaccount.com"
+	const sub = "111122223333444455557"
+	ctx := context.Background()
+	userID := uuid.New().String()
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed active SA user: %v", err)
+	}
+	now := time.Now()
+	if err := h.extStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID: uuid.New().String(), Provider: "google", Issuer: googleCanonicalIssuer, Subject: sub,
+		UserID: userID, Email: email, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	cfg := newExternalBearerConfigWithSA(t, newTestValidator(endpoints), h.resolver, []string{"my-a2a-project"})
+
+	claims := serviceAccountIDTokenClaims(email)
+	claims["sub"] = sub
+	claims["azp"] = sub
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: body=%s", w.Code, w.Body.String())
+	}
+	if !result.reached {
+		t.Fatal("expected the handler to be reached for an admitted SA principal")
+	}
+}
