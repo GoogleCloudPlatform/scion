@@ -391,3 +391,82 @@ func TestAgentCreate_ServiceAccountParentAuthority(t *testing.T) {
 		assert.Empty(t, d.DeniedBy, "the agent's own authority denies: reason %q", d.Reason)
 	})
 }
+
+// agentCreatorDefaultSAFixture gives the shared fixture's caller the full
+// agent role and an assigned service account, and sets the project default
+// to a verified account that the creating account may act as.
+func agentCreatorDefaultSAFixture(t *testing.T, hubScoped bool) *bypassAgentsFixture {
+	t.Helper()
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	ensureHubMembership(ctx, f.store, f.owner.ID)
+	callerSA := &store.GCPServiceAccount{
+		ID: tid("dsa-caller-sa"), Scope: store.ScopeProject, ScopeID: f.proj.ID,
+		Email: "dsa-caller-sa@proj.iam.gserviceaccount.com", ProjectID: "gcp-proj",
+		Verified: true, CreatedBy: tid("dsa-someone"), CreatedAt: time.Now(),
+	}
+	require.NoError(t, f.store.CreateGCPServiceAccount(ctx, callerSA))
+	f.caller.AppliedConfig = &store.AgentAppliedConfig{
+		AgentRole: string(AgentRoleFull),
+		GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign,
+			ServiceAccountID: callerSA.ID, ServiceAccountEmail: callerSA.Email},
+	}
+	require.NoError(t, f.store.UpdateAgent(ctx, f.caller))
+	var target *store.GCPServiceAccount
+	if hubScoped {
+		target = hubScopedSACreatedBy(t, f, tid("dsa-registrar"), true)
+	} else {
+		target = bypassAgentsCreateSA(t, f, f.proj.ID, true)
+	}
+	setProjectDefaultSAAnnotations(t, f, target.ID)
+	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(target.Email))
+	return f
+}
+
+// TestAgentCreate_AgentCreatorDefaultServiceAccountScope pins the default
+// service-account rung for an agent creator: a project-scoped default is
+// assigned, and a hub-scoped default is refused with the service-account
+// assign denial, on both the HTTP create path and scheduled dispatch. The
+// hub-member assign grant applies to user principals only.
+func TestAgentCreate_AgentCreatorDefaultServiceAccountScope(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		hubScoped bool
+		allowed   bool
+	}{
+		{"project-scoped default", false, true},
+		{"hub-scoped default", true, false},
+	} {
+		t.Run("http/"+tc.name, func(t *testing.T) {
+			f := agentCreatorDefaultSAFixture(t, tc.hubScoped)
+			rec := f.asAgent(t, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
+				CreateAgentRequest{Name: "dsa-child"}, ScopesForRole(AgentRoleFull)...)
+			if tc.allowed {
+				require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "assign this GCP service account")
+			_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "dsa-child")
+			assert.ErrorIs(t, err, store.ErrNotFound)
+		})
+		t.Run("scheduled/"+tc.name, func(t *testing.T) {
+			f := agentCreatorDefaultSAFixture(t, tc.hubScoped)
+			ctx := context.Background()
+			f.srv.createProjectMembersGroup(ctx, f.proj)
+			require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
+			err := f.srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+				ID: "evt-dsa", ProjectID: f.proj.ID, EventType: "dispatch_agent",
+				Payload: `{"agentName":"dsa-sched","task":"t"}`, CreatedBy: f.caller.ID,
+			})
+			if tc.allowed {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "assign this GCP service account")
+			_, getErr := f.store.GetAgentBySlug(ctx, f.proj.ID, "dsa-sched")
+			assert.ErrorIs(t, getErr, store.ErrNotFound)
+		})
+	}
+}
