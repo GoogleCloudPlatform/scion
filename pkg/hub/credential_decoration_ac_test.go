@@ -313,6 +313,138 @@ func TestCredentialDecoration_AC3_MintRejectsUnsafeMetadata(t *testing.T) {
 	}
 }
 
+// TestCredentialDecoration_AC_MetadataAuditAndAPIEcho closes review-3 finding
+// 2 (non-blocking): the credential_create mutation-audit AfterSummary must
+// record has_purpose/label_keys, and never the purpose/label values
+// themselves (plan §2.4); and the token create/list API must echo
+// purpose/labels when set, and omit them (not render empty strings/maps)
+// when not.
+func TestCredentialDecoration_AC_MetadataAuditAndAPIEcho(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("e1-metadata-echo-p")
+	ownerID := tid("e1-metadata-echo-o")
+	rs4Project(t, s, projectID, ownerID)
+	rs4AddProjectRole(t, s, DevUserID, projectID, store.ProjectRoleOwner)
+
+	// --- With metadata ---
+	codeWith, respWith := e1MintTokenViaAPI(t, srv, map[string]interface{}{
+		"name": "with-metadata", "projectId": projectID, "scopes": []string{"agent:read"},
+		"purpose": "ci automation", "labels": map[string]string{"env": "prod"},
+	})
+	if codeWith != http.StatusCreated {
+		t.Fatalf("mint with-metadata failed: %d %+v", codeWith, respWith)
+	}
+
+	// (a) Audit: has_purpose/label_keys present, values absent.
+	ctx := context.Background()
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: "credential_create",
+		Limit:        50,
+	})
+	if err != nil {
+		t.Fatalf("failed to list mutation audits: %v", err)
+	}
+	// AfterSummary carries the token's server-assigned ID, not its name, so
+	// identify the with-metadata record by the presence of label_keys (only
+	// appendCredentialMetadataAuditFields adds that key, and only when
+	// purpose or labels were supplied).
+	var withMetadataAudit *store.MutationAuditRecord
+	for _, a := range audits {
+		if strings.Contains(a.AfterSummary, `"label_keys"`) {
+			withMetadataAudit = a
+			break
+		}
+	}
+	if withMetadataAudit == nil {
+		t.Fatalf("no credential_create mutation audit with metadata fields found among %d records", len(audits))
+	}
+	var afterFields map[string]interface{}
+	if err := json.Unmarshal([]byte(withMetadataAudit.AfterSummary), &afterFields); err != nil {
+		t.Fatalf("AfterSummary is not valid JSON: %v: %q", err, withMetadataAudit.AfterSummary)
+	}
+	if hasPurpose, _ := afterFields["has_purpose"].(bool); !hasPurpose {
+		t.Errorf("expected has_purpose:true in AfterSummary, got %v", afterFields["has_purpose"])
+	}
+	labelKeys, ok := afterFields["label_keys"].([]interface{})
+	if !ok || len(labelKeys) != 1 || labelKeys[0] != "env" {
+		t.Errorf(`expected label_keys:["env"] in AfterSummary, got %v`, afterFields["label_keys"])
+	}
+	if strings.Contains(withMetadataAudit.AfterSummary, "ci automation") || strings.Contains(withMetadataAudit.AfterSummary, "prod") {
+		t.Fatalf("AfterSummary leaked a purpose/label VALUE, not just its presence: %q", withMetadataAudit.AfterSummary)
+	}
+
+	// (b) API echo: POST response carries purpose/labels.
+	accessToken, ok := respWith["accessToken"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response missing accessToken object: %+v", respWith)
+	}
+	if got, _ := accessToken["purpose"].(string); got != "ci automation" {
+		t.Errorf("expected accessToken.purpose=%q, got %v", "ci automation", accessToken["purpose"])
+	}
+	labelsWire, ok := accessToken["labels"].(map[string]interface{})
+	if !ok || labelsWire["env"] != "prod" {
+		t.Errorf(`expected accessToken.labels={"env":"prod"}, got %v`, accessToken["labels"])
+	}
+
+	// --- Without metadata: purpose/labels keys must be entirely absent
+	// (omitempty), not rendered as "" / {} / null.
+	codeWithout, respWithout := e1MintTokenViaAPI(t, srv, map[string]interface{}{
+		"name": "no-metadata", "projectId": projectID, "scopes": []string{"agent:read"},
+	})
+	if codeWithout != http.StatusCreated {
+		t.Fatalf("mint no-metadata failed: %d %+v", codeWithout, respWithout)
+	}
+	accessTokenNoMeta, ok := respWithout["accessToken"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response missing accessToken object: %+v", respWithout)
+	}
+	if _, present := accessTokenNoMeta["purpose"]; present {
+		t.Errorf("expected no purpose key for a no-metadata token, got %v", accessTokenNoMeta["purpose"])
+	}
+	if _, present := accessTokenNoMeta["labels"]; present {
+		t.Errorf("expected no labels key for a no-metadata token, got %v", accessTokenNoMeta["labels"])
+	}
+
+	// (b, continued) GET list echoes the same shape.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/auth/tokens", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list tokens failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var listResp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("failed to parse list response: %v", err)
+	}
+	items, ok := listResp["items"].([]interface{})
+	if !ok {
+		t.Fatalf("list response missing items array: %+v", listResp)
+	}
+	var foundWith, foundWithout bool
+	for _, raw := range items {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch item["name"] {
+		case "with-metadata":
+			foundWith = true
+			if got, _ := item["purpose"].(string); got != "ci automation" {
+				t.Errorf("list: expected purpose=%q for with-metadata, got %v", "ci automation", item["purpose"])
+			}
+		case "no-metadata":
+			foundWithout = true
+			if _, present := item["purpose"]; present {
+				t.Errorf("list: expected no purpose key for no-metadata, got %v", item["purpose"])
+			}
+			if _, present := item["labels"]; present {
+				t.Errorf("list: expected no labels key for no-metadata, got %v", item["labels"])
+			}
+		}
+	}
+	if !foundWith || !foundWithout {
+		t.Fatalf("list response did not contain both minted tokens: foundWith=%v foundWithout=%v, items=%+v", foundWith, foundWithout, items)
+	}
+}
+
 // AC3 (legacy rows): a row with a control character in its name (created
 // before validation existed, e.g. by direct store access) still
 // authenticates, keeps the raw name pre-render, and renders it sanitized.

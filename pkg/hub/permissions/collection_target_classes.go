@@ -147,7 +147,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// authorization call site: evaluateSAAssignment/authorizeSAAssignment
 	// (sa_assign_gate.go, invoked from handlers_agents_core.go during agent
 	// create/patch) authorizes using gcpServiceAccountResource(sa)
-	// (capabilities.go:150-163), whose ID is the EXISTING gcp_service_account
+	// (gcpServiceAccountResource, capabilities.go), whose ID is the EXISTING gcp_service_account
 	// being assigned and whose ParentType/ParentID (when set) is that SA's
 	// OWN scope — NOT the new agent being created/patched. assign always
 	// targets an existing SA instance, so its entry is empty (never

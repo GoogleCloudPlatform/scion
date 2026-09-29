@@ -76,9 +76,10 @@ func decodeErrorCode(t *testing.T, body []byte) string {
 // handleAgentPTY specifically, proven by its EXACT signature for an
 // authenticated, authorized, non-upgrade request against an agent with no
 // runtime broker configured (422 ErrCodeNoRuntimeBroker) — a status/code
-// pair no other handler on this mux produces. The old /attach pattern is no
-// longer a recognized agent sub-action at all and falls through to the
-// generic, POST-only action dispatcher (405 for GET).
+// pair which a GET on this path only produces when it reaches the PTY
+// handler. The /attach pattern is not a recognized agent sub-action; it
+// falls through to the generic, POST-only action dispatcher (405 for
+// GET).
 func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -100,7 +101,7 @@ func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 		t.Errorf("GET %s: error code = %q, want %q", path, code, ErrCodeNoRuntimeBroker)
 	}
 
-	// The old /attach pattern is not one of handleAgentByID's recognized
+	// The /attach pattern is not one of handleAgentByID's recognized
 	// sub-resources (deliberately NOT read from the catalog -- this proves
 	// the absence of a catalog entry for it), so it falls through to
 	// handleAgentAction, which is POST-only and returns 405 for GET -- the
@@ -111,8 +112,8 @@ func TestCatalogRoute_AgentAttachIsPTYNotAttach(t *testing.T) {
 	}
 }
 
-// portProxyTestAgent creates a project, an agent, and (if grantPermission is
-// non-empty) a project-scoped role binding granting it to authorizedUserID.
+// portProxyTestAgent creates a project and an agent within it, and returns
+// both.
 func portProxyTestAgent(t *testing.T, s store.Store, seed string) (project *store.Project, agent *store.Agent) {
 	t.Helper()
 	ctx := context.Background()
@@ -121,6 +122,41 @@ func portProxyTestAgent(t *testing.T, s store.Store, seed string) (project *stor
 	agent = &store.Agent{ID: tid("cpp-agent-" + seed), Slug: "cpp-agent-" + seed, Name: "a", ProjectID: project.ID, Phase: string(state.PhaseRunning)}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	return project, agent
+}
+
+// portProxyEntryPoints returns authzop.Catalog's agent.portaccess entry
+// points that reach proxyAgentPort (i.e. contain "/proxy"), asserting the
+// exact expected method/pattern set so a catalog edit that dropped the
+// proxy entries (leaving only the bare /ports list entry) would fail this
+// assertion instead of silently iterating zero times.
+func portProxyEntryPoints(t *testing.T) []authzop.EntryPoint {
+	t.Helper()
+	var proxy []authzop.EntryPoint
+	for _, ep := range catalogEntryPoints(t, "agent.portaccess") {
+		if strings.Contains(ep.Pattern, "/proxy") {
+			proxy = append(proxy, ep)
+		}
+	}
+	wantMethods := map[string]bool{"GET": false, "POST": false, "PUT": false, "DELETE": false}
+	sawSubpath := false
+	for _, ep := range proxy {
+		if strings.Contains(ep.Pattern, "{subpath}") {
+			sawSubpath = true
+			continue
+		}
+		if _, ok := wantMethods[ep.Method]; ok {
+			wantMethods[ep.Method] = true
+		}
+	}
+	for method, seen := range wantMethods {
+		if !seen {
+			t.Fatalf("authzop.Catalog's agent.portaccess is missing a %s entry point on the bare .../proxy pattern", method)
+		}
+	}
+	if !sawSubpath {
+		t.Fatal("authzop.Catalog's agent.portaccess is missing a .../proxy/{subpath} entry point")
+	}
+	return proxy
 }
 
 // TestCatalogRoute_PortProxy_AgentSelfAccess drives every EntryPoint
@@ -143,10 +179,7 @@ func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{"port": 4000}, token)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	for _, ep := range catalogEntryPoints(t, "agent.portaccess") {
-		if !strings.Contains(ep.Pattern, "/proxy") {
-			continue // the bare /ports list entry doesn't reach proxyAgentPort
-		}
+	for _, ep := range portProxyEntryPoints(t) {
 		ep := ep
 		path := substitutePattern(ep.Pattern, agent.ID, "4000", "some/sub/path")
 		t.Run(ep.Method+"_"+ep.Pattern, func(t *testing.T) {
@@ -195,10 +228,7 @@ func TestCatalogRoute_PortProxy_UserSession(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, unauthorizedUser))
 	createTestUserWithProjectRole(t, s, unauthorizedUser.ID, unauthorizedUser.Email, agent.ProjectID, store.ProjectRoleMember)
 
-	for _, ep := range catalogEntryPoints(t, "agent.portaccess") {
-		if !strings.Contains(ep.Pattern, "/proxy") {
-			continue
-		}
+	for _, ep := range portProxyEntryPoints(t) {
 		ep := ep
 		path := substitutePattern(ep.Pattern, agent.ID, "4001", "some/sub/path")
 

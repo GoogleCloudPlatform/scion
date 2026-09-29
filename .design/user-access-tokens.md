@@ -359,9 +359,13 @@ purely descriptive metadata to a token at mint time, so that reused-by-the-
 same-human tokens are distinguishable in logs and audit records — without
 ever treating that metadata as a verified actor, ancestry, or authorization
 signal. The authenticated principal is always the human user; a label such
-as `nightly-cleanup` is a hint for a log reader, never an agent identity, and
-authorization code is mechanically prevented from branching on it (see
-`pkg/hub/credential_decoration_authz_guard_test.go`).
+as `nightly-cleanup` is a hint for a log reader, never an agent identity. A
+static guard test scans every production file in `pkg/hub` for the known
+ways decoration can be carried or read — the type itself, a field/embed/alias
+declaration naming it, or a call to one of its rendering functions — and
+fails if any of those appears outside the documented carriage and rendering
+points, so authorization code cannot branch on it without the guard catching
+the new reference (see `pkg/hub/credential_decoration_authz_guard_test.go`).
 
 ### Fields
 
