@@ -25,28 +25,12 @@ import (
 	"testing"
 )
 
-// TestDispatchStateEnumeration is the durable guard for nc-promote-busy
-// (round 2, R2): it uses go/ast to find every `&store.Message{...}`
-// composite literal in non-test .go files under pkg/hub and requires each
-// one to set the DispatchState field explicitly.
-//
-// Why this matters: an unset DispatchState silently falls through to the
-// Ent schema's "pending" default (pkg/ent/schema/message.go), and unless
-// something later explicitly transitions the row, it is picked up by
-// ExpireStuckPendingMessages (which flips it to "failed" after 24h) and then
-// PurgeFailedMessages (which hard-deletes it after 7 days). Two production
-// call sites (messagebroker.go:deliverToUser and
-// handlers_agent_messaging.go's deliveryUserDirect fallback, plus
-// notifications.go:createInboxMessage and the group-set-to-user site) had
-// exactly this omission — the persisted row WAS the delivery, but nothing
-// ever stamped it "dispatched" — which made "Promote to thread" fail
-// forever and, worse, put every one of those rows on a silent 7-day
-// deletion clock. Every current literal sets DispatchState explicitly
-// (agent_dm_operation.go's ExecuteAgentDM is the one intentional exception
-// in value, not presence: it writes MessageDispatchPending as a durable
-// dispatch intent per #1689, transitioned forward once the broker actually
-// accepts or rejects it). A new call site that omits the field entirely
-// must fail this test, not ship silently.
+// TestDispatchStateEnumeration is the durable guard for nc-promote-busy: a
+// go/ast scan of every `&store.Message{...}` literal in non-test pkg/hub
+// files, failing if any omits DispatchState or sets it to "" — both fall
+// through to Ent's "pending" default and, if nothing transitions the row,
+// onto the sweep-then-purge deletion path. See the investigation note for
+// the full incident writeup.
 func TestDispatchStateEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
@@ -94,9 +78,18 @@ func TestDispatchStateEnumeration(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "DispatchState" {
-					return true // found it on this literal — done
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok || key.Name != "DispatchState" {
+					continue
 				}
+				// A literal empty string is the same as omitting the field
+				// (CreateMessage only calls SetDispatchState when non-empty,
+				// pkg/store/entadapter/message_store.go), so it must not
+				// satisfy the guard.
+				if isEmptyStringLit(kv.Value) {
+					break
+				}
+				return true // found a non-empty value on this literal — done
 			}
 
 			unset = append(unset, litSite{
@@ -135,4 +128,10 @@ func isStoreMessageType(expr ast.Expr) bool {
 	}
 	ident, ok := sel.X.(*ast.Ident)
 	return ok && ident.Name == "store"
+}
+
+// isEmptyStringLit returns true if expr is the literal `""`.
+func isEmptyStringLit(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && lit.Value == `""`
 }
