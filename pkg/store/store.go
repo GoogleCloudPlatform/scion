@@ -1312,9 +1312,20 @@ type ScheduleStore interface {
 	// ListSchedules returns schedules matching the filter criteria.
 	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
 
-	// UpdateSchedule updates an existing schedule (name, cron_expr, payload, status).
-	// Returns ErrNotFound if the schedule doesn't exist.
-	UpdateSchedule(ctx context.Context, schedule *Schedule) error
+	// UpdateSchedule updates an existing schedule's mutable fields (name,
+	// cron_expr, event_type, payload, status, next_run_at). Returns
+	// ErrNotFound if the schedule doesn't exist.
+	//
+	// When attribution is non-nil, the same write also replaces
+	// schedule.InitiatorAttribution, conditioned on the schedule's current
+	// authorization_revision matching attribution.PrevRevision (or being
+	// NULL, when PrevRevisionKnown is false) — an optimistic-concurrency
+	// guard (ruling Q2; review R2/R3) that stops a stale read from silently
+	// reverting a concurrent re-attribution. Returns ErrRevisionConflict if
+	// attribution is non-nil and no row matched that condition. When
+	// attribution is nil, InitiatorAttribution columns are left completely
+	// untouched, so a metadata-only update can never affect them.
+	UpdateSchedule(ctx context.Context, schedule *Schedule, attribution *ScheduleAttributionUpdate) error
 
 	// UpdateScheduleStatus updates only the status of a schedule.
 	// Returns ErrNotFound if the schedule doesn't exist.

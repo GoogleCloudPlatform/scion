@@ -1931,6 +1931,23 @@ const (
 	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
 )
 
+// ScheduleAttributionUpdate carries a conditional, optimistic-concurrency
+// attribution replacement for UpdateSchedule (ruling Q2; review R2/R3). A
+// stale read must never be able to revert a concurrent re-attribution or its
+// revision, so the write is conditioned on the revision the caller actually
+// read.
+type ScheduleAttributionUpdate struct {
+	// Attribution is the new InitiatorAttribution to persist.
+	Attribution InitiatorAttribution
+	// PrevRevision is the AuthorizationRevision the caller read before
+	// deciding to re-attribute. Ignored when PrevRevisionKnown is false.
+	PrevRevision int
+	// PrevRevisionKnown is false for a never-attributed or legacy schedule
+	// (authorization_revision IS NULL); the store conditions the write on
+	// that instead of PrevRevision in that case.
+	PrevRevisionKnown bool
+}
+
 // =============================================================================
 // Scheduled Events (One-Shot Timers)
 // =============================================================================
@@ -1951,8 +1968,12 @@ type ScheduledEvent struct {
 
 	// InitiatorAttribution is set at authoring time (one-shot create) or
 	// copied from the parent schedule at each recurrence (E.2b). See the
-	// type doc above.
-	InitiatorAttribution
+	// type doc above. json:"-" (review R6): nothing in the brief or plan
+	// asks for wire exposure, and a token's descriptive metadata (name,
+	// purpose, labels, boundary) is otherwise shown only to its owner.
+	// Callers that need it read the row from the store; B.3 and E.2b's own
+	// tests read the embedded struct field directly.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -1998,8 +2019,9 @@ type Schedule struct {
 	// InitiatorAttribution is set at authoring time and replaced atomically
 	// (together with AuthorizationRevision) whenever a fully reauthorized
 	// mutation changes future dispatch (E.2b, ruling Q2). CreatedBy is never
-	// overwritten by a re-attribution. See the type doc above.
-	InitiatorAttribution
+	// overwritten by a re-attribution. See the type doc above. json:"-"
+	// (review R6): see ScheduledEvent's field doc above for why.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduleStatus constants
