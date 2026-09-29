@@ -55,6 +55,25 @@ const (
 	ErrCodeTemplateError      = "template_error"
 	ErrCodeSkillResolution    = "skill_resolution_failed"
 
+	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
+	// verified as safe because a runtime process restart dropped the
+	// in-memory record needed to tell "not found" apart from "exists, but
+	// unidentifiable." Stable within this broker's own HTTP API, but what a
+	// hub or CLI caller sees differs by which endpoint triggered it:
+	//   - delete: the hub re-codes this broker's 409 as its own generic
+	//     "conflict" error (pkg/hub/handlers_agents_core.go, the
+	//     errors.As(err, &se) && se.StatusCode == http.StatusConflict check
+	//     around its DispatchAgentDelete call), so a caller sees this code's
+	//     message text, not the code itself;
+	//   - stop: the hub's stop dispatch (pkg/hub/handlers_agent_lifecycle.go,
+	//     the AgentActionStop case) has no equivalent check — every
+	//     DispatchAgentStop error, this one included, becomes a generic 502
+	//     "runtime_error" before the CLI sees it, so this 409 is not even
+	//     distinguishable as a conflict there today.
+	// Either way this constant lets broker-level callers and tests branch on
+	// it, not (yet) the hub or the CLI.
+	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
 	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
@@ -134,6 +153,16 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// AgentIdentityUnknown writes a 409 Conflict response with the stable
+// ErrCodeAgentIdentityUnknown code for a delete/stop that a runtime process
+// restart made impossible to verify as safe. message must stay generic —
+// it must not name any runtime-specific scope (e.g. a namespace) or point
+// at a runtime-specific document; a caller's own log line carries those
+// details instead (see agentIdentityUnknownError).
+func AgentIdentityUnknown(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeAgentIdentityUnknown, message, nil)
 }
 
 // RuntimeLogsUnsupported writes a 501 Not Implemented response with the

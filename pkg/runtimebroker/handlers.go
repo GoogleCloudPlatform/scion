@@ -306,9 +306,8 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 // makes). ok is false when no live instance exists yet for rtType — most
 // commonly an auxiliary runtime type no request has resolved yet — and
 // callers must leave the capability unknown in that case rather than guess
-// from the type string alone (a named profile on a broker with a different
-// default type is not "probably fine" just because it's not the default
-// type).
+// from the type string alone (a substrate profile on a docker-default
+// broker is not "probably fine" just because it's not the default type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
 		if s.runtime == nil {
@@ -1810,6 +1809,18 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			RuntimeError(w, "Failed to delete agent: "+err.Error())
 			return
 		}
+		if errors.Is(err, errAgentIdentityUnknown) {
+			logArgs := []any{"agent_id", id, "project_id", projectID, "error", err}
+			var idErr *agentIdentityUnknownError
+			if errors.As(err, &idErr) {
+				// The prober-supplied, runtime-specific scope is logged
+				// here only; AgentIdentityUnknown's HTTP body never names it.
+				logArgs = append(logArgs, logKeyRuntimeScope, idErr.Scope, "recordless_actors", idErr.Names)
+			}
+			s.agentLifecycleLog.Warn("Agent delete: agent identity unknown after a runtime process restart", logArgs...)
+			AgentIdentityUnknown(w, err.Error())
+			return
+		}
 		Conflict(w, "Failed to delete agent: "+err.Error())
 		return
 	}
@@ -2350,6 +2361,36 @@ func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID stri
 	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
 }
 
+// hasRecordlessProber reports whether the default runtime or any currently
+// registered auxiliary runtime implements the optional RecordlessActorProber
+// capability. stopAgent uses this to decide whether an unresolved target is
+// worth probing for record-less actors at all — unlike allManagers() (built,
+// sorted, and used only once the probe actually runs), this doesn't build or
+// sort the full manager list, so a broker with no prober never pays for
+// either on an unresolved stop.
+func (s *Server) hasRecordlessProber() bool {
+	if am, ok := s.manager.(*agent.AgentManager); ok && am.Runtime != nil {
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
+			return true
+		}
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+	for _, aux := range s.auxiliaryRuntimes {
+		if aux.Manager == nil {
+			continue
+		}
+		am, ok := aux.Manager.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -2389,6 +2430,50 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		return
 	}
 	if target == "" {
+		// Before treating an unresolved target as an idempotent no-op (the
+		// generic behaviour every runtime relies on), check whether a
+		// runtime process restart left at least one record-less actor in
+		// the runtime's own scope for this project (the optional
+		// RecordlessActorProber capability). Only runtimes that implement
+		// that capability take part, so every other runtime's Stop
+		// behaviour here is unchanged. Scoped to projectID != "" for the
+		// same reason as resolveDeleteTarget's equivalent check: a
+		// project-blind stop (solo/CLI) is unaffected, and a
+		// genuinely-absent slug in a project with no record-less actors
+		// still falls through to the idempotent 202 below.
+		//
+		// projectID != "" is, today, always true by the time control
+		// reaches here: projectScopedTarget only returns "" for a non-empty
+		// projectID (an empty projectID falls back to returning id itself,
+		// per its own doc comment). Kept anyway as defence-in-depth against
+		// a future change to projectScopedTarget's contract.
+		//
+		// hasRecordlessProber() gates the probe so a broker with no
+		// registered prober doesn't pay for allManagers() (lock + sort) and
+		// recordlessActorProbe's manager loop on every unresolved stop, for
+		// a type assertion that can never succeed.
+		if projectID != "" && s.hasRecordlessProber() {
+			managers := s.allManagers()
+			scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+			if perr != nil {
+				span.SetStatus(codes.Error, perr.Error())
+				// Same rule as the projectScopedTarget error above: perr may
+				// carry a raw runtime error; log it, keep the body fixed.
+				s.agentLifecycleLog.Warn("Agent stop: record-less actor probe failed", "agent_id", id, "project_id", projectID, "error", perr)
+				RuntimeError(w, "Failed to stop agent")
+				return
+			}
+			if len(recordless) > 0 {
+				// bodyMsg is generic and carries no runtime-specific scope;
+				// the prober-supplied scope is logged below only, never in
+				// the HTTP body.
+				bodyMsg := fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(recordless))
+				s.agentLifecycleLog.Warn("Agent stop: agent identity unknown after a runtime process restart",
+					"agent_id", id, "project_id", projectID, logKeyRuntimeScope, scope, "recordless_actors", recordless, "error", bodyMsg)
+				AgentIdentityUnknown(w, bodyMsg)
+				return
+			}
+		}
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
 			"phase", string(state.PhaseStopped))
@@ -4182,9 +4267,12 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 }
 
 // allManagers returns the default manager plus every distinct auxiliary
-// runtime's manager, in deterministic (sorted-by-identity) order. Used by
-// resolveDeleteTarget to search every registered runtime rather than only
-// the one a slug-based lookup happens to resolve to first.
+// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// resolveDeleteTarget and the stop path's record-less-actor probe
+// (recordlessActorProbe) to search every registered runtime rather than
+// only the one a slug-based lookup happens to resolve to first — a
+// record-less actor (see RecordlessActorProber) never matches a slug-based
+// lookup at all, so that lookup must not be relied on here.
 func (s *Server) allManagers() []agent.Manager {
 	managers := []agent.Manager{s.manager}
 	s.auxiliaryRuntimesMu.RLock()
@@ -4601,6 +4689,105 @@ type nfsAgentFilesRemover interface {
 
 var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
 
+// errAgentIdentityUnknown means a runtime process restart dropped the
+// in-memory record a runtime needs to tell "not found" apart from "exists,
+// but this process can no longer identify which project it belongs to," for
+// at least one actor in the runtime's own scope for a project (see
+// RecordlessActorProber). Reporting not-found here would let the hub treat
+// an unresolved delete/stop as an idempotent success and orphan the actor.
+var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime process restart")
+
+// logKeyRuntimeScope is the structured-log key under which the broker
+// records the runtime-specific scope a RecordlessActorProber reports (for
+// example, a namespace) when a delete/stop fails with
+// errAgentIdentityUnknown. The broker only carries this generic key; the
+// value is whatever the prober supplies, and it goes to the broker log
+// only, never into an HTTP response body.
+const logKeyRuntimeScope = "runtime_scope"
+
+// agentIdentityUnknownError carries the record-less actor names and the
+// runtime's own scope for them (as reported by the prober) alongside
+// errAgentIdentityUnknown, so resolveDeleteTarget's caller (deleteAgent) can
+// log both at WARN in the broker log, without ever putting them in the HTTP
+// response body: Error() deliberately reports only the count, exactly what
+// AgentIdentityUnknown's body already carries, so nothing about this type
+// changes what a caller sees from err.Error() or errors.Is(err,
+// errAgentIdentityUnknown).
+type agentIdentityUnknownError struct {
+	Scope string
+	Names []string
+}
+
+func (e *agentIdentityUnknownError) Error() string {
+	return fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(e.Names))
+}
+
+func (e *agentIdentityUnknownError) Unwrap() error {
+	return errAgentIdentityUnknown
+}
+
+// recordlessActorProbe checks every manager in managers whose runtime
+// implements the optional RecordlessActorProber capability for record-less
+// actors belonging to projectID, and returns the prober-reported scope with
+// the actor names. A probe error is returned immediately as an explicit
+// failure — never treated as "no record-less actors" — matching how a
+// runtime listing failure elsewhere on this path is never treated as
+// not-found either.
+//
+// Results are deduped by actor UID across every manager the probe checks,
+// not by "scope/name", because two managers can both report an actor with
+// the same scope and name for two different reasons that need different
+// treatment —
+//   - the SAME actor, reached twice (e.g. resolveManagerForOpts caching a
+//     second manager for a profile whose runtime points at the same backend
+//     as the default) — this must be deduped, or the 409 message
+//     double-counts it;
+//   - two DIFFERENT actors that merely collide on scope+name, because a
+//     runtime may derive its scope from projectID alone regardless of which
+//     backend a profile points at — this must NOT be deduped, or the
+//     operator is told about only one of two actors that both need
+//     cleaning up.
+//
+// The UID (see RecordlessActor) tells these apart where scope+name cannot:
+// a real duplicate report of the same actor carries the same UID both
+// times, while two distinct actors do not. Only currently registered
+// managers are probed: a restarted broker does not probe a non-default
+// profile's backend until that profile is used again and re-registers its
+// runtime as an auxiliary runtime.
+func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (scope string, actorNames []string, err error) {
+	seen := make(map[string]bool)
+	for _, mgr := range managers {
+		am, ok := mgr.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		prober, ok := am.Runtime.(scionrt.RecordlessActorProber)
+		if !ok {
+			continue
+		}
+		probeScope, found, perr := prober.RecordlessActors(ctx, projectID)
+		if perr != nil {
+			return "", nil, perr
+		}
+		for _, a := range found {
+			key := a.UID
+			if key == "" {
+				// Defensive only: a UID is expected on every entry, so this
+				// falls back to the collision-prone scope/name key rather
+				// than dropping the entry.
+				key = probeScope + "/" + a.Name
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			scope = probeScope
+			actorNames = append(actorNames, a.Name)
+		}
+	}
+	return scope, actorNames, nil
+}
+
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {
 	mgr         agent.Manager
@@ -4753,9 +4940,40 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	// No runtime entry was found. If a runtime could not be listed, that is
 	// not known to be true: its container may still be running. Fail rather
 	// than delete only the files (orphaning the container) or report a 404
-	// (which the hub treats as a completed delete).
+	// (which the hub treats as a completed delete). listErr itself is
+	// already logged where it was captured, above (a raw runtime List
+	// error may carry an actor/runtime-scope name); errDeleteTargetUnknown's
+	// own fixed message is what reaches the caller and, from there, the
+	// HTTP body.
 	if listErr != nil {
-		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
+		return nil, errDeleteTargetUnknown
+	}
+
+	// Before accepting a file-only target below (which reports success —
+	// files deleted, HTTP 204 — while never touching the runtime), check
+	// whether a runtime process restart left at least one record-less actor
+	// in the runtime's own scope for this project (the optional
+	// RecordlessActorProber capability). This runs on every "no runtime
+	// entry matched" outcome, not only when the file scan also finds
+	// nothing: a persisted project directory (a workstation or a
+	// PVC-backed $HOME) can resolve a file-only target even for an agent
+	// whose actor is still running, record-less, on its backend — reporting
+	// that as success would delete only the files and orphan the actor and
+	// whatever the runtime provisioned for it. Scoped to projectID != "" so
+	// a project-blind delete (solo/CLI) is unaffected; a runtime with no
+	// RecordlessActorProber, or a project whose scope holds no record-less
+	// actor, falls through unchanged.
+	if projectID != "" {
+		scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+		if perr != nil {
+			// Same rule as the listErr case above: log the raw error, return
+			// errDeleteTargetUnknown's fixed, scope-free message.
+			s.agentLifecycleLog.Warn("Agent delete: record-less actor probe failed", "agent_id", id, "project_id", projectID, "error", perr)
+			return nil, errDeleteTargetUnknown
+		}
+		if len(recordless) > 0 {
+			return nil, &agentIdentityUnknownError{Scope: scope, Names: recordless}
+		}
 	}
 
 	// The agent may exist only as files (never started, or its container is
