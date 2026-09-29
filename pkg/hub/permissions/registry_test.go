@@ -168,10 +168,9 @@ func TestProjectTargetApplicability_CoversEveryRegistryPermission(t *testing.T) 
 }
 
 // TestProjectTargetApplicability_ArbitrarySystemPermissionNotProjectAccess
-// pins the literal fix for "an arbitrary system permission is not project
-// access": broker.create, project.create, and skill.create_global must all
-// be reviewed false, since none of them apply to an existing project
-// target.
+// pins the rule "an arbitrary system permission is not project access":
+// broker.create, project.create, and skill.create_global must all be
+// reviewed false, since none of them apply to an existing project target.
 func TestProjectTargetApplicability_ArbitrarySystemPermissionNotProjectAccess(t *testing.T) {
 	for _, id := range []string{"broker.create", "project.create", "skill.create_global"} {
 		applies, reviewed := AppliesToExistingProjectTarget(id)
