@@ -204,11 +204,10 @@ test('all-zero tokens with no total still count the call but emit no token field
   const messageID = 'msg_synthetic_zero';
   const sessionID = 'ses_synthetic_zero';
   // Synthetic (not from a capture): a step-finish whose tokens are all zero
-  // and `total` is absent, which OpenCode's own semantics treat as "usage
-  // unknown" (findings-opencode.md §4: "No usage means all zeros and total
-  // undefined. Treat that as unknown."). This exact shape was not observed
-  // in any real capture, so it is exercised here as a labelled synthetic
-  // case per the brief.
+  // and `total` is absent, which design §3.7 treats as unknown usage
+  // ("All-zero tokens with total undefined mean unknown: count the call,
+  // emit no tokens"). This exact shape was not observed in any real
+  // capture, so it is exercised here as a labelled synthetic case.
   route(state, {
     type: 'message.updated',
     properties: { info: { id: messageID, role: 'assistant', providerID: 'p', modelID: 'm', time: { created: 1 } } },
