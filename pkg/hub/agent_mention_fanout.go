@@ -147,6 +147,13 @@ type agentMentionFanoutInput struct {
 // error is captured in the corresponding MentionResult, and the whole call
 // is bounded well under a typical client's own request timeout.
 func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutInput) []messages.MentionResult {
+	// Every production call site always supplies both; this guard is a
+	// cheap defensive backstop against a future caller mistake rather than
+	// a documented input contract, since in.Sender.Slug and in.SenderIdent
+	// are dereferenced unconditionally below.
+	if in.Sender == nil || in.SenderIdent == nil {
+		return nil
+	}
 	if !mentionFanoutTypes[in.Type] {
 		return nil
 	}

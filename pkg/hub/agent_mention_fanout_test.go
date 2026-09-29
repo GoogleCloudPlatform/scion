@@ -118,6 +118,38 @@ func TestMentionFanout_SelfMentionDoesNotConsumeRecipientCap(t *testing.T) {
 	}
 }
 
+// A nil Sender or SenderIdent must produce no results rather than panicking
+// on the unconditional field dereferences later in the function (e.g.
+// in.Sender.Slug). Every production call site always supplies both; this is
+// a defensive backstop against a future caller mistake.
+func TestMentionFanout_NilSenderOrSenderIdentReturnsNoResults(t *testing.T) {
+	srv, _, _, sender, _, _, _, dispatcher := mentionFanoutSetup(t)
+
+	t.Run("nil_sender", func(t *testing.T) {
+		in := agentMentionFanoutInput{
+			Sender:      nil,
+			SenderIdent: GetAgentIdentityFromContext(agentCtx(context.Background(), sender)),
+			Type:        messages.TypeInstruction,
+			Msg:         "hey @somebody",
+		}
+		results := srv.fanOutAgentMentions(context.Background(), in)
+		require.Empty(t, results)
+	})
+
+	t.Run("nil_sender_ident", func(t *testing.T) {
+		in := agentMentionFanoutInput{
+			Sender:      sender,
+			SenderIdent: nil,
+			Type:        messages.TypeInstruction,
+			Msg:         "hey @somebody",
+		}
+		results := srv.fanOutAgentMentions(context.Background(), in)
+		require.Empty(t, results)
+	})
+
+	require.Empty(t, dispatchesTo(dispatcher, sender.ID), "sanity: neither case should have dispatched anything")
+}
+
 // Only a deliberate, human-authored-shaped send triggers fan-out; every
 // automatic or already-fanned-out message type produces zero dispatches.
 func TestMentionFanout_TypeGate(t *testing.T) {
