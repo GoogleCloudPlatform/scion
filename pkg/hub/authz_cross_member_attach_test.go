@@ -62,7 +62,7 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		identity UserIdentity
 		resource Resource
 		attach   bool
-		port     bool // miller79/scion#121: owner/admin carry agent.port_access
+		port     bool // owner/admin carry agent.port_access
 	}{
 		{"owner on own agent", owner, ownerAgent, true, true},
 		{"owner on own progeny", owner, ownerProgeny, true, true},
@@ -217,7 +217,7 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 }
 
 // TestOwnerPortAccess_OpenOnlyNotManage pins the scope of the port-access
-// grant owners and admins carry (miller79/scion#121): it opens a member's
+// grant owners and admins carry: it opens a member's
 // already-exposed ports through the proxy and nothing else. Registering,
 // removing or tunnelling ports needs hub-level port_access, and the
 // terminal-level actions stay behind agent.attach.

@@ -445,12 +445,12 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 			"project admin should have %s access on project agents", action)
 	}
 
-	// miller79/scion#88: admin must NOT attach to another member's agent —
+	// admin must NOT attach to another member's agent —
 	// the agent runs with its owner's user-scoped secrets.
 	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionAttach)
 	assert.False(t, decision.Allowed,
 		"project admin should NOT have attach access on another member's agent")
-	// miller79/scion#121: admin may open another member's forwarded ports.
+	// admin may open another member's forwarded ports.
 	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionPortAccess)
 	assert.True(t, decision.Allowed,
 		"project admin should have port_access on project agents: %s", decision.Reason)

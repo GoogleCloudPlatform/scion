@@ -135,7 +135,7 @@ type Permission struct {
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
 	// permissions (agent.attach, agent.port_access) that some project roles
-	// do not hold (owners/admins lack attach, miller79/scion#88; members lack
+	// do not hold (owners/admins lack attach; members lack
 	// port_access), so that holders of those roles can still mint
 	// agent:manage tokens. The scope remains available for explicit selection.
 	ExcludeFromManageAlias bool

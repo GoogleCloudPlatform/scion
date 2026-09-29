@@ -284,7 +284,7 @@ func projectOwnerPermissionIDs() []string {
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
 		//
-		// agent.attach is excluded (R3, miller79/scion#88): agents run with
+		// agent.attach is excluded (R3): agents run with
 		// their creator's user-scoped secrets, so a terminal on another
 		// member's agent would expose that member's credentials. Owners reach
 		// their own agents and progeny via the resource-owner and ancestor
@@ -292,7 +292,7 @@ func projectOwnerPermissionIDs() []string {
 		// restore) is retained so owners keep management oversight of
 		// members' agents.
 		//
-		// agent.port_access is included (R4, miller79/scion#121): a forwarded
+		// agent.port_access is included (R4): a forwarded
 		// port serves only what the agent chooses to listen on, not its
 		// environment or secret files, so owners and admins may open
 		// members' exposed ports. project-member still does not carry it;
@@ -369,8 +369,7 @@ func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
 		// no agent-self credential permissions, no attach — see
-		// projectOwnerPermissionIDs for the miller79/scion#88 and #121
-		// rationale)
+		// projectOwnerPermissionIDs for the rationale)
 		"agent.create",
 		"agent.lifecycle",
 		"agent.list",
