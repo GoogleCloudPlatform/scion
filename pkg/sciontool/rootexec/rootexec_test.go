@@ -243,6 +243,56 @@ func TestEnv_NeverInheritsAmbientEnvironment(t *testing.T) {
 	}
 }
 
+// TestSanitizeInheritedEnv_StripsDangerousNamesKeepsOthers proves the one
+// caller that legitimately needs to keep most of its inherited environment
+// (a pre-start hook) still gets PATH fixed and every LD_*/BASH_ENV/ENV/
+// IFS/GIT_*/PYTHON* entry dropped, while an unrelated, legitimately-needed
+// variable like HOME survives untouched.
+func TestSanitizeInheritedEnv_StripsDangerousNamesKeepsOthers(t *testing.T) {
+	in := []string{
+		"PATH=/usr/local/share/npm-global/bin:/usr/bin",
+		"HOME=/home/scion",
+		"LD_PRELOAD=/evil.so",
+		"LD_LIBRARY_PATH=/evil",
+		"BASH_ENV=/evil.sh",
+		"ENV=/evil.sh",
+		"IFS=$'\\n'",
+		"GIT_SSH_COMMAND=/evil",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"PYTHONPATH=/evil",
+		"SCION_AGENT_NAME=test",
+	}
+	got := SanitizeInheritedEnv(in)
+
+	has := func(kv string) bool {
+		for _, e := range got {
+			if e == kv {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{
+		"HOME=/home/scion",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"SCION_AGENT_NAME=test",
+		"PATH=" + strings.Join(SearchPath, ":"),
+	} {
+		if !has(want) {
+			t.Errorf("SanitizeInheritedEnv(%v) = %v, missing %q", in, got, want)
+		}
+	}
+	for _, forbidden := range []string{"npm-global", "evil"} {
+		for _, e := range got {
+			if strings.Contains(e, forbidden) {
+				t.Errorf("SanitizeInheritedEnv(%v) = %v, still contains forbidden value %q in %q", in, got, forbidden, e)
+			}
+		}
+	}
+}
+
 // TestSelfExe_IsTheProcMagicSymlink proves SelfExe returns the fixed magic
 // path, never a resolved on-disk path — the whole point being that this
 // string is immune to the on-disk binary being replaced.

@@ -965,6 +965,18 @@ func parseLibVersion(src string) string {
 	return "unknown"
 }
 
+// HarnessProvisionHookFilename is the fixed name this file always stages the
+// wrapper under. pkg/sciontool/hooks recognizes this one script by this exact
+// name (its own harnessProvisionHookFilename, kept in sync with this constant
+// by TestHarnessProvisionHookFilenameMatchesWriter) to run it under the
+// workload's own identity instead of root, even though the wrapper itself is
+// trusted, broker-delivered, root-owned content: that trust proves the
+// wrapper is genuine, not that what it execs is safe to run as root. Not
+// imported directly from that package: pkg/harness's own test package
+// already imports pkg/sciontool/hooks, so the reverse import would be a
+// cycle — see that package's own copy of this name for the full reasoning.
+const HarnessProvisionHookFilename = "20-harness-provision"
+
 func writeHookWrapper(agentHome, bundleContainerPath string) error {
 	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -975,7 +987,7 @@ func writeHookWrapper(agentHome, bundleContainerPath string) error {
 set -eu
 exec sciontool harness provision --manifest "%s/manifest.json"
 `, bundleContainerPath)
-	target := filepath.Join(dir, "20-harness-provision")
+	target := filepath.Join(dir, HarnessProvisionHookFilename)
 	if err := os.WriteFile(target, []byte(wrapper), 0755); err != nil {
 		return err
 	}

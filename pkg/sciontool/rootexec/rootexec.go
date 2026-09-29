@@ -131,6 +131,62 @@ func Env(extra ...string) []string {
 	return env
 }
 
+// noInheritedExecEnvPrefixes and noInheritedExecEnvNames are the variables
+// SanitizeInheritedEnv strips outright — the same closed set Env's own doc
+// comment describes never being carried over into a from-scratch
+// environment, applied here to a caller that (unlike every other root exec
+// site) cannot simply build its whole environment from scratch, because it
+// legitimately needs to keep other inherited, workload-derived variables
+// (see SanitizeInheritedEnv's own doc comment).
+var noInheritedExecEnvNames = map[string]bool{
+	"PATH":     true,
+	"BASH_ENV": true,
+	"ENV":      true,
+	"IFS":      true,
+}
+
+// isNeverInheritedExecEnvName reports whether key must never survive into a
+// root exec's environment: an exact match against noInheritedExecEnvNames,
+// or an LD_*, GIT_* (except the two names a shared-workspace git rewrite
+// deliberately sets itself — see SanitizeInheritedEnv's caller), or
+// PYTHON* prefix.
+func isNeverInheritedExecEnvName(key string) bool {
+	if noInheritedExecEnvNames[key] {
+		return true
+	}
+	switch {
+	case strings.HasPrefix(key, "LD_"):
+		return true
+	case strings.HasPrefix(key, "PYTHON"):
+		return true
+	case strings.HasPrefix(key, "GIT_") && key != "GIT_CONFIG_NOSYSTEM" && key != "GIT_CONFIG_GLOBAL":
+		return true
+	}
+	return false
+}
+
+// SanitizeInheritedEnv returns a copy of env with PATH replaced by the fixed
+// SearchPath, and every LD_*, BASH_ENV, ENV, IFS, GIT_* (other than
+// GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL), and PYTHON* entry dropped
+// outright — for the one root-context caller (a pre-start hook, which
+// legitimately needs to keep its other workload-derived variables, e.g.
+// HOME=AgentHome, so staged content resolves) that cannot simply build its
+// whole environment from scratch the way every other root exec site in this
+// codebase does. Order is preserved for everything that survives; the fixed
+// PATH is appended once at the end.
+func SanitizeInheritedEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || key == "PATH" || isNeverInheritedExecEnvName(key) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out, "PATH="+strings.Join(SearchPath, ":"))
+	return out
+}
+
 // SelfExe returns the path a root process must use to re-exec itself:
 // "/proc/self/exe", the kernel's magic symlink to the running inode. Unlike
 // os.Executable() (which re-reads a path from disk that may itself sit
