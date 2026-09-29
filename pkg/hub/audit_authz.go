@@ -69,9 +69,14 @@ func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, recor
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
 	// Sampling: always audit deny decisions; sample allow decisions, unless
-	// the request carries the always-audit marker (e.g. G's delegated-agent
-	// events), which forces an allow decision to be audited too.
-	if decision.Allowed && !request.AlwaysAudit && a.DecisionAuditSampleRate < 1.0 {
+	// either always-audit marker is set. AuthzRequest.AlwaysAudit is set by
+	// the caller before evaluation; Decision.AlwaysAudit is set from inside
+	// decide's body by a branch that only learns partway through evaluation
+	// that this decision must not be sampled away (e.g. G's delegated-agent
+	// branch, routed on identity kind after principal/credential
+	// derivation). Either one forces an allow decision to be audited too.
+	alwaysAudit := request.AlwaysAudit || decision.AlwaysAudit
+	if decision.Allowed && !alwaysAudit && a.DecisionAuditSampleRate < 1.0 {
 		if rand.Float64() >= a.DecisionAuditSampleRate {
 			return
 		}

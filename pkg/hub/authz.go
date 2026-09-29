@@ -171,9 +171,11 @@ type AuthzRequest struct {
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
 	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
-	// audited already; this exists for callers that need an allow decision
-	// audited unconditionally too — for example G's delegated-agent events.
-	// It never changes the authorization result.
+	// audited already; this exists for callers that know in advance they
+	// need an allow decision audited unconditionally too. See also
+	// Decision.AlwaysAudit, its counterpart for a branch inside decide's
+	// body that only learns this partway through evaluation. It never
+	// changes the authorization result.
 	AlwaysAudit bool
 }
 
@@ -222,6 +224,17 @@ type Decision struct {
 	// §3.2, ruling Q7). Empty for decisions that fail before permission
 	// resolution.
 	PermissionID string `json:"permissionId,omitempty"`
+
+	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
+	// record for this decision regardless of the allow-sampling rate, the
+	// same as AuthzRequest.AlwaysAudit — but settable from inside decide's
+	// body, for a branch that determines only partway through evaluation
+	// that this decision must not be sampled away (for example a delegated-
+	// agent branch routed on identity kind after principal/credential
+	// derivation, which the caller building AuthzRequest cannot know to flag
+	// in advance). The single audit exit ORs this with the request-level
+	// flag. Authorization-neutral: it never changes Allowed or Reason.
+	AlwaysAudit bool `json:"-"`
 
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data

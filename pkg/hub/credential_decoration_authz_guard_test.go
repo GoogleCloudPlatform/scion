@@ -76,6 +76,7 @@ var decorationGuardAllowed = map[string]bool{
 	"identity.go:requestAuthAttrs":            true,
 	"audit_actor.go:auditActorFromContext":    true,
 	"audit_authz.go:BuildDecisionAuditRecord": true,
+	"audit.go:credentialLogAttr":              true,
 }
 
 // decorationHit is one reference to credential decoration found by

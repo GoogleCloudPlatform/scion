@@ -97,6 +97,24 @@ func auditActorFromContext(ctx context.Context) AuditActor {
 		actor.ExecutorID = ec.ID
 	}
 
+	// INTEGRATION POINT (D.1 broker on-behalf-of, not yet landed — see the
+	// E.2a handoff): D.1's shared hub-attested broker OBO context path will
+	// add an identity.go accessor BrokerOnBehalfOfFromContext(ctx)
+	// (BrokerOnBehalfOf, bool), set only by the shared broker-auth helper
+	// (contextWithBrokerOnBehalfOf, unexported, no request-header path).
+	// When present, PrincipalKind/PrincipalID above are already correct (the
+	// effective user, still read from GetIdentityFromContext) and
+	// CredentialKind/CredentialID above are already the broker's own
+	// credential (GetCredentialContextFromContext, Kind "broker") — but that
+	// conflates "whose action is this" with "which credential carried it."
+	// Once BrokerOnBehalfOfFromContext exists, add a SEPARATE
+	// BrokerActorID/BrokerCredentialID pair to AuditActor (and the matching
+	// mutation-audit columns) sourced from it, rather than overwriting
+	// PrincipalID/CredentialID — the effective user must never be replaced
+	// by or merged with the broker's own identity. Do not adopt the name
+	// above before D.1 lands it; confirm the final shape with pat-d-lead
+	// first.
+
 	return actor
 }
 
