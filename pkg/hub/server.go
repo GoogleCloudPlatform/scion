@@ -4971,20 +4971,13 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
 
-	// E.2a (ptone/scion#2127, plan §3.1, ruling Q5): the request logger now
-	// wraps UnifiedAuthMiddleware instead of being wrapped by it. Previously
-	// RequestLogMiddleware sat *inside* auth in this chain, so any request
-	// auth rejected outright (invalid/revoked/expired UAT, suspended user,
-	// missing credential, ...) wrote its response and returned without ever
-	// calling the next handler — meaning RequestLogMiddleware, being further
-	// in, never ran and the request was never logged. Moving it here makes
-	// it the request logger's next.ServeHTTP call that invokes auth, so it
-	// always observes the final response status, however auth resolved.
-	// auth_type and principal/credential attributes are correspondingly no
-	// longer read from the request context before calling next (see
-	// RequestLogMiddleware) — auth now records them via
-	// logging.SetRequestAuth on the shared *RequestMeta this middleware
-	// installs, which stays reachable from every context derived from it.
+	// The request logger wraps UnifiedAuthMiddleware, so it is the request
+	// logger's own next.ServeHTTP call that invokes auth: every request is
+	// logged with its final response status, whether auth allows it through
+	// or rejects it outright. auth_type and principal/credential attributes
+	// come from logging.SetRequestAuth on the shared *RequestMeta this
+	// middleware installs (see RequestLogMiddleware), reachable from every
+	// context derived from it.
 	if s.requestLogger != nil {
 		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
 	} else {

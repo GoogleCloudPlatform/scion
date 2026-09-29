@@ -63,16 +63,11 @@ type RequestMeta struct {
 	Component string
 
 	// AuthType and AuthAttrs are set by the auth layer via SetRequestAuth
-	// once it has classified (or rejected) the credential. E.2a (ptone/scion#2127,
-	// plan §3.1, ruling Q5): RequestLogMiddleware now wraps the auth
-	// middleware instead of being wrapped by it, so a request that auth
-	// rejects (before ever calling its next handler) is still logged. That
-	// move means auth_type can no longer be read from the request context
-	// before calling next — the context mutation auth makes happens on a
-	// request object this middleware never sees again. Instead, auth calls
-	// SetRequestAuth on this shared, pointer-identical RequestMeta (reachable
-	// from every context derived from the one this middleware installs), and
-	// RequestLogMiddleware reads it back after next returns.
+	// once it has classified (or rejected) the credential. Auth calls
+	// SetRequestAuth on this shared, pointer-identical RequestMeta —
+	// reachable from every context derived from the one RequestLogMiddleware
+	// installs — and RequestLogMiddleware reads it back after next returns,
+	// so a request auth rejects outright is logged too.
 	AuthType  string
 	AuthAttrs []slog.Attr
 }
@@ -367,13 +362,12 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 
 			// Read final metadata (handlers/auth may have enriched it).
 			// auth_type and its attributes are read here, after next returns,
-			// not before calling next: this middleware now wraps auth (E.2a,
-			// ruling Q5), so a request auth rejects outright — writing a
-			// response and never calling next further down — still reaches
-			// this point with wrapped.statusCode set to whatever auth wrote,
-			// and with AuthType/AuthAttrs set (if auth called SetRequestAuth
-			// before rejecting). A request with no credential at all (missing
-			// auth header) leaves AuthType empty, same as today.
+			// so that a request auth rejects outright (writing a response and
+			// never calling next further down) still reaches this point with
+			// wrapped.statusCode set to whatever auth wrote, and with
+			// AuthType/AuthAttrs set if auth called SetRequestAuth before
+			// rejecting. A request with no credential at all leaves AuthType
+			// empty.
 			meta.mu.Lock()
 			finalProjectID := meta.ProjectID
 			finalAgentID := meta.AgentID
