@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,6 +54,7 @@ var (
 	migrateNamesDryRun       bool
 	migrateNamesDeleteLegacy bool
 	migrateNamesHubID        string
+	migrateNamesTimeout      time.Duration
 )
 
 // hubSecretMigrateNamesCmd renames GCP Secret Manager secrets from the legacy
@@ -118,6 +120,7 @@ func init() {
 	hubSecretMigrateNamesCmd.Flags().BoolVar(&migrateNamesDryRun, "dry-run", false, "Print the migration plan without making changes")
 	hubSecretMigrateNamesCmd.Flags().BoolVar(&migrateNamesDeleteLegacy, "delete-legacy", false, "Delete each legacy secret after verifying its hub-prefixed copy (run a plain migrate-names first)")
 	hubSecretMigrateNamesCmd.Flags().StringVar(&migrateNamesHubID, "hub-id", "", "Hub instance ID for secret namespacing (defaults to the resolved server hub ID)")
+	hubSecretMigrateNamesCmd.Flags().DurationVar(&migrateNamesTimeout, "timeout", 5*time.Minute, "Maximum time to run before aborting (increase for a large number of secrets)")
 
 	_ = hubSecretMigrateNamesCmd.MarkFlagRequired("gcp-project")
 }
@@ -127,7 +130,10 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--gcp-project flag is required")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Default 5 minutes; --timeout raises this for a fleet with a large
+	// number of secrets to check (ptone/scion#2152 round-3 review
+	// non-blocking finding 11).
+	ctx, cancel := context.WithTimeout(context.Background(), migrateNamesTimeout)
 	defer cancel()
 
 	cfg, err := config.LoadGlobalConfig("")
@@ -150,9 +156,9 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 		credentialsJSON = string(data)
 	}
 
-	hubID := migrateNamesHubID
-	if hubID == "" {
-		hubID = config.ResolveHubIDFromEnv()
+	hubID, err := resolveMigrateNamesHubID(cfg, migrateNamesDryRun)
+	if err != nil {
+		return err
 	}
 	if hubID == "" {
 		// An empty hubID still produces a valid, deterministic prefix
@@ -161,7 +167,12 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 		// (ptone/scion#2152 review finding 15).
 		return fmt.Errorf("resolved hub ID is empty; pass --hub-id explicitly or configure server.hub.hub_id")
 	}
-	fmt.Printf("Using hub ID: %s\n", hubID)
+	if migrateNamesHubID == "" {
+		if err := checkMigrateNamesHubIDAgainstExistingRecords(ctx, db, hubID); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("Using hub ID: %s (prefix: %s)\n", hubID, secret.SecretNamePrefixForHubID(hubID))
 
 	gcpBackend, err := secret.NewGCPBackend(ctx, db, secret.GCPBackendConfig{
 		ProjectID:       migrateNamesProject,
@@ -172,6 +183,80 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	}
 
 	return runMigrateNames(ctx, gcpBackend, db, hubID, migrateNamesDryRun, migrateNamesDeleteLegacy, os.Stdout)
+}
+
+// resolveMigrateNamesHubID resolves the hub ID exactly the way the running
+// hub server does at startup — --hub-id, then settings server.hub.hub_id,
+// then the server's own environment/hostname fallback
+// (HubServerConfig.ResolveHubID()) — instead of a parallel resolution path
+// that could silently disagree with the server and rename every secret out
+// from under it (ptone/scion#2152 round-3 review finding 1, critical).
+//
+// Under --dry-run, the environment/hostname fallback is refused rather than
+// followed when it would need to write: on a workstation with no persisted
+// ~/.scion/hub-id yet, the real resolution path (PersistentHubID) creates and
+// persists one as a side effect, and --dry-run must perform no writes at all.
+// Rather than derive a value that might not match whatever a real run ends
+// up persisting, this fails closed and asks for --hub-id.
+func resolveMigrateNamesHubID(cfg *config.GlobalConfig, dryRun bool) (string, error) {
+	if migrateNamesHubID != "" {
+		return migrateNamesHubID, nil
+	}
+	if cfg.Hub.HubID != "" {
+		return cfg.Hub.HubID, nil
+	}
+	if !dryRun {
+		return cfg.Hub.ResolveHubID(), nil
+	}
+	id, ok := config.ResolveHubIDFromEnvReadOnly()
+	if !ok {
+		return "", fmt.Errorf("cannot resolve a hub ID without writing to disk for --dry-run (no server.hub.hub_id configured, no SCION_SERVER_HUB_HUBID or K_SERVICE set, and no persisted ~/.scion/hub-id yet); pass --hub-id explicitly")
+	}
+	return id, nil
+}
+
+// checkMigrateNamesHubIDAgainstExistingRecords refuses to proceed with a
+// resolved hub ID that disagrees with an existing hub-scope secret record's
+// ScopeID, unless the operator passed --hub-id explicitly (ptone/scion#2152
+// round-3 review finding 1): such a mismatch — a workstation hostname
+// change with a stale or missing persisted ~/.scion/hub-id, or a
+// reconfigured server.hub.hub_id — would otherwise silently treat every
+// secret already migrated under the old ID as unrelated to the prefix this
+// run computes, rather than failing loudly.
+func checkMigrateNamesHubIDAgainstExistingRecords(ctx context.Context, db store.SecretStore, hubID string) error {
+	records, err := db.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub})
+	if err != nil {
+		return fmt.Errorf("failed to check existing hub-scope secret records: %w", err)
+	}
+	for _, r := range records {
+		if r.ScopeID != "" && r.ScopeID != hubID {
+			return fmt.Errorf("resolved hub ID %q does not match existing hub-scope secret record %q's scope ID %q; pass --hub-id explicitly if this is intentional (e.g. a deliberate hub rename)", hubID, r.Key, r.ScopeID)
+		}
+	}
+	return nil
+}
+
+// stripDSNQueryParam removes every occurrence of a "key=..." query parameter
+// from a "file:"-style sqlite DSN, leaving other parameters and their order
+// intact. Used before forcing a specific value for a parameter the DSN might
+// already set (ptone/scion#2152 round-3 review nit 12).
+func stripDSNQueryParam(dsn, key string) string {
+	idx := strings.Index(dsn, "?")
+	if idx < 0 {
+		return dsn
+	}
+	base, query := dsn[:idx], dsn[idx+1:]
+	var kept []string
+	for _, p := range strings.Split(query, "&") {
+		if p == "" || p == key || strings.HasPrefix(p, key+"=") {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) == 0 {
+		return base
+	}
+	return base + "?" + strings.Join(kept, "&")
 }
 
 // openMigrateNamesStore opens the Hub database using the driver configured in
@@ -196,7 +281,12 @@ func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun
 			dsn = "file:" + dsn
 		}
 		if dryRun {
-			roDSN := dsn
+			// Strip any existing "mode" query param before forcing "ro":
+			// appending unconditionally could otherwise produce a DSN with
+			// two conflicting "mode" params (e.g. a configured "mode=rwc")
+			// where the driver's tie-break between them is undocumented
+			// behavior to depend on (ptone/scion#2152 round-3 review nit 12).
+			roDSN := stripDSNQueryParam(dsn, "mode")
 			if strings.Contains(roDSN, "?") {
 				roDSN += "&mode=ro"
 			} else {
@@ -226,14 +316,22 @@ func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun
 		}
 		return cs, nil
 	case "postgres":
+		if dryRun {
+			// OpenPostgresReadOnly sets default_transaction_read_only=on for
+			// every connection: defense in depth on top of --dry-run only
+			// ever calling read-only backend methods (ptone/scion#2152
+			// round-3 review finding 10).
+			ec, err := entc.OpenPostgresReadOnly(cfg.Database.URL, entc.PoolConfig{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to open postgres database read-only: %w", err)
+			}
+			return entadapter.NewCompositeStore(ec), nil
+		}
 		ec, err := entc.OpenPostgres(cfg.Database.URL, entc.PoolConfig{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open postgres database: %w", err)
 		}
 		cs := entadapter.NewCompositeStore(ec)
-		if dryRun {
-			return cs, nil
-		}
 		if err := cs.Migrate(ctx); err != nil {
 			_ = cs.Close()
 			return nil, fmt.Errorf("failed to run database migration: %w", err)
@@ -351,16 +449,16 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 
 // migrateNamesActionLabel maps a GCPBackend.RepairRefToPrefixed/PlanRefRepair
 // action to the CLI's human-readable label for it.
-func migrateNamesActionLabel(action string) string {
+func migrateNamesActionLabel(action secret.RefRepairAction) string {
 	switch action {
-	case "copied":
+	case secret.RefRepairCopied:
 		return "MIGRATED"
-	case "resynced":
+	case secret.RefRepairResynced:
 		return "RESYNCED"
-	case "repaired":
+	case secret.RefRepairRepaired:
 		return "REPAIRED REF"
 	default:
-		return action
+		return string(action)
 	}
 }
 
@@ -377,10 +475,17 @@ func migrateNamesActionLabel(action string) string {
 // then a later --delete-legacy run) converge, and what makes a stale
 // prefixed copy from a mixed-version rolling deploy or a rollback get
 // corrected rather than blindly repointed to (ptone/scion#2152 round-2
-// review findings 1 and 2). Any error from it — including the legacy name
-// being permission-denied — is a real migration failure, not something to
-// silently skip (finding 3): a DB record whose ref depends on an unreadable
-// legacy secret is broken, and reporting success would hide that.
+// review findings 1 and 2). A record with a *stored* ref that turns out to
+// be unreadable (including permission-denied) is a real migration failure,
+// not something to silently skip (round-2 finding 3): a DB record whose ref
+// depends on an unreadable legacy secret is broken, and reporting success
+// would hide that. A record with no ref at all, and no value under the
+// computed legacy name either, has nothing to migrate — that's
+// store.ErrNotFound, reported as a skip — and a stored ref whose designated
+// value is simply gone is reported as a visible ORPHAN, also not a failure
+// (round-3 review finding 4): migrate-names has no value to copy in either
+// case, so refusing to make progress on every *other* candidate because of
+// one already-absent secret would be its own bug.
 //
 // Only when no DB record exists at all (a hub-scope key recovered directly
 // from GCP SM, with no ref to consult) does this fall back to the
@@ -396,12 +501,25 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 	if hasRecord {
 		if !refIsPrefixed {
 			action, err := backend.RepairRefToPrefixed(ctx, c.name, c.scope, c.scopeID)
-			if err != nil {
+			switch {
+			case err == nil:
+				if action != "" {
+					fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", migrateNamesActionLabel(action), c.name, c.scope, c.scopeID)
+					acted = true
+				}
+			case err == store.ErrNotFound:
+				// No stored ref, and the computed legacy name has no
+				// accessible value either: nothing to migrate for this
+				// identity, not a failure (ptone/scion#2152 round-3 review
+				// finding 4).
+			case errors.Is(err, secret.ErrOrphanedRef):
+				// A distinct, visible condition: the record's stored ref
+				// designates a value that's gone. Reported for operator
+				// awareness, but not a migrate-names failure — there is
+				// nothing for it to copy (round-3 review finding 4).
+				fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
+			default:
 				return false, fmt.Errorf("failed to migrate/repair (check the hub's IAM grant on the legacy name): %w", err)
-			}
-			if action != "" {
-				fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", migrateNamesActionLabel(action), c.name, c.scope, c.scopeID)
-				acted = true
 			}
 		}
 	} else {
@@ -425,11 +543,11 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 	// once resynced, the prefixed and legacy values are identical, so the
 	// value-equality check below passes.
 	if deleteLegacy {
-		legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+		canDelete, err := backend.PlanLegacyDeletion(ctx, c.name, c.scope, c.scopeID)
 		if err != nil {
 			return acted, fmt.Errorf("failed to check legacy secret: %w", err)
 		}
-		if legacyPresent {
+		if canDelete {
 			if err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID); err != nil {
 				return acted, fmt.Errorf("failed to delete legacy secret: %w", err)
 			}
@@ -458,19 +576,40 @@ func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, 
 		return false, fmt.Errorf("failed to check DB ref: %w", err)
 	}
 
+	// actionPlanned tracks whether a MIGRATE/RESYNC/REPAIR REF action was
+	// just planned for this candidate. A real run performs that action
+	// (RepairRefToPrefixed writes synchronously, and so does
+	// MigrateNameForward for the no-DB-record path) before it ever checks
+	// delete-legacy in the same invocation, so by the time it does, the
+	// prefixed copy already exists and (where there's a DB record) the ref
+	// already designates it. --dry-run never writes, so nothing actually
+	// changes throughout the whole pass — the delete-legacy check below must
+	// simulate the post-action state instead of asking canDeleteLegacyName
+	// about today's (pre-action) state, or it would wrongly refuse a
+	// combined "REPAIR REF AND DELETE LEGACY" (or "MIGRATE AND DELETE
+	// LEGACY") plan that a real run completes successfully in one pass.
+	actionPlanned := false
 	if hasRecord {
 		if !refIsPrefixed {
 			action, err := backend.PlanRefRepair(ctx, c.name, c.scope, c.scopeID)
-			if err != nil {
+			switch {
+			case err == nil:
+				actionPlanned = true
+				switch action {
+				case secret.RefRepairCopied:
+					actions = append(actions, "MIGRATE")
+				case secret.RefRepairResynced:
+					actions = append(actions, "RESYNC")
+				case secret.RefRepairRepaired:
+					actions = append(actions, "REPAIR REF")
+				}
+			case err == store.ErrNotFound:
+				// Nothing to migrate for this identity (round-3 review
+				// finding 4); leave actions empty rather than failing.
+			case errors.Is(err, secret.ErrOrphanedRef):
+				fmt.Fprintf(out, "  ORPHAN  %s (scope: %s/%s) - stored ref has no accessible value; nothing to migrate\n", c.name, c.scope, c.scopeID)
+			default:
 				return false, fmt.Errorf("failed to check migrate/repair plan (check the hub's IAM grant on the legacy name): %w", err)
-			}
-			switch action {
-			case "copied":
-				actions = append(actions, "MIGRATE")
-			case "resynced":
-				actions = append(actions, "RESYNC")
-			case "repaired":
-				actions = append(actions, "REPAIR REF")
 			}
 		}
 	} else {
@@ -480,16 +619,34 @@ func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, 
 		}
 		absent = err == store.ErrNotFound
 		if needsCopy {
+			actionPlanned = true
 			actions = append(actions, "MIGRATE")
 		}
 	}
 
 	if deleteLegacy && !absent {
-		legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+		var canDelete bool
+		var err error
+		if actionPlanned {
+			// The ref-repair/copy/resync above hasn't actually happened yet
+			// (--dry-run never writes), but a real run would have already
+			// performed it by this point in the same invocation: simulate
+			// that post-action state. Presence is what matters here, not
+			// today's (pre-action) ref value.
+			canDelete, err = backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+		} else {
+			// No ref action will happen this pass (no DB record, the ref
+			// already designated the prefixed name at entry — round-3
+			// review finding 2's post-migration-rotation case — or there
+			// was genuinely nothing to migrate/repair): use the exact
+			// decision DeleteLegacySecretName itself makes, so --dry-run
+			// reports exactly what --delete-legacy would do.
+			canDelete, err = backend.PlanLegacyDeletion(ctx, c.name, c.scope, c.scopeID)
+		}
 		if err != nil {
 			return false, fmt.Errorf("failed to check legacy secret: %w", err)
 		}
-		if legacyPresent {
+		if canDelete {
 			actions = append(actions, "DELETE LEGACY")
 		}
 	}

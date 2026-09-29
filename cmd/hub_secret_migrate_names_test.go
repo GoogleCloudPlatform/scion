@@ -627,3 +627,273 @@ func TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch(t *testing.T) {
 	mock.mu.Unlock()
 	assert.Equal(t, "v1-old", prefixedValue, "dry-run must not have written the resync")
 }
+
+// =============================================================================
+// Round 3 review regression tests (ptone/scion#2152 PR 2171, sp-rev-3.md)
+// =============================================================================
+
+// TestResolveMigrateNamesHubID_ExplicitFlagWins pins --hub-id as the
+// top of the precedence order, matching the flag's documented override
+// semantics.
+func TestResolveMigrateNamesHubID_ExplicitFlagWins(t *testing.T) {
+	orig := migrateNamesHubID
+	defer func() { migrateNamesHubID = orig }()
+	migrateNamesHubID = "explicit-hub"
+
+	cfg := &config.GlobalConfig{Hub: config.HubServerConfig{HubID: "settings-hub"}}
+	id, err := resolveMigrateNamesHubID(cfg, false)
+	require.NoError(t, err)
+	assert.Equal(t, "explicit-hub", id)
+}
+
+// TestResolveMigrateNamesHubID_SettingsHubIDPreferredOverEnvAndHostname
+// reproduces round-3 review finding 1 (critical): migrate-names must resolve
+// the hub ID exactly the way the running hub server does --
+// HubServerConfig.ResolveHubID() checks the settings hub_id field before
+// ever consulting the environment or hostname fallback. This pins that a
+// settings hub_id that differs from both the env var and (implicitly) the
+// hostname-derived fallback wins, exactly as it would on the server.
+func TestResolveMigrateNamesHubID_SettingsHubIDPreferredOverEnvAndHostname(t *testing.T) {
+	orig := migrateNamesHubID
+	defer func() { migrateNamesHubID = orig }()
+	migrateNamesHubID = ""
+
+	t.Setenv("SCION_SERVER_HUB_HUBID", "env-hub-id")
+	t.Setenv("HOME", t.TempDir()) // would otherwise derive/persist a third, hostname-based value
+
+	cfg := &config.GlobalConfig{Hub: config.HubServerConfig{HubID: "settings-hub-id"}}
+
+	id, err := resolveMigrateNamesHubID(cfg, false)
+	require.NoError(t, err)
+	assert.Equal(t, "settings-hub-id", id, "settings hub_id must win over both the env var and the hostname fallback, matching HubServerConfig.ResolveHubID()'s own precedence")
+
+	// --dry-run must reach the identical answer via the identical settings
+	// check (it never even needs the read-only env fallback here).
+	idDryRun, err := resolveMigrateNamesHubID(cfg, true)
+	require.NoError(t, err)
+	assert.Equal(t, "settings-hub-id", idDryRun)
+}
+
+// TestResolveMigrateNamesHubID_EnvFallbackUsedWhenNoSettingsHubID covers the
+// non-dry-run environment/hostname fallback path (HubServerConfig.ResolveHubID
+// delegates to config.ResolveHubIDFromEnv when settings hub_id is unset).
+func TestResolveMigrateNamesHubID_EnvFallbackUsedWhenNoSettingsHubID(t *testing.T) {
+	orig := migrateNamesHubID
+	defer func() { migrateNamesHubID = orig }()
+	migrateNamesHubID = ""
+
+	t.Setenv("SCION_SERVER_HUB_HUBID", "env-hub-id")
+	cfg := &config.GlobalConfig{}
+
+	id, err := resolveMigrateNamesHubID(cfg, false)
+	require.NoError(t, err)
+	assert.Equal(t, "env-hub-id", id)
+}
+
+// TestResolveMigrateNamesHubID_DryRunFailsWhenResolutionWouldWriteToDisk
+// reproduces round-3 review finding 1's --dry-run requirement: on a
+// workstation with no settings hub_id, no SCION_SERVER_HUB_HUBID/K_SERVICE,
+// and no persisted ~/.scion/hub-id yet, the real (non-dry-run) resolution
+// path would create and persist a hostname-derived ID as a side effect
+// (PersistentHubID) -- a write. --dry-run must refuse rather than derive an
+// unpersisted value that might not match what a real run ends up writing,
+// and critically must not create the file itself.
+func TestResolveMigrateNamesHubID_DryRunFailsWhenResolutionWouldWriteToDisk(t *testing.T) {
+	orig := migrateNamesHubID
+	defer func() { migrateNamesHubID = orig }()
+	migrateNamesHubID = ""
+
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+	t.Setenv("K_SERVICE", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	cfg := &config.GlobalConfig{}
+	_, err := resolveMigrateNamesHubID(cfg, true)
+	require.Error(t, err, "--dry-run must refuse to resolve a hub ID that would require persisting ~/.scion/hub-id for the first time")
+	assert.Contains(t, err.Error(), "--hub-id")
+
+	if _, statErr := os.Stat(filepath.Join(tmpHome, ".scion", "hub-id")); !os.IsNotExist(statErr) {
+		t.Errorf("--dry-run must not create ~/.scion/hub-id; stat error: %v", statErr)
+	}
+}
+
+// TestResolveMigrateNamesHubID_DryRunUsesPersistedFileWithoutRewritingIt
+// covers the companion case: if ~/.scion/hub-id already exists from an
+// earlier server boot, --dry-run may read it (that's a read, not a write)
+// without needing --hub-id.
+func TestResolveMigrateNamesHubID_DryRunUsesPersistedFileWithoutRewritingIt(t *testing.T) {
+	orig := migrateNamesHubID
+	defer func() { migrateNamesHubID = orig }()
+	migrateNamesHubID = ""
+
+	t.Setenv("SCION_SERVER_HUB_HUBID", "")
+	t.Setenv("K_SERVICE", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0700))
+	hubIDPath := filepath.Join(scionDir, "hub-id")
+	require.NoError(t, os.WriteFile(hubIDPath, []byte("persisted-hub-id\n"), 0600))
+	before, err := os.Stat(hubIDPath)
+	require.NoError(t, err)
+
+	cfg := &config.GlobalConfig{}
+	id, err := resolveMigrateNamesHubID(cfg, true)
+	require.NoError(t, err)
+	assert.Equal(t, "persisted-hub-id", id)
+
+	after, err := os.Stat(hubIDPath)
+	require.NoError(t, err)
+	assert.Equal(t, before.ModTime(), after.ModTime(), "--dry-run must not rewrite the persisted hub-id file")
+}
+
+// TestCheckMigrateNamesHubIDAgainstExistingRecords_MismatchRefused
+// reproduces round-3 review finding 1's cross-check: a resolved hub ID that
+// disagrees with an existing hub-scope secret record's ScopeID must be
+// refused rather than silently treating that hub's existing secrets as
+// belonging to a different (freshly resolved) hub ID.
+func TestCheckMigrateNamesHubIDAgainstExistingRecords_MismatchRefused(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("hub-scope-existing"), Key: hub.SecretKeyAgentSigningKey, Scope: store.ScopeHub, ScopeID: "old-hub-id",
+	}))
+
+	err := checkMigrateNamesHubIDAgainstExistingRecords(ctx, db, "new-hub-id")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "old-hub-id")
+}
+
+func TestCheckMigrateNamesHubIDAgainstExistingRecords_MatchAllowed(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("hub-scope-existing-match"), Key: hub.SecretKeyAgentSigningKey, Scope: store.ScopeHub, ScopeID: "hub-1",
+	}))
+
+	assert.NoError(t, checkMigrateNamesHubIDAgainstExistingRecords(ctx, db, "hub-1"))
+}
+
+func TestCheckMigrateNamesHubIDAgainstExistingRecords_NoRecordsAllowed(t *testing.T) {
+	db := newTestStore(t)
+	assert.NoError(t, checkMigrateNamesHubIDAgainstExistingRecords(context.Background(), db, "any-hub-id"))
+}
+
+// TestRunMigrateNames_NoRefNoGCPCopyIsSkippedNotFailed reproduces round-3
+// review finding 4: a DB record with no stored ref and no value under
+// either GCP SM name is nothing to migrate, not a failure.
+func TestRunMigrateNames_NoRefNoGCPCopyIsSkippedNotFailed(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("no-ref-no-copy"), Key: "GHOST", Scope: "user", ScopeID: "user-1",
+	}))
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "0 failed")
+	assert.NotContains(t, out.String(), "ERROR")
+}
+
+// TestRunMigrateNames_DryRun_NoRefNoGCPCopyIsSkippedNotFailed is the
+// --dry-run counterpart.
+func TestRunMigrateNames_DryRun_NoRefNoGCPCopyIsSkippedNotFailed(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("no-ref-no-copy-dry"), Key: "GHOST", Scope: "user", ScopeID: "user-1",
+	}))
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true, false, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "0 failed")
+	assert.NotContains(t, out.String(), "ERROR")
+}
+
+// TestRunMigrateNames_OrphanedRefReportedNotFailed and its --dry-run
+// counterpart reproduce round-3 review finding 4's other half: a DB record
+// with a *stored* ref whose designated value is gone is reported as a
+// visible ORPHAN, distinct from a plain skip, but still not a failure.
+func TestRunMigrateNames_OrphanedRefReportedNotFailed(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	orphanedRef := "gcpsm:projects/test-project/secrets/scion-deadbeefcafe-user-aaaaaaaaaaaa-GONE"
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("orphan-cli"), Key: "GONE", Scope: "user", ScopeID: "user-1", SecretRef: orphanedRef,
+	}))
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "ORPHAN")
+	assert.Contains(t, out.String(), "0 failed")
+}
+
+func TestRunMigrateNames_DryRun_OrphanedRefReportedNotFailed(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	orphanedRef := "gcpsm:projects/test-project/secrets/scion-deadbeefcafe-user-aaaaaaaaaaaa-GONE"
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("orphan-cli-dry"), Key: "GONE", Scope: "user", ScopeID: "user-1", SecretRef: orphanedRef,
+	}))
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true, false, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "ORPHAN")
+	assert.Contains(t, out.String(), "0 failed")
+}
+
+// TestRunMigrateNames_DeleteLegacyDryRunMatchesRealRunAfterRotation
+// reproduces round-3 review finding 2's dry-run/real-run parity requirement:
+// once the ref designates the prefixed name, a rotation on the prefixed
+// copy performed after migration must not block --delete-legacy in either
+// mode -- dry-run and the real run must reach the identical conclusion from
+// the identical underlying check.
+func TestRunMigrateNames_DeleteLegacyDryRunMatchesRealRunAfterRotation(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("ROTATED", "user", "user-1")
+	prefixedName := prefixedNameForTest("ROTATED", "user", "user-1")
+	mock.seed(t, "test-project", legacyName, "v1-original")
+	mock.seed(t, "test-project", prefixedName, "v1-original")
+	prefixedRef := fmt.Sprintf("gcpsm:projects/test-project/secrets/%s", prefixedName)
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("delete-legacy-rotation-cli"), Key: "ROTATED", Scope: "user", ScopeID: "user-1", SecretRef: prefixedRef,
+	}))
+	// Rotate the prefixed copy post-migration: the legacy value is now
+	// stale by design, not by mistake.
+	_, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+		Parent:  fmt.Sprintf("projects/test-project/secrets/%s", prefixedName),
+		Payload: &smpb.SecretPayload{Data: []byte("v2-rotated")},
+	})
+	require.NoError(t, err)
+
+	var dryOut bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true /* dryRun */, true /* deleteLegacy */, &dryOut))
+	assert.Contains(t, dryOut.String(), "DELETE LEGACY", "dry-run must agree the rotated-but-authoritative-by-ref secret is safe to delete")
+
+	var out bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true /* deleteLegacy */, &out))
+	assert.Contains(t, out.String(), "DELETED LEGACY")
+	assert.False(t, mock.has(fmt.Sprintf("projects/test-project/secrets/%s", legacyName)))
+}
