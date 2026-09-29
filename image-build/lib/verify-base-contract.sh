@@ -316,6 +316,11 @@ need_cmd gcsfuse "GCS volume mounts (pkg/runtime/common.go)"
 # sudo — scion-base installs /etc/sudoers.d/scion for passwordless sudo.
 need_cmd sudo "scion-base passwordless sudo for the scion user"
 
+# ffmpeg — installed by install-core-toolchain.sh so multimodal agent tasks can
+# generate and inspect audio/video media fixtures without failing with a
+# misleading model-capability error.
+need_cmd ffmpeg "multimodal agent media fixture generation and inspection"
+
 # ---------------------------------------------------------------------------
 # chromium — the *name* is what is depended on, not merely a browser being
 # present: .scion/templates/web-dev/scion-agent.yaml runs a `chromium` service,

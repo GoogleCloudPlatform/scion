@@ -318,4 +318,3 @@ func TestHandleAgentMessage_TopLevelRawAndPlainFlags(t *testing.T) {
 		assert.Equal(t, "Enter", calls[0].StructuredMessage.DeliveryText)
 	})
 }
-
