@@ -46,7 +46,7 @@ func loadAntigravityFixture(t *testing.T) (*dialects.MappingDialect, []*hooks.Ev
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var events []*hooks.Event
 	scanner := bufio.NewScanner(f)
