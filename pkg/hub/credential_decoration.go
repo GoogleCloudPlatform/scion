@@ -43,13 +43,13 @@ import (
 // and is never itself consulted for enforcement — enforcement is A.1/D.1's
 // job, using their own type.
 //
-// Unexported deliberately (pat-refactor ruling on Q8, 2026-09-28): once the
-// stand-in below is swapped for A.1's TokenBoundary, this type has the same
-// shape ({Kind; ProjectID}) as that type. Keeping it unexported means it is
-// only ever a rendering detail of CredentialDecoration.Boundary and LogValue,
-// with no external API surface — so there is no duplicate *public* boundary
-// model after A.1 integration, satisfying "no duplicate public boundary
-// model may remain after integration."
+// Unexported deliberately (pat-refactor ruling on Q8, 2026-09-28): it has the
+// same shape ({Kind; ProjectID}) as A.1's TokenBoundary. Keeping it
+// unexported means it is only ever a rendering detail of
+// CredentialDecoration.Boundary and LogValue, with no external API surface —
+// so there is no duplicate *public* boundary model after A.1 integration,
+// satisfying "no duplicate public boundary model may remain after
+// integration."
 type decorationBoundary struct {
 	Kind      string // "project" | "hub" | "invalid" (mapped from A's kind)
 	ProjectID string // set iff Kind == "project"
