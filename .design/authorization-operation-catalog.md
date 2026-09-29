@@ -1106,6 +1106,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
+- `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
 
 ---
 

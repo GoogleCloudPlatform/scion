@@ -810,7 +810,11 @@ var Catalog = []OperationSpec{
 			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
 		AuthorityEval: AuthorityEvalNone,
 		DenialCodes:   []DenialCode{DenialForbidden},
-		TestRefs:      []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
+			{Package: "pkg/hub", Function: "TestAgentCreate_RequiresLiveDelegator"},
+		},
 	},
 	{
 		ID:          "agent.lifecycle.delete",
