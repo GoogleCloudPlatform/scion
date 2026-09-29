@@ -81,6 +81,8 @@ locals {
   hub_prefixed_secret_prefix = "projects/${var.project_number}/secrets/scion-${substr(sha256(var.hub_name), 0, 12)}-"
 }
 
+# condition{} fields (title, description, expression) are ForceNew: editing any of them, even
+# description wording, destroys and re-creates this grant on live hubs. Put explanations in comments, not here.
 resource "google_project_iam_member" "hub_secretmanager_admin_hub_scope" {
   project = var.project_id
   role    = "roles/secretmanager.admin"
@@ -88,11 +90,13 @@ resource "google_project_iam_member" "hub_secretmanager_admin_hub_scope" {
 
   condition {
     title       = "${var.hub_name}-hub-scope-secrets"
-    description = "Legacy, pre-#2152 hub-scope secret prefix. Only this hub's own hub-scope secrets (gcpSecretName(scope=hub, scopeID=hub_id)) — never another hub's or the live stack's. Transitional: keep until this hub's image carries ptone/scion#2152 and migrate --delete-legacy has run."
+    description = "Only this hub's own hub-scope secrets (gcpSecretName(scope=hub, scopeID=hub_id)) — never another hub's or the live stack's."
     expression  = "resource.name.startsWith(\"${local.hub_scope_secret_prefix}\")"
   }
 }
 
+# condition{} fields (title, description, expression) are ForceNew: editing any of them, even
+# description wording, destroys and re-creates this grant on live hubs. Put explanations in comments, not here.
 resource "google_project_iam_member" "hub_secretmanager_admin_hub_prefixed" {
   project = var.project_id
   role    = "roles/secretmanager.admin"
