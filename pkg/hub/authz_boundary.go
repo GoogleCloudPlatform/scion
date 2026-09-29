@@ -466,7 +466,7 @@ func bindingActivationOK(b *store.RoleBinding, now time.Time) bool {
 // through a group. Shared by ProjectMembershipEvidence and the system-scope
 // queries below so principal/group resolution semantics cannot drift.
 func (a *AuthzService) principalClosure(ctx context.Context, principal PrincipalContext) (refs []store.PrincipalRef, directKey string, groupKeys map[string]bool, err error) {
-	if cache := mintEligibilityCacheFromContext(ctx); cache != nil {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil && cache.principalMatches(principal) {
 		cache.mu.Lock()
 		if cache.closureLoaded {
 			refs, directKey, groupKeys, err = cache.closureRefs, cache.closureDirectKey, cache.closureGroupKeys, cache.closureErr
@@ -512,18 +512,16 @@ func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal Princ
 	return refs, directKey, groupKeys, nil
 }
 
-// scopedRoleBindingPermissions is the shared building block behind both
-// getProjectScopedPermissions's project-scope query and the system-scope
-// queries below (design review #7): given a pre-fetched binding list, it
-// unions the permission IDs granted by every ACTIVE binding whose ScopeType
-// matches scopeType (and, for project scope, whose ScopeID matches
-// scopeID), then applies the same access-constraint reduction
+// scopedRoleBindingPermissions backs getProjectScopedPermissions's
+// project-scope query (its only caller): given a pre-fetched binding list,
+// it unions the permission IDs granted by every ACTIVE binding whose
+// ScopeType matches scopeType (and, for project scope, whose ScopeID
+// matches scopeID), then applies the same access-constraint reduction
 // (loadAccessConstraintRestrictions) already relied on elsewhere.
 // A role definition referenced by an active binding but missing/unloadable
 // is a data-integrity error, not a routine "skip and continue" case: this
 // function propagates that error to the caller (fail closed) rather than
-// silently omitting the binding's permissions, per this contract's error
-// policy.
+// silently omitting the binding's permissions.
 func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
 	seen := make(map[string]bool)
 	var result []string
@@ -753,10 +751,6 @@ func applyHubWideScopeFilters(candidates []CandidateBinding, roleDefs map[string
 	}
 }
 
-// activeSystemScopeCandidates loads principal's active system-scope role
-// bindings as kernel CandidateBinding/RolePermissions structures, ready for
-// applyHubWideScopeFilters. Shared by SystemAuthorityProof and
-// MintTimeSystemGrant.
 // mintEligibilityCacheKey is the context.Context key for an optional,
 // per-call mint-eligibility cache (see mintEligibilityCache).
 type mintEligibilityCacheKey struct{}
@@ -776,6 +770,19 @@ type mintEligibilityCacheKey struct{}
 // never a source of eligibility facts, and never a behavior difference.
 type mintEligibilityCache struct {
 	mu sync.Mutex
+
+	// principalSet/principalKind/principalID record the FIRST principal any
+	// caller populated the closure/system slots for. CanMintSelector installs
+	// a fresh cache per call for a single principal, so this is always the
+	// same principal on every read in practice; it exists so a future caller
+	// that reused one cache across two different principals is detected and
+	// falls back to an uncached load (principalMatches) instead of silently
+	// handing the second principal the first principal's closure/authority.
+	// Deliberately does not gate constraintsLoaded/constraints: the
+	// access-constraint table is global, not principal-scoped.
+	principalSet  bool
+	principalKind PrincipalKind
+	principalID   string
 
 	closureLoaded    bool
 	closureRefs      []store.PrincipalRef
@@ -803,9 +810,31 @@ func mintEligibilityCacheFromContext(ctx context.Context) *mintEligibilityCache 
 	return c
 }
 
+// principalMatches reports whether c's closure/system-scope slots may be
+// used for principal: the first call records the principal, and every later
+// call must match it exactly (both Kind and ID). A mismatch returns false,
+// telling the caller to skip the cache (load uncached) rather than read or
+// overwrite state populated for a different principal.
+func (c *mintEligibilityCache) principalMatches(principal PrincipalContext) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.principalSet {
+		c.principalSet = true
+		c.principalKind = principal.Kind
+		c.principalID = principal.ID
+		return true
+	}
+	return c.principalKind == principal.Kind && c.principalID == principal.ID
+}
+
+// activeSystemScopeCandidates loads principal's active system-scope role
+// bindings as kernel CandidateBinding/RolePermissions structures, ready for
+// applyHubWideScopeFilters. Shared by SystemAuthorityProof and
+// MintTimeSystemGrant.
 func (a *AuthzService) activeSystemScopeCandidates(ctx context.Context, principal PrincipalContext) ([]CandidateBinding, map[string]*RolePermissions, []store.PrincipalRef, error) {
 	cache := mintEligibilityCacheFromContext(ctx)
-	if cache != nil {
+	usable := cache != nil && cache.principalMatches(principal)
+	if usable {
 		cache.mu.Lock()
 		if cache.systemLoaded {
 			candidates, roleDefs, refs, err := cache.systemCandidates, cache.systemRoleDefs, cache.systemRefs, cache.systemErr
@@ -817,7 +846,7 @@ func (a *AuthzService) activeSystemScopeCandidates(ctx context.Context, principa
 
 	candidates, roleDefs, refs, err := a.loadActiveSystemScopeCandidates(ctx, principal)
 
-	if cache != nil {
+	if usable {
 		cache.mu.Lock()
 		cache.systemLoaded = true
 		cache.systemCandidates, cache.systemRoleDefs, cache.systemRefs, cache.systemErr = candidates, roleDefs, refs, err
@@ -1049,9 +1078,9 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 	// access-constraint reduction (ResourceContext{ProjectID: thatProject})
 	// — a constraint governing one project must not be diluted by merging
 	// its bindings with an unconstrained second project's, and must not be
-	// evaluated as a system-wide constraint (ResourceContext{}) instead
-	// Succeeds only if at least one actual
-	// project's own constrained grant survives.
+	// evaluated as a system-wide constraint (ResourceContext{}) instead.
+	// Succeeds only if at least one actual project's own constrained grant
+	// survives.
 	for projectID, projBindings := range byProject {
 		if !candidateSetHasPermission(toCandidateBindings(projBindings), roleDefs, permissionID) {
 			continue

@@ -25,20 +25,161 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// groupSATarget builds the real, canonical Resource for a group/SA
+// permission's own resource type — groupResource/gcpServiceAccountResource,
+// the exact constructors the live handlers and capability computation use —
+// project-parented, with its ownership field set to a DIFFERENT user than
+// the test principal. Without that, an owner relationship grant could
+// admit the request and masquerade as system-role authority in a
+// Decide-vs-SystemAuthorityProof comparison.
+func groupSATarget(resourceType, projectID, seed string) Resource {
+	otherOwner := tid("gsa-diff-owner-" + seed)
+	id := tid("gsa-diff-target-" + seed)
+	switch resourceType {
+	case "group":
+		return groupResource(&store.Group{ID: id, ProjectID: projectID, OwnerID: otherOwner})
+	case "gcp_service_account":
+		return gcpServiceAccountResource(&store.GCPServiceAccount{ID: id, Scope: store.ScopeProject, ScopeID: projectID, CreatedBy: otherOwner})
+	default:
+		panic("groupSATarget: unsupported resource type " + resourceType)
+	}
+}
+
+// TestGroupAndGCPServiceAccount_DecideAgreesWithSystemAuthorityProof is the
+// differential proof the ruling requires: for every group.*/gcp_service_account.*
+// permission reviewed ProjectTargetApplicability=true (including assign),
+// Decide (via CheckAccess, exactly as production handlers and capability
+// computation call it) and SystemAuthorityProof must agree on a REAL
+// project-parented target built with the actual production constructors —
+// not a hand-literal Resource and not an assertion against
+// SystemAuthorityProof alone, which would be circular (it is the very
+// function the table under test drives).
+func TestGroupAndGCPServiceAccount_DecideAgreesWithSystemAuthorityProof(t *testing.T) {
+	byID := make(map[string]permissions.Permission, len(permissions.Registry))
+	for _, p := range permissions.Registry {
+		byID[p.ID] = p
+	}
+
+	applicable := []string{
+		"group.read", "group.update", "group.delete", "group.addMember", "group.removeMember",
+		"gcp_service_account.read", "gcp_service_account.delete", "gcp_service_account.verify", "gcp_service_account.assign",
+	}
+	for _, permID := range applicable {
+		permID := permID
+		p, ok := byID[permID]
+		if !ok {
+			t.Fatalf("test assumption broken: %q is not a Registry permission", permID)
+		}
+		if applies, reviewed := permissions.AppliesToExistingProjectTarget(permID); !reviewed || !applies {
+			t.Fatalf("test assumption broken: %q must be reviewed ProjectTargetApplicability=true", permID)
+		}
+
+		t.Run(permID+"/decide_agrees_with_system_authority_proof", func(t *testing.T) {
+			authz, s := authzTestSetup(t)
+			ctx := context.Background()
+			projectID := tid("gsa-diff-proj-" + permID)
+			userID := tid("gsa-diff-user-" + permID)
+			createDelegateTestProject(t, s, projectID, "gsa-diff-"+permID, "someone-else")
+			systemRoleUserWithPermissions(t, s, userID, []string{permID})
+
+			target := groupSATarget(p.Resource, projectID, permID)
+			identity := NewAuthenticatedUser(userID, userID+"@test.com", "u", store.UserRoleMember, "api")
+
+			decision := authz.CheckAccess(ctx, identity, target, Action(p.Action))
+			proof, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, permID, ContemplatedProjectClass(permID))
+			require.NoError(t, err)
+
+			if !decision.Allowed {
+				t.Fatalf("Decide must allow %s against its real project-parented target when the principal holds a system-scoped grant for it: %s", permID, decision.Reason)
+			}
+			if decision.Allowed != proof {
+				t.Errorf("Decide and SystemAuthorityProof must agree for %s: Decide.Allowed=%v, SystemAuthorityProof=%v", permID, decision.Allowed, proof)
+			}
+		})
+	}
+}
+
+// TestGroupAndGCPServiceAccount_NonApplicableRows_SystemAuthorityProofDenied
+// covers the other half of the ruling's evidence requirement: group.create/
+// group.list and gcp_service_account.create/list/mint are reviewed
+// ProjectTargetApplicability=false, and SystemAuthorityProof must deny them
+// even when the principal holds a system-scoped grant for the exact
+// permission — collection-capable is never inferred from instance-capable.
+func TestGroupAndGCPServiceAccount_NonApplicableRows_SystemAuthorityProofDenied(t *testing.T) {
+	nonApplicable := []string{"group.create", "group.list", "gcp_service_account.create", "gcp_service_account.list", "gcp_service_account.mint"}
+	for _, permID := range nonApplicable {
+		permID := permID
+		t.Run(permID, func(t *testing.T) {
+			if applies, reviewed := permissions.AppliesToExistingProjectTarget(permID); !reviewed || applies {
+				t.Fatalf("test assumption broken: %q must be reviewed ProjectTargetApplicability=false", permID)
+			}
+
+			authz, s := authzTestSetup(t)
+			ctx := context.Background()
+			projectID := tid("gsa-na-proj-" + permID)
+			userID := tid("gsa-na-user-" + permID)
+			createDelegateTestProject(t, s, projectID, "gsa-na-"+permID, "someone-else")
+			systemRoleUserWithPermissions(t, s, userID, []string{permID})
+
+			ok, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, permID, ContemplatedProjectClass(permID))
+			require.NoError(t, err)
+			if ok {
+				t.Errorf("%s is not reviewed project-applicable and must deny SystemAuthorityProof even when the principal holds a system-scoped grant for it", permID)
+			}
+		})
+	}
+}
+
+// TestSeededRoleException_DecideAgreesWithSystemAuthorityProof is finding
+// 1's differential proof for the seeded-role exceptions specifically: the
+// SAME seeded system role (not a synthetic single-permission role) must
+// make Decide agree with SystemAuthorityProof on a real target for each
+// entry in seededRoleProjectTargetExceptions.
+func TestSeededRoleException_DecideAgreesWithSystemAuthorityProof(t *testing.T) {
+	byID := make(map[string]permissions.Permission, len(permissions.Registry))
+	for _, p := range permissions.Registry {
+		byID[p.ID] = p
+	}
+
+	for _, exc := range seededRoleProjectTargetExceptions {
+		exc := exc
+		p, ok := byID[exc.permissionID]
+		if !ok {
+			t.Fatalf("test assumption broken: %q is not a Registry permission", exc.permissionID)
+		}
+
+		t.Run(exc.role+"/"+exc.permissionID, func(t *testing.T) {
+			authz, s := authzTestSetup(t)
+			ctx := context.Background()
+			projectID := tid("sre-diff-proj-" + exc.role + "-" + exc.permissionID)
+			userID := tid("sre-diff-user-" + exc.role + "-" + exc.permissionID)
+			createDelegateTestProject(t, s, projectID, "sre-diff-"+exc.role+"-"+exc.permissionID, "someone-else")
+			createTestUserWithRole(t, s, userID, "sre-diff-"+exc.role+"-"+exc.permissionID+"@test.com", "member", exc.role)
+
+			target := groupSATarget(p.Resource, projectID, exc.role+"-"+exc.permissionID)
+			identity := NewAuthenticatedUser(userID, userID+"@test.com", "u", store.UserRoleMember, "api")
+
+			decision := authz.CheckAccess(ctx, identity, target, Action(p.Action))
+			proof, err := authz.SystemAuthorityProof(ctx, activeUserPrincipal(userID), projectID, exc.permissionID, ContemplatedProjectClass(exc.permissionID))
+			require.NoError(t, err)
+
+			if !decision.Allowed {
+				t.Fatalf("Decide must allow the seeded %s role's %s against its real project-parented target: %s", exc.role, exc.permissionID, decision.Reason)
+			}
+			if decision.Allowed != proof {
+				t.Errorf("Decide and SystemAuthorityProof must agree for seeded %s/%s: Decide.Allowed=%v, SystemAuthorityProof=%v", exc.role, exc.permissionID, decision.Allowed, proof)
+			}
+		})
+	}
+}
+
 // TestSystemAuthorityProof_GroupAndGCPServiceAccount_PerPermissionCharacterization
-// characterizes EACH group.* and gcp_service_account.* permission
-// individually against its real target construction and current Decide,
-// rather than inferring a whole family from a smaller sample. It covers
-// every permission whose real, live authorization call site (an enforcement
-// gate or a capability computation — see
-// ResourceActions["group"]/["gcp_service_account"], capabilities.go)
-// evaluates it against a Resource that can carry ParentType="project"
-// (groupResource sets this for project_agents groups;
-// gcpServiceAccountResource sets it for project-scoped service accounts).
-// group.create/group.list (always parentless or a hardcoded hub Resource)
-// and gcp_service_account.create/list/mint (never evaluated per-instance)
-// are intentionally excluded: their real target construction never produces
-// a project-parented Resource.
+// covers the admission-boundary facts TestGroupAndGCPServiceAccount_DecideAgreesWithSystemAuthorityProof
+// does not: no-binding, wrong-permission and constraint-denied controls,
+// and the composed ProjectTargetAdmission runtime path, for every
+// permission reviewed ProjectTargetApplicability=true. It asserts only
+// SystemAuthorityProof/ProjectTargetAdmission, not Decide/CheckAccess — the
+// Decide-agreement proof lives in the differential test above.
 func TestSystemAuthorityProof_GroupAndGCPServiceAccount_PerPermissionCharacterization(t *testing.T) {
 	cases := []struct {
 		permissionID string
@@ -52,6 +193,7 @@ func TestSystemAuthorityProof_GroupAndGCPServiceAccount_PerPermissionCharacteriz
 		{"gcp_service_account.read", "gcp_service_account"},
 		{"gcp_service_account.delete", "gcp_service_account"},
 		{"gcp_service_account.verify", "gcp_service_account"},
+		{"gcp_service_account.assign", "gcp_service_account"},
 	}
 
 	for _, tc := range cases {
@@ -73,8 +215,8 @@ func TestSystemAuthorityProof_GroupAndGCPServiceAccount_PerPermissionCharacteriz
 			}
 
 			// The composed runtime path agrees, via a real project-parented
-			// target of this permission's own resource type.
-			target := Resource{Type: tc.resourceType, ID: tid("gsa-pos-target-" + tc.permissionID), ParentType: "project", ParentID: projectID}
+			// target built with the actual production constructor.
+			target := groupSATarget(tc.resourceType, projectID, "pos-"+tc.permissionID)
 			result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, tc.permissionID, target, nil)
 			require.NoError(t, err)
 			if !result.Admitted || result.Source != ProjectAccessSourceSystemRole {
@@ -188,14 +330,11 @@ func TestSeededRoles_DenyProjectTargetsByDefault(t *testing.T) {
 		for _, permID := range r.permissions {
 			r, permID := r, permID
 			t.Run(r.label+"/"+permID, func(t *testing.T) {
-				applies, reviewed := permissions.AppliesToExistingProjectTarget(permID)
-				if !reviewed || !applies {
-					// Not project-applicable at all: SystemAuthorityProof's
-					// own gate denies before any role or binding evaluation
-					// is reached, so there is nothing further to prove here.
-					return
-				}
-
+				// No early return for a non-project-applicable permission:
+				// the deny-by-default guarantee must be proven by actually
+				// calling SystemAuthorityProof and asserting false, not
+				// assumed from the table it exists to guard — a future
+				// change to the gate ordering must be caught here too.
 				authz, s := authzTestSetup(t)
 				ctx := context.Background()
 				projectID := tid("srg-proj-" + r.label + "-" + permID)
@@ -288,7 +427,7 @@ func TestSeededRoleException_GroupAndSARead_Controls(t *testing.T) {
 			if exc.permissionID == "gcp_service_account.read" {
 				ownResourceType = "gcp_service_account"
 			}
-			ownTarget := Resource{Type: ownResourceType, ID: tid("sre-mm-own-" + exc.role + "-" + exc.permissionID), ParentType: "project", ParentID: projectID}
+			ownTarget := groupSATarget(ownResourceType, projectID, "mm-own-"+exc.role+"-"+exc.permissionID)
 			result, err := authz.ProjectTargetAdmission(ctx, activeUserPrincipal(userID), projectID, exc.permissionID, ownTarget, memo)
 			require.NoError(t, err)
 			require.True(t, result.Admitted, "sanity: the reviewed exception must be admitted for its own permission and target")

@@ -1441,6 +1441,62 @@ func TestCanMintSelector_HubBoundary_RelationshipAlternative_DevPrincipal(t *tes
 	}
 }
 
+// TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind pins that
+// hub.NormalizePrincipalType (the flat mint path and Decide's constraint
+// matching) and permissions.RelationshipPrincipalKind (the relationship
+// mint path) never diverge, even though they are two independent
+// implementations of the same mapping (permissions cannot import hub, so
+// there is no single shared function to call instead) — every PrincipalKind
+// constant, plus an unrecognized value, must map identically through both.
+func TestNormalizePrincipalType_AgreesWithRelationshipPrincipalKind(t *testing.T) {
+	kinds := []string{
+		string(PrincipalKindUser),
+		string(PrincipalKindAgent),
+		string(PrincipalKindFederatedUser),
+		string(PrincipalKindFederatedAgent),
+		string(PrincipalKindFederatedService),
+		string(PrincipalKindBroker),
+		string(PrincipalKindDev),
+		"totally-unrecognized-kind",
+	}
+	for _, k := range kinds {
+		got := NormalizePrincipalType(k)
+		want := permissions.RelationshipPrincipalKind(k)
+		if got != want {
+			t.Errorf("NormalizePrincipalType(%q) = %q but permissions.RelationshipPrincipalKind(%q) = %q -- the flat and relationship mint paths would diverge on this principal kind", k, got, k, want)
+		}
+	}
+}
+
+// TestMintEligibilityCache_PrincipalMismatchSkipsCache proves the
+// principal-key guard: a cache populated for one principal must not hand a
+// second, different principal the first principal's closure. CanMintSelector
+// never actually reuses one cache across two principals (it installs a
+// fresh cache per call), but a future caller that did must be safe.
+func TestMintEligibilityCache_PrincipalMismatchSkipsCache(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	userA := tid("mec-user-a")
+	userB := tid("mec-user-b")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userA, Email: "meca@test.com", DisplayName: "a", Role: "member", Status: store.UserStatusActive}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userB, Email: "mecb@test.com", DisplayName: "b", Role: "member", Status: store.UserStatusActive}))
+
+	cache := &mintEligibilityCache{}
+	cachedCtx := withMintEligibilityCache(ctx, cache)
+
+	refsA, _, _, err := authz.principalClosure(cachedCtx, activeUserPrincipal(userA))
+	require.NoError(t, err)
+	refsB, _, _, err := authz.principalClosure(cachedCtx, activeUserPrincipal(userB))
+	require.NoError(t, err)
+
+	if len(refsA) != 1 || refsA[0].ID != userA {
+		t.Fatalf("sanity: refsA must resolve to userA, got %+v", refsA)
+	}
+	if len(refsB) != 1 || refsB[0].ID != userB {
+		t.Errorf("a second principal sharing one cache must get its OWN closure, not the first principal's: got %+v, want ID %q", refsB, userB)
+	}
+}
+
 // countingConstraintStore wraps a store.Store and counts calls to
 // ListAccessConstraints, so a test can assert the mint-eligibility cache
 // actually prevents the access-constraint table from being reloaded once
