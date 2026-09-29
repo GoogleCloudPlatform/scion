@@ -309,8 +309,30 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private dragOverThreadId: string | null = null;
 
   // --- Thread groups state ---
-  /** Set of collapsed group IDs. */
+  /**
+   * The user's real, persisted collapse preference. This is the only thing
+   * `saveCollapsedGroupIds`/`pruneCollapsedGroups` ever write — the deep-link
+   * auto-expand below must never add to or remove from it, or the override
+   * leaks into storage the next time anything else saves (round-2 review,
+   * R2).
+   */
   @state() private collapsedGroups = new Set<string>();
+  /**
+   * Transient, render-only override: the one group forced open because it
+   * contains the selected/deep-linked thread, even though the user's real
+   * preference for it (in `collapsedGroups`) is collapsed. Never persisted.
+   * See `maybeAutoExpandGroupForSelectedKey`.
+   */
+  @state() private autoExpandedGroupId: string | null = null;
+  /**
+   * The `selectedKey` that `autoExpandedGroupId` was last computed for.
+   * `loadData` runs on every SSE-triggered reload with the *same* selected
+   * thread, and recomputing the override each time would silently pop the
+   * group back open right after the user collapses it — the override must
+   * be decided once per distinct thread selection, not once per reload
+   * (round-2 review, R3).
+   */
+  private _autoExpandComputedForKey: string | null = null;
   /** Group header id the drag is hovering over. */
   @state() private dragOverGroupId: string | null = null;
   /** State for the group name prompt (inline input). */
@@ -795,11 +817,17 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
-    // Auto-expand the space and group containing the selected thread
-    // (deep-link support).
-    if (changedProperties.has('selectedKey') && this.selectedKey) {
-      this.expandSpaceForSelectedKey();
-      this.expandGroupForSelectedKey();
+    if (changedProperties.has('selectedKey')) {
+      if (this.selectedKey) {
+        // Auto-expand the space and group containing the selected thread
+        // (deep-link support).
+        this.expandSpaceForSelectedKey();
+        this.maybeAutoExpandGroupForSelectedKey();
+      } else {
+        // Nothing selected — no group should be forced open on its behalf.
+        this.autoExpandedGroupId = null;
+        this._autoExpandComputedForKey = null;
+      }
     }
   }
 
@@ -829,22 +857,28 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * Expand, in memory only, the thread group containing the currently
-   * selected thread (deep-link support). Before persisted collapse existed,
-   * a group could never hide the active thread — it always started
-   * expanded. Now a reload can land on a thread inside a group the user
-   * left collapsed, so the group is opened for this view without touching
-   * the user's stored preference: navigate away and it is still collapsed
-   * next time, exactly as they left it.
+   * Decide, once per distinct `selectedKey`, whether the group containing
+   * the selected thread needs a transient auto-expand override (deep-link
+   * support): before persisted collapse existed, a group could never hide
+   * the active thread — it always started expanded. Now a reload can land
+   * on a thread inside a group the user left collapsed, so it is forced
+   * open for this view via `autoExpandedGroupId` — never by touching
+   * `collapsedGroups`, which stays exactly what the user last set it to.
+   *
+   * Idempotent per key: `loadData` calls this on every reload (SSE messages,
+   * topic changes, etc.), and re-deciding it each time would force the group
+   * back open right after the user collapses it, seconds later, with no way
+   * to keep it shut while the thread stays open (round-2 review, R3).
    */
-  private expandGroupForSelectedKey(): void {
+  private maybeAutoExpandGroupForSelectedKey(): void {
+    if (this._autoExpandComputedForKey === this.selectedKey) return;
+    this._autoExpandComputedForKey = this.selectedKey;
+    this.autoExpandedGroupId = null;
     if (!this.selectedKey || this.collapsedGroups.size === 0) return;
     const allGroups = Object.values(this.prefs.threadGroups ?? {}).flat();
     for (const group of allGroups) {
       if (group.threadIds.includes(this.selectedKey) && this.collapsedGroups.has(group.id)) {
-        const next = new Set(this.collapsedGroups);
-        next.delete(group.id);
-        this.collapsedGroups = next;
+        this.autoExpandedGroupId = group.id;
         return;
       }
     }
@@ -899,7 +933,7 @@ export class ScionChatSpaceRail extends LitElement {
         this.pruneCollapsedGroups();
       }
       if (this.selectedKey) {
-        this.expandGroupForSelectedKey();
+        this.maybeAutoExpandGroupForSelectedKey();
       }
     } finally {
       this.loading = false;
@@ -1339,6 +1373,14 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private toggleGroupCollapse(groupId: string): void {
+    if (groupId === this.autoExpandedGroupId) {
+      // This group is only *visually* expanded via the deep-link override —
+      // the user's real preference (in collapsedGroups) already has it
+      // collapsed. A click here means "collapse", and clearing the override
+      // is the entire action; there's nothing new to save.
+      this.autoExpandedGroupId = null;
+      return;
+    }
     const next = new Set(this.collapsedGroups);
     if (next.has(groupId)) {
       next.delete(groupId);
@@ -2455,7 +2497,8 @@ export class ScionChatSpaceRail extends LitElement {
         const groupThreads = group.threadIds
           .map((id) => threadMap.get(id))
           .filter((t): t is ChatSpaceThread => t !== undefined);
-        const collapsed = this.collapsedGroups.has(group.id);
+        const collapsed =
+          this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
         return html`
           <div
             class="thread-group-header ${this.dragOverGroupId === group.id ? 'drag-over' : ''}"

@@ -311,18 +311,20 @@ describe('space rail — prune gating on partial load failures (R1 regression)',
 });
 
 describe('space rail — auto-expand group for a selected/deep-linked thread (N1)', () => {
-  it('expands, in memory only, the group containing the selected thread', () => {
+  it('sets a transient autoExpandedGroupId override without mutating collapsedGroups', () => {
     const el = document.createElement('scion-chat-space-rail') as any;
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'thread-1';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-live']));
 
-    el.expandGroupForSelectedKey();
+    el.maybeAutoExpandGroupForSelectedKey();
 
-    expect(el.collapsedGroups.has('g-live')).toBe(false);
-    // Not persisted — the user's stored collapse choice survives navigating
-    // away from this deep link.
+    expect(el.autoExpandedGroupId).toBe('g-live');
+    // The user's real preference is untouched — only the transient override
+    // changed. See the R2 tests below for what breaks if this mutates
+    // collapsedGroups instead.
+    expect(el.collapsedGroups.has('g-live')).toBe(true);
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as string[];
     expect(stored).toContain('g-live');
   });
@@ -333,8 +335,9 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     el.selectedKey = 'not-in-any-group';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
 
-    el.expandGroupForSelectedKey();
+    el.maybeAutoExpandGroupForSelectedKey();
 
+    expect(el.autoExpandedGroupId).toBeNull();
     expect(el.collapsedGroups.has('g-live')).toBe(true);
   });
 
@@ -352,7 +355,114 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     el.selectedKey = 'thread-1';
     await el.updateComplete;
 
-    expect(el.collapsedGroups.has('g-live')).toBe(false);
+    expect(el.autoExpandedGroupId).toBe('g-live');
+    expect(el.collapsedGroups.has('g-live')).toBe(true);
+  });
+
+  it('clears the override (without touching collapsedGroups) when selectedKey is cleared', async () => {
+    const el = mount();
+    await el.reload();
+
+    el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    el.collapsedGroups = new Set(['g-live']);
+    el.selectedKey = 'thread-1';
+    await el.updateComplete;
+    expect(el.autoExpandedGroupId).toBe('g-live');
+
+    el.selectedKey = '';
+    await el.updateComplete;
+
+    expect(el.autoExpandedGroupId).toBeNull();
+    expect(el.collapsedGroups.has('g-live')).toBe(true);
+  });
+});
+
+describe('space rail — auto-expand must never leak into the persisted set (R2 regression)', () => {
+  it('toggling a different group afterward does not drop the auto-expanded group from storage', () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    document.body.appendChild(el);
+    el.selectedKey = 'thread-1';
+    el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+
+    el.maybeAutoExpandGroupForSelectedKey();
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+
+    // A real, unrelated toggle — this is what used to write the mutated
+    // (auto-expanded) collapsedGroups back out, silently dropping g-sel.
+    el.toggleGroupCollapse('g-other');
+
+    const stored = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:user-1`) ?? '[]') as string[];
+    expect(stored).toContain('g-sel');
+    expect(stored).toContain('g-other');
+  });
+
+  it('a later prune does not drop the auto-expanded group from storage', () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel', 'g-stale']));
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    document.body.appendChild(el);
+    el.selectedKey = 'thread-1';
+    el.spaces = [space('p-a', 'Alpha')];
+    // g-stale no longer exists server-side; g-sel still does and still holds
+    // the selected thread.
+    el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+
+    el.maybeAutoExpandGroupForSelectedKey();
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+
+    el.pruneCollapsedGroups();
+
+    expect(el.collapsedGroups.has('g-sel')).toBe(true);
+    expect(el.collapsedGroups.has('g-stale')).toBe(false);
+    const stored = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:user-1`) ?? '[]') as string[];
+    expect(stored).toContain('g-sel');
+    expect(stored).not.toContain('g-stale');
+  });
+
+  it("does not override the user's collapse on a later reload with the same selectedKey (R3 regression)", async () => {
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+        );
+      }
+      if (path.startsWith('/api/v1/chat/spaces/')) {
+        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
+      }
+      if (path === '/api/v1/chat/user-prefs') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threadGroups: JSON.stringify({
+                'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }],
+              }),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.selectedKey = 'thread-1';
+    document.body.appendChild(el);
+    await el.reload();
+
+    // The user collapses the group that holds their own currently-open
+    // thread — a deliberate, real toggle.
+    el.toggleGroupCollapse('g-sel');
+    expect(el.collapsedGroups.has('g-sel')).toBe(true);
+
+    // A later SSE-triggered reload with the *same* selectedKey (chat.ts
+    // calls reload() on every message, topic change, etc.) must not force
+    // the group back open.
+    await el.reload();
+
+    expect(el.collapsedGroups.has('g-sel')).toBe(true);
+    expect(el.autoExpandedGroupId).not.toBe('g-sel');
   });
 });
 
