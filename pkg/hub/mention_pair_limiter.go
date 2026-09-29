@@ -38,8 +38,19 @@ const (
 
 	// mentionPairLimiterMaxPairs bounds the tracked pairs so the map cannot
 	// grow without bound from one-off mention pairs that never repeat.
-	// Reaching it forces an immediate sweep of fully-idle pairs.
+	// Reaching it triggers a sweep of fully-idle pairs, rate-limited by
+	// mentionPairLimiterSweepInterval below.
 	mentionPairLimiterMaxPairs = 10000
+
+	// mentionPairLimiterSweepInterval bounds how often the at-capacity sweep
+	// may actually run. Without this, once the map is at capacity and
+	// nothing has expired yet, every single Reserve call would repeat a full
+	// O(pairs) scan under the lock — a sweep that finds nothing to reclaim
+	// is itself an expensive no-op under sustained load. Reserve's own cap
+	// enforcement (pruneBefore, scoped to the one pair being checked) does
+	// not depend on this sweep ever running at all; the sweep only bounds
+	// the map's total size.
+	mentionPairLimiterSweepInterval = 1 * time.Minute
 )
 
 // mentionPairLimiter is an in-memory sliding-window limiter keyed by the
@@ -53,6 +64,14 @@ type mentionPairLimiter struct {
 	windows  map[string][]time.Time
 	capacity int
 	window   time.Duration
+
+	// lastSweep is the clock time the at-capacity sweep last actually ran,
+	// used to rate-limit it to at most once per mentionPairLimiterSweepInterval.
+	lastSweep time.Time
+	// sweepCount counts how many times the sweep has actually executed (not
+	// merely been considered). Tests use it to observe sweep frequency
+	// directly instead of inferring it from map-size side effects.
+	sweepCount int
 
 	// now is the clock, injectable so tests can exercise the window without
 	// sleeping ten real minutes.
@@ -185,11 +204,19 @@ func (l *mentionPairLimiter) setOrDeleteLocked(key string, kept []time.Time) {
 }
 
 // sweepIfLargeLocked drops fully-idle pairs when the tracked-pair count has
-// hit the defensive cap. The caller must hold l.mu.
+// hit the defensive cap, but at most once per mentionPairLimiterSweepInterval:
+// once the map is at capacity, if nothing (or little) has expired yet, every
+// Reserve call would otherwise repeat this full O(pairs) scan under the
+// lock. The caller must hold l.mu.
 func (l *mentionPairLimiter) sweepIfLargeLocked(now time.Time) {
 	if len(l.windows) < mentionPairLimiterMaxPairs {
 		return
 	}
+	if now.Sub(l.lastSweep) < mentionPairLimiterSweepInterval {
+		return
+	}
+	l.lastSweep = now
+	l.sweepCount++
 	cutoff := now.Add(-l.window)
 	for k, times := range l.windows {
 		kept := pruneBefore(times, cutoff)

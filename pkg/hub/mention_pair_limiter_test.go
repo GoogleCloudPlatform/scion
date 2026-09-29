@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -177,4 +178,62 @@ func TestMentionPairLimiter_PruningReclaimsExpiredEntries(t *testing.T) {
 	require.True(t, l.Reserve("fresh-a", "fresh-b"))
 	require.Less(t, len(l.windows), mentionPairLimiterMaxPairs+10,
 		"expired pairs must be swept once the tracked-pair count is large")
+}
+
+// The at-capacity sweep must not repeat on every Reserve call once the map
+// is at capacity and nothing new has expired: that would turn every send
+// into a full O(pairs) scan under the lock. It must still run again once
+// mentionPairLimiterSweepInterval has elapsed, and reclaim whatever has
+// expired by then. Correctness of the cap itself (via pruneBefore, scoped to
+// the one pair being checked) never depends on whether a sweep ran at all —
+// this test is only about how often the sweep itself executes.
+func TestMentionPairLimiter_SweepIsRateLimited(t *testing.T) {
+	fakeNow := time.Now()
+	l := newMentionPairLimiterWithParams(1000, time.Minute, func() time.Time { return fakeNow })
+
+	// Fill the map to the defensive cap with entries already expired
+	// relative to the 1-minute window, so a real sweep has something to
+	// reclaim.
+	l.mu.Lock()
+	for i := 0; i < mentionPairLimiterMaxPairs; i++ {
+		key := fmt.Sprintf("stale-%d", i)
+		l.windows[key] = []time.Time{fakeNow.Add(-2 * time.Minute)}
+	}
+	l.mu.Unlock()
+
+	require.True(t, l.Reserve("a", "b"), "a fresh pair must still be admitted while the map is at the defensive cap")
+	require.Equal(t, 1, l.sweepCount, "the first Reserve at capacity must trigger exactly one sweep")
+	require.Less(t, len(l.windows), mentionPairLimiterMaxPairs,
+		"the sweep must have reclaimed the fully-expired stale entries")
+
+	// Re-fill back up to the cap with entries that are NOT expired, so the
+	// map is at capacity again but there is nothing stale for a sweep to
+	// find — and the sweep interval has not elapsed since the first sweep.
+	l.mu.Lock()
+	for i := 0; len(l.windows) < mentionPairLimiterMaxPairs; i++ {
+		key := fmt.Sprintf("fresh-%d", i)
+		l.windows[key] = []time.Time{fakeNow}
+	}
+	l.mu.Unlock()
+
+	for i := 0; i < 5; i++ {
+		l.Reserve("c", "d")
+	}
+	require.Equal(t, 1, l.sweepCount,
+		"repeated Reserve calls at capacity within the sweep interval must not re-sweep")
+
+	// Advance past the sweep interval and make the map stale again: the
+	// next Reserve at capacity must sweep once more and reclaim it.
+	fakeNow = fakeNow.Add(mentionPairLimiterSweepInterval + time.Second)
+	l.mu.Lock()
+	for k := range l.windows {
+		l.windows[k] = []time.Time{fakeNow.Add(-2 * time.Minute)}
+	}
+	l.mu.Unlock()
+
+	require.True(t, l.Reserve("e", "f"))
+	require.Equal(t, 2, l.sweepCount,
+		"a Reserve at capacity after the sweep interval has elapsed must sweep again")
+	require.Less(t, len(l.windows), mentionPairLimiterMaxPairs,
+		"the second sweep must reclaim entries that expired after the first one")
 }
