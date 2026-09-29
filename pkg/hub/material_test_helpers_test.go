@@ -131,13 +131,15 @@ type materialFailingStore struct {
 	// getUserErrAfterCalls, if > 0, makes getUserErr apply starting with that
 	// call number (e.g. 1 lets the first GetUser call through and fails the
 	// second onward). 0 (the default) fails every call, as before.
-	getUserErrAfterCalls            int
-	getUserCalls                    int
+	getUserErrAfterCalls int
+	getUserCalls         int
+	// listRoleBindingsForPrincipalErr injects a failure into the singular
+	// ListRoleBindingsForPrincipal, which CheckEffectiveMembership calls for
+	// a principal's direct bindings.
 	listRoleBindingsForPrincipalErr error
 	// listRoleBindingsForPrincipalsErr injects a failure into the plural
-	// ListRoleBindingsForPrincipals, which ProjectAdmissionForClass's
-	// membership-evidence branch calls (ptone/scion#2129); distinct from the
-	// singular method above, which CheckEffectiveMembership used.
+	// ListRoleBindingsForPrincipals, which CheckEffectiveMembership calls for
+	// group-derived bindings.
 	listRoleBindingsForPrincipalsErr error
 	getDelegationEdgesForDelegateErr error
 	delegationEdgesOverride          []*store.DelegationEdge

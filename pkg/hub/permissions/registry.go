@@ -285,10 +285,15 @@ var Registry = []Permission{
 	// Material delivery and runtime-use permissions (ptone/scion#2129).
 	// *.deliver governs launch-time delivery of a secret, stored environment
 	// variable or stored skill reference to a target agent; it carries no
-	// AgentScopes and is admitted only under a hub-side delivery credential,
-	// never an agent JWT. secret.use and gcp_service_account.use govern an
-	// agent's own runtime retrieval or token-mint request and are admitted
-	// only under an agent JWT.
+	// AgentScopes. The intended rule is that it is admitted only under a
+	// hub-side delivery credential, never an agent JWT; that credential
+	// restriction is tracked separately and is not yet enforced here.
+	// secret.use governs an agent's own runtime retrieval and is admitted
+	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
+	// has no AgentScopes: the GCP token scope is per service account
+	// (project:gcp:token:<sa-id>) and cannot be matched statically, so no
+	// credential satisfies it until the slice that wires the token-mint
+	// check adds that mapping.
 	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},

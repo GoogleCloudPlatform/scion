@@ -97,13 +97,13 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
-	// Check 5: root human live authority. Admission is membership OR
-	// target-applicable system authority for the exact secret.use permission
-	// (ptone/scion#2129), via ProjectAdmissionForClass. The root's own
-	// liveness (found, active) is still checked directly here, so the
-	// specific reason code (target_unresolved / source_inactive / a genuine
-	// lookup fault) is preserved regardless of admission's own, coarser,
-	// fail-closed error handling.
+	// Check 5: root human live authority. Admission is built-in project
+	// membership (CheckEffectiveMembership) OR target-applicable system
+	// authority for the exact secret.use permission (SystemAuthorityProof).
+	// An unrelated custom project binding satisfies neither leg. This is an
+	// interim composition: it keeps this endpoint's existing behavior while
+	// the shared exact-permission ceiling is not yet enforced everywhere; F
+	// converges check 5 on ProjectAdmissionForClass once that lands.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -120,20 +120,30 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if u.Status != store.UserStatusActive {
 		return nil, ReasonSourceInactive, http.StatusForbidden
 	}
-	if s.authzService == nil {
+	m := s.CheckEffectiveMembership(ctx, root.ID, rec.ProjectID)
+	if m.Err != nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	admission, err := s.authzService.ProjectAdmissionForClass(ctx,
-		PrincipalContext{Kind: PrincipalKindUser, ID: root.ID},
-		rec.ProjectID,
-		"secret.use",
-		ProjectTargetClass{ResourceType: "secret", ScopeKind: store.ScopeProject},
-		nil,
-	)
-	if err != nil {
-		return nil, ReasonBackendError, http.StatusInternalServerError
+	admitted := m.IsMember
+	if !admitted {
+		if s.authzService == nil {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		// The class is fixed at the project scope kind because this
+		// precheck runs before any per-item scope is known (a later
+		// user-scope item does not change which class this call reviews).
+		ok, err := s.authzService.SystemAuthorityProof(ctx,
+			PrincipalContext{Kind: PrincipalKindUser, ID: root.ID},
+			rec.ProjectID,
+			"secret.use",
+			ProjectTargetClass{ResourceType: "secret", ScopeKind: store.ScopeProject},
+		)
+		if err != nil {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		admitted = ok
 	}
-	if !admission.Admitted {
+	if !admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
 	}
 
