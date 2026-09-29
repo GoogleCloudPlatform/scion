@@ -825,6 +825,22 @@ describe('scion-chat-message GitHub shortform refs', () => {
     const el = await mount('see _ptone/scion#1 for details');
     expect(ghRefLinks(el)).toHaveLength(0);
   });
+
+  it('re-emits the boundary character unchanged (round 3 R1)', async () => {
+    const el = await mount('x (a/b#1),c/d#2 e/f#3');
+    expect(ghRefLinks(el).map((a) => a.textContent)).toEqual(['a/b#1', 'c/d#2', 'e/f#3']);
+    expect(el.shadowRoot?.querySelector('.md-content p')?.textContent).toBe(
+      'x (a/b#1),c/d#2 e/f#3'
+    );
+  });
+
+  it('links a ref at the very start of the message (round 3 R2)', async () => {
+    const el = await mount('ptone/scion#2217 is fixed');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
 });
 
 describe('scion-chat-message cross-project label', () => {
