@@ -217,6 +217,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 				"sub", identity.Subject)
 			return nil, fmt.Errorf("bound user not found: %w", err)
 		}
+		if user == nil {
+			return nil, fmt.Errorf("google identity resolver: bound user record is nil")
+		}
 
 		if user.Status == store.UserStatusSuspended {
 			return nil, ErrUserSuspended
@@ -299,6 +302,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	normalizedEmail := strings.ToLower(identity.Email)
 	existingUser, err := r.users.GetUserByEmail(ctx, normalizedEmail)
 	if err == nil {
+		if existingUser == nil {
+			return nil, fmt.Errorf("google identity resolver: existing user record is nil")
+		}
 		// Found a user by email. Verify no conflicting binding exists.
 		existingBindings, _ := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
 		for _, eb := range existingBindings {
@@ -420,6 +426,9 @@ func (r *GoogleIdentityResolver) resolveAfterConflict(ctx context.Context, canon
 	user, err := r.users.GetUser(ctx, winner.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("bound user not found after conflict resolution: %w", err)
+	}
+	if user == nil {
+		return nil, fmt.Errorf("google identity resolver: resolved user record is nil")
 	}
 	if user.Status == "suspended" {
 		return nil, ErrUserSuspended

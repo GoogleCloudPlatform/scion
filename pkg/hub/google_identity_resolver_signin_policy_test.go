@@ -453,3 +453,144 @@ func TestGoogleIdentityResolver_CollisionWinner_ActiveWinner_GrantsRestored(t *t
 		t.Error("expected the winner's missing hub-members grant to be restored on this handback")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fail-closed nil-record guards. store.UserStore is an interface — a real
+// implementation returning (nil, nil) instead of (nil, store.ErrNotFound)
+// would be a contract violation, but callers here are auth paths, so they
+// guard against it anyway rather than trusting every implementation
+// (including test doubles) to honor the contract.
+// ---------------------------------------------------------------------------
+
+// nilOnGetUserStore wraps a real store.UserStore, forcing GetUser to return
+// (nil, nil) so tests can exercise the fail-closed guard deterministically.
+type nilOnGetUserStore struct {
+	store.UserStore
+}
+
+func (s *nilOnGetUserStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, nil
+}
+
+// nilOnGetUserByEmailStore wraps a real store.UserStore, forcing
+// GetUserByEmail to return (nil, nil).
+type nilOnGetUserByEmailStore struct {
+	store.UserStore
+}
+
+func (s *nilOnGetUserByEmailStore) GetUserByEmail(context.Context, string) (*store.User, error) {
+	return nil, nil
+}
+
+// raceExternalIdentityStore wraps a real store.ExternalIdentityStore,
+// deterministically simulating the unique-binding race resolveAfterConflict
+// exists to handle: the first GetExternalIdentity call (Resolve's own Step-1
+// check) reports not-found, CreateExternalIdentity always reports a
+// conflict, and every GetExternalIdentity call after the first answers from
+// the real store — so resolveAfterConflict's own lookup finds a genuine
+// "winning" binding, the way a concurrent resolution's would look from here.
+type raceExternalIdentityStore struct {
+	store.ExternalIdentityStore
+	getCalls int
+}
+
+func (s *raceExternalIdentityStore) GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*store.ExternalIdentityBinding, error) {
+	s.getCalls++
+	if s.getCalls == 1 {
+		return nil, store.ErrNotFound
+	}
+	return s.ExternalIdentityStore.GetExternalIdentity(ctx, provider, issuer, subject)
+}
+
+func (s *raceExternalIdentityStore) CreateExternalIdentity(context.Context, *ExternalIdentityBinding) error {
+	return store.ErrAlreadyExists
+}
+
+// TestGoogleIdentityResolver_ExistingBinding_NilUser_FailsClosed is the
+// bound-branch regression: a GetUser call that returns (nil, nil) for an
+// existing binding must be rejected with a clean error, not a nil-pointer
+// fault.
+func TestGoogleIdentityResolver_ExistingBinding_NilUser_FailsClosed(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	ctx := context.Background()
+	userID := uuid.New().String()
+	// The binding's UserID must reference a real row (the store enforces
+	// this as a foreign key); the wrapper below is what actually makes
+	// GetUser return nil despite that row existing.
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID: userID, Email: identity.Email, Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed bound user: %v", err)
+	}
+	now := time.Now()
+	if err := h.extStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID: uuid.New().String(), Provider: "google", Issuer: googleCanonicalIssuer, Subject: identity.Subject,
+		UserID: userID, Email: identity.Email, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	resolver := NewGoogleIdentityResolver(&nilOnGetUserStore{UserStore: h.store}, h.extStore, h.srv.isUserAuthorized, nil, nil)
+
+	user, err := resolver.Resolve(ctx, identity, ResolvePolicy{})
+	if err == nil {
+		t.Fatalf("expected an error for a nil bound-user record, got user=%+v", user)
+	}
+}
+
+// TestGoogleIdentityResolver_EmailMatch_NilUser_FailsClosed is the
+// email-match-branch regression: a GetUserByEmail call that returns
+// (nil, nil) must be rejected with a clean error, not a nil-pointer fault.
+func TestGoogleIdentityResolver_EmailMatch_NilUser_FailsClosed(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	resolver := NewGoogleIdentityResolver(&nilOnGetUserByEmailStore{UserStore: h.store}, h.extStore, h.srv.isUserAuthorized, nil, nil)
+
+	user, err := resolver.Resolve(context.Background(), identity, ResolvePolicy{})
+	if err == nil {
+		t.Fatalf("expected an error for a nil existing-by-email user record, got user=%+v", user)
+	}
+}
+
+// TestGoogleIdentityResolver_ResolveAfterConflict_NilUser_FailsClosed covers
+// the third sibling of the same pattern found while scanning for it:
+// resolveAfterConflict's own GetUser call, reached when
+// CreateExternalIdentity reports a concurrent-creation conflict during the
+// email-match branch. A (nil, nil) return there must also be rejected
+// cleanly.
+func TestGoogleIdentityResolver_ResolveAfterConflict_NilUser_FailsClosed(t *testing.T) {
+	identity := validGmailIdentity()
+	h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{idTokenResult: identity})
+
+	ctx := context.Background()
+	userID := uuid.New().String()
+	if err := h.store.CreateUser(ctx, &store.User{
+		ID: userID, Email: identity.Email, Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed active user: %v", err)
+	}
+	now := time.Now()
+	// The "winning" binding a concurrent resolution would have created —
+	// present so resolveAfterConflict's own GetExternalIdentity lookup
+	// succeeds and reaches its GetUser call.
+	if err := h.extStore.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID: uuid.New().String(), Provider: "google", Issuer: googleCanonicalIssuer, Subject: identity.Subject,
+		UserID: userID, Email: identity.Email, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed winning binding: %v", err)
+	}
+
+	resolver := NewGoogleIdentityResolver(
+		&nilOnGetUserStore{UserStore: h.store},
+		&raceExternalIdentityStore{ExternalIdentityStore: h.extStore},
+		h.srv.isUserAuthorized, nil, nil,
+	)
+
+	user, err := resolver.Resolve(ctx, identity, ResolvePolicy{})
+	if err == nil {
+		t.Fatalf("expected an error for a nil resolved-after-conflict user record, got user=%+v", user)
+	}
+}

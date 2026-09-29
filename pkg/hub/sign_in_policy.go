@@ -133,6 +133,9 @@ func applyLiveSignInPolicy(
 	preAuthorized bool,
 	opts signInPolicyPersistOpts,
 ) (*store.User, error) {
+	if user == nil {
+		return nil, fmt.Errorf("sign-in policy: user record is nil")
+	}
 	if user.Status == store.UserStatusSuspended {
 		slog.Warn("sign-in rejected: account suspended", "email", user.Email, "user_id", user.ID)
 		return nil, ErrUserSuspended
