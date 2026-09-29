@@ -633,11 +633,6 @@ func TestRunMigrateNames_FailsWhenLegacyDeniedForDependentRecord(t *testing.T) {
 	assert.Equal(t, "gcpsm:"+legacyFull, rec.SecretRef)
 }
 
-// TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch covers
-// non-blocking finding 13: once a stale prefixed copy exists, --dry-run must
-// plan RESYNC (what the real run would actually do), not a plain
-// DELETE LEGACY that a real run would in fact refuse due to the value
-// mismatch DeleteLegacySecretName checks for.
 // TestRunMigrateNames_DryRunPlansResyncThenDelete pins the plan for a
 // candidate that needs both a resync (the prefixed copy is stale relative to
 // the ref-designated value) and a delete-legacy in the same pass. Since
@@ -1193,4 +1188,90 @@ func TestSPREV5_MigrateNames_ReportsConflictNotSilence(t *testing.T) {
 	assert.Error(t, err, "a CONFLICT must produce a non-zero exit")
 	assert.Contains(t, out.String(), "CONFLICT")
 	assert.Contains(t, out.String(), "API_KEY")
+}
+
+// sprev8TrueConflict sets up a TRUE conflict (a concurrent new-binary Set
+// repoints the ref to the prefixed name while this run is copying) exactly as
+// TestSPREV5_MigrateNames_ReportsConflictNotSilence does, and runs the first
+// pass with the given deleteLegacy flag. It returns the plain backend for the
+// re-run.
+func sprev8TrueConflict(t *testing.T, firstDeleteLegacy bool) (context.Context, store.Store, *migrateNamesMockSMClient) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	prefixedName := prefixedNameForTest("API_KEY", "user", "user-1")
+	prefixedRef := "gcpsm:projects/test-project/secrets/" + prefixedName
+	mock.seed(t, "test-project", legacyName, "v1")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev8-true-conflict"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: legacyRef,
+	}))
+	race := &sprev5OnceAtCallAccessSMClient{migrateNamesMockSMClient: mock, call: 2}
+	race.hook = func() { mock.seed(t, "test-project", prefixedName, "v2-new-binary-set") }
+	hooked := &sprev5AddHookSMClient{migrateNamesMockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		_, err := db.UpsertSecret(ctx, &store.Secret{Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: prefixedRef})
+		require.NoError(t, err)
+	}
+	composite := &sprev5CompositeSMClient{migrateNamesMockSMClient: mock, access: race, add: hooked}
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, migrateNamesTestBackend(t, db, composite, migrateNamesTestHubID), db, migrateNamesTestHubID, false, firstDeleteLegacy, &out)
+	t.Logf("first run err=%v\n%s", err, out.String())
+	require.Error(t, err)
+	require.Contains(t, out.String(), "CONFLICT")
+	return ctx, db, mock
+}
+
+// TestSPREV8_TrueConflictRerunWithDeleteLegacyReportsAction pins round-8
+// review Required 1: the CONFLICT guidance's diagnostic re-run must exclude
+// --delete-legacy. If an operator instead re-runs the exact CONFLICT-producing
+// command line -- which routinely includes --delete-legacy, since that's the
+// documented final pass -- for a TRUE conflict the ref already designates the
+// prefixed name, so --delete-legacy deletes the legacy copy and reports
+// DELETED LEGACY regardless of whether the conflict was ever resolved. That
+// is why DELETED LEGACY/WOULD DELETE LEGACY is explicitly carved out as NOT
+// the false-positive signal (MIGRATED/RESYNCED/REPAIRED REF is) in the
+// CONFLICT line, --help, .design section 7, and the PR body. This test
+// asserts the current, now-documented behavior -- not a defect to fix here --
+// so the text and the behavior stay pinned together.
+func TestSPREV8_TrueConflictRerunWithDeleteLegacyReportsAction(t *testing.T) {
+	ctx, db, mock := sprev8TrueConflict(t, true)
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true, &out)
+	t.Logf("re-run err=%v\n%s", err, out.String())
+	require.NoError(t, err, "a re-run with --delete-legacy reports the delete as an action, not a failure")
+	assert.Contains(t, out.String(), "DELETED LEGACY", "a re-run with --delete-legacy reports an action for a TRUE conflict too")
+	sv, gerr := backend.Get(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, gerr)
+	assert.Equal(t, "v1", sv.Value, "the hub keeps serving the stale value; the reported action did not resolve the conflict")
+}
+
+// TestSPREV8_TrueConflictDryRunRerunWithDeleteLegacyReportsAction is the
+// --dry-run counterpart: the plan for a TRUE conflict re-run with
+// --delete-legacy also reports WOULD DELETE LEGACY, for the same reason.
+func TestSPREV8_TrueConflictDryRunRerunWithDeleteLegacyReportsAction(t *testing.T) {
+	ctx, db, mock := sprev8TrueConflict(t, true)
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true, true, &out)
+	t.Logf("dry re-run err=%v\n%s", err, out.String())
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "WOULD DELETE LEGACY", "a --dry-run --delete-legacy re-run reports the planned action for a TRUE conflict too")
+}
+
+// TestSPREV8_TrueConflictPlainRerunReportsNothing is the control: a plain
+// re-run (without --delete-legacy) of a TRUE conflict reports nothing for the
+// secret, matching the CONFLICT guidance's diagnostic-re-run signal.
+func TestSPREV8_TrueConflictPlainRerunReportsNothing(t *testing.T) {
+	ctx, db, mock := sprev8TrueConflict(t, false)
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out)
+	t.Logf("re-run err=%v\n%s", err, out.String())
+	require.NoError(t, err)
+	for _, l := range []string{"MIGRATED", "RESYNCED", "REPAIRED REF", "DELETED LEGACY"} {
+		require.NotContains(t, out.String(), l)
+	}
 }
