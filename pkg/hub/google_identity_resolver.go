@@ -79,6 +79,30 @@ type GoogleIdentityResolver struct {
 	// inert — safe for the many existing callers that construct a resolver
 	// directly without setting it.
 	platformAuthSA string
+
+	// policyDeps carries the additional server-config-derived callbacks
+	// (role assignment, super-admin binding, grant sync, audit) that
+	// applyLiveSignInPolicy uses to give an existing record found by email
+	// the same account-state handling as interactive login. Set via
+	// SetSignInPolicyDeps (server.go wires it from the same Server methods
+	// provisionUser uses). Zero value is safe: every field except authorize
+	// degrades to a no-op, and authorize/suspension are always enforced
+	// directly from r.authorize regardless of whether this is set — see
+	// Resolve's email-match branch.
+	policyDeps signInPolicyDeps
+}
+
+// SetSignInPolicyDeps wires the resolver's existing-record-by-email branch
+// to the same live sign-in policy and account-state handling that
+// interactive login uses (see applyLiveSignInPolicy), so a pre-existing
+// record picked up by this resolver cannot drift from login's behavior.
+// Optional: the sign-in policy check (authorize) and suspension enforcement
+// apply unconditionally either way; this only fills in role assignment,
+// super-admin binding, grant sync, and audit — the many callers that
+// construct a resolver without server-config wiring keep working with those
+// left as no-ops.
+func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
+	r.policyDeps = deps
 }
 
 // SetPlatformAuthSA records the hub's configured platform/transport auth
@@ -250,8 +274,24 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			}
 		}
 
-		if existingUser.Status == "suspended" {
-			return nil, ErrUserSuspended
+		// Apply the same live sign-in policy and account-state handling
+		// every sign-in path shares (see applyLiveSignInPolicy): suspension,
+		// the live access policy (unless PreAuthorized), invited-record
+		// activation, and role/grant sync. On denial, no identity link is
+		// created for this sign-in — deps.authorize is always r.authorize,
+		// so the policy check itself does not depend on SetSignInPolicyDeps
+		// having been called.
+		policyDeps := r.policyDeps
+		policyDeps.authorize = r.authorize
+		if policyDeps.UpdateUser == nil {
+			// Persistence of the state transition (e.g. invited -> active)
+			// must not silently depend on SetSignInPolicyDeps having been
+			// called; r.users is always present.
+			policyDeps.UpdateUser = r.users.UpdateUser
+		}
+		existingUser, err = applyLiveSignInPolicy(ctx, policyDeps, existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized)
+		if err != nil {
+			return nil, err
 		}
 
 		// Create the binding atomically. If a concurrent resolution already
