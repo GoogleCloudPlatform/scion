@@ -520,8 +520,13 @@ func buildSelectorRegistry() map[string]SelectorMapping {
 
 // intersectAllowedBoundaries returns the intersection of
 // SelectorAllowedBoundaries across every ID in ids. ok is false if any ID
-// lacks a reviewed entry.
+// lacks a reviewed entry. An empty ids yields no boundaries and ok=false:
+// there is nothing to intersect, so the function has no basis for allowing
+// any boundary.
 func intersectAllowedBoundaries(ids []string) (boundaries []BoundaryKind, ok bool) {
+	if len(ids) == 0 {
+		return nil, false
+	}
 	counts := make(map[BoundaryKind]int)
 	for _, id := range ids {
 		kinds, reviewed := SelectorAllowedBoundaries(id)

@@ -504,7 +504,6 @@ func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal Princ
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, "", nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
 	}
-	err = nil
 	for _, gid := range groupIDs {
 		refs = append(refs, store.PrincipalRef{Type: "group", ID: gid})
 		groupKeys["group:"+gid] = true
@@ -1275,11 +1274,14 @@ type projectAdmissionCacheKey struct {
 
 // ProjectAdmissionCache is an optional request-scoped memo shared across
 // multiple ProjectTargetAdmission calls in one request (e.g. B.2's
-// request-local authority cache). nil is safe (unmemoized). Never persisted
-// or shared ACROSS requests. An error returned FROM ProjectAdmissionForClass
-// is NEVER cached — a failed lookup, including a failure to load the
-// access-constraint table, is recomputed on the next call, never remembered
-// as a denial or an allow.
+// request-local authority cache). nil is safe (unmemoized), and so is its
+// zero value — the underlying map is initialized lazily on first put, so a
+// zero-value or literal-built ProjectAdmissionCache{} is ready to use without
+// calling NewProjectAdmissionCache. Never persisted or shared ACROSS
+// requests. An error returned FROM ProjectAdmissionForClass is NEVER cached
+// — a failed lookup, including a failure to load the access-constraint
+// table, is recomputed on the next call, never remembered as a denial or an
+// allow.
 type ProjectAdmissionCache struct {
 	mu    sync.Mutex
 	cache map[projectAdmissionCacheKey]ProjectAdmissionResult
@@ -1306,6 +1308,9 @@ func (c *ProjectAdmissionCache) put(key projectAdmissionCacheKey, v ProjectAdmis
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[projectAdmissionCacheKey]ProjectAdmissionResult)
+	}
 	c.cache[key] = v
 }
 
