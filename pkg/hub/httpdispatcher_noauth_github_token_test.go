@@ -84,6 +84,14 @@ func (m *mockGitTokenSecretBackend) Resolve(_ context.Context, _, _, _ string, _
 
 func (m *mockGitTokenSecretBackend) HubID() string { return "test-hub" }
 
+func (m *mockGitTokenSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 func TestBuildCreateRequest_NoAuth_GitHubTokenSurvives(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)

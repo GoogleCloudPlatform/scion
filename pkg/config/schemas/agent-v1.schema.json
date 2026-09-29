@@ -140,6 +140,11 @@
         "namespace": { "type": "string" },
         "runtimeClassName": { "type": "string" },
         "serviceAccountName": { "type": "string" },
+        "imagePullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes image pull policy. Overrides any Hub settings harness_configs.<name>.image_pull_policy default."
+        },
         "resources": {
           "type": "object",
           "properties": {
