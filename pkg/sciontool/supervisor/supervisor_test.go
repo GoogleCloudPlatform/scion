@@ -73,6 +73,128 @@ func TestSupervisor_RunFailingCommand(t *testing.T) {
 	}
 }
 
+// TestSupervisor_RunWithWorkingDir proves Config.WorkingDir sets the child's
+// cmd.Dir: the substrate harness working directory (see
+// commands.InitRunOptions.WorkingDir) only reaches the actual OS process if
+// this field is honoured here. Using a relative-path file creation ("touch
+// marker") rather than reading os.Stdout is deliberate: Run hardcodes
+// s.cmd.Stdout = os.Stdout, so the only externally observable proof of the
+// child's cwd is where a relative-path side effect lands.
+func TestSupervisor_RunWithWorkingDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dir := t.TempDir()
+	config := DefaultConfig()
+	config.WorkingDir = dir
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "touch marker"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Errorf("marker file not found in WorkingDir %s: %v (child did not start with the configured cwd)", dir, statErr)
+	}
+}
+
+// TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset proves the
+// non-substrate path is unchanged: when Config.WorkingDir is left at its
+// zero value (every caller today except substrate-serve), the child must
+// NOT be forced into any particular directory — it inherits this process's
+// own cwd. A relative-path side effect
+// (rather than asserting exec.Cmd.Dir directly, which is only observable
+// during Run) proves the child actually ran with the supervisor process's
+// own cwd rather than some other, unexpected directory.
+func TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	config := DefaultConfig() // WorkingDir left unset (zero value)
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "touch marker"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Errorf("marker file not found in this process's own cwd %s: %v (WorkingDir==\"\" must inherit the supervisor's cwd, not change it)", dir, statErr)
+	}
+}
+
+// TestSupervisor_RunWithWorkingDir_SetsPWD proves that with a symlinked
+// WorkingDir the child sees PWD set to the logical (symlinked) path, not
+// the physical path getcwd() would report. sh, tmux and Node's
+// process.cwd() prefer the inherited PWD over getcwd() only when the two
+// resolve to the same physical directory; for a plain (non-symlinked)
+// directory the shell recomputes PWD via getcwd() regardless of whether
+// supervisor sets it, so this test uses a symlink to make the PWD-setting
+// code the only thing that can produce the expected value.
+func TestSupervisor_RunWithWorkingDir_SetsPWD(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "ws-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("os.Symlink(%s, %s): %v", real, link, err)
+	}
+	out := filepath.Join(real, "env.out")
+	config := DefaultConfig()
+	config.WorkingDir = link
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "printf '%s' \"$PWD\" > " + out})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	got, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("reading child's captured PWD: %v", readErr)
+	}
+	if string(got) != link {
+		t.Errorf("child PWD = %q, want %q (the symlinked WorkingDir, not its physical target)", got, link)
+	}
+}
+
+// TestSupervisor_RunWithoutWorkingDir_DoesNotForcePWD proves the scoping:
+// callers that leave WorkingDir at its zero value (every runtime other than
+// substrate) must not get a PWD override at all. Inspects the constructed
+// exec.Cmd.Env directly (this test is in-package) rather than round-tripping
+// through a real shell, since a real shell independently recomputes $PWD via
+// getcwd() whenever the inherited value doesn't match the process's actual
+// cwd — that shell behavior, not supervisor.Run, would otherwise be what the
+// test observed.
+func TestSupervisor_RunWithoutWorkingDir_DoesNotForcePWD(t *testing.T) {
+	wantPWD := os.Getenv("PWD")
+
+	config := DefaultConfig() // WorkingDir left unset (zero value)
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"true"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if got := getEnvVar(sup.cmd.Env, "PWD"); got != wantPWD {
+		t.Errorf("child env PWD = %q, want the unchanged ambient value %q (WorkingDir==\"\" must not touch PWD)", got, wantPWD)
+	}
+}
+
 func TestSupervisor_RunNoCommand(t *testing.T) {
 	config := DefaultConfig()
 	sup := New(config)
@@ -536,40 +658,6 @@ func lstatCtime(t *testing.T, path string) syscall.Timespec {
 	return statCtime(st)
 }
 
-// TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials proves
-// that with RequirePrivilegeDrop left at its zero value, every one of a set
-// of UID/GID pairs — including a non-root UID paired with a root (0) GID,
-// which the credential-drop predicate itself (UID>0 && GID>0) does not
-// treat the same as UID>0 alone — still runs the child without a
-// Credential, a plain "no drop" rather than an error.
-func TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials(t *testing.T) {
-	cases := []struct {
-		name     string
-		uid, gid int
-	}{
-		{name: "both0", uid: 0, gid: 0},
-		{name: "gid0", uid: 1000, gid: 0},
-		{name: "uid0", uid: 0, gid: 1000},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			marker := filepath.Join(t.TempDir(), "ran")
-			config := DefaultConfig()
-			config.UID = tc.uid
-			config.GID = tc.gid
-			sup := New(config)
-
-			exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
-			if err != nil || exitCode != 0 {
-				t.Fatalf("Run(UID=%d, GID=%d) = (%d, %v), want (0, nil)", tc.uid, tc.gid, exitCode, err)
-			}
-			if _, statErr := os.Stat(marker); statErr != nil {
-				t.Errorf("child did not run: %v", statErr)
-			}
-		})
-	}
-}
-
 // TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials proves
 // that, with RequirePrivilegeDrop set, a Config whose UID or GID
 // fails the credential drop's own UID>0 && GID>0 predicate must make Run
@@ -604,6 +692,42 @@ func TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials(t *tes
 			}
 			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 				t.Errorf("the child ran (marker exists, stat err=%v); it must not start without a credential drop in enforced mode", statErr)
+			}
+		})
+	}
+}
+
+// TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials is the
+// enforced hard-error's non-enforced twin: with RequirePrivilegeDrop=false,
+// every one of the same UID/GID pairs that refuses to run in enforced mode
+// must still run the child without a Credential — including a non-root UID
+// paired with a root (0) GID, which the credential-drop predicate itself
+// (UID>0 && GID>0) does not treat the same as UID>0 alone. Non-substrate
+// runtimes commonly pass a non-root UID with GID 0, so this pairing must
+// stay a plain "no drop" rather than an error whenever enforcement is off.
+func TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials(t *testing.T) {
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "both0", uid: 0, gid: 0},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "uid0", uid: 0, gid: 1000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			config := DefaultConfig()
+			config.UID = tc.uid
+			config.GID = tc.gid
+			sup := New(config)
+
+			exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
+			if err != nil || exitCode != 0 {
+				t.Fatalf("Run(UID=%d, GID=%d) = (%d, %v), want (0, nil)", tc.uid, tc.gid, exitCode, err)
+			}
+			if _, statErr := os.Stat(marker); statErr != nil {
+				t.Errorf("child did not run: %v", statErr)
 			}
 		})
 	}

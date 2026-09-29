@@ -1,27 +1,30 @@
-/*
-Copyright 2026 The Scion Authors.
-*/
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-package commands
+package substrate
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 )
-
-// errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
-// return by default for the lifetime of this test binary (see TestMain).
-var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserByID: real user lookups are disabled by TestMain; a test that needs a resolved user must override the var itself (scoped with t.Cleanup)")
 
 // sandboxHomeDir is the throwaway directory TestMain points HOME and the
 // XDG base directories at, for the lifetime of this test binary. Tests that
@@ -29,23 +32,10 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 // TestGoCachesEscapeSandboxHOME) read this instead of recomputing it.
 var sandboxHomeDir string
 
-// realHomeDir is this test binary's own real, original $HOME, captured
-// before TestMain redirects HOME to sandboxHomeDir below. A fixture that
-// must pass a real root-owned-or-self-owned chain check (e.g.
-// dirfd.VerifyRootOwnedExecutable, which trustedTestRoot in
-// substrate_rootfs_test.go anchors under this) cannot use t.TempDir() or
-// sandboxHomeDir: both resolve under the real, world-writable "/tmp", which
-// fails that check on mode alone before the fixture's own content is ever
-// reached. The real $HOME (e.g. "/home/scion") is trusted for the same
-// reason production's real "/home/scion" is: owned by the user actually
-// running this process, not group- or world-writable.
-var realHomeDir string
-
 // resolveRealGoCaches finds this machine's real GOCACHE, GOMODCACHE and
 // GOPATH before TestMain redirects HOME and XDG_CACHE_HOME to a throwaway
 // directory, and exports them explicitly so any child `go` process this
-// test binary launches (several tests here build or introspect sciontool
-// with `go build`/`go list`) keeps writing to the real caches instead of
+// test binary launches keeps writing to the real caches instead of
 // deriving a fresh module cache and build cache under the throwaway
 // directory. Go's module cache is written read-only, so a child `go`
 // process that populated one there would survive TestMain's own cleanup.
@@ -125,86 +115,40 @@ func disableGoTelemetry(configHome string) error {
 	return os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o644)
 }
 
-// selfCheckHelperEnv, when set to any non-empty value, makes this test
-// binary behave as a lightweight standalone helper process instead of
-// running the test suite: it calls verifySelfBinaryRootOwned() directly
-// against its own running location and exits, printing "PASS" or "FAIL: "
-// plus the error. This lets a test copy the compiled test binary itself to
-// a controlled location (a real self-owned trusted chain, or a real
-// world-writable one) and run it as a real subprocess, so
-// verifySelfBinaryRootOwned's accept path can be exercised for real without
-// needing actual root — unlike a fake "root-owned" fixture, whose ownership
-// can't be constructed without CAP_CHOWN, this controls the one thing an
-// unprivileged test process CAN control for itself: which directory chain
-// its own binary sits under.
-const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
-
-// TestMain makes this package's tests hermetic against the *real* machine
-// they happen to run on, for the whole test binary — not just the tests
-// that remember to sandbox themselves. See
-// .design/project-log/2026-09-25-substrate-phase1-substrate-serve.md
-// ("Privilege drop" and "Test hermeticity") for what motivated each layer
-// below.
-//
-// Layers, all required:
-//
-//  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
-//     and SCION_KEEPID_UID, is cleared for the entire process: removes the
-//     *input* hub.NewClient()'s own testing.Testing() guard depends on, for
-//     every test here, not just ones that remember to call scrubHubEnv.
-//  2. scionUserLookup and lookupUserByID default to "not found" for the
-//     whole test binary: no lookup here can resolve a real account, even
-//     when a test overrides the var back to a fake one (scoped with
-//     t.Cleanup). defaultScionUserLookup/defaultLookupUserByID's own
-//     testing.Testing() gate (init.go) is this layer's independent
-//     backstop, not a replacement for it.
-//  3. The real GOCACHE, GOMODCACHE and GOPATH are resolved and exported
-//     before HOME/XDG_CACHE_HOME are redirected (layer 4), so a child `go`
-//     process this binary launches keeps using the real caches instead of
-//     writing fresh ones under the throwaway sandbox home.
-//  4. HOME, the XDG base-directory variables, and SCION_WORKSPACE_PATH are
-//     redirected to one per-binary temp directory: every remaining input
-//     this package's code uses to derive a real filesystem path when
-//     nothing more specific is available.
-//  5. startReaper is stubbed to a no-op for the whole test binary: a test
-//     driving RunInit must never install the process-wide zombie reaper
-//     that steals another test's exec.Command child.
-//  6. log.SetLogPath redirects pkg/sciontool/log's own file target to the
-//     same per-binary temp directory, before any log call in this binary
-//     can lazily Init() itself against the real path.
+// TestMain clears every Hub- and privilege-drop-related environment
+// variable, and redirects HOME/XDG_*/SCION_WORKSPACE_PATH/the Hub token
+// home/pkg/sciontool/log's own log file to one per-binary temp directory,
+// before any test in this package runs — see cmd/sciontool/commands's
+// TestMain (testmain_test.go) for the incidents this defends against. This
+// package's own production code doesn't import pkg/sciontool/hub or
+// resolve a fixed real home directory itself (every test here drives
+// WithInitRunner/WithPrivilegeDropChecker with local fakes, never the real
+// RunInit — see cmd/sciontool/commands's newSubstrateServeServer for where
+// the real ones are wired instead), so the blast radius here is smaller.
+// But handleBootstrap does read SCION_HOST_UID/GID out of the real process
+// environment (set there by a test's own req.Env, via os.Setenv, exactly
+// like a real bootstrap request), so a test that forgets to reset them
+// could otherwise leak a previous test's values into a later one; server.go
+// does call pkg/sciontool/log directly, which would otherwise lazily
+// default to this container's real /home/scion/agent.log the same way
+// cmd/sciontool/commands's incident 4 did; and the HOME/XDG/workspace
+// redirection is cheap insurance against any future test in this package
+// that does end up resolving a real path. resolveRealGoCaches runs before
+// that redirection, so any future test that shells out to `go` keeps using
+// the real GOCACHE/GOMODCACHE/GOPATH instead of writing fresh ones under
+// the throwaway sandbox home.
 func TestMain(m *testing.M) {
-	if os.Getenv(selfCheckHelperEnv) != "" {
-		if err := verifySelfBinaryRootOwned(); err != nil {
-			fmt.Printf("FAIL: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("PASS")
-		os.Exit(0)
-	}
-
-	envVarsToClear := append(append([]string{}, hubEnvVars...),
-		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
-	for _, v := range envVarsToClear {
+	for _, v := range []string{
+		"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_AUTH_TOKEN",
+		"SCION_AGENT_ID", "SCION_AGENT_MODE",
+		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
+	} {
 		_ = os.Unsetenv(v)
-	}
-
-	scionUserLookup = func(string) (*user.User, error) {
-		return nil, errScionUserLookupDisabledInTests
-	}
-	lookupUserByID = func(string) (*user.User, error) {
-		return nil, errScionUserLookupDisabledInTests
-	}
-	startReaper = func() {}
-
-	// Captured before HOME is redirected below — see realHomeDir's own doc
-	// comment for why some fixtures need the real one instead.
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		realHomeDir = home
 	}
 
 	resolveRealGoCaches()
 
-	tmpHome, err := os.MkdirTemp("", "sciontool-test-home-*")
+	tmpHome, err := os.MkdirTemp("", "sciontool-substrate-test-home-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: failed to create sandbox home: %v\n", err)
 		os.Exit(1)
@@ -220,34 +164,21 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
 	log.SetLogPath(filepath.Join(tmpHome, "agent.log"))
-
-	// hub.ReadTokenFile resolves its own home directory independently of
-	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real
-	// user.Lookup("scion") result over $HOME, so on a machine where
-	// "scion" is a real account, redirecting $HOME above does not stop it
-	// from reading — or, if a test ever called WriteTokenFile, writing —
-	// the real ~/.scion/scion-token. SetTokenHome overrides that resolver
-	// directly.
 	restoreTokenHome := hub.SetTokenHome(tmpHome)
 
-	privateTmpBase, err := os.MkdirTemp("", "sciontool-test-private-tmp-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "TestMain: failed to create private-tmp-dir sandbox: %v\n", err)
-		os.Exit(1)
-	}
-	// A test that spins up a real substrate.Server (e.g. via
-	// newSubstrateServeServer) exercises pkg/sciontool/substrate's own
-	// ensurePrivateTmpDir, which reads that package's unexported
-	// privateRootTmpDir var. Point it at this throwaway directory via the
-	// exported test seam instead of the real, root-owned "/run/scion/tmp".
-	restorePrivateRootTmpDir := substrate.SetPrivateRootTmpDirForTest(filepath.Join(privateTmpBase, "run", "scion", "tmp"))
+	// Redirect ensurePrivateTmpDir's target at a throwaway directory this
+	// (unprivileged) test binary itself owns, for the same reason HOME/XDG
+	// are redirected above: production never reassigns privateRootTmpDir,
+	// and the real path it defaults to ("/run/scion/tmp") lives under a
+	// root-owned "/run" this test binary has no permission to create
+	// anything under. Any individual test that specifically exercises the
+	// real default (e.g. proving the production path name itself is right)
+	// overrides and restores this var itself, the same way
+	// withEnforcedHooksFixture does for enforcedHooksDir.
+	privateRootTmpDir = filepath.Join(tmpHome, "run", "scion", "tmp")
 
 	code := m.Run()
 	restoreTokenHome()
-	restorePrivateRootTmpDir()
-	if err := removeSandboxHome(privateTmpBase); err != nil {
-		fmt.Fprintf(os.Stderr, "TestMain: failed to remove private-tmp-dir sandbox %s: %v\n", privateTmpBase, err)
-	}
 	if err := removeSandboxHome(tmpHome); err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: failed to remove sandbox home %s: %v\n", tmpHome, err)
 	}

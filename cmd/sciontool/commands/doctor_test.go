@@ -74,8 +74,9 @@ func TestCheckWorkspaceGit_NonRootRunsTheRealCheck(t *testing.T) {
 // the function must refuse outright (no git subprocess run at all) rather
 // than trust a workload-controlled gitconfig. Skips otherwise — a fake
 // euid can't be injected without a production seam, and this codebase's
-// convention for a check that is genuinely root-only is to skip rather
-// than fake it.
+// convention for a check that is genuinely root-only (see
+// TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary) is to skip
+// rather than fake it.
 func TestCheckWorkspaceGit_RootRefusesRatherThanTrustGitconfig(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to exercise the refusal path for real")
