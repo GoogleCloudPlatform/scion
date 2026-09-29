@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { fileURLToPath } from 'node:url';
+
 import { defineConfig } from '@playwright/test';
 
 // Deliberately separate from the Hub E2E harness: no project agents or
@@ -36,7 +38,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4535',
-    cwd: new URL('../../', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('../../', import.meta.url)),
     url: 'http://127.0.0.1:4535/',
     reuseExistingServer: false,
   },
