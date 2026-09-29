@@ -26,19 +26,19 @@ nothing was hand-written or hand-edited.
 
 Records 1-7 are one turn that forces two real model requests (a tool call,
 then a follow-up call with the tool result): this is the real-world
-evidence that `PostInvocation` fires one per main-loop model request, not
+evidence that `PostInvocation` fires once per main-loop model request, not
 once per turn — one `Stop` (one turn) pairs with two `PreInvocation`/
 `PostInvocation` pairs (`invocationNum` 0 and 1). Records 8-10 are a second,
 separate turn in the same conversation; `invocationNum` resets to 0,
 confirming it is scoped per-turn.
 
-**Known undercount.** The mock's raw request log (kept alongside the
-capture, not part of this fixture) shows a fourth real model request beyond
-these three: `agy`'s own conversation-title generation, against a
-`*-flash-lite-*` model. It fires no Invocation hook at all, so it is
-invisible to this mechanism entirely. Failed or retried main-loop attempts
-were not captured either, so `PostInvocation`'s behavior on an error path
-(and any `status`-equivalent field) is uncharacterized by this fixture.
+**Known undercount.** The capture's mock backend received a fourth real
+model request beyond these three: `agy`'s own conversation-title
+generation, against a `*-flash-lite-*` model. It fires no Invocation hook
+at all, so it is invisible to this mechanism entirely. Failed or retried
+main-loop attempts were not captured either, so `PostInvocation`'s behavior
+on an error path (and any `status`-equivalent field) is uncharacterized by
+this fixture.
 
 ## Usage (absent)
 

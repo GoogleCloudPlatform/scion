@@ -131,16 +131,18 @@ func TestAntigravityFixture_EventSequence(t *testing.T) {
 // report, and nothing must synthesize a value.
 func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
-	// Pin the label set metricAttrs()/recordEndMetrics stamp on
-	// gen_ai.api.calls (design §3.2): harness and model from these two env
-	// vars, status from the event (always success here). SCION_AGENT_ID and
-	// SCION_PROJECT_ID are cleared so this test's expected key set doesn't
-	// depend on whatever the process happens to have ambient (this sandbox
-	// itself runs as a Scion agent, with both set in its real environment).
+	// Pin the full label set metricAttrs()/recordEndMetrics stamp on
+	// gen_ai.api.calls (design §3.2): agent_id, project_id and harness from
+	// metricAttrs(), model and status from the event (always success here).
+	// SCION_AGENT_ID and SCION_PROJECT_ID are set to fixed values, not just
+	// cleared, so this pins that they *are* stamped, not only that nothing
+	// extra leaks in -- this sandbox itself runs as a Scion agent, with both
+	// set ambiently in its real environment, so a bare assertion that they're
+	// present wouldn't by itself prove metricAttrs() is what stamped them.
 	t.Setenv("SCION_HARNESS", "antigravity")
 	t.Setenv("SCION_MODEL", "gemini-3.1-pro-low")
-	t.Setenv("SCION_AGENT_ID", "")
-	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_PROJECT_ID", "project-1")
 	_, events := loadAntigravityFixture(t)
 
 	reader := sdkmetric.NewManualReader()
@@ -179,6 +181,13 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 		t.Errorf("gen_ai.api.calls single data point value = %d, want 3", callPoints[0].Value)
 	}
 	wantAttrs := map[string]string{
+		// agent_id/project_id are metricAttrs()'s producer-side labels (kept
+		// for Cloud descriptor compatibility, design §3.2); they are
+		// distinct from the exporter-stamped canonical scion_agent_id/
+		// scion_project_id, which have their own contract constants and are
+		// out of hooks.Handle's scope entirely.
+		"agent_id":                     "agent-1",
+		"project_id":                   "project-1",
 		telemetrycontract.HarnessLabel: "antigravity",
 		telemetrycontract.ModelLabel:   "gemini-3.1-pro-low",
 		telemetrycontract.StatusLabel:  telemetrycontract.StatusSuccess,
@@ -221,6 +230,13 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 // unaffected either way (design D4, narrow): the one real tool call still
 // shows up.
 func TestAntigravityFixture_UsageSourceUnsetPublishesNothing(t *testing.T) {
+	// Explicitly unset, not just left alone: this PR's own provision.py sets
+	// SCION_USAGE_SOURCE=hooks in every antigravity agent, so a bare `go
+	// test` run inside one would otherwise see it ambiently set and fail
+	// here -- exactly the environment this change creates. The existing
+	// D10 tests in telemetry_test.go set this explicitly for every case,
+	// including "", for the same reason.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	_, events := loadAntigravityFixture(t)
 
 	reader := sdkmetric.NewManualReader()

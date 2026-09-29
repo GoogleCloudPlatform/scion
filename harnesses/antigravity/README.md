@@ -69,7 +69,7 @@ sets `SCION_USAGE_SOURCE=hooks` unconditionally, so `gen_ai.api.calls` comes
 from the `PreInvocation`/`PostInvocation` hooks that `dialect.yaml` already
 maps to `model-start`/`model-end`.
 
-**Granularity.** `PostInvocation` fires one per main-loop model request, not
+**Granularity.** `PostInvocation` fires once per main-loop model request, not
 once per agent turn. A single turn that makes a tool call and then a
 follow-up call produces two full `PreInvocation`/`PostInvocation` pairs
 (`invocationNum` 0 and 1) before its one `Stop`; `invocationNum` resets to 0
