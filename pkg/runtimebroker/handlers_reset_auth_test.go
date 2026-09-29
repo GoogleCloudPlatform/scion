@@ -211,9 +211,12 @@ func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
 }
 
-// TestResetAuth_NotFoundReturns404 is the N4 regression companion to
+// TestResetAuth_NotFoundReturns404 is the regression companion to
 // TestResetAuth_ListUnavailableReturns503: a genuine "not found" (a
 // successful, empty list — no lookup error at all) must still 404, not 503,
 // and must never invoke the exec. Without this test, a mutation that turns

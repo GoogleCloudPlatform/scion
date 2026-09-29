@@ -618,6 +618,12 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		// A well-behaved AgentLookup never returns (nil, nil); don't
 		// dereference it or guess the agent is gone if one does — treat it
 		// the same as a list-unavailable failure and retry.
+		//
+		// This branch is a defensive guard: today LookupAgent is a concrete
+		// method that never actually returns (nil, nil), so this path is
+		// currently unreachable and not exercised by tests. It deliberately
+		// builds its sentence with the same agentLookupUnavailableMessage
+		// helper as the list-unavailable path above, so the two stay in sync.
 		slog.Error("PTY attach: agent lookup returned no result and no error", "agent_id", agentID)
 		RuntimeUnavailable(w, agentLookupUnavailableMessage(agentID, "the attach"))
 		return

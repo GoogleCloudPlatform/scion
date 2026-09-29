@@ -1003,8 +1003,8 @@ func TestLookupContainerID_ListingErrorIsListUnavailable(t *testing.T) {
 
 // TestLookupContainerID_AuxiliaryListErrorSurfacesUnavailable is the
 // LookupContainerID analogue of
-// TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable (ptone/scion#2165,
-// R1): an auxiliary runtime's List failure must not be folded into "not
+// TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable (ptone/scion#2165):
+// an auxiliary runtime's List failure must not be folded into "not
 // found" — execCommand/resetAuth (both of which resolve their target via
 // LookupContainerID) must see ErrAgentListUnavailable and respond 503, not
 // 404, for the same underlying condition the PTY attach path (LookupAgent)

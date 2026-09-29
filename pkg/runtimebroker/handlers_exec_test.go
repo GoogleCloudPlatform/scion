@@ -297,10 +297,10 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	}
 }
 
-// TestStopAgent_AuxiliaryListErrorAbortsWithout202 is the knock-on-effect
-// regression test called out in the ptone/scion#2176 R1 review: before the
-// fix, an auxiliary runtime's List failure inside LookupContainerID was
-// folded into agentNotFoundError (ErrAgentNotFound), so projectScopedTarget
+// TestStopAgent_AuxiliaryListErrorAbortsWithout202 is a knock-on-effect
+// regression test for ptone/scion#2176: before the fix, an auxiliary
+// runtime's List failure inside LookupContainerID was folded into
+// agentNotFoundError (ErrAgentNotFound), so projectScopedTarget
 // treated it as "not found in this project" and stopAgent answered 202
 // "Agent stopped (not found in project)" — a false "stopped" for what was
 // actually a transient listing failure, not via a 404 but via a 202. Now
@@ -341,6 +341,9 @@ func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
 	}
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
 	}
 }
 
@@ -383,6 +386,9 @@ func TestExecCommand_ListUnavailableReturns503(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
 }
 
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
@@ -421,9 +427,9 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 // runtime_unavailable response and must NOT call Start — otherwise a runtime
 // hiccup during the lookup would leave a second container running alongside
 // whatever the first lookup couldn't see. The status is pinned exactly
-// (rather than just "some 5xx") so a mutation that widens the
-// ErrAgentListUnavailable branch to swallow all lookup errors into a bare
-// 500 would be caught.
+// (rather than just "some 5xx") so a mutation that removes or narrows the
+// ErrAgentListUnavailable branch (falling back to a 500 runtime_error) is
+// caught.
 func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -450,6 +456,9 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
 	if mgr.startCalls != 0 {
 		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
 	}
@@ -459,12 +468,11 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 }
 
 // TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart is the restart
-// counterpart of TestStopAgent_AuxiliaryListErrorAbortsWithout202, added for
-// the ptone/scion#2176 round-2 review: an auxiliary runtime's List failure
-// inside LookupContainerID must abort the restart with a 503
-// runtime_unavailable, not proceed to Start as if the agent were simply
-// absent from this project — otherwise a runtime hiccup during the
-// stop-target lookup would leave a second container running.
+// counterpart of TestStopAgent_AuxiliaryListErrorAbortsWithout202: an
+// auxiliary runtime's List failure inside LookupContainerID must abort the
+// restart with a 503 runtime_unavailable, not proceed to Start as if the
+// agent were simply absent from this project — otherwise a runtime hiccup
+// during the stop-target lookup would leave a second container running.
 func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
 	defaultMgr := &filteringMockManager{}
 	defaultMgr.agents = []api.AgentInfo{}
