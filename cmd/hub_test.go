@@ -588,7 +588,7 @@ func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
 // TestFormatProviderCapacity covers the display rules for a provider's
 // broker capacity (ptone/scion#2161): "count/limit" when the broker has an
 // effective limit, just the count when it's unlimited, and a dash when the
-// hub could not resolve capacity for this provider at all.
+// hub reports no capacity for this provider.
 func TestFormatProviderCapacity(t *testing.T) {
 	i64 := func(v int64) *int64 { return &v }
 

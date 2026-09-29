@@ -124,8 +124,9 @@ func TestListProjectProviders_AgentLimitBrokerScopedOverride(t *testing.T) {
 
 // TestListProjectProviders_AgentLimitUnsetWhenUnlimited covers the
 // unlimited case: when the effective limit resolves to <= 0, agentLimit
-// must be left unset (nil), distinguishing it from an actual limit of zero,
-// while agentCount is still reported (ptone/scion#2161). It also pins the
+// must be left unset (nil) — it is never 0, since a non-positive effective
+// limit means unlimited — while agentCount is still reported
+// (ptone/scion#2161). It also pins the
 // documented lag on an unlimited broker: because
 // QuotaService.Reserve returns before creating a reservation when the
 // effective limit is <= 0 (quota.go), a running agent is not reflected in

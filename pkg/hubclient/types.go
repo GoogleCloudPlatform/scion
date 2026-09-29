@@ -134,7 +134,9 @@ type ProjectProvider struct {
 	// AgentLimit is the broker's effective max_agents_per_broker ceiling
 	// (ptone/scion#2161). Unset (nil) when the hub has no quota enforcement
 	// configured, no max_agents_per_broker definition exists, resolution
-	// failed for this provider, or the broker is unlimited.
+	// failed for this provider, or the broker is unlimited. The field is
+	// never 0: a non-positive effective limit means unlimited and is
+	// omitted.
 	AgentLimit *int64 `json:"agentLimit,omitempty"`
 	// AgentCount is the number of active max_agents_per_broker reservations
 	// on this broker (ptone/scion#2161) — broker-wide, across every project
