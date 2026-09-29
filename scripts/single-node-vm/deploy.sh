@@ -803,6 +803,54 @@ if [[ -z "$ACCOUNT" ]]; then
 fi
 echo "  Authenticated as: ${ACCOUNT}"
 
+# --- Release checksum preflight ---
+# Phase 3 below downloads the scion binary and any chat plugins and verifies
+# each against a SHA256SUMS checksums asset published alongside the release
+# (see .github/workflows/build-release.yml) before installing it. Check here,
+# before any GCP resource is created, that the chosen release actually
+# publishes one -- a release built before checksum publishing existed would
+# otherwise fail deep into Phase 3, after a VM, network, and firewall rules
+# already exist. ALLOW_UNVERIFIED_RELEASE=true is an explicit, loud opt-out
+# for exactly that transition period; there is no silent fallback.
+RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+# Normalize to exactly "true" or "false": this value is interpolated into
+# single-quoted tests in the Phase 3 --command strings below (e.g.
+# [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]), so a value containing a
+# single quote would alter the remote command text. Operator-controlled
+# either way, not a privilege boundary, but VERSION gets the same strict
+# treatment a few lines up for the same reason -- keep the remote command
+# text predictable regardless of what the caller's environment set.
+if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
+  ALLOW_UNVERIFIED_RELEASE=true
+else
+  ALLOW_UNVERIFIED_RELEASE=false
+fi
+info "Checking that release ${VERSION} publishes checksums..."
+SHA256SUMS_PREFLIGHT_RC=0
+curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
+if [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
+  echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
+elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
+  # curl -f maps any HTTP error response to exit 22; anything else (DNS
+  # failure, TLS error, connection refused/timed out, ...) is a
+  # connectivity problem, not evidence the release lacks SHA256SUMS.
+  # Sending an operator to ALLOW_UNVERIFIED_RELEASE for a transient network
+  # blip would be actively wrong, so don't even mention it here.
+  err "Could not reach ${RELEASE_URL}/SHA256SUMS (curl exit ${SHA256SUMS_PREFLIGHT_RC})."
+  echo "  This looks like a network or GitHub-availability problem, not a release that lacks" >&2
+  echo "  checksums. Check connectivity and retry." >&2
+  exit 1
+elif [[ "$ALLOW_UNVERIFIED_RELEASE" == "true" ]]; then
+  warn "Release ${VERSION} does not publish a SHA256SUMS checksums asset."
+  warn "Proceeding WITHOUT checksum verification because ALLOW_UNVERIFIED_RELEASE=true."
+else
+  err "Release ${VERSION} does not publish a SHA256SUMS checksums asset, so its downloads cannot be verified."
+  echo "  This applies to any release published before checksum publishing was added." >&2
+  echo "  Choose a release that publishes SHA256SUMS, or set ALLOW_UNVERIFIED_RELEASE=true to install this" >&2
+  echo "  release anyway WITHOUT checksum verification (not recommended)." >&2
+  exit 1
+fi
+
 # ===================================================================
 # Phase 2: GCP Resources
 # ===================================================================
@@ -1459,7 +1507,8 @@ echo "  Cloud-init completed."
 # ===================================================================
 section "Phase 3: VM Setup"
 
-RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+# RELEASE_URL and ALLOW_UNVERIFIED_RELEASE are set by the checksum preflight
+# in Phase 1, before any GCP resource was created.
 
 # --- Detect VM architecture ---
 info "Detecting VM architecture..."
@@ -1487,17 +1536,49 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   " 2>/dev/null || true
 
 # --- Download and install scion binary ---
+# The release also publishes a SHA256SUMS checksums file (see
+# .github/workflows/build-release.yml). Download it alongside the binary and
+# verify with sha256sum -c before extracting. A missing tarball or a hash
+# mismatch always aborts, with no override. A missing checksums file or a
+# missing entry for this asset also aborts by default, unless
+# ALLOW_UNVERIFIED_RELEASE=true (set and warned about by the Phase 1
+# preflight) explicitly opts out for a release published before checksums
+# existed. The match is anchored and the archive name's dots are escaped so
+# an unrelated entry (e.g. a suffixed "...tar.gz.old" line) cannot be
+# mistaken for this asset's checksum. The single space between the hash and
+# the "[ *]" class accepts either sha256sum output mode: two spaces in text
+# mode (what build-release.yml's `sha256sum --` produces), or a space and an
+# asterisk in binary mode.
+SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
+SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
 info "Installing scion binary (${VERSION})..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/scion-linux-${ARCH_SUFFIX}.tar.gz' -o /tmp/scion.tar.gz
-    tar -xzf /tmp/scion.tar.gz -C /tmp
+    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
+    echo 'Downloading release checksums...'
+    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
+      if grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+        echo 'Verifying checksum...'
+        (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+      elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+        echo 'WARNING: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+      else
+        echo 'ERROR: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS -- refusing to install.' >&2
+        exit 1
+      fi
+    elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+      echo 'WARNING: could not download SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+    else
+      echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
+      exit 1
+    fi
+    tar -xzf /tmp/${SCION_ARCHIVE} -C /tmp
     sudo mv /tmp/scion /usr/local/bin/scion
     sudo chmod +x /usr/local/bin/scion
-    rm -f /tmp/scion.tar.gz
+    rm -f /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
   "
 
@@ -1507,6 +1588,7 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
   for PLUGIN in "${CHAT_PLUGINS[@]}"; do
     PLUGIN_BINARY="scion-plugin-${PLUGIN}"
     PLUGIN_ARCHIVE="${PLUGIN_BINARY}-linux-${ARCH_SUFFIX}.tar.gz"
+    PLUGIN_ARCHIVE_RE="${PLUGIN_ARCHIVE//./\\.}"
     info "  Installing ${PLUGIN_BINARY}..."
     gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1514,11 +1596,26 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
         set -euo pipefail
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
         curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
+        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
+          if grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+            (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+          elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+            echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+          else
+            echo 'ERROR: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS -- refusing to install.' >&2
+            exit 1
+          fi
+        elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+          echo 'WARNING: could not download SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+        else
+          echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
+          exit 1
+        fi
         tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
         sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -f /tmp/${PLUGIN_ARCHIVE}
+        rm -f /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done
