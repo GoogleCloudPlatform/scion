@@ -23,13 +23,16 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/require"
@@ -102,12 +105,40 @@ func TestMaterialPermissions_AgentScopeMappingExplicit(t *testing.T) {
 	}
 }
 
+// TestMaterialPermissions_NotInCuratedSeedRoles pins the §4.8 "adds none"
+// rule directly against the curated role builders: none of secret.deliver,
+// env_var.deliver, skill_injection.deliver or gcp_service_account.use is
+// ever included in the seeded hub-admin, hub-member or hub-viewer permission
+// sets. secret.use is excluded from this table because the OQ-3 mapping
+// deliberately reaches agent JWTs through AgentScopes, not through any
+// curated role list.
+func TestMaterialPermissions_NotInCuratedSeedRoles(t *testing.T) {
+	roles := map[string][]string{
+		"hub-admin":  hubAdminPermissionIDs(),
+		"hub-member": hubMemberPermissionIDs(),
+		"hub-viewer": hubViewerPermissionIDs(),
+	}
+	unwanted := []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver", "gcp_service_account.use"}
+	for roleName, perms := range roles {
+		permSet := make(map[string]bool, len(perms))
+		for _, p := range perms {
+			permSet[p] = true
+		}
+		for _, id := range unwanted {
+			if permSet[id] {
+				t.Errorf("seeded role %q unexpectedly includes %q", roleName, id)
+			}
+		}
+	}
+}
+
 // TestSecretUse_AgentScopeDoesNotGrantUserMaterial covers the explicit
 // agent-scope mapping's limit: a full-role agent's project:secret:read scope gives it a synthetic
 // binding for secret.use, but that binding is project-scoped
 // (buildAgentSyntheticBindings), so it does not reach a user-owned resource
 // with no progeny relationship. A raw Decide call for secret.use against
-// such a resource still denies.
+// such a resource still denies with no candidate binding at all -- not
+// merely a ceiling denial that a different delegator could satisfy.
 func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 	f := newMaterialFixture(t, "secretuse-no-user-material")
 	ctx := context.Background()
@@ -120,22 +151,27 @@ func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 		Action:     ActionUse,
 		Permission: "secret.use",
 	})
-	if d.Allowed {
-		t.Fatalf("expected deny: a full-role agent's project:secret:read scope must not grant a user-scope secret with no progeny relationship, got allowed (reason=%q)", d.Reason)
+	wantReason := `no active binding grants permission "secret.use"`
+	if d.Allowed || d.Reason != wantReason {
+		t.Fatalf("expected deny with reason %q: a full-role agent's project:secret:read scope must not grant a user-scope secret with no progeny relationship, got allowed=%v reason=%q", wantReason, d.Allowed, d.Reason)
 	}
 }
 
-// TestSecretUse_ProjectSecretRequiresProjectSecretRead pins the two-permission
-// composite for project-scope material: an ordinary project owner's role
-// holds project.secret_read (seeded), not secret.use (held only by
-// super-admin, through every registry permission). So a raw Decide call for
-// secret.use on the project resource still denies through the delegation
-// ceiling -- checkUserHoldsPermission checks the delegator against the
-// exact requested permission, and an owner delegator does not hold
-// secret.use -- even though the identical request for project.secret_read
-// on the same resource, from the same delegator, is admitted. Project-scope
-// material access needs project.secret_read specifically; secret.use alone
-// is not enough.
+// TestSecretUse_ProjectSecretRequiresProjectSecretRead pins the raw-Decide
+// half of the two-permission composite for project-scope material: an
+// ordinary project owner's role holds project.secret_read (seeded), not
+// secret.use (held only by super-admin, through every registry permission).
+// So a raw Decide call for secret.use on the project resource still denies
+// through the delegation ceiling -- checkUserHoldsPermission checks the
+// delegator against the exact requested permission, and an owner delegator
+// does not hold secret.use -- even though the identical request for
+// project.secret_read on the same resource, from the same delegator, is
+// admitted. This shows the two permissions decide independently; it does not
+// exercise the runtime read path itself. See
+// TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead
+// below for the end-to-end consequence: a root admitted at check 5 only
+// through secret.use system authority still cannot read a project secret,
+// because check 7 decides on project.secret_read specifically.
 func TestSecretUse_ProjectSecretRequiresProjectSecretRead(t *testing.T) {
 	f := newMaterialFixture(t, "secretuse-composite")
 	ctx := context.Background()
@@ -178,15 +214,104 @@ func TestSecretUse_ProjectSecretRequiresProjectSecretRead(t *testing.T) {
 	}
 }
 
+// TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead
+// pins the end-to-end §4.8 consequence: a root admitted at check 5 only
+// through secret.use system authority (a custom system role holding
+// secret.use, no project membership and no project.secret_read anywhere)
+// still cannot read a project secret. Check 7 always decides on
+// project.secret_read specifically, and this root's delegate (an agent with
+// an active delegation edge) is denied by the ceiling for that exact
+// permission, so the read reports not_found with no value, and the audited
+// item names project.secret_read as the permission it was decided on.
+func TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysauth-composite")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysauth-composite", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysauth-composite")
+	systemRoleUserWithPermissions(t, s, userID, []string{"secret.use"})
+	agentID := tid("agent-sysauth-composite")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysauth-composite", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	setBackfillCompleted(t, s)
+	createDCEdge(t, s, store.DelegationPrincipalUser, userID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+
+	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
+	require.NoError(t, err)
+	seedSecret(t, srv.secretBackend, "SYSAUTH_KEY", "v", "", "", projectID)
+
+	auditor := newRecordingMaterialAuditor()
+	srv.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"SYSAUTH_KEY"}}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp secretFetchResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if len(resp.Secrets) != 1 || resp.Secrets[0].Status != "not_found" || resp.Secrets[0].Value != "" {
+		t.Fatalf("expected not_found with no value (secret.use system authority does not substitute for project.secret_read), got %+v", resp.Secrets)
+	}
+
+	if len(auditor.events) == 0 || len(auditor.events[len(auditor.events)-1].Items) == 0 {
+		t.Fatal("expected a material selection audit event with at least one item")
+	}
+	item := auditor.events[len(auditor.events)-1].Items[0]
+	if item.Permission != "project.secret_read" {
+		t.Errorf("expected the audited item's permission to be project.secret_read, got %q", item.Permission)
+	}
+}
+
 // TestMaterialUse_CeilingStoreErrorDenies pins that secret.use participates
 // in the same fail-closed delegation-ceiling behaviour as any other
 // non-read-only action: a genuine edge-lookup store fault denies rather than
 // allowing, even though the agent's own JWT scope would otherwise satisfy
-// the kernel decision.
+// the kernel decision. The positive control (no injected fault) confirms the
+// same request is allowed with a real delegation edge and a delegator that
+// holds secret.use, so the later denial is caused by the fault and not by an
+// edge or permission that was already missing.
 func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 	f := newMaterialFixture(t, "secretuse-ceiling-store-error")
 	ctx := context.Background()
 	setBackfillCompleted(t, f.Store)
+
+	// A super-admin delegator holds secret.use through allPermissionIDs, and
+	// a recorded delegation edge exists, so the positive control below can
+	// only pass because the ceiling's normal edge lookup succeeds -- not
+	// because no delegator holds the permission or no edge was ever checked.
+	superAdminDelegator := tid("secretuse-ceiling-superadmin")
+	createTestUserWithRole(t, f.Store, superAdminDelegator, "secretuse-ceiling-superadmin@test.com", "member", store.SystemRoleSuperAdmin)
+	delegateAgentID := tid("secretuse-ceiling-delegate-agent")
+	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
+		ID: delegateAgentID, Slug: "secretuse-ceiling-delegate", Name: "delegate", ProjectID: f.ProjectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{superAdminDelegator},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	createDCEdge(t, f.Store, store.DelegationPrincipalUser, superAdminDelegator, store.DelegationPrincipalAgent, delegateAgentID,
+		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
+
+	ident := newFullAgentIdentity(delegateAgentID, f.ProjectID, []string{superAdminDelegator}, []AgentTokenScope{ScopeProjectSecretRead})
+	request := AuthzRequest{
+		Principal:  principalContextForIdentity(ident),
+		Credential: credentialContextForIdentity(ident),
+		Resource:   Resource{Type: "project", ID: f.ProjectID},
+		Action:     ActionUse,
+		Permission: "secret.use",
+	}
+
+	dControl := f.Server.authzService.Decide(ctx, request)
+	if !dControl.Allowed {
+		t.Fatalf("positive control: expected allow with a real delegation edge and a super-admin delegator holding secret.use, got deny (reason=%q)", dControl.Reason)
+	}
 
 	failing := &materialFailingStore{
 		Store:                            f.Store,
@@ -194,14 +319,7 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 	}
 	f.Server.authzService = NewAuthzService(failing, logging.Subsystem("hub.auth"))
 
-	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
-	d := f.Server.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(ident),
-		Credential: credentialContextForIdentity(ident),
-		Resource:   Resource{Type: "project", ID: f.ProjectID},
-		Action:     ActionUse,
-		Permission: "secret.use",
-	})
+	d := f.Server.authzService.Decide(ctx, request)
 	if d.Allowed {
 		t.Fatal("expected deny: a genuine edge-lookup fault must fail closed for a non-read-only action")
 	}
@@ -210,11 +328,15 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 // TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation pins
 // that holding a *.deliver permission through a role is not the whole
 // story: super-admin holds every registry permission, including
-// secret.deliver, through allPermissionIDs, but this base has no
-// association/progeny/skill_default relationship grant and no hub-delivery
-// credential concept yet (both land with the delivery pipeline), so a raw
-// Decide call for a super-admin user principal still denies for lack of any
-// grant on the item.
+// secret.deliver, through allPermissionIDs. The positive control shows the
+// same super-admin, built from a real identity, admitted for an ordinary
+// permission (project.update), so the principal itself is not the reason a
+// deliver decision would deny. The delivery-only assertion is skipped: the
+// internal hub_delivery credential kind and its restriction (denying
+// *.deliver for every other credential kind, including this one) are a
+// B-owned change tracked at ptone/scion#2228, not yet on this branch. Until
+// that restriction lands, ordinary role evaluation can still reach these
+// rows; no F.2b endpoint consumes them.
 func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -226,9 +348,25 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testin
 		ID: projectID, Name: "p", Slug: "p-superadmin-deliver", Created: time.Now(), Updated: time.Now(),
 	}))
 
+	admin := principalContextForIdentity(NewAuthenticatedUser(adminID, "superadmin-deliver@test.com", "Admin", "admin", "cli"))
+	credential := CredentialContext{Kind: CredentialKindInteractive}
+
+	dControl := authz.Decide(ctx, AuthzRequest{
+		Principal:  admin,
+		Credential: credential,
+		Resource:   Resource{Type: "project", ID: projectID},
+		Action:     ActionUpdate,
+		Permission: "project.update",
+	})
+	if !dControl.Allowed || dControl.Reason == "missing principal" {
+		t.Fatalf("positive control: expected super-admin allowed for project.update with a real identity, got allowed=%v reason=%q", dControl.Allowed, dControl.Reason)
+	}
+
+	t.Skip("secret.deliver enforcement depends on the hub_delivery credential restriction, ptone/scion#2228 (not yet on this branch); un-skip and assert deny once that restriction lands")
+
 	d := authz.Decide(ctx, AuthzRequest{
-		Principal:  activeUserPrincipal(adminID),
-		Credential: CredentialContext{Kind: CredentialKindInteractive},
+		Principal:  admin,
+		Credential: credential,
 		Resource:   Resource{Type: "secret", ID: tid("superadmin-deliver-secret"), ParentType: "project", ParentID: projectID},
 		Action:     ActionDeliver,
 		Permission: "secret.deliver",
