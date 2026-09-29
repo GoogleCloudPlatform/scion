@@ -8,7 +8,7 @@ Two security fixes led the day: agent-written files could run scripts with a vie
 
 ## 🚀 Features
 * **Canonical usage telemetry** (#2051, #2057): A shared telemetry contract (`gen_ai.api.calls` and `scion.usage.tokens{token_type}`) is used by sciontool and the hub. Exporters stamp project and agent identity on every point from authoritative sources. sciontool derives Claude calls and tokens from Claude's native events. The Hub dashboard now counts cumulative increases per series instead of summing every flushed point, so Claude usage is attributed correctly. This requires a scion-base rebuild.
-* **Reincarnate for shared-workspace and hub-managed agents** (#2037): `scion reincarnate` now works for these agents while preserving the agent row, identity, and shared checkout, without restarting sibling agents. Worktree-per-agent agents are refused with 400. Reincarnate is now authorized by `agent.lifecycle` instead of `agent.update`.
+* **Reincarnate for shared-workspace and hub-managed agents** (#2037): `scion reincarnate` now works for these agents while preserving the agent row, identity, and shared checkout, without restarting sibling agents. Agents using worktree-per-agent workspaces are refused with 400. Reincarnate is now authorized by `agent.lifecycle` instead of `agent.update`.
 * **`scion keys` in agent mode** (#2050): `scion keys` is hub-aware and usable inside agent containers.
 
 ## 🔒 Security
