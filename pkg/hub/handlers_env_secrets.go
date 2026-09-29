@@ -1390,8 +1390,9 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 // Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
 // When no scope is specified, secrets from both project and user scopes are returned.
 //
-// Applies the F.2a checks 1-6 precheck, then filters metadata: it reads no
-// value and has no check-9 step. It lists only keys the agent could read.
+// Applies the whole-request checks 1-6 precheck, then filters metadata: it
+// reads no value and has no check-9 step. It lists only keys the agent could
+// read.
 func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
 
@@ -1416,8 +1417,8 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 
 	// emitListExitItem records the request's MaterialSelectionEvent with a
 	// single request-level item before a whole-request exit, so a backend
-	// fault is never a silent exit (R2-2): every exit from this handler
-	// leaves a trace, the same way the decision-error branch already did.
+	// fault is never a silent exit: every exit from this handler leaves a
+	// trace, the same way the decision-error branch already did.
 	emitListExitItem := func(scope, scopeID string, grant GrantKind, permission string) {
 		item := materialSelectionItem(ItemResult{
 			Candidate: Candidate{Kind: MaterialKindSecret, Scope: scope, ScopeID: scopeID, Grant: grant},
@@ -1467,7 +1468,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			})
 			if err != nil {
 				emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
-				writeErrorFromErr(w, err, "")
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 				return
 			}
 			for _, m := range metas {
@@ -1505,7 +1506,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		})
 		if err != nil {
 			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
-			writeErrorFromErr(w, err, "")
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
 		}
 		for _, m := range metas {
@@ -1519,7 +1520,7 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			if lerr != nil {
 				// A liveness-check error is not the same as "not shared":
 				// logged distinctly so an operator is not left to guess
-				// which one occurred (R2-2).
+				// which one occurred.
 				slog.Error("agent list secrets: progeny source liveness check failed",
 					"agent_id", agentID, "key", m.Name, "err", lerr)
 				continue

@@ -23,15 +23,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// runtimeProvenanceRoot derives the F.2a provenance root from the target
-// agent's stored ancestry (check 3). There is no fallback to CreatedBy,
-// OwnerID, the token's OriginUserID(), or scheduledCreatorIdentity: the
-// stored ancestry chain is the only source. An empty ancestry (scheduler
-// children and legacy rows) has no root and must be denied by the caller.
+// errStoreReturnedNilResult is returned by progenySourceLive when a store
+// lookup that should fail closed instead returns a nil record with a nil
+// error. Every caller treats a non-nil error the same way (backend_error),
+// so this keeps that case from being read as a definitive "not live" result
+// with no error to log.
+var errStoreReturnedNilResult = errors.New("store returned nil result")
+
+// runtimeProvenanceRoot derives the provenance root for a runtime material
+// read from the target agent's stored ancestry (check 3). There is no
+// fallback to CreatedBy, OwnerID, the token's OriginUserID(), or
+// scheduledCreatorIdentity: the stored ancestry chain is the only source. An
+// empty ancestry (scheduler children and legacy rows) has no root and must
+// be denied by the caller.
 //
-// ctx is unused by the F.2a rule above, but is part of the committed
-// signature: a later change resolves the root from recorded edge provenance
-// instead, which needs it.
+// ctx is unused by the rule above, but is part of the committed signature: a
+// later change resolves the root from recorded edge provenance instead,
+// which needs it.
 func runtimeProvenanceRoot(ctx context.Context, rec *store.Agent) (ProvenanceRoot, bool) { //nolint:unparam // ctx: see doc comment
 	if rec == nil || len(rec.Ancestry) == 0 {
 		return ProvenanceRoot{}, false
@@ -51,7 +59,7 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 			// A real store never returns (nil, nil); this is cheap insurance
 			// on an authorization path rather than a reachable production
 			// case.
-			return false, "", ReasonBackendError, nil
+			return false, "", ReasonBackendError, errStoreReturnedNilResult
 		}
 		if u.Status != store.UserStatusActive {
 			return false, "user", ReasonSourceInactive, nil
@@ -74,7 +82,7 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 	if ag == nil {
 		// A real store never returns (nil, nil); this is cheap insurance on
 		// an authorization path rather than a reachable production case.
-		return false, "", ReasonBackendError, nil
+		return false, "", ReasonBackendError, errStoreReturnedNilResult
 	}
 	// GetAgent returns soft-deleted rows; the source agent must not be one.
 	if !ag.DeletedAt.IsZero() {
@@ -93,7 +101,7 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 	if rootUser == nil {
 		// A real store never returns (nil, nil); this is cheap insurance on
 		// an authorization path rather than a reachable production case.
-		return false, "agent", ReasonBackendError, nil
+		return false, "agent", ReasonBackendError, errStoreReturnedNilResult
 	}
 	if rootUser.Status != store.UserStatusActive {
 		return false, "agent", ReasonSourceInactive, nil
