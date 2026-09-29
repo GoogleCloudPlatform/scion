@@ -152,6 +152,22 @@ func TestAgentSecretRead_SharingSourceMustBeActive(t *testing.T) {
 	}
 }
 
+// TestAgentSecretRead_SharingSourceEmptyCreatedByDenies pins that an empty
+// meta.CreatedBy denies with source_inactive and no error, without a store
+// call: both store.GetUser and store.GetAgent would themselves resolve an
+// empty ID to store.ErrNotFound before ever querying the backend
+// (entadapter's parseGetID), so progenySourceLive short-circuits to the same
+// outcome those lookups would otherwise reach.
+func TestAgentSecretRead_SharingSourceEmptyCreatedByDenies(t *testing.T) {
+	f := newMaterialFixture(t, "source-empty-created-by")
+
+	live, kind, reason, err := f.Server.progenySourceLive(context.Background(), secret.SecretMeta{CreatedBy: ""})
+	require.NoError(t, err)
+	if live || kind != "" || reason != ReasonSourceInactive {
+		t.Fatalf("expected an inactive source with no kind, got live=%v kind=%s reason=%s", live, kind, reason)
+	}
+}
+
 // TestAgentSecretRead_SharingSourceAgentDeletedDenied pins that a
 // soft-deleted source agent is not live, even though GetAgent returns
 // soft-deleted rows.

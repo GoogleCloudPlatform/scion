@@ -53,6 +53,12 @@ func runtimeProvenanceRoot(ctx context.Context, rec *store.Agent) (ProvenanceRoo
 // once, and never assumed. kind is "user" or "agent" once CreatedBy resolves
 // to either, for the audit-only SharingSource; "" when neither resolves.
 func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) (live bool, kind string, reason string, err error) {
+	if meta.CreatedBy == "" {
+		// Neither lookup below can resolve an empty author; skip both and go
+		// straight to the same outcome a not-found CreatedBy reaches once the
+		// user and agent lookups both miss.
+		return false, "", ReasonSourceInactive, nil
+	}
 	u, uerr := s.store.GetUser(ctx, meta.CreatedBy)
 	if uerr == nil {
 		if u == nil {
