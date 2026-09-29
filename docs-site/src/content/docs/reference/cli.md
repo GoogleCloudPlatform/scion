@@ -283,13 +283,14 @@ Lists all agents and their status.
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
     - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND.
-    - `--owner <user>` (Hub mode only): Filter by owner — a user name, email, or `me`.
+    - `--owner <user>` (Hub mode only): Filter by owner — a user ID, name, email, or the reserved value `me` (a user whose display name is literally "me" cannot be matched by name; use their ID or email). Owner is the direct creator (`createdBy`), which for an agent-created agent is another **agent**, not the human at the root of the tree — `--owner alice` does not include agents created by alice's agents, and `--owner me` in agent mode means "agents I directly created."
     - `--broker <name|id>` (Hub mode only): Filter by runtime broker name or ID.
     - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
     - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference. With no value, the reference is the calling agent in agent mode, or the calling user otherwise (a user's ID is recorded as the creator in its directly-created agents' ancestry, so this still works).
     - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`. A user reference has no ancestry, so this returns an empty list when the reference defaults to the calling user.
     - `--lineage[=<agent>]` (Hub mode only): List the reference's direct parent plus all of that parent's descendants (its "lineage neighborhood") — mirrors the same root+subtree relationship the Hub uses internally to cascade a `lineage` message-mode change. Same reference-resolution rule as `--descendants`; when the reference is a user (no parent to walk to), it is its own root, making the result identical to `--descendants` for that user.
     - `--descendants`, `--ancestors`, and `--lineage` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
+    - Without `--all`, every Hub-mode filter above (including `--descendants`/`--ancestors`/`--lineage`) is scoped to the **current project** — a reference agent's ancestors/descendants/lineage in a different project will not appear. Use `--all` to search across every project you can see.
 
 ### `scion delete` (or `rm`)
 

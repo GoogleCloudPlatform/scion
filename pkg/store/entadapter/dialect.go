@@ -128,6 +128,73 @@ func projectLabelNotContains(key, value string) predicate.Project {
 	}
 }
 
+// appliedConfigHarnessConfigEquals returns an Ent predicate restricting
+// results to agents whose `applied_config` JSON document has a top-level
+// "harnessConfig" key equal to value.
+//
+// Unlike labels and ancestry, applied_config is stored as a plain Ent
+// field.Text column (pkg/ent/schema/agent.go), not field.JSON — it is kept
+// decoupled from the store package's struct definition. Ent/the schema never
+// validates that the column actually holds well-formed JSON (unlike a real
+// jsonb column, which Postgres rejects invalid input for at write time), and
+// pkg/store/entadapter/agent_store.go's own marshalAppliedConfig /
+// parseAppliedConfig tolerate and log malformed rows rather than failing —
+// so corrupt applied_config values are a known, expected condition, not a
+// hypothetical one (ptone/scion#2146 review R1-4).
+//
+// A naive `col::jsonb ->> 'harnessConfig'` (or SQLite's plain json_extract)
+// throws on the first malformed row it touches, turning one corrupt agent —
+// possibly in a project the caller can't even see — into a 500 for every
+// harnessConfig-filtered query. Both branches below guard the extraction
+// with a validity check first, via CASE, so an invalid document contributes
+// NULL (never matches, but never errors) instead of aborting the query:
+//
+//	SQLite:   col IS NOT NULL
+//	          AND CASE WHEN json_valid(col) THEN json_extract(col, '$.harnessConfig') END = ?
+//	Postgres: col IS NOT NULL
+//	          AND CASE WHEN pg_input_is_valid(col, 'jsonb') THEN (col::jsonb ->> 'harnessConfig') END = $n
+//
+// The Postgres guard requires pg_input_is_valid, added in PostgreSQL 16 —
+// there is no expression-level "try cast" available on earlier versions
+// without a custom PL/pgSQL helper (which would need its own migration).
+// This is a real version floor introduced by this predicate specifically;
+// flagged in dev-notes for the lead/ptone to confirm or veto, since the repo
+// does not otherwise document (or CI-test) a minimum Postgres version.
+//
+// The whole fragment is parenthesized so it composes safely if a future
+// caller wraps it in Or/Not (it is only ever ANDed today).
+func appliedConfigHarnessConfigEquals(value string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldAppliedConfig)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(").
+					WriteString(col).
+					WriteString(" IS NOT NULL AND CASE WHEN pg_input_is_valid(").
+					WriteString(col).
+					WriteString(", 'jsonb') THEN (").
+					WriteString(col).
+					WriteString("::jsonb ->> 'harnessConfig') END = ").
+					Arg(value).
+					WriteString(")")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(").
+					WriteString(col).
+					WriteString(" IS NOT NULL AND CASE WHEN json_valid(").
+					WriteString(col).
+					WriteString(") THEN json_extract(").
+					WriteString(col).
+					WriteString(", '$.harnessConfig') END = ").
+					Arg(value).
+					WriteString(")")
+			}))
+		}
+	}
+}
+
 // ancestryContains returns an Ent predicate restricting results to agents whose
 // `ancestry` JSON array contains principalID.
 //
@@ -159,42 +226,6 @@ func projectLabelNotContains(key, value string) predicate.Project {
 // The ancestry IS NOT NULL guard short-circuits agents with no recorded
 // lineage and keeps Postgres from invoking the set-returning function on a NULL
 // input.
-// appliedConfigHarnessConfigEquals returns an Ent predicate restricting
-// results to agents whose `applied_config` JSON document has a top-level
-// "harnessConfig" key equal to value.
-//
-// Unlike labels and ancestry, applied_config is stored as a plain Ent
-// field.Text column (pkg/ent/schema/agent.go), not field.JSON — it is kept
-// decoupled from the store package's struct definition. On Postgres this
-// means the column has no native jsonb type to apply `@>` or `->>` against
-// directly; it must be cast first. SQLite's json_extract works against a text
-// column holding a JSON string either way.
-//
-//	SQLite:   json_extract(applied_config, '$.harnessConfig') = ?
-//	Postgres: applied_config IS NOT NULL AND (applied_config::jsonb ->> 'harnessConfig') = ?
-func appliedConfigHarnessConfigEquals(value string) predicate.Agent {
-	return func(s *entsql.Selector) {
-		col := s.C(agent.FieldAppliedConfig)
-		switch s.Dialect() {
-		case dialect.Postgres:
-			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString(col).
-					WriteString(" IS NOT NULL AND (").
-					WriteString(col).
-					WriteString("::jsonb ->> 'harnessConfig') = ").
-					Arg(value)
-			}))
-		default: // SQLite
-			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString("json_extract(").
-					WriteString(col).
-					WriteString(", '$.harnessConfig') = ").
-					Arg(value)
-			}))
-		}
-	}
-}
-
 func ancestryContains(principalID string) predicate.Agent {
 	return func(s *entsql.Selector) {
 		col := s.C(agent.FieldAncestry)

@@ -611,8 +611,11 @@ func AgentDomain() Domain[store.Agent] {
 			{
 				// IDs: narrowing restriction to a specific agent ID set,
 				// backing relationship queries like CLI --ancestors
-				// (ptone/scion#2146). A non-UUID entry (as Ancestry mixes
-				// user and agent principal IDs) simply matches no row.
+				// (ptone/scion#2146). A user ID mixed into the candidate set
+				// (Ancestry mixes user and agent principal IDs) is a
+				// perfectly valid UUID — it simply matches no row in the
+				// agents table, which is how "skip entries that are users"
+				// falls out without extra bookkeeping.
 				Name: "ByIDs",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-keep")))

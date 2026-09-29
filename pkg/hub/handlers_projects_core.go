@@ -2111,7 +2111,10 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
 	}
-	applyAgentAttributeAndRelationshipFilters(&filter, query)
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
 		parsed, err := parseLabelFilters(labelParams)

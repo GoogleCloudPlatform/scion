@@ -1333,6 +1333,53 @@ func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	assert.Equal(t, 3, all.TotalCount)
 }
 
+// TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow is the ptone/scion#2146
+// review R1-4 regression: applied_config is a plain Ent field.Text column, not
+// schema-validated JSON (unlike labels/ancestry, which are field.JSON), so a
+// corrupt row can and does exist in practice — parseAppliedConfig already
+// tolerates one by logging and continuing. A naive `col::jsonb`/json_extract
+// cast throws on the first malformed row it touches, which would turn any
+// single corrupt agent anywhere in the table — even in a project the caller
+// can't see — into a 500 for every harnessConfig-filtered query. The
+// appliedConfigHarnessConfigEquals predicate must instead treat a corrupt row
+// as "does not match" and let the query complete.
+func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	claude := makeAgent(projectID, "claude-agent-corrupt-test")
+	claude.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	require.NoError(t, s.CreateAgent(ctx, claude))
+
+	corrupt := makeAgent(projectID, "corrupt-applied-config-agent")
+	require.NoError(t, s.CreateAgent(ctx, corrupt))
+
+	// Corrupt corrupt's applied_config directly at the column level — Ent's
+	// field.Text setter does not validate JSON-ness, exactly like production
+	// data that predates a stricter writer or was hand-edited.
+	corruptUID, err := uuid.Parse(corrupt.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(corruptUID).SetAppliedConfig("{not json").Save(ctx)
+	require.NoError(t, err)
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err, "a corrupt applied_config row on an unrelated agent must not fail the whole query")
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, claude.ID, result.Items[0].ID)
+
+	// The corrupt row itself never matches any harnessConfig value — it
+	// degrades to "no match", not an error and not a false positive.
+	byCorruptValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "not json"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, byCorruptValue.Items)
+
+	// The unfiltered listing already tolerated this (parseAppliedConfig logs
+	// and continues) — confirm that still holds after corrupting the row.
+	all, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, all.TotalCount)
+}
+
 // TestAgentStore_RequestedOwnerIDFilter verifies that RequestedOwnerID is a
 // plain AND filter, independent of the OwnerID/MemberOrOwnerProjectIDs
 // OR-based Mine/Shared classification (ptone/scion#2146). This is the
@@ -1385,9 +1432,11 @@ func TestAgentStore_RequestedOwnerIDFilter(t *testing.T) {
 // TestAgentStore_IDsFilter verifies the IDs restriction backing relationship
 // queries such as CLI --ancestors (ptone/scion#2146): nil means unrestricted,
 // an empty non-nil slice fails closed to zero rows (mirroring
-// AuthorizedProjectIDs), and IDs that don't parse as UUIDs are dropped rather
-// than erroring — which is how "skip entries that are users, not agents"
-// falls out for free when Ancestry mixes user and agent principal IDs.
+// AuthorizedProjectIDs). In production, "skip entries that are users, not
+// agents" falls out for free because a user ID — a perfectly valid UUID —
+// simply matches no row in the agents table; the test below additionally
+// checks a genuinely malformed (non-UUID) entry, which parseUUIDList drops
+// rather than erroring on, as a separate defensive fallback for corrupt data.
 func TestAgentStore_IDsFilter(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

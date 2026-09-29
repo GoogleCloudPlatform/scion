@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -73,6 +74,23 @@ var listCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List running scion agents",
+	// Args rejects positional arguments so that `scion list --descendants foo`
+	// fails loudly instead of silently dropping "foo": --descendants has a
+	// NoOptDefVal (R1-2), so without "=" the flag consumes no value and "foo"
+	// parses as a bare positional argument instead of the reference agent.
+	// Left unchecked, that positional is simply ignored (listCmd never reads
+	// args), so the command would run with --descendants inferring the
+	// caller instead of naming "foo" — a silent wrong-answer, not an error.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf(
+				"scion list does not take positional arguments (got %v). "+
+					"If you meant to name a reference agent for --descendants, --ancestors, or --lineage, "+
+					"use \"=\": e.g. --descendants=%s, not --descendants %s",
+				args, args[0], args[0])
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateListFlags(); err != nil {
 			return err
@@ -98,8 +116,43 @@ var listCmd = &cobra.Command{
 		}
 
 		// Local mode
+		if err := rejectHubOnlyFiltersInLocalMode(); err != nil {
+			return err
+		}
 		return listAgentsLocal()
 	},
+}
+
+// rejectHubOnlyFiltersInLocalMode returns a clear error if any Hub-only
+// filter flag is set while listing locally (ptone/scion#2146 review R1-5).
+//
+// Local listing has no store.AgentFilter to push these into — it filters an
+// in-memory runtime.List() result by name/label only. Before this check,
+// setting e.g. --owner or --ancestors in local mode was silently a no-op:
+// the flag was simply never read outside listAgentsViaHub, so the command
+// printed every agent as though it were the filtered set. A narrowing filter
+// that silently narrows nothing makes the output *wider* than what was
+// asked for, with no indication anything was ignored — dangerous when the
+// output feeds a script (e.g. piped into a bulk stop or delete). Erroring
+// is the only response that can't be misread as "no matches."
+func rejectHubOnlyFiltersInLocalMode() error {
+	type hubOnlyFlag struct {
+		name string
+		set  bool
+	}
+	for _, f := range []hubOnlyFlag{
+		{"owner", filterOwner != ""},
+		{"broker", filterBroker != ""},
+		{"harness", filterHarness != ""},
+		{"descendants", filterDescendants != ""},
+		{"ancestors", filterAncestors != ""},
+		{"lineage", filterLineage != ""},
+	} {
+		if f.set {
+			return fmt.Errorf("--%s requires Hub mode (no Hub is configured for this project)", f.name)
+		}
+	}
+	return nil
 }
 
 // listAgentsLocal lists agents using the local runtime
@@ -151,6 +204,20 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		opts.Page.Limit = listCount
 	}
 	agentSvc := hubCtx.Client.Agents()
+	// refAgentSvc is used specifically to resolve a relationship flag's
+	// reference agent (see resolveReferenceAgent calls below) — it is kept
+	// separate from agentSvc, which drives the final listing and must follow
+	// --all. An agent identity generally has no hub-wide list authority; it
+	// only gets to list via the project-scoped endpoint's same-project
+	// carve-out (listProjectAgents, pkg/hub/handlers_projects_core.go). If
+	// reference resolution used the --all-selected agentSvc, `--all
+	// --descendants` (even bare, naming the caller itself) would silently
+	// find nothing for an agent caller — not because the reference doesn't
+	// exist, but because the global endpoint can't see it under that
+	// identity (ptone/scion#2146 review R1-3). Reference resolution is
+	// scoped to the caller's own current project whenever one is resolvable,
+	// regardless of --all; the final listing still spans every project.
+	refAgentSvc := agentSvc
 
 	if !listAll {
 		// Get the project ID for the current project
@@ -160,7 +227,13 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		opts.ProjectID = projectID
 		agentSvc = hubCtx.Client.ProjectAgents(projectID)
+		refAgentSvc = agentSvc
+	} else if projectID, err := GetProjectID(hubCtx); err == nil {
+		refAgentSvc = hubCtx.Client.ProjectAgents(projectID)
 	}
+	// else: no project resolvable at all (e.g. --all run from an unlinked
+	// directory) — refAgentSvc falls back to the global agentSvc, exactly
+	// the prior behavior.
 
 	if filterOwner != "" {
 		ownerID, err := resolveOwnerID(ctx, hubCtx.Client, filterOwner)
@@ -197,7 +270,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// that works for an agent reference works unchanged here.
 			opts.AncestorID = userID
 		} else {
-			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+			refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
 			if err != nil {
 				return wrapHubError(err)
 			}
@@ -213,17 +286,20 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// A user has no Ancestry chain of its own — nothing to list.
 			return displayAgents(nil, listAll, true)
 		}
-		refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+		refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
 		if err != nil {
 			return wrapHubError(err)
 		}
 		if len(refAgent.Ancestry) == 0 {
-			// No ancestors recorded (e.g. a root, user-created agent's sole
-			// ancestry entry was itself, or ancestry is empty). Short-circuit
-			// locally rather than sending an empty id-list query: an id query
-			// with zero "id" params is indistinguishable on the wire from "no
-			// id restriction at all", which would silently widen the result
-			// to every authorized agent instead of none.
+			// Ancestry is empty (a legacy agent with no recorded lineage —
+			// production ancestry is always [creatorUser, ...ancestor
+			// agents..., parent] and never empty for a normally-created
+			// agent; even a root, user-created agent has Ancestry=[userID]).
+			// Short-circuit locally rather than sending an empty id-list
+			// query: an id query with zero "id" params is indistinguishable
+			// on the wire from "no id restriction at all", which would
+			// silently widen the result to every authorized agent instead
+			// of none.
 			return displayAgents(nil, listAll, true)
 		}
 		opts.IDs = refAgent.Ancestry
@@ -239,7 +315,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// own lineage root — see resolveLineageRootID.
 			root = resolveLineageRootID(userID, nil)
 		} else {
-			refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+			refAgent, err := resolveReferenceAgent(ctx, refAgentSvc, agentRef)
 			if err != nil {
 				return wrapHubError(err)
 			}
@@ -297,17 +373,33 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 		return "", fmt.Errorf("failed to resolve --owner %q: %w", ownerRef, err)
 	}
 
-	// Fall back to a name/email search.
-	resp, err := client.Users().List(ctx, &hubclient.ListUsersOptions{Search: ownerRef})
-	if err != nil {
-		return "", fmt.Errorf("failed to search for user %q: %w", ownerRef, err)
-	}
+	// Fall back to a name/email search, paging through every result rather
+	// than only the first page. Search is a substring match, so an exact
+	// match can easily be pushed past the first page by other users sharing
+	// the same substring (ptone/scion#2146 review R1-8).
 	lower := strings.ToLower(ownerRef)
 	var matches []hubclient.User
-	for _, u := range resp.Users {
-		if strings.ToLower(u.Email) == lower || strings.ToLower(u.DisplayName) == lower {
-			matches = append(matches, u)
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxResolutionPages {
+			return "", fmt.Errorf("--owner %q: too many matching users to search exhaustively; use the user ID instead", ownerRef)
 		}
+		resp, err := client.Users().List(ctx, &hubclient.ListUsersOptions{
+			Search: ownerRef,
+			Page:   apiclient.PageOptions{Cursor: cursor},
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to search for user %q: %w", ownerRef, err)
+		}
+		for _, u := range resp.Users {
+			if strings.ToLower(u.Email) == lower || strings.ToLower(u.DisplayName) == lower {
+				matches = append(matches, u)
+			}
+		}
+		if resp.Page.NextCursor == "" {
+			break
+		}
+		cursor = resp.Page.NextCursor
 	}
 	switch len(matches) {
 	case 0:
@@ -381,23 +473,77 @@ func resolveLineageRootID(id string, ancestry []string) string {
 // agent record via agentSvc, which the caller has already scoped to the
 // right project (or left unscoped for --all). It tries ref as a direct ID
 // first, then falls back to a slug/name match within agentSvc's listing.
+// maxResolutionPages bounds how many pages resolveOwnerID and
+// resolveReferenceAgent will fetch while searching for an exact name/email
+// match, so a misbehaving or never-terminating cursor cannot hang the CLI
+// forever (ptone/scion#2146 review R1-8).
+const maxResolutionPages = 1000
+
+// resolveReferenceAgent resolves ref (an agent ID, slug, or name) to the full
+// agent record. It resolves through agentSvc's authorized *list* — the same
+// choke point the final narrowing query uses — rather than treating a
+// single-resource GET as authoritative.
+//
+// GET is tried first as a fast, cheap path that is correct whenever it
+// succeeds (notably when ref is the caller's own ID). But many agent
+// identities are denied GET on any agent other than themselves with a plain
+// 403, even though the identical agent is visible through the list endpoint
+// (ptone/scion#2146 review R1-3) — using GET as the primary path silently
+// failed --descendants=<peer> and --ancestors=<peer> for exactly the
+// audience (agents naming a sibling) these flags exist for. So both 404 and
+// 403 fall through to list-based resolution below, never just 404.
 func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService, ref string) (*hubclient.Agent, error) {
 	if a, err := agentSvc.Get(ctx, ref); err == nil {
 		return a, nil
-	} else if !apiclient.IsNotFoundError(err) {
+	} else if !apiclient.IsNotFoundError(err) && !apiclient.IsForbiddenError(err) {
 		return nil, fmt.Errorf("failed to resolve agent %q: %w", ref, err)
 	}
 
-	resp, err := agentSvc.List(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up agent %q: %w", ref, err)
-	}
-	var matches []hubclient.Agent
-	for i := range resp.Agents {
-		a := resp.Agents[i]
-		if a.Slug == ref || a.Name == ref {
-			matches = append(matches, a)
+	// If ref looks like an agent ID, ask the list endpoint to narrow
+	// directly to it — the same IDs mechanism --ancestors already uses —
+	// instead of paging through every agent for what is usually the common
+	// case.
+	if _, err := uuid.Parse(ref); err == nil {
+		resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{IDs: []string{ref}})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve agent %q: %w", ref, err)
 		}
+		switch len(resp.Agents) {
+		case 0:
+			return nil, fmt.Errorf("agent %q not found", ref)
+		case 1:
+			return &resp.Agents[0], nil
+		default:
+			// IDs is a single-element set; the server should never return
+			// more than one match. Fail loud rather than guess which one.
+			return nil, fmt.Errorf("agent %q unexpectedly matched more than one record", ref)
+		}
+	}
+
+	// Not a UUID: page through the full authorized list, matching by slug or
+	// name, until an exact match is found or the list is exhausted
+	// (ptone/scion#2146 review R1-8 — matching only the first page silently
+	// missed real agents on a large, `--all`-scoped hub).
+	var matches []hubclient.Agent
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxResolutionPages {
+			return nil, fmt.Errorf("agent %q: too many agents to search exhaustively; use the agent ID instead", ref)
+		}
+		resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Page: apiclient.PageOptions{Cursor: cursor}})
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up agent %q: %w", ref, err)
+		}
+		for i := range resp.Agents {
+			a := resp.Agents[i]
+			if a.Slug == ref || a.Name == ref {
+				matches = append(matches, a)
+			}
+		}
+		if resp.Page.NextCursor == "" {
+			break
+		}
+		cursor = resp.Page.NextCursor
 	}
 	switch len(matches) {
 	case 0:
@@ -966,7 +1112,7 @@ func init() {
 	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
 
 	// Attribute filters (Hub mode only).
-	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user name, email, or \"me\" (Hub mode only)")
+	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user ID, name, email, or the reserved value \"me\" (Hub mode only)")
 	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID (Hub mode only)")
 	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name (Hub mode only)")
 

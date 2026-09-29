@@ -951,6 +951,65 @@ func TestValidateListFlagsNegativeCount(t *testing.T) {
 	}
 }
 
+// TestRejectHubOnlyFiltersInLocalMode is the ptone/scion#2146 review R1-5
+// regression: a Hub-only filter set while listing locally must error rather
+// than silently listing everything (a narrowing filter that narrows nothing
+// makes the output wider than asked for, with no indication anything was
+// ignored).
+func TestRejectHubOnlyFiltersInLocalMode(t *testing.T) {
+	reset := func() {
+		filterOwner, filterBroker, filterHarness = "", "", ""
+		filterDescendants, filterAncestors, filterLineage = "", "", ""
+	}
+	defer reset()
+
+	t.Run("no Hub-only filters set: no error", func(t *testing.T) {
+		reset()
+		assert.NoError(t, rejectHubOnlyFiltersInLocalMode())
+	})
+
+	tests := []struct {
+		flagName string
+		set      func()
+	}{
+		{"owner", func() { filterOwner = "alice" }},
+		{"broker", func() { filterBroker = "my-broker" }},
+		{"harness", func() { filterHarness = "claude" }},
+		{"descendants", func() { filterDescendants = "agent-a" }},
+		{"ancestors", func() { filterAncestors = "agent-a" }},
+		{"lineage", func() { filterLineage = "agent-a" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.flagName, func(t *testing.T) {
+			reset()
+			tt.set()
+			err := rejectHubOnlyFiltersInLocalMode()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--"+tt.flagName)
+			assert.Contains(t, err.Error(), "Hub mode")
+		})
+	}
+}
+
+// TestListCmd_Args_RejectsPositionalArguments is the ptone/scion#2146 review
+// R1-2 regression: `scion list --descendants foo` (space, not "=") must not
+// silently drop "foo" as an ignored positional argument. Because
+// --descendants has NoOptDefVal, the flag consumes no value without "=", so
+// "foo" would otherwise parse as a positional arg that listCmd's RunE never
+// reads — the command would then run with --descendants inferring the
+// caller instead of naming "foo", a silent wrong answer rather than a
+// visible error.
+func TestListCmd_Args_RejectsPositionalArguments(t *testing.T) {
+	require.NotNil(t, listCmd.Args, "listCmd must validate positional arguments")
+
+	err := listCmd.Args(listCmd, []string{"foo"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--descendants=")
+
+	assert.NoError(t, listCmd.Args(listCmd, nil), "no positional args must still be accepted")
+	assert.NoError(t, listCmd.Args(listCmd, []string{}), "an empty args slice must still be accepted")
+}
+
 func TestListCountFlag(t *testing.T) {
 	var receivedLimit string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1418,6 +1477,127 @@ func TestResolveReferenceAgent(t *testing.T) {
 	})
 }
 
+// TestResolveReferenceAgent_FallsBackOn403 is the ptone/scion#2146 review
+// R1-3 regression: many agent identities are denied a single-resource GET on
+// any agent other than themselves with a plain 403 (verified against a real
+// Hub in TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// pkg/hub/rs2_r1_fixes_test.go), even though the identical agent is visible
+// through the authorized list endpoint. Before this fix, resolveReferenceAgent
+// only fell through to list-based resolution on 404, so --descendants=<peer>
+// failed outright for exactly the audience (agents naming a sibling) it is
+// built for. This test proves the CLIENT-side fallback: given a GET that
+// returns 403, resolution must still succeed via the list endpoint.
+func TestResolveReferenceAgent_FallsBackOn403(t *testing.T) {
+	const peerID = "66666666-6666-6666-6666-666666666666"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+peerID:
+			// A single-resource GET on a peer is forbidden for this identity
+			// (agent.read has no AgentScopes mapping — see
+			// TestBypassAgents_LegitimateFlowsStillWork), even though the
+			// agent genuinely exists and is listable.
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden"})
+		case r.URL.Path == "/api/v1/agents":
+			// The list endpoint, by contrast, is authorized and includes the
+			// peer — whether narrowed by id[] or returned in a bare page.
+			ids := r.URL.Query()["id"]
+			if len(ids) > 0 {
+				require.Equal(t, []string{peerID}, ids)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: peerID, Slug: "peer-agent", Name: "peer-agent"}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	a, err := resolveReferenceAgent(context.Background(), client.Agents(), peerID)
+	require.NoError(t, err, "a 403 on GET must fall through to list-based resolution, not fail outright")
+	assert.Equal(t, peerID, a.ID)
+}
+
+// TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter verifies that once GET
+// fails (404 or 403), a UUID-shaped reference is resolved via the id[]
+// filter — a single narrowing query — rather than paging through every
+// agent to find a name/slug match that could never occur for a UUID input.
+func TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter(t *testing.T) {
+	const refID = "77777777-7777-7777-7777-777777777777"
+	var bareListCalled bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+refID:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/agents":
+			ids := r.URL.Query()["id"]
+			if len(ids) == 0 {
+				bareListCalled = true
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+				return
+			}
+			require.Equal(t, []string{refID}, ids)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: refID, Slug: "ref-agent", Name: "ref-agent"}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	a, err := resolveReferenceAgent(context.Background(), client.Agents(), refID)
+	require.NoError(t, err)
+	assert.Equal(t, refID, a.ID)
+	assert.False(t, bareListCalled, "a UUID reference must resolve via id[], not a full-list page scan")
+}
+
+// TestResolveReferenceAgent_PagesThroughNameMatches is the ptone/scion#2146
+// review R1-8 regression: a name/slug match must not be missed just because
+// it falls on a later page of the authorized list.
+func TestResolveReferenceAgent_PagesThroughNameMatches(t *testing.T) {
+	const targetID = "88888888-8888-8888-8888-888888888888"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/target-name":
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/agents":
+			if r.URL.Query().Get("cursor") == "" {
+				// First page: no match, but says there's more.
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"agents":     []hubclient.Agent{{ID: "other-1", Slug: "other-1", Name: "other-1"}},
+					"nextCursor": "page-2",
+				})
+				return
+			}
+			// Second page: the actual match, no further cursor.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: targetID, Slug: "target-name", Name: "target-name"}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	a, err := resolveReferenceAgent(context.Background(), client.Agents(), "target-name")
+	require.NoError(t, err, "a match on the second page must not be missed")
+	assert.Equal(t, targetID, a.ID)
+}
+
 // TestListAgentsViaHub_AttributeFilterQueryParams is an end-to-end wiring
 // check: --owner/--broker/--harness resolve and land on the outgoing
 // /api/v1/agents request as ownerId/runtimeBrokerId/harnessConfig, combined
@@ -1648,6 +1828,80 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		run()
 		assert.Equal(t, rootlessRefID, gotLineageRootID)
 	})
+}
+
+// TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint is
+// the ptone/scion#2146 review R1-3 regression for `--all`: an agent identity
+// generally has no hub-wide list authority (only the project-scoped
+// endpoint's same-project carve-out — see
+// TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// pkg/hub/rs2_r1_fixes_test.go), so if reference-agent resolution used the
+// --all-selected global agentSvc, `--all --descendants` would silently find
+// nothing for an agent caller, even for itself. refAgentSvc must resolve the
+// reference through the project-scoped endpoint whenever a project is
+// resolvable, regardless of --all, while the final listing still spans every
+// project via the global endpoint.
+func TestListAgentsViaHub_AllMode_ReferenceResolutionUsesProjectScopedEndpoint(t *testing.T) {
+	const projectID = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	const selfID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+	var globalAgentsCalled bool
+	var gotAncestorID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+selfID:
+			// Simulates the real Hub's denial of a single-resource GET for
+			// an agent identity on any agent, including itself.
+			w.WriteHeader(http.StatusForbidden)
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
+			// The project-scoped list endpoint succeeds — this is what
+			// refAgentSvc must use for reference resolution.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: selfID, Slug: "self", Name: "self"}},
+			})
+		case r.URL.Path == "/api/v1/agents":
+			// The global endpoint drives the final --all listing. If
+			// reference resolution incorrectly fell back to this endpoint,
+			// it would 404 here (not stubbed to resolve selfID) and the
+			// test would fail with an error instead of asserting on
+			// ancestorId.
+			globalAgentsCalled = true
+			gotAncestorID = r.URL.Query().Get("ancestorId")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	// ProjectID set directly on HubContext so GetProjectID resolves
+	// deterministically without touching git/settings in this test.
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	oldListAll, oldDescendants, oldOutputFormat := listAll, filterDescendants, outputFormat
+	listAll = true
+	filterDescendants = scopeInferSentinel
+	outputFormat = "json"
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_AGENT_ID", selfID)
+	defer func() {
+		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
+	}()
+
+	oldStdout := os.Stdout
+	_, w, _ := os.Pipe()
+	os.Stdout = w
+	err = listAgentsViaHub(hubCtx)
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+	assert.True(t, globalAgentsCalled, "the final --all listing must still hit the global endpoint")
+	assert.Equal(t, selfID, gotAncestorID,
+		"reference resolution must succeed via the project-scoped endpoint even though the global one can't see this identity")
 }
 
 // TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults covers
