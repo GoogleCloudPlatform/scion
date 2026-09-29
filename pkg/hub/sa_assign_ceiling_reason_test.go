@@ -145,12 +145,13 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 //
 // Chain: user U (exists, holds project:agent:create) -> agent A (role
 // readonly, so it lacks the agent-create scope) -> agent B (role full). B
-// requests the SA assignment. Layer 0 allows via B's own agent-jwt-scope
-// synthetic binding; Step 10 walks the chain, finds A holds the permission
-// but recurses no further because the check on A itself already fails, and
-// denies with DenyCauseCeilingDelegatorLacksPermission before ever resolving
-// U. This exercises the agent branch of that check, the twin of the
-// user-delegator branch the sibling test above covers.
+// requests the SA assignment. The Hub policy kernel (within Layer 1) allows
+// via B's own agent-jwt-scope synthetic binding; Step 10 checks B's
+// delegator A, finds A's recorded role (readonly) does not carry the scope
+// that maps to gcp_service_account.assign, and denies with
+// DenyCauseCeilingDelegatorLacksPermission without recursing to U. This
+// exercises the agent branch of that check, the twin of the user-delegator
+// branch the sibling test above covers.
 func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -329,11 +330,12 @@ func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
 // agent's immediate creator.
 //
 // Chain: user U (never created — orphaned) -> agent A (holds
-// project:agent:create) -> agent B. B requests the SA assignment. Layer 0
-// allows via B's own agent-jwt-scope synthetic binding; Step 10 walks the
-// chain: B's delegator A still holds the permission, so the walk recurses
-// into A's own chain, finds A's delegator U does not resolve, and denies the
-// mint with DenyCauseCeilingOrphaned — propagated back through B's result via
+// project:agent:create) -> agent B. B requests the SA assignment. The Hub
+// policy kernel (within Layer 1) allows via B's own agent-jwt-scope
+// synthetic binding; Step 10 walks the chain: B's delegator A still holds
+// the permission, so the walk recurses into A's own chain, finds A's
+// delegator U does not resolve, and denies the mint with
+// DenyCauseCeilingOrphaned — propagated back through B's result via
 // the cause pointer threaded through walkDelegationChain's recursive call.
 // The message must not name B's immediate creator (A, which exists) as the
 // missing principal — it names the delegation chain generically instead.
