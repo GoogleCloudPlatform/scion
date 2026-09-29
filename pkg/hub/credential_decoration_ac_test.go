@@ -25,6 +25,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -36,8 +37,14 @@ import (
 
 // ---------------------------------------------------------------------------
 // E.1 acceptance-criteria tests (plan §5, E.1 table). Each AC below has both
-// a positive and negative behavior-level test, exercised through the real
-// HTTP handlers and UnifiedAuthMiddleware, not a hand-constructed identity.
+// a positive and negative behavior-level test. Mint always goes through the
+// real HTTP handler (`e1MintTokenViaAPI` → `doRequest`, dev session
+// credential). AC1/AC2/the legacy-row case then exercise the token through
+// `UserAccessTokenService.ValidateToken` directly, the same production
+// derivation path the middleware calls (review finding F4); AC4's
+// `TestCredentialDecoration_AC4_MiddlewareCarriesDecorationToLogs` is the one
+// test that authenticates through the real `UnifiedAuthMiddleware` end to
+// end and inspects both the resulting context and rendered log output.
 // ---------------------------------------------------------------------------
 
 // e1MintTokenViaAPI mints a token via the HTTP API using the dev session
@@ -150,8 +157,9 @@ func TestCredentialDecoration_AC2_LabelsNeverChangeAuthorization(t *testing.T) {
 	}
 	codeB, respB := e1MintTokenViaAPI(t, srv, map[string]interface{}{
 		"name": "labeled", "projectId": projectID, "scopes": []string{"project:read"},
-		"purpose": "ci automation",
-		"labels":  map[string]string{"automation_role": "nightly-cleanup-agent"},
+		// Plan §5 AC2 example: an accepted actor-like label and purpose.
+		"purpose": "agent xyz",
+		"labels":  map[string]string{"role_hint": "admin"},
 	})
 	if codeB != http.StatusCreated {
 		t.Fatalf("labeled mint failed: %d %+v", codeB, respB)
@@ -197,6 +205,55 @@ func TestCredentialDecoration_AC2_LabelsNeverChangeAuthorization(t *testing.T) {
 	capsLabeled := srv.authzService.ComputeCapabilities(ctx, idLabeled, res)
 	if !reflect.DeepEqual(capsPlain.Actions, capsLabeled.Actions) {
 		t.Fatalf("labels changed computed capabilities: plain=%v labeled=%v", capsPlain.Actions, capsLabeled.Actions)
+	}
+
+	// Ancestry trust is unchanged: labels never affect whether an identity's
+	// ancestry is hub-attested.
+	if AncestryIsHubAttested(idPlain) != AncestryIsHubAttested(idLabeled) {
+		t.Fatalf("labels changed ancestry attestation: plain=%v labeled=%v",
+			AncestryIsHubAttested(idPlain), AncestryIsHubAttested(idLabeled))
+	}
+
+	// Delegation is unchanged: both identities get the same CanDelegate
+	// answer for an allowed grant and a denied one. Both grants use an
+	// explicit RolePermissions list rather than a real role definition, so
+	// the test pins exactly one permission per case instead of depending on
+	// a seeded role's full curated permission set:
+	//   - allowed: "project.read", which is both a permission the project
+	//     owner holds AND within the minted token's own "project:read"
+	//     scope (a UAT can only delegate permissions its own scope carries,
+	//     per enforceUATDelegation/intersectCredentialCaveats).
+	//   - denied: "project.manage", which the owner holds as a human but
+	//     which is outside the token's scope, so the UAT credential caveat
+	//     denies it regardless of the underlying human's authority.
+	allowedGrant := GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"project.read"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         projectID,
+	}
+	delegatePlainAllowed := srv.authzService.CanDelegate(ctx, idPlain, allowedGrant)
+	delegateLabeledAllowed := srv.authzService.CanDelegate(ctx, idLabeled, allowedGrant)
+	if delegatePlainAllowed.Allowed != delegateLabeledAllowed.Allowed || delegatePlainAllowed.Reason != delegateLabeledAllowed.Reason {
+		t.Fatalf("labels changed an allowed CanDelegate decision: plain=%+v labeled=%+v", delegatePlainAllowed, delegateLabeledAllowed)
+	}
+	if !delegatePlainAllowed.Allowed {
+		t.Fatalf("expected the token (scoped to project:read) to be able to delegate project.read, got %+v", delegatePlainAllowed)
+	}
+
+	deniedGrant := GrantDescriptor{
+		Type:            GrantTypeRoleBinding,
+		RolePermissions: []string{"project.manage"},
+		ScopeType:       store.RoleScopeProject,
+		ScopeID:         projectID,
+	}
+	delegatePlainDenied := srv.authzService.CanDelegate(ctx, idPlain, deniedGrant)
+	delegateLabeledDenied := srv.authzService.CanDelegate(ctx, idLabeled, deniedGrant)
+	if delegatePlainDenied.Allowed != delegateLabeledDenied.Allowed || delegatePlainDenied.Reason != delegateLabeledDenied.Reason {
+		t.Fatalf("labels changed a denied CanDelegate decision: plain=%+v labeled=%+v", delegatePlainDenied, delegateLabeledDenied)
+	}
+	if delegatePlainDenied.Allowed {
+		t.Fatalf("expected the token (scoped to project:read) to be denied delegating project.manage, which is outside its scope, got %+v", delegatePlainDenied)
 	}
 }
 
@@ -328,6 +385,7 @@ func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
 	key := resp["token"].(string)
 	hash := sha256.Sum256([]byte(key))
 	hashHex := hex.EncodeToString(hash[:])
+	prefix := resp["accessToken"].(map[string]interface{})["prefix"].(string)
 
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -346,5 +404,89 @@ func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
 	}
 	if strings.Contains(logged, hashHex) {
 		t.Fatal("logs contain the token's SHA-256 hash")
+	}
+	if strings.Contains(logged, prefix) {
+		t.Fatal("logs contain the token's visible prefix (ruling Q3: never log the prefix)")
+	}
+}
+
+// TestCredentialDecoration_AC4_MiddlewareCarriesDecorationToLogs is the
+// missing middleware-level case the reviewer identified (F4): it
+// authenticates a labeled UAT through the real, production
+// UnifiedAuthMiddleware (not ValidateToken called directly), captures
+// CredentialDecorationFromContext from the request context the middleware
+// built, logs it exactly as a real request-log consumer would
+// (slog.Any("credential", d)), and asserts both the captured fields and the
+// rendered log line, including that the plaintext, hash, and visible prefix
+// never appear.
+func TestCredentialDecoration_AC4_MiddlewareCarriesDecorationToLogs(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("e1-ac4-mw-p")
+	ownerID := tid("e1-ac4-mw-o")
+	rs4Project(t, s, projectID, ownerID)
+	rs4AddProjectRole(t, s, DevUserID, projectID, store.ProjectRoleOwner)
+
+	code, resp := e1MintTokenViaAPI(t, srv, map[string]interface{}{
+		"name": "mw-test", "projectId": projectID, "scopes": []string{"project:read"},
+		"purpose": "agent xyz", "labels": map[string]string{"role_hint": "admin"},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("mint failed: %d %+v", code, resp)
+	}
+	key := resp["token"].(string)
+	hash := sha256.Sum256([]byte(key))
+	hashHex := hex.EncodeToString(hash[:])
+	tokenObj := resp["accessToken"].(map[string]interface{})
+	tokenID := tokenObj["id"].(string)
+	prefix := tokenObj["prefix"].(string)
+
+	var logBuf bytes.Buffer
+	captureLogger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var captured CredentialDecoration
+	var capturedOK bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, capturedOK = CredentialDecorationFromContext(r.Context())
+		captureLogger.Info("request completed", "credential", captured)
+		w.WriteHeader(http.StatusOK)
+	})
+	// This is exactly the production carriage path: auth.go's UAT branch
+	// (:~431) calls contextWithCredentialContext(credentialContextForIdentity(...)),
+	// which is what CredentialDecorationFromContext reads back out.
+	handler := UnifiedAuthMiddleware(srv.authConfig)(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/mw-decoration-test", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 through UnifiedAuthMiddleware, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !capturedOK {
+		t.Fatal("expected CredentialDecorationFromContext to find a decoration on the middleware-authenticated request context")
+	}
+	if captured.TokenID != tokenID || captured.TokenName != "mw-test" {
+		t.Fatalf("unexpected decoration carried through the middleware: %+v", captured)
+	}
+	if captured.Purpose != "agent xyz" || captured.Labels["role_hint"] != "admin" {
+		t.Fatalf("expected purpose/labels to carry through the middleware, got %+v", captured)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, `"role_hint":"admin"`) {
+		t.Fatalf("expected the label to render under credential.labels.*, got log: %s", logged)
+	}
+	if !strings.Contains(logged, `"labels_source":"issuer"`) {
+		t.Fatalf("expected the labels_source=issuer marker in the rendered log, got: %s", logged)
+	}
+	if strings.Contains(logged, key) {
+		t.Fatal("rendered log output contains the plaintext token")
+	}
+	if strings.Contains(logged, hashHex) {
+		t.Fatal("rendered log output contains the token's SHA-256 hash")
+	}
+	if strings.Contains(logged, prefix) {
+		t.Fatal("rendered log output contains the token's visible prefix (ruling Q3: never log the prefix)")
 	}
 }
