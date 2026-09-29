@@ -14,24 +14,27 @@
 
 package hub
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ---------------------------------------------------------------------------
 // Shared provider email-ownership invariant.
 //
 // Pre-registration user records are keyed by email, so associating a login
 // with one by email must rest on the provider having actually proven the
-// caller owns that address — not merely reported it. Google's and GitHub's
-// web-login userinfo handling each decide this independently; requireVerifiedEmail
-// is the one place that decision is made, so the two cannot drift apart the
-// way they did before (one never checked its verified flag at all; the
-// other fell back to an address it never verified). OIDC already enforces
-// this invariant inline and is left as its own reference implementation.
+// caller owns that address — not merely reported it. Google, GitHub, and
+// OIDC web-login userinfo handling all decide this the same way, through
+// requireVerifiedEmail, so Google and GitHub apply the same rule as OIDC's
+// original reference implementation — and none of the three can drift apart
+// from the others on this again.
 // ---------------------------------------------------------------------------
 
 // requireVerifiedEmail returns email when the provider has verified it, or
 // an error otherwise. provider is used only to label the error message.
 func requireVerifiedEmail(provider, email string, verified bool) (string, error) {
+	email = strings.TrimSpace(email)
 	if email == "" {
 		return "", fmt.Errorf("%s did not return an email address", provider)
 	}

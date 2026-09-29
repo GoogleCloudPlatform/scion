@@ -150,6 +150,135 @@ func TestOAuthService_GetGitHubPrimaryEmail_EmptyList_Rejected(t *testing.T) {
 	}
 }
 
+// githubUserInfoRoundTrip routes GET /user to userBody and GET /user/emails
+// to emailsBody (with the given status, defaulting to 200), so
+// getGitHubUserInfo can be tested without an end-to-end harness.
+func githubUserInfoRoundTrip(userBody, emailsBody string, emailsStatus int) roundTripFunc {
+	if emailsStatus == 0 {
+		emailsStatus = http.StatusOK
+	}
+	return func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case githubUserURL:
+			return httpJSONResponse(http.StatusOK, userBody), nil
+		case githubEmailURL:
+			return httpJSONResponse(emailsStatus, emailsBody), nil
+		default:
+			return httpJSONResponse(http.StatusNotFound, `{"error":"not found"}`), nil
+		}
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_ProfileEmailVerified_Selected covers
+// the common case: the profile's public email is verified in the caller's
+// email list and is used as-is.
+func TestOAuthService_GetGitHubUserInfo_ProfileEmailVerified_Selected(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"public@example.com","avatar_url":"https://example.com/a.png"}`,
+			`[
+				{"email":"public@example.com","primary":true,"verified":true},
+				{"email":"other@example.com","primary":false,"verified":true}
+			]`, 0),
+	}}
+
+	info, err := svc.getGitHubUserInfo(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Email != "public@example.com" {
+		t.Errorf("email = %q, want %q", info.Email, "public@example.com")
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_ProfileEmailUnverified_FallsBackToVerified
+// is the R1 regression: the profile's public email, always present and
+// always taken as-is before this fix, is listed unverified. It must never be
+// used; a different verified address on the account is selected instead.
+func TestOAuthService_GetGitHubUserInfo_ProfileEmailUnverified_FallsBackToVerified(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"public@example.com","avatar_url":""}`,
+			`[
+				{"email":"public@example.com","primary":true,"verified":false},
+				{"email":"other@example.com","primary":false,"verified":true}
+			]`, 0),
+	}}
+
+	info, err := svc.getGitHubUserInfo(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Email != "other@example.com" {
+		t.Errorf("email = %q, want %q (the unverified profile email must not be used)", info.Email, "other@example.com")
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_ProfileEmailUnverifiedAndNoOtherVerified_Rejected
+// covers the same regression when there is no other verified address to
+// fall back to: the login must be rejected, not silently admitted on the
+// unverified profile email.
+func TestOAuthService_GetGitHubUserInfo_ProfileEmailUnverifiedAndNoOtherVerified_Rejected(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"public@example.com","avatar_url":""}`,
+			`[{"email":"public@example.com","primary":true,"verified":false}]`, 0),
+	}}
+
+	if info, err := svc.getGitHubUserInfo(context.Background(), "token"); err == nil {
+		t.Fatalf("expected an error, got info=%+v", info)
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_ProfileEmailNotInList_NotUsed covers a
+// stale profile email that no longer appears in the caller's email list at
+// all: it must not be used, even though it is non-empty.
+func TestOAuthService_GetGitHubUserInfo_ProfileEmailNotInList_NotUsed(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"stale@example.com","avatar_url":""}`,
+			`[{"email":"current@example.com","primary":true,"verified":true}]`, 0),
+	}}
+
+	info, err := svc.getGitHubUserInfo(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Email != "current@example.com" {
+		t.Errorf("email = %q, want %q (the stale profile email is not in the list and must not be used)", info.Email, "current@example.com")
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_EmailsEndpointEmpty_Rejected covers the
+// emails endpoint returning nothing at all: rejected, even though a profile
+// email is present — there is no unverified fallback.
+func TestOAuthService_GetGitHubUserInfo_EmailsEndpointEmpty_Rejected(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"public@example.com","avatar_url":""}`,
+			`[]`, 0),
+	}}
+
+	if _, err := svc.getGitHubUserInfo(context.Background(), "token"); err == nil {
+		t.Fatal("expected an error when the emails endpoint lists nothing, even though a profile email is present")
+	}
+}
+
+// TestOAuthService_GetGitHubUserInfo_EmailsEndpointForbidden_Rejected covers
+// the emails endpoint being unreachable (e.g. the user:email scope was not
+// actually granted): rejected, not a silent fallback to the profile email.
+func TestOAuthService_GetGitHubUserInfo_EmailsEndpointForbidden_Rejected(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"public@example.com","avatar_url":""}`,
+			`{"message":"Forbidden"}`, http.StatusForbidden),
+	}}
+
+	if _, err := svc.getGitHubUserInfo(context.Background(), "token"); err == nil {
+		t.Fatal("expected an error when the emails endpoint is forbidden, even though a profile email is present")
+	}
+}
+
 // TestRequireVerifiedEmail_ConsistentAcrossProviders is a characterization
 // test: the shared invariant behaves identically regardless of which
 // provider is asking, given the same (email, verified) evidence.
@@ -189,5 +318,21 @@ func TestRequireVerifiedEmail_ConsistentAcrossProviders(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRequireVerifiedEmail_WhitespaceOnlyEmail_Rejected(t *testing.T) {
+	if email, err := requireVerifiedEmail(hubclient.OAuthProviderGoogle, "   ", true); err == nil {
+		t.Fatalf("expected an error for a whitespace-only email, got email=%q", email)
+	}
+}
+
+func TestRequireVerifiedEmail_TrimsSurroundingWhitespace(t *testing.T) {
+	email, err := requireVerifiedEmail(hubclient.OAuthProviderGoogle, "  user@example.com  ", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if email != "user@example.com" {
+		t.Errorf("email = %q, want trimmed %q", email, "user@example.com")
 	}
 }
