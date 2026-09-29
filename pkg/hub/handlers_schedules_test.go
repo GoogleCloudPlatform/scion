@@ -219,6 +219,11 @@ func TestSchedule_UpdateDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(),
 			"scheduled agent creation requires a credential whose scope can be applied at execution time")
+
+		// The same unscoped user keeps working.
+		rec = doScheduleAgentRequest(t, srv, ownerUser, projectID, sched.ID, http.MethodPatch,
+			UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"worker-c"}`})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
 	t.Run("re-target existing dispatch_agent schedule denied", func(t *testing.T) {
