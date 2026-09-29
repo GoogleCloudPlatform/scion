@@ -38,8 +38,9 @@ import (
 //
 //   - provisionUser: web login, API login, and device flow all call
 //     (*Server).provisionUser directly (handlers_auth.go :229,:345,:1069,
-//     :1297) — one function, so exercising it once exercises all three call
-//     sites.
+//     :1297), as does the API-server's own proxy-trust provisioner
+//     (auth.go :890, MakeProxyUserProvisioner) — one function, so
+//     exercising it once exercises all four call sites.
 //   - GoogleIdentityResolver.Resolve, email-match branch: GE exchange and
 //     external bearer, the first time an identity links to a pre-existing
 //     record by email.
@@ -335,6 +336,11 @@ func TestSignInEquivalence_ProvisionedVsInvited_AcrossPaths(t *testing.T) {
 // fail-closed outcome — denial, no state mutation — for a suspended record
 // on every mechanism.
 func TestSignInEquivalence_SuspendedDeniedAcrossPaths(t *testing.T) {
+	// A fixed, obviously-not-"now" timestamp: if any mechanism's suspended
+	// check ran after a LastLogin bump instead of before it, this would
+	// catch it (a coincidental match with time.Now() cannot happen here).
+	fixedLastLogin := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	for _, mech := range signInMechanisms {
 		t.Run(mech.name, func(t *testing.T) {
 			h := newSignInPolicyHarness(t, ServerConfig{}, &fakeGoogleValidator{})
@@ -345,7 +351,8 @@ func TestSignInEquivalence_SuspendedDeniedAcrossPaths(t *testing.T) {
 			email := "user@gmail.com"
 
 			if err := h.store.CreateUser(ctx, &store.User{
-				ID: userID, Email: email, Role: store.UserRoleMember, Status: store.UserStatusSuspended, Created: time.Now(),
+				ID: userID, Email: email, Role: store.UserRoleMember, Status: store.UserStatusSuspended,
+				Created: time.Now(), LastLogin: fixedLastLogin,
 			}); err != nil {
 				t.Fatalf("seed suspended user: %v", err)
 			}
@@ -361,6 +368,12 @@ func TestSignInEquivalence_SuspendedDeniedAcrossPaths(t *testing.T) {
 			}
 			if stored.Status != store.UserStatusSuspended {
 				t.Fatalf("expected the suspended record to be unchanged, got status=%q", stored.Status)
+			}
+			if !stored.LastLogin.Equal(fixedLastLogin) {
+				t.Errorf("expected LastLogin to be unchanged at %v, got %v", fixedLastLogin, stored.LastLogin)
+			}
+			if isHubMember(t, h.store, userID) {
+				t.Error("expected a suspended record to gain no hub-members grant")
 			}
 		})
 	}
