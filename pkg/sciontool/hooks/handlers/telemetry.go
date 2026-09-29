@@ -655,12 +655,20 @@ func (h *TelemetryHandler) recordTokenMetrics(ctx context.Context, event *hooks.
 	record(telemetrycontract.TokenTypeInput, event.Data.InputTokens)
 	record(telemetrycontract.TokenTypeOutput, event.Data.OutputTokens)
 	record(telemetrycontract.TokenTypeCacheRead, event.Data.CachedTokens)
+	record(telemetrycontract.TokenTypeCacheWrite, event.Data.CacheWriteTokens)
+	// Reasoning is informational only: design §3.2 defines canonical
+	// "output" as generated tokens *including* reasoning, and a source that
+	// reports ReasoningTokens separately already includes it in
+	// event.Data.OutputTokens too. So this is recorded as its own
+	// token_type for visibility, but never added into TokenTypeOutput
+	// above, which would double count it against the total.
+	record(telemetrycontract.TokenTypeReasoning, event.Data.ReasoningTokens)
 
 	if h.metricsDebug {
 		if recorded {
 			log.TaggedInfo("metrics",
-				"recorded token metrics for event=%s input=%d output=%d cached=%d",
-				event.Name, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens)
+				"recorded token metrics for event=%s input=%d output=%d cached=%d cache_write=%d reasoning=%d",
+				event.Name, event.Data.InputTokens, event.Data.OutputTokens, event.Data.CachedTokens, event.Data.CacheWriteTokens, event.Data.ReasoningTokens)
 		} else if event.Name == hooks.EventModelEnd || event.Name == hooks.EventSessionEnd {
 			log.TaggedInfo("metrics", "no token metrics recorded for event=%s (no token fields present)", event.Name)
 		}

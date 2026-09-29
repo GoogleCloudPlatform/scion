@@ -845,6 +845,113 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 	}
 }
 
+// TestTelemetryHandler_RecordsCacheWriteAndReasoningTokens pins design §3.7
+// "Hook token plumbing" (GoogleCloudPlatform/scion#2057 review): a model-end
+// with all five token fields populated emits exactly five
+// scion.usage.tokens points -- input, output, cache_read, cache_write and
+// reasoning -- each with the exact contract label set
+// {harness, model, token_type}, gated the same way as the other three by
+// SCION_USAGE_SOURCE (none when unset or native, all five when hooks).
+func TestTelemetryHandler_RecordsCacheWriteAndReasoningTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		usageSource     string
+		wantTokenPoints int
+	}{
+		{name: "unset (vetting gate default)", usageSource: "", wantTokenPoints: 0},
+		{name: "native (deriver owns usage)", usageSource: "native", wantTokenPoints: 0},
+		{name: "hooks (opted in)", usageSource: "hooks", wantTokenPoints: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_USAGE_SOURCE", tc.usageSource)
+			t.Setenv("SCION_HARNESS", "test-harness")
+			t.Setenv("SCION_MODEL", "test-model")
+
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+
+			h := NewTelemetryHandler(nil, nil, nil, mp)
+			// Unpaired model-end (recordUnpairedEndMetrics): the normal
+			// hook-per-process case, same as
+			// TestTelemetryHandler_UnpairedModelEnd.
+			if err := h.Handle(&hooks.Event{
+				Name: hooks.EventModelEnd,
+				Data: hooks.EventData{
+					Success:          true,
+					InputTokens:      100,
+					OutputTokens:     50,
+					CachedTokens:     10,
+					CacheWriteTokens: 30,
+					ReasoningTokens:  15,
+				},
+			}); err != nil {
+				t.Fatalf("Handle model-end error: %v", err)
+			}
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect error: %v", err)
+			}
+
+			wantTokenKeys := map[string]bool{
+				telemetrycontract.HarnessLabel:   true,
+				telemetrycontract.ModelLabel:     true,
+				telemetrycontract.TokenTypeLabel: true,
+			}
+			gotByType := map[string]int64{}
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != telemetrycontract.MetricUsageTokens {
+						continue
+					}
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					if !ok {
+						t.Fatalf("%s: unexpected data type %T", m.Name, m.Data)
+					}
+					for _, point := range sum.DataPoints {
+						gotKeys := map[string]bool{}
+						for _, kv := range point.Attributes.ToSlice() {
+							gotKeys[string(kv.Key)] = true
+						}
+						if len(gotKeys) != len(wantTokenKeys) {
+							t.Errorf("point attribute keys = %v, want exactly %v", gotKeys, wantTokenKeys)
+							continue
+						}
+						for key := range wantTokenKeys {
+							if !gotKeys[key] {
+								t.Errorf("point attribute keys = %v, missing %q", gotKeys, key)
+							}
+						}
+						if tokenType, ok := point.Attributes.Value(attribute.Key(telemetrycontract.TokenTypeLabel)); ok {
+							gotByType[tokenType.AsString()] = point.Value
+						}
+					}
+				}
+			}
+
+			if len(gotByType) != tc.wantTokenPoints {
+				t.Fatalf("%s token points = %d (%v), want %d", telemetrycontract.MetricUsageTokens, len(gotByType), gotByType, tc.wantTokenPoints)
+			}
+			if tc.wantTokenPoints == 0 {
+				return
+			}
+			want := map[string]int64{
+				telemetrycontract.TokenTypeInput:      100,
+				telemetrycontract.TokenTypeOutput:     50,
+				telemetrycontract.TokenTypeCacheRead:  10,
+				telemetrycontract.TokenTypeCacheWrite: 30,
+				telemetrycontract.TokenTypeReasoning:  15,
+			}
+			for tokenType, want := range want {
+				if got := gotByType[tokenType]; got != want {
+					t.Errorf("token_type=%s = %d, want %d", tokenType, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestTelemetryHandler_UsageSourceGate pins design D4/D10 and the Phase 2 AC:
 // hook-sourced usage (gen_ai.api.calls, scion.usage.tokens) is recorded only
 // when SCION_USAGE_SOURCE=hooks. It is suppressed both when the variable is

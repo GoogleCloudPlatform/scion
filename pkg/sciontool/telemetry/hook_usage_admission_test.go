@@ -94,7 +94,12 @@ func TestHookUsageTokensPassStrictGCPCloudAdmission(t *testing.T) {
 	// Mirrors hooks/handlers.recordTokenMetrics exactly: the same helper,
 	// the same hook instrumentation scope and unit, one point per token
 	// type present (muse-code's PostLLMCall: input=1200, output=400,
-	// cached=150, "cached" mapping to the canonical cache_read).
+	// cached=150, "cached" mapping to the canonical cache_read). cache_write
+	// and reasoning are included too (ptone/scion#2053 phase 2's hook token
+	// plumbing, GoogleCloudPlatform/scion#2057 review): the closed
+	// token_type enum already covers them, so this pins that the narrower
+	// scion.usage.tokens allowlist admits every enum member, not just the
+	// three a harness happened to populate first.
 	meter := providers.MeterProvider.Meter(hookMetricScope)
 	tokens, err := meter.Int64Counter(telemetrycontract.MetricUsageTokens, metric.WithUnit("{token}"))
 	if err != nil {
@@ -102,9 +107,11 @@ func TestHookUsageTokensPassStrictGCPCloudAdmission(t *testing.T) {
 	}
 	baseAttrs := pointAttrsForTest(telemetrycontract.UsageTokenPointAttrs("muse-code", "model"))
 	for tokenType, n := range map[string]int64{
-		telemetrycontract.TokenTypeInput:     1200,
-		telemetrycontract.TokenTypeOutput:    400,
-		telemetrycontract.TokenTypeCacheRead: 150,
+		telemetrycontract.TokenTypeInput:      1200,
+		telemetrycontract.TokenTypeOutput:     400,
+		telemetrycontract.TokenTypeCacheRead:  150,
+		telemetrycontract.TokenTypeCacheWrite: 75,
+		telemetrycontract.TokenTypeReasoning:  60,
 	} {
 		attrs := append(append([]attribute.KeyValue{}, baseAttrs...), attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
 		tokens.Add(context.Background(), n, metric.WithAttributes(attrs...))

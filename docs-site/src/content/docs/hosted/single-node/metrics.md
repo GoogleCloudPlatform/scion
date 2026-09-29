@@ -242,6 +242,15 @@ token counters. The retired `scion.hook.tokens.{input,output,cached}` names
 are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
 is.
 
+A hook-sourced harness's dialect can populate all five `token_type` values on
+`scion.usage.tokens`, not just three: a Go dialect, or a bundled
+`dialect.yaml`'s `fields` mapping, sets `input_tokens`, `output_tokens`,
+`cached_tokens` (→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
+`reasoning_tokens` (→ `reasoning`, informational — already included in
+`output`, never added again) on the hook event data. A point is emitted only
+for a token type whose field was actually populated (a positive value); a
+dialect that never maps a given field simply never emits that `token_type`.
+
 #### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`
 
 The Hub dashboard reads exactly two usage metrics, regardless of source:
