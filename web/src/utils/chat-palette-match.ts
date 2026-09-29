@@ -23,7 +23,7 @@
  * objects so it can be unit tested without mounting a component.
  */
 
-import type { PaletteCandidate } from '../client/chat-palette-types.js';
+import { PALETTE_GROUP_ORDER, type PaletteCandidate } from '../client/chat-palette-types.js';
 
 /** Match tiers, best (0) to worst (3). `null` means "no match". */
 export type MatchTier = 0 | 1 | 2 | 3;
@@ -34,16 +34,15 @@ export interface HighlightRange {
   end: number;
 }
 
-/** Stable reading order for palette groups. Unknown groups sort last. */
-const GROUP_ORDER: Record<string, number> = {
-  agents: 0,
-  threads: 1,
-  people: 2,
-  documents: 3,
-};
-
+/**
+ * Stable reading order for palette groups, derived from the single shared
+ * {@link PALETTE_GROUP_ORDER} constant so this comparator and the palette's
+ * own Tab/Shift+Tab group cycling (`chat-switcher.ts`) can never disagree
+ * about group order. Unknown groups (there are none today) sort last.
+ */
 function groupRank(group: string): number {
-  return group in GROUP_ORDER ? GROUP_ORDER[group] : Object.keys(GROUP_ORDER).length;
+  const index = PALETTE_GROUP_ORDER.indexOf(group as (typeof PALETTE_GROUP_ORDER)[number]);
+  return index === -1 ? PALETTE_GROUP_ORDER.length : index;
 }
 
 /**
