@@ -16,31 +16,23 @@
 
 package hub
 
-// Tests for tracker C, task C.1 (ptone/scion#2092): project UATs require
-// active project access for project targets, and a member may select
-// relationship-scoped agent attach/port access before owning any agent.
+// Tests for ptone/scion#2092: project UATs require active project access
+// for project targets, and a member may select relationship-scoped agent
+// attach/port access before owning any agent.
 //
-// Phase 1 (2026-09-28, against origin/main acc5a4b, before A.1/A.2 existed)
-// recorded these as a red baseline: mint-eligibility tests failed because
-// mint validation was a flat subset check with no stock role carrying
-// agent.attach/agent.port_access, and runtime-project-access tests failed
-// because enforceUATConstraints did not check live project access at all.
-// See C/wip/c1-phase1-notes.md for that baseline table.
-//
-// Phase 2 (this revision) implements both: CreateToken's mint path now
-// calls AuthzService.CanMintSelector (A.1, A/notes/contract-shapes.md v5
-// §4), and enforceUATConstraints calls AuthzService.ProjectTargetAdmission
-// (A.1, same doc §2) for project targets. See C/wip/c1-dev-report.md for the
-// resulting pass/fail table and any remaining baseline failures.
+// CreateToken's mint path calls AuthzService.CanMintSelector, and
+// enforceUATConstraints calls AuthzService.ProjectTargetAdmission for
+// project targets (both in pkg/hub/authz_boundary.go).
 //
 // Kept in its own file (not authz_cross_member_attach_test.go) to avoid
-// contention with A.2, which edits that file's legacy-implication
-// assertions. See C/plan.md §2.2(4).
+// contention with ptone/scion#2118, which edits that file's
+// legacy-implication assertions.
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -61,9 +53,10 @@ import (
 // project-scoped member role binding AND the seeded hub-members group
 // (seed.go:462-480), which every logged-in user actually holds. Tests in
 // this file deliberately do not use a minimal fixture that omits hub
-// membership -- pat-c-lead flagged that A's live-project-access design is
-// under review specifically for how it treats the hub-member system role
-// (see C/wip/c1-phase1-notes.md), and a fixture without that binding would
+// membership: the seeded hub-member system role interacts with the
+// live-project-access gate (see
+// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess and the F-3
+// seeded-role regressions below), and a fixture without that binding would
 // hide the interaction instead of exposing it.
 func uatpMember(t *testing.T, s store.Store, projectID, userID string) {
 	t.Helper()
@@ -101,6 +94,33 @@ func uatpExposePort(t *testing.T, s store.Store, agent *store.Agent, port int) {
 	})
 	require.NoError(t, s.UpdateAgentExposedPorts(context.Background(), agent.ID, ports))
 	agent.ExposedPorts = ports
+}
+
+// assertAuthorizedPTY asserts rec is the "authorized, no runtime broker"
+// signal for a /pty preflight: pty_handlers.go runs authorization first and
+// only then checks for a runtime broker, returning 422 when the agent has
+// none configured (as every agent in this file's fixtures does) -- so 422
+// here is the positive authorization signal, not a validation failure.
+// Asserting the exact code (rather than merely != 403) also catches a
+// regression to 401/404/500, which a loose "not forbidden" check would miss.
+func assertAuthorizedPTY(t *testing.T, rec *httptest.ResponseRecorder, msgAndArgs ...interface{}) {
+	t.Helper()
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code, msgAndArgs...)
+}
+
+// requireAuthorizedPTY is assertAuthorizedPTY's require-semantics twin, for
+// sanity preconditions a test cannot usefully continue past.
+func requireAuthorizedPTY(t *testing.T, rec *httptest.ResponseRecorder, msgAndArgs ...interface{}) {
+	t.Helper()
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, msgAndArgs...)
+}
+
+// assertAuthorizedPortProxy is assertAuthorizedPTY's port-proxy equivalent:
+// authorization runs first, and an authorized request against a port with
+// no active tunnel returns 503.
+func assertAuthorizedPortProxy(t *testing.T, rec *httptest.ResponseRecorder, msgAndArgs ...interface{}) {
+	t.Helper()
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, msgAndArgs...)
 }
 
 // uatpDeleteProjectBinding removes userID's direct project-scoped role
@@ -168,12 +188,10 @@ func TestProjectUAT_MemberMintsAttachBeforeFirstAgent(t *testing.T) {
 	uatpExposePort(t, s, agent, 8080)
 
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"member should pass attach authorization on their own newly created agent: %s", rec.Body.String())
+	assertAuthorizedPTY(t, rec, "member should pass attach authorization on their own newly created agent: %s", rec.Body.String())
 
 	rec = doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/8080/proxy/", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"member should pass port_access authorization on their own agent: %s", rec.Body.String())
+	assertAuthorizedPortProxy(t, rec, "member should pass port_access authorization on their own agent: %s", rec.Body.String())
 }
 
 func TestProjectUAT_AttachReachesAuthorizedDescendants(t *testing.T) {
@@ -185,15 +203,18 @@ func TestProjectUAT_AttachReachesAuthorizedDescendants(t *testing.T) {
 	uatpMember(t, s, projectID, memberID)
 
 	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "attach-descendant",
-		projectID, []string{"agent:attach"}, nil)
-	require.NoError(t, err, "member should be able to mint agent:attach for their own agents and descendants")
+		projectID, []string{"agent:attach", "agent:port_access"}, nil)
+	require.NoError(t, err, "member should be able to mint agent:attach/agent:port_access for their own agents and descendants")
 
 	parent := uatpAgent(t, s, projectID, memberID, t.Name()+"-parent", memberID)
 	child := uatpAgent(t, s, projectID, parent.ID, t.Name()+"-child", memberID, parent.ID)
+	uatpExposePort(t, s, child, 8090)
 
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+child.ID+"/pty", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"attach should reach an authorized multi-hop descendant: %s", rec.Body.String())
+	assertAuthorizedPTY(t, rec, "attach should reach an authorized multi-hop descendant: %s", rec.Body.String())
+
+	rec = doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+child.ID+"/ports/8090/proxy/", nil)
+	assertAuthorizedPortProxy(t, rec, "port_access should reach an authorized multi-hop descendant: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -212,8 +233,8 @@ func TestProjectUAT_OwnedAgentRequiresSelectedScope(t *testing.T) {
 	uatpExposePort(t, s, agent, 9090)
 
 	t.Run("read-only token cannot attach", func(t *testing.T) {
-		// agent:read is already carried by the stock member role
-		// (seed.go), so this mint already succeeds on main today.
+		// agent:read is carried by the stock member role (seed.go), so
+		// this mint succeeds via the flat project-role path.
 		uatKey := mintScopedUAT(t, srv, memberID, projectID, []string{"agent:read"})
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "agent:read token must not authorize attach: %s", rec.Body.String())
@@ -222,7 +243,7 @@ func TestProjectUAT_OwnedAgentRequiresSelectedScope(t *testing.T) {
 	t.Run("attach-only token cannot reach ports", func(t *testing.T) {
 		uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "attach-only",
 			projectID, []string{"agent:attach"}, nil)
-		require.NoError(t, err, "attach mint expected to succeed once CanMintSelector lands")
+		require.NoError(t, err, "the owner's own agent:attach selector is relationship-eligible and mints")
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/9090/proxy/", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "attach must not imply port_access: %s", rec.Body.String())
 	})
@@ -230,7 +251,7 @@ func TestProjectUAT_OwnedAgentRequiresSelectedScope(t *testing.T) {
 	t.Run("port-only token cannot attach", func(t *testing.T) {
 		uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "port-only",
 			projectID, []string{"agent:port_access"}, nil)
-		require.NoError(t, err, "port_access mint expected to succeed once CanMintSelector lands")
+		require.NoError(t, err, "the owner's own agent:port_access selector is relationship-eligible and mints")
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "port_access must not imply attach: %s", rec.Body.String())
 	})
@@ -285,7 +306,7 @@ func TestProjectUAT_AttachConfinedToTokenProject(t *testing.T) {
 
 	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "attach-p",
 		projectP, []string{"agent:attach"}, nil)
-	require.NoError(t, err, "attach mint expected to succeed once CanMintSelector lands")
+	require.NoError(t, err, "the owner's own agent:attach selector is relationship-eligible and mints")
 
 	ownAgentInQ := uatpAgent(t, s, projectQ, memberID, t.Name(), memberID)
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+ownAgentInQ.ID+"/pty", nil)
@@ -293,13 +314,13 @@ func TestProjectUAT_AttachConfinedToTokenProject(t *testing.T) {
 		"a project-P token must not reach the member's own agent in project Q: %s", rec.Body.String())
 }
 
-// TestProjectUAT_RequiresActiveProjectAccessAtUse pins plan.md §1.4/R7: use-
-// time active project membership is not rechecked at all on main today. Each
+// TestProjectUAT_RequiresActiveProjectAccessAtUse pins that use-time active
+// project membership is rechecked on every request (ptone/scion#2092). Each
 // subcase mints "agent:read" (already carried by the stock member role, so
-// the mint itself is unaffected by the CanMintSelector gap) and then removes
-// project access through a different mechanism, to isolate this from the
-// separate mint-eligibility gap covered by the attach/port_access tests
-// above.
+// the mint itself does not depend on CanMintSelector's relationship-eligible
+// path) and then removes project access through a different mechanism, to
+// isolate this from the separate mint-eligibility coverage in the
+// attach/port_access tests above.
 func TestProjectUAT_RequiresActiveProjectAccessAtUse(t *testing.T) {
 	t.Run("direct binding deleted", func(t *testing.T) {
 		srv, s := testServer(t)
@@ -317,11 +338,10 @@ func TestProjectUAT_RequiresActiveProjectAccessAtUse(t *testing.T) {
 		uatpDeleteProjectBinding(t, s, memberID, projectID)
 
 		rec = doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
-		// Expected once ActiveProjectAccess is wired into
-		// enforceUATConstraints: deny. On main today this still returns
-		// 200 -- the owner relationship grant (authz.go:1000-1013) has no
-		// project-membership precondition, so it admits the request
-		// regardless of current membership.
+		// The owner relationship grant (authz.go's checkRelationshipGrants)
+		// has no project-membership precondition of its own -- it is
+		// ProjectTargetAdmission, evaluated first in enforceUATConstraints,
+		// that denies here regardless of retained ownership.
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"removed project access should deny a project UAT even on the holder's own agent: %s", rec.Body.String())
 	})
@@ -418,25 +438,23 @@ func TestProjectUAT_RequiresActiveProjectAccessAtUse(t *testing.T) {
 	})
 }
 
-// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess pins the
-// pat-c-lead ruling (2026-09-28, C/decisions.md): runtime project admission
-// is project membership OR actual system authority for the EXACT requested
-// permission/target -- not "the principal holds some system-scope
-// permission that is merely applicable to project targets in general."
+// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess pins that
+// runtime project admission is project membership OR actual system
+// authority for the EXACT requested permission/target -- not "the principal
+// holds some system-scope permission that is merely applicable to project
+// targets in general" (ptone/scion#2092).
 //
 // The seeded hub-members group (seed.go:462-480) gives every hub member a
 // system-scoped hub-member role binding whose permission set
 // (hubMemberPermissionIDs, seed.go:203-241) includes template.read/list,
 // harness_config.read/list, skill.read/list, and quota.read -- none of them
 // agent.*, but several reviewed "applies to an existing project target in
-// general" in A's contract draft (A/notes/contract-shapes.md v3 §3,
-// ProjectTargetApplicability). An aggregate implementation of the
-// project-access gate ("holds any system permission applicable to some
-// project target") would incorrectly treat hub membership alone as access
-// to every project, since hub membership is close to universal among
-// authenticated users. This test would catch that regression once the corrected, per-permission
-// gate lands; on main today it fails for the same reason as the subcases
-// above -- there is no runtime project-access check at all yet.
+// general" in permissions.ProjectTargetApplicability. An aggregate
+// implementation of the project-access gate ("holds any system permission
+// applicable to some project target") would incorrectly treat hub
+// membership alone as access to every project, since hub membership is
+// close to universal among authenticated users. This test pins that
+// SystemAuthorityProof instead requires the exact requested permission.
 func TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -451,10 +469,10 @@ func TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess(t *testing.T) {
 	ensureHubMembership(ctx, s, memberID) // the only access source left standing, below
 
 	// Grant project membership transiently, purely so a scoped UAT can be
-	// minted against this project -- A2's mint-time issuer ceiling
-	// (unchanged by C.1) requires an actual project-scoped permission and
-	// is not itself under test here -- then revoke it. What remains is
-	// exactly the seeded hub-members binding.
+	// minted against this project (the flat agent:read mint path still
+	// requires an actual project-scoped permission, which is not itself
+	// under test here) -- then revoke it. What remains is exactly the
+	// seeded hub-members binding.
 	createTestUserWithProjectRole(t, s, memberID, memberID+"@test.com", projectID, store.ProjectRoleMember)
 	agent := uatpAgent(t, s, projectID, memberID, t.Name(), memberID)
 	uatKey := mintScopedUAT(t, srv, memberID, projectID, []string{"agent:read"})
@@ -485,17 +503,15 @@ func TestProjectUAT_ProjectAccessCheckedBeforeRelationshipGrants(t *testing.T) {
 	uatpDeleteProjectBinding(t, s, memberID, projectID)
 
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
-	// On main today the request is allowed via the owner relationship
-	// grant (plan.md §1.4) -- exactly the gap this test documents. Once
-	// the gate lands, the UAT-only pre-kernel check in step 1 must deny
-	// this before the owner relationship grant in step 9 ever runs.
+	// The UAT-only pre-kernel check in Decide step 1 denies this before the
+	// owner relationship grant in step 9 ever runs.
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"project access must be checked before relationship grants fire: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance: current system authority still admits (decision Q2(b)); flat
-// scope-wide eligibility keeps the project-binding ceiling.
+// Acceptance: current system authority still admits; flat scope-wide
+// eligibility keeps the project-binding ceiling (ptone/scion#2092).
 // ---------------------------------------------------------------------------
 
 func TestProjectUAT_SystemAuthorityCountsAsProjectAccess(t *testing.T) {
@@ -508,9 +524,8 @@ func TestProjectUAT_SystemAuthorityCountsAsProjectAccess(t *testing.T) {
 	// Deliberately no project-scoped binding for superAdminID in projectID.
 
 	t.Run("relationship-eligible selector is mintable without a project binding", func(t *testing.T) {
-		// Decision Q2(b) (pat-refactor, C/decisions.md): a super-admin's
-		// current system authority admits the project even with no
-		// membership row, and agent:attach is relationship-eligible
+		// A super-admin's current system authority admits the project even
+		// with no membership row, and agent:attach is relationship-eligible
 		// (needs no existing target).
 		_, _, err := srv.uatService.CreateToken(rs4MintContext(superAdminID), superAdminID, "sysauth-attach",
 			projectID, []string{"agent:attach"}, nil)
@@ -518,12 +533,11 @@ func TestProjectUAT_SystemAuthorityCountsAsProjectAccess(t *testing.T) {
 	})
 
 	t.Run("flat scope-wide selector still requires the project-binding ceiling", func(t *testing.T) {
-		// Decision Q2(b): system authority must never inflate the flat
-		// project-role ceiling (matches
-		// TestRS4_A2_SystemPermDoesNotInflateCeiling) -- only the DENIAL
-		// REASON should change from "no project access at all"
-		// (ErrUATProjectForbidden) to "admitted, but this specific flat
-		// selector exceeds the project role" (ErrUATScopeViolation).
+		// System authority must never inflate the flat project-role
+		// ceiling (matches TestRS4_A2_SystemPermDoesNotInflateCeiling) --
+		// only the denial reason should change from "no project access at
+		// all" (ErrUATProjectForbidden) to "admitted, but this specific
+		// flat selector exceeds the project role" (ErrUATScopeViolation).
 		_, _, err := srv.uatService.CreateToken(rs4MintContext(superAdminID), superAdminID, "sysauth-delete",
 			projectID, []string{"agent:delete"}, nil)
 		assert.ErrorIs(t, err, ErrUATScopeViolation,
@@ -532,13 +546,11 @@ func TestProjectUAT_SystemAuthorityCountsAsProjectAccess(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Ruling F-3 (pat-refactor via pat-c-lead, 2026-09-28,
-// D/notes/ruling-f3-project-access.md): v3's ActiveProjectAccess draft was
-// permission-agnostic ("holds any system permission applicable to project
-// targets in general"), which the seeded hub-member/hub-admin roles make
-// vacuous. Runtime admission must instead be current membership OR a system
-// grant applicable to the EXACT requested canonical permission AND the
-// actual project target. These four tests use real seeded roles (not
+// Runtime project admission (ptone/scion#2092) is current membership OR a
+// system grant applicable to the EXACT requested canonical permission AND
+// the actual project target -- not "holds any system permission applicable
+// to project targets in general," which the seeded hub-member/hub-admin
+// roles would make vacuous. These four tests use real seeded roles (not
 // synthetic minimal fixtures) to pin that requirement.
 // ---------------------------------------------------------------------------
 
@@ -584,16 +596,15 @@ func TestProjectUAT_FormerMemberRetainedAncestryOnlyCatalogRoles(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code,
 		"former member's catalog-only roles must not restore read: %s", rec.Body.String())
 
-	if assert.NoError(t, attachErr, "attach mint expected to succeed once CanMintSelector lands (a separate gap from this test)") {
-		rec = doRequestWithUAT(t, srv, attachKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"former member's catalog-only roles must not restore attach: %s", rec.Body.String())
-	}
-	if assert.NoError(t, portErr, "port_access mint expected to succeed once CanMintSelector lands (a separate gap from this test)") {
-		rec = doRequestWithUAT(t, srv, portKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/6060/proxy/", nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"former member's catalog-only roles must not restore port access: %s", rec.Body.String())
-	}
+	require.NoError(t, attachErr, "the member's own agent:attach selector was relationship-eligible and minted before removal")
+	rec = doRequestWithUAT(t, srv, attachKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"former member's catalog-only roles must not restore attach: %s", rec.Body.String())
+
+	require.NoError(t, portErr, "the member's own agent:port_access selector was relationship-eligible and minted before removal")
+	rec = doRequestWithUAT(t, srv, portKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/6060/proxy/", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"former member's catalog-only roles must not restore port access: %s", rec.Body.String())
 }
 
 // TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents: F-3 case (2).
@@ -610,8 +621,8 @@ func TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents(t *testing.T) 
 	createTestUserWithRole(t, s, hubAdminID, hubAdminID+"@test.com", "admin", store.SystemRoleHubAdmin)
 
 	// Grant project membership transiently to mint a token against this
-	// project (A2's mint-time ceiling is unaffected by C.1 and not under
-	// test here), then revoke it. Only the system-scoped hub-admin binding
+	// project (the flat agent:read mint path is not itself under test
+	// here), then revoke it. Only the system-scoped hub-admin binding
 	// (scheduled_event.*, no agent.*) remains.
 	createTestUserWithProjectRole(t, s, hubAdminID, hubAdminID+"@test.com", projectID, store.ProjectRoleMember)
 	agent := uatpAgent(t, s, projectID, hubAdminID, t.Name(), hubAdminID)
@@ -676,8 +687,7 @@ func TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach(t *testing.T) {
 
 	agent := uatpAgent(t, s, projectID, superAdminID, t.Name(), superAdminID)
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"super-admin's exact-permission system authority should admit use-time attach without a project binding: %s", rec.Body.String())
+	assertAuthorizedPTY(t, rec, "super-admin's exact-permission system authority should admit use-time attach without a project binding: %s", rec.Body.String())
 }
 
 // TestProjectUAT_PTYTicketPathFailsClosed pins that the /pty ticket
@@ -710,8 +720,7 @@ func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
 // the CURRENT rule for interactive sessions: an owner/ancestor relationship
 // grant does not check current project membership, so a session user whose
 // project binding was removed still passes attach and port-access
-// authorization on their own agent. Ruling R-c (pat-refactor, relayed by
-// pat-c-lead, C/decisions.md) keeps this behavior unchanged in C.1 --
+// authorization on their own agent. This behavior is unchanged by C.1 --
 // interactive sessions get this characterization test only, no behavior
 // change. Extending active-project-access enforcement to interactive
 // sessions is a separate, pending product decision tracked at
@@ -731,16 +740,16 @@ func TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved(t *testing
 	require.NoError(t, err)
 
 	rec := doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	require.NotEqual(t, http.StatusForbidden, rec.Code, "sanity: session attaches to own agent before removal")
+	requireAuthorizedPTY(t, rec, "sanity: session attaches to own agent before removal")
 
 	uatpDeleteProjectBinding(t, s, memberID, projectID)
 
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+	assertAuthorizedPTY(t, rec,
 		"current rule (unchanged by C.1, ptone/scion#2141 pending): session owner attach survives project access removal: %s", rec.Body.String())
 
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/7070/proxy/", nil)
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
+	assertAuthorizedPortProxy(t, rec,
 		"current rule (unchanged by C.1, ptone/scion#2141 pending): session owner port access survives project access removal: %s", rec.Body.String())
 }
 
@@ -757,10 +766,25 @@ func TestProjectUAT_AccessConstraintsRestrictRelationshipAttach(t *testing.T) {
 	createRS1Project(t, s, projectID, ownerID)
 	uatpMember(t, s, projectID, memberID)
 	agent := uatpAgent(t, s, projectID, memberID, t.Name(), memberID)
+	uatpExposePort(t, s, agent, 6161)
+
+	// Mint before any constraint exists, so the already-issued UAT carries
+	// agent:attach/agent:port_access when the constraint below is added.
+	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "constrained-attach",
+		projectID, []string{"agent:attach", "agent:port_access"}, nil)
+	require.NoError(t, err, "attach/port_access mint should succeed before any constraint exists")
+
+	recPTY := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+	require.Equal(t, http.StatusUnprocessableEntity, recPTY.Code, "sanity: attach authorized before the constraint exists")
+	recPort := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/6161/proxy/", nil)
+	require.Equal(t, http.StatusServiceUnavailable, recPort.Code, "sanity: port access authorized before the constraint exists")
 
 	// A constraint on the member restricts their MAXIMUM permissions in
-	// this project to agent.read -- agent.attach is excluded.
-	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+	// this project to agent.read -- agent.attach and agent.port_access are
+	// excluded. Project MEMBERSHIP is unaffected (ProjectMembershipEvidence
+	// is permission-agnostic), so this exercises the kernel/relationship
+	// restriction path (Decide step 7c), not the C.1 project-access gate.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
 		Name:                 "uatp-deny-attach",
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: pvStrPtr("user"),
@@ -773,19 +797,28 @@ func TestProjectUAT_AccessConstraintsRestrictRelationshipAttach(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Run("mint is rejected", func(t *testing.T) {
-		_, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "constrained-attach",
+	t.Run("mint is rejected once the constraint exists", func(t *testing.T) {
+		_, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "constrained-attach-2",
 			projectID, []string{"agent:attach"}, nil)
 		require.Error(t, err, "an access constraint excluding agent.attach must block minting it, even though attach is relationship-eligible")
 	})
 
-	t.Run("use is rejected via restriction 7c", func(t *testing.T) {
-		// Access-constraint reduction (Decide step 7c) already applies to
-		// relationship grants today (authz.go: restrictions re-applied at
-		// checkRelationshipGrants's caller, :536-542), independent of
-		// C.1's new UAT project-access gate. This subtest is expected to
-		// PASS already on main -- it locks in that the existing
-		// restriction-on-relationship-grant behavior extends to attach.
+	t.Run("already-minted attach UAT is denied at the real endpoint", func(t *testing.T) {
+		rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "access constraint must deny attach at use time: %s", rec.Body.String())
+	})
+
+	t.Run("already-minted port-access UAT is denied at the real endpoint", func(t *testing.T) {
+		rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/6161/proxy/", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "access constraint must deny port access at use time: %s", rec.Body.String())
+	})
+
+	t.Run("session identity sees the same restriction (characterization, not UAT coverage)", func(t *testing.T) {
+		// Access-constraint reduction already applies to relationship
+		// grants for every credential kind, independent of C.1's project-
+		// access gate; this documents that a session identity is
+		// restricted the same way, without standing in for the UAT
+		// real-endpoint coverage above.
 		owner := NewAuthenticatedUser(memberID, memberID+"@test.com", "Member", "member", "api")
 		decision := srv.authzService.CheckAccess(ctx, owner, agentResource(agent), ActionAttach)
 		assert.False(t, decision.Allowed, "access constraint must restrict the owner relationship grant's attach: %s", decision.Reason)
@@ -807,25 +840,39 @@ func TestProjectUAT_AttachOnlyTokenCannotManageLifecycle(t *testing.T) {
 
 	uatKey, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "lifecycle-attach",
 		projectID, []string{"agent:attach"}, nil)
-	require.NoError(t, err, "attach mint expected to succeed once CanMintSelector lands")
+	require.NoError(t, err, "the owner's own agent:attach selector is relationship-eligible and mints")
 
-	// This part of the acceptance criterion is ALREADY TRUE on main
-	// (plan.md §1.4/§1.5): enforceUATConstraints denies by exact scope
-	// match before LegacyUATScopeImplications (agent:attach -> lifecycle)
-	// is ever consulted. Ruling R-a keeps this runtime behavior unchanged;
-	// this pins it with a real-endpoint regression so A.2's ceiling
-	// normalization cannot silently turn it back on.
+	// enforceUATConstraints denies by exact scope match before
+	// LegacyUATScopeImplications (agent:attach -> lifecycle) is ever
+	// consulted (ruling ptone/scion#2092), so an attach-only token cannot
+	// manage lifecycle actions.
 	for _, action := range []string{"start", "stop", "restart"} {
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"attach-only token must not manage lifecycle (%s): %s", action, rec.Body.String())
 	}
 
-	// Control: exec is an attach-class action and must pass authorization
-	// (i.e. not 403) once the mint succeeds, confirming the 403s above come
-	// from the lifecycle/attach split and not from a blanket denial.
-	rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]any{})
-	assert.NotEqual(t, http.StatusForbidden, rec.Code, "attach-only token should pass authorization for exec: %s", rec.Body.String())
+	// Control: exec is an attach-class action. A real command body is
+	// required so the request reaches authorization instead of failing
+	// request validation first (handleAgentExec rejects an empty command
+	// with 400 before loading the agent or checking authorization at all,
+	// so an empty body would pass this assertion even under a blanket
+	// deny). Past authorization, the handler has no runtime broker to
+	// dispatch to, so it returns 503 -- the same "authorized, no runtime"
+	// signal used for /pty and port-proxy elsewhere in this file.
+	rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec",
+		map[string]any{"command": []string{"true"}})
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"attach-only token should pass authorization for exec (no broker configured): %s", rec.Body.String())
+
+	// Negative twin: an agent:read-only token must be denied the same exec
+	// request, showing the 503 above comes from authorization succeeding
+	// and not from a blanket allow that would mask a missing check.
+	readOnlyKey := mintScopedUAT(t, srv, memberID, projectID, []string{"agent:read"})
+	rec = doRequestWithUAT(t, srv, readOnlyKey, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec",
+		map[string]any{"command": []string{"true"}})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"agent:read-only token must be denied exec: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -844,10 +891,10 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 
 	uatKey, token, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "recheck-attach",
 		projectID, []string{"agent:attach"}, nil)
-	require.NoError(t, err, "attach mint expected to succeed once CanMintSelector lands")
+	require.NoError(t, err, "the owner's own agent:attach selector is relationship-eligible and mints")
 
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	require.NotEqual(t, http.StatusForbidden, rec.Code, "preflight should be authorized before revocation: %s", rec.Body.String())
+	requireAuthorizedPTY(t, rec, "preflight should be authorized before revocation: %s", rec.Body.String())
 
 	require.NoError(t, srv.uatService.RevokeToken(rs4MintContext(memberID), memberID, token.ID))
 
@@ -859,10 +906,9 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // Acceptance: no stock project role gains attach; no dependency on B.
 // ---------------------------------------------------------------------------
 
-// TestProjectRoles_DoNotGrantAttachOrPortAccess should PASS already on main
-// -- it locks in the current, correct state (seed.go revision 3) so a
-// future edit to the stock role permission lists cannot silently reintroduce
-// cross-member attach/port_access.
+// TestProjectRoles_DoNotGrantAttachOrPortAccess locks in the current,
+// correct state (seed.go revision 3) so a future edit to the stock role
+// permission lists cannot silently reintroduce cross-member attach/port_access.
 func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 	revisions := map[string]int{
 		store.ProjectRoleOwner:  3,
@@ -886,14 +932,13 @@ func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 	}
 }
 
-// TestCanMintSelector_RelationshipEligibleWithoutTarget exercises A.1's
-// AuthzService.CanMintSelector directly (A/notes/contract-shapes.md v5 §4),
-// covering the mint-eligibility unit contract C.1's mint path now relies on:
-// relationship-eligible selectors (agent:attach/agent:port_access) are
-// mintable before any agent exists, a non-member gets the uniform
-// MintDenialProjectAccessRequired reason for every requested selector in one
-// call (A-5), and a flat-only selector the member's role doesn't carry gets
-// MintDenialFlatRoleInsufficient.
+// TestCanMintSelector_RelationshipEligibleWithoutTarget exercises
+// AuthzService.CanMintSelector directly, covering the mint-eligibility unit
+// contract CreateToken's mint path relies on: relationship-eligible
+// selectors (agent:attach/agent:port_access) are mintable before any agent
+// exists, a non-member gets the uniform MintDenialProjectAccessRequired
+// reason for every requested selector in one call, and a flat-only selector
+// the member's role doesn't carry gets MintDenialFlatRoleInsufficient.
 func TestCanMintSelector_RelationshipEligibleWithoutTarget(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -960,29 +1005,27 @@ func TestCanMintSelector_RelationshipEligibleWithoutTarget(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// pat-refactor ruling, 2026-09-29 (C/decisions.md 00:22-00:39): system-role
-// runtime authority for the EXACT requested permission on a project target
-// is preserved; A is correcting ProjectTargetApplicability per permission
-// (group.read, gcp_service_account.read, group.addMember, and others among
-// 14 review findings still to be appended to pat/2117-a1-contracts). The
-// ALLOW subtests below are t.Skip'd with a TODO naming that fix; the DENY
-// subtests exercise paths that are correct both today and after the fix
-// (no authority, the wrong permission, or a governing constraint), so they
-// run unskipped now.
+// System-role runtime authority for the EXACT requested permission on a
+// project target is the intended rule (ptone/scion#2092); the reviewed
+// permissions.ProjectTargetApplicability table is being corrected per
+// permission (group.read, gcp_service_account.read, group.addMember, and
+// others -- ptone/scion#2117). The ALLOW subtests below are t.Skip'd with a
+// TODO naming that fix; the DENY subtests exercise paths that are correct
+// both today and after the fix (no authority, the wrong permission, or a
+// governing constraint), so they run unskipped now.
 // ---------------------------------------------------------------------------
 
 // TestUATProjectAdmission_SystemAuthorityForExactPermission covers
 // group.read and gcp_service_account.read through the public
 // AuthzService.CheckAccess/Decide entry point rather than a real HTTP
-// route: pat-c-lead confirmed (2026-09-29) neither GET /api/v1/groups/{id}
-// (handlers_groups.go getGroup) nor GET
-// /api/v1/projects/{id}/gcp-service-accounts/{id}
+// route: neither GET /api/v1/groups/{id} (handlers_groups.go getGroup) nor
+// GET /api/v1/projects/{id}/gcp-service-accounts/{id}
 // (handlers_gcp_identity.go getGCPServiceAccount, whose own comment cites
 // this) calls Decide/CheckAccess at all for a project-scoped read -- a
-// pre-existing gap tracked as ptone/scion#598, unrelated to C.1, and out of
-// scope to fix here. CheckAccess is the same public facade the pty/port/
-// agent-GET tests in this file reach through Decide, so this coverage
-// survives D.1 moving enforceUATConstraints's body into authz_bearer.go.
+// pre-existing gap tracked as ptone/scion#598, unrelated to this task and
+// out of scope to fix here. CheckAccess is the same public facade the
+// pty/port/agent-GET tests in this file reach through Decide, so this
+// coverage survives a future refactor of enforceUATConstraints's body.
 func TestUATProjectAdmission_SystemAuthorityForExactPermission(t *testing.T) {
 	cases := []struct {
 		permissionID string
@@ -1009,7 +1052,7 @@ func TestUATProjectAdmission_SystemAuthorityForExactPermission(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.permissionID, func(t *testing.T) {
 			t.Run("system-scope binding with the exact permission allows use", func(t *testing.T) {
-				t.Skip("TODO(A.1 table fix, pat-a-lead/pat-refactor ruling 2026-09-29, C/decisions.md): ProjectTargetApplicability[\"" + tc.permissionID + "\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
+				t.Skip("TODO(ptone/scion#2117): ProjectTargetApplicability[\"" + tc.permissionID + "\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
 
 				srv, s := testServer(t)
 				ctx := context.Background()
@@ -1101,9 +1144,8 @@ func TestUATProjectAdmission_SystemAuthorityForExactPermission(t *testing.T) {
 // on the same project, even when both checks share the same request-scoped
 // ProjectAdmissionCache -- the cache key
 // (authz_boundary.go projectAdmissionCacheKey) includes the permission ID,
-// so this is a regression test pinning that key shape, requested explicitly
-// (pat-c-lead, 2026-09-29, C/decisions.md 00:39) rather than assumed safe by
-// inspection alone.
+// so this is a regression test pinning that key shape rather than assuming
+// it safe by inspection alone.
 func TestUATProjectAdmission_CrossPermissionMemoIsolation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1140,9 +1182,8 @@ func TestUATProjectAdmission_CrossPermissionMemoIsolation(t *testing.T) {
 // TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute exercises
 // the group family through a real HTTP route + middleware (POST
 // /api/v1/groups/{id}/members -> addGroupMember -> s.authorize -> Decide),
-// rather than a direct CheckAccess call, per pat-d-lead's constraint that
-// new C.1 regressions go through real routes so they survive D.1 moving
-// enforceUATConstraints's body into authz_bearer.go.
+// rather than a direct CheckAccess call, so this coverage survives a future
+// refactor that moves enforceUATConstraints's body elsewhere.
 //
 // group.addMember has a Hub-only mint-time issuance boundary
 // (permissions.PermissionAllowedBoundaries["group.addMember"] ==
@@ -1154,10 +1195,10 @@ func TestUATProjectAdmission_CrossPermissionMemoIsolation(t *testing.T) {
 // project-scoped credential, proving separately that use-time evaluation
 // never re-checks mint-time issuance boundaries: only current authority
 // (ProjectTargetAdmission plus the kernel) decides. This also doubles as
-// the group family's real-HTTP exercise pat-c-lead asked for.
+// the group family's real-HTTP exercise.
 func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T) {
 	t.Run("system-scope binding with the exact permission allows the request", func(t *testing.T) {
-		t.Skip("TODO(A.1 table fix, pat-a-lead/pat-refactor ruling 2026-09-29, C/decisions.md): ProjectTargetApplicability[\"group.addMember\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
+		t.Skip("TODO(ptone/scion#2117): ProjectTargetApplicability[\"group.addMember\"] is currently false; unskip once pat/2117-a1-contracts corrects it to true.")
 
 		srv, s := testServer(t)
 		ctx := context.Background()
@@ -1179,7 +1220,7 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 		uatKey := uatpInsertLegacyToken(t, s, userID, projectID, []string{"group:addMember"})
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/groups/"+group.ID+"/members",
 			map[string]any{"memberType": "user", "memberId": targetID, "role": "member"})
-		assert.NotEqual(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusCreated, rec.Code,
 			"system authority for the exact permission should admit the request even though this scope could never be freshly minted for a project boundary: %s", rec.Body.String())
 	})
 
@@ -1208,38 +1249,86 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 	})
 }
 
-// TestProjectUAT_MintForbiddenIsOracleResistant pins A-5 (pat-c-lead review,
-// 2026-09-29, C/decisions.md): CanMintSelector's admission check is ONE
-// check for the whole request, with a single reason
+// TestProjectUAT_MintForbiddenIsOracleResistant pins that CanMintSelector's
+// admission check is ONE check for the whole request, with a single reason
 // (MintDenialProjectAccessRequired) whenever it fails -- CreateToken must
 // map that reason to the existing, bare ErrUATProjectForbidden (no
 // selector, no reason code in the response), so a non-member of a real
 // project and a caller naming a project that does not exist at all get the
-// byte-identical HTTP response. Neither case may be distinguishable from
-// the other, or from "the project doesn't exist," by the response alone.
+// byte-identical HTTP response (ptone/scion#2092). Neither case may be
+// distinguishable from the other, from "the project doesn't exist," or from
+// a per-selector eligibility denial, by the response alone: this asserts
+// the exact error code and message rather than only the HTTP status, and
+// checks the body carries neither the selector name nor the
+// project_access_required reason code, so a future change that leaks either
+// into the message is caught here rather than only by the RS4 tests that
+// happen to assert the sentinel error type. Covers both a flat selector
+// (agent:read) and a relationship-eligible selector (agent:attach), since
+// the two take different internal paths inside CanMintSelector before
+// reaching the same uniform admission failure.
 func TestProjectUAT_MintForbiddenIsOracleResistant(t *testing.T) {
+	for _, scope := range []string{"agent:read", "agent:attach"} {
+		t.Run(scope, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			projectID := tid("uatp-oracle-project-" + scope)
+			ownerID := tid("uatp-oracle-owner-" + scope)
+			outsiderID := tid("uatp-oracle-outsider-" + scope)
+			createRS1Project(t, s, projectID, ownerID)
+			outsider := &store.User{
+				ID: outsiderID, Email: outsiderID + "@test.com", DisplayName: "Outsider", Role: "member", Status: "active",
+			}
+			require.NoError(t, s.CreateUser(ctx, outsider))
+			ensureHubMembership(ctx, s, outsiderID)
+
+			body := map[string]any{"name": "oracle-test", "projectId": projectID, "scopes": []string{scope}}
+			recNonMember := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", body)
+
+			nonexistentProjectID := tid("uatp-oracle-nonexistent-" + scope)
+			bodyNonexistent := map[string]any{"name": "oracle-test-2", "projectId": nonexistentProjectID, "scopes": []string{scope}}
+			recNonexistent := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", bodyNonexistent)
+
+			require.Equal(t, http.StatusForbidden, recNonMember.Code, "non-member mint: %s", recNonMember.Body.String())
+			assert.Equal(t, recNonMember.Code, recNonexistent.Code,
+				"non-member and nonexistent-project mint must return the same HTTP status")
+			assert.JSONEq(t, recNonMember.Body.String(), recNonexistent.Body.String(),
+				"non-member and nonexistent-project mint must return the byte-identical error body")
+
+			var resp ErrorResponse
+			require.NoError(t, json.Unmarshal(recNonMember.Body.Bytes(), &resp))
+			assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+			assert.Equal(t, "forbidden", resp.Error.Message)
+			assert.Nil(t, resp.Error.Details)
+			assert.NotContains(t, recNonMember.Body.String(), scope,
+				"the oracle-resistant response must not name the selector")
+			assert.NotContains(t, recNonMember.Body.String(), string(MintDenialProjectAccessRequired),
+				"the oracle-resistant response must not name the internal reason code")
+		})
+	}
+}
+
+// TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal pins
+// the fail-closed branch in enforceUATConstraints: any error from
+// ProjectTargetAdmission (including ErrUnsupportedPrincipalKind for a
+// principal kind other than PrincipalKindUser/PrincipalKindDev) denies, the
+// same as an explicit !admission.Admitted. This kind mismatch cannot occur
+// for a real ScopedUserIdentity today (Decide only reaches
+// enforceUATConstraints for CredentialKindUAT, which is always a local
+// user), but the gate must still fail closed rather than panic or silently
+// admit if principal resolution is ever widened.
+func TestProjectUAT_EnforceUATConstraintsFailsClosedOnUnsupportedPrincipal(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	projectID := tid("uatp-oracle-project")
-	ownerID := tid("uatp-oracle-owner")
-	outsiderID := tid("uatp-oracle-outsider")
+	projectID := tid("uatp-failclosed-project")
+	ownerID := tid("uatp-failclosed-owner")
 	createRS1Project(t, s, projectID, ownerID)
-	outsider := &store.User{
-		ID: outsiderID, Email: outsiderID + "@test.com", DisplayName: "Outsider", Role: "member", Status: "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, outsider))
-	ensureHubMembership(ctx, s, outsiderID)
+	agent := uatpAgent(t, s, projectID, ownerID, t.Name(), ownerID)
 
-	body := map[string]any{"name": "oracle-test", "projectId": projectID, "scopes": []string{"agent:read"}}
-	recNonMember := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", body)
+	scoped := NewScopedUserIdentity(NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "api"), projectID, []string{"agent:read"})
+	principal := PrincipalContext{Kind: PrincipalKindAgent, ID: ownerID}
 
-	nonexistentProjectID := tid("uatp-oracle-nonexistent")
-	bodyNonexistent := map[string]any{"name": "oracle-test-2", "projectId": nonexistentProjectID, "scopes": []string{"agent:read"}}
-	recNonexistent := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", bodyNonexistent)
-
-	assert.Equal(t, http.StatusForbidden, recNonMember.Code, "non-member mint: %s", recNonMember.Body.String())
-	assert.Equal(t, recNonMember.Code, recNonexistent.Code,
-		"non-member and nonexistent-project mint must return the same HTTP status")
-	assert.JSONEq(t, recNonMember.Body.String(), recNonexistent.Body.String(),
-		"non-member and nonexistent-project mint must return the byte-identical error body")
+	decision := srv.authzService.enforceUATConstraints(ctx, principal, scoped, agentResource(agent), ActionRead, "agent.read")
+	require.NotNil(t, decision, "an unsupported principal kind must deny, not pass through as nil")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "token holder lacks active access to the target project", decision.Reason)
 }

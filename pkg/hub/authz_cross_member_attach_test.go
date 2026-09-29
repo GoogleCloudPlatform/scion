@@ -185,12 +185,12 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	// C.1 (ptone/scion#2092): explicit attach selection is relationship-
-	// eligible (owner/ancestor) and requires no existing target, per the
-	// design doc's "Resource-relative minting for #2092" and A.1's
-	// MintEligibilityRegistry. This replaces the pinned expectation above
-	// from before that eligibility existed, when owner role membership was
-	// the only mint path and an explicit attach token exceeded it.
+	// ptone/scion#2092: explicit attach selection is relationship-eligible
+	// (owner/ancestor) and requires no existing target. This replaces the
+	// earlier expectation that an owner could not mint explicit
+	// agent:attach, from before that eligibility path existed, when owner
+	// role membership was the only mint path and an explicit attach token
+	// exceeded it.
 	t.Run("project owner can mint explicit attach for own agents", func(t *testing.T) {
 		srv, s := testServer(t)
 		ctx := context.Background()

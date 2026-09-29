@@ -66,11 +66,17 @@ var (
 )
 
 // UATScopeViolationError names the selector and machine-readable reason when
-// CanMintSelector (A.1, pkg/hub/authz_boundary.go) denies a requested
-// selector at mint time. Unwrap returns ErrUATScopeViolation so existing
+// CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
+// mint time. Unwrap returns ErrUATScopeViolation so existing
 // errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
-// mapping, TestRS4_DenialCodeStability) keep working unchanged; C.2 uses
-// errors.As to surface Selector/Reason in the 403 response body.
+// mapping, TestRS4_DenialCodeStability) keep working unchanged.
+// handlers_auth.go's scope_violation response already writes err.Error() as
+// its message, so the 403 body now includes the selector and reason text
+// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
+// denied (flat_role_insufficient)`), where it previously carried only the
+// sentinel text. This is reached only once project admission has already
+// succeeded, never on the uniform ErrUATProjectForbidden path (see
+// CreateToken below), so it does not weaken oracle resistance.
 type UATScopeViolationError struct {
 	Selector string
 	Reason   MintDenialReason
@@ -150,13 +156,12 @@ func (s *UserAccessTokenService) createAuditRecord(ctx context.Context, txStore 
 // scopeToPermissionIDs converts UAT scope strings (resource:action) to
 // permission IDs using the production permissions.Registry.
 //
-// No longer called from CreateToken (C.1, ptone/scion#2092): mint
-// eligibility now goes through CanMintSelector, which resolves selectors via
+// No longer called from CreateToken (ptone/scion#2092): mint eligibility now
+// goes through CanMintSelector, which resolves selectors via
 // permissions.ResolveSelector instead of this resource:action
-// reconstruction. Left in place, unchanged, for A.2 (ptone/scion#2118) to
-// rewire or retire along with the rest of selector resolution and the
-// persisted scope representation — out of C.1's file scope per
-// C/decisions.md (2026-09-28 23:52 entry).
+// reconstruction. Left in place, unchanged, for ptone/scion#2118 to rewire
+// or retire along with the rest of selector resolution and the persisted
+// scope representation.
 func scopeToPermissionIDs(scopes []string) []string {
 	scopeSet := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
@@ -241,18 +246,18 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- C.1: mint eligibility via CanMintSelector (A.1, ptone/scion#2117) ---
+	// --- Mint eligibility via CanMintSelector (ptone/scion#2092, #2117) ---
 	// CanMintSelector composes project admission (current membership OR, per
-	// selector, exact-permission system authority — F-3 ruling,
-	// D/notes/ruling-f3-project-access.md) with per-selector mint
-	// eligibility (the existing flat project-role subset check, unchanged,
-	// or declared relationship candidacy for resource-relative selectors
-	// such as agent:attach/agent:port_access — design doc "Resource-relative
-	// minting for #2092") in one batched call, admission checked once for
-	// the whole request (A-5). This replaces only the flat eligibility
-	// subset loop; selector resolution (expandScopes above) and the
-	// persisted Scopes representation are unchanged (A.2 owns normalizing
-	// those at load time).
+	// selector, exact-permission system authority on the exact requested
+	// permission) with per-selector mint eligibility (the existing flat
+	// project-role subset check, unchanged, or declared relationship
+	// candidacy for resource-relative selectors such as
+	// agent:attach/agent:port_access, which are mintable before any target
+	// exists) in one batched call, with admission checked once for the
+	// whole request. This replaces only the flat eligibility subset loop;
+	// selector resolution (expandScopes above) and the persisted Scopes
+	// representation are unchanged (ptone/scion#2118 owns normalizing those
+	// at load time).
 	//
 	// Note: authorization runs outside WithTx. The TOCTOU window is
 	// acceptable because (1) use-time enforcement narrows every request to
@@ -272,17 +277,16 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		if result.OK {
 			continue
 		}
-		// A-5 oracle resistance (pat-c-lead review, 2026-09-29, C/decisions.md):
-		// MintDenialProjectAccessRequired means CanMintSelector's ONE
-		// admission check for the whole batch failed (no membership and no
-		// exact-permission system authority) -- every selector gets this
-		// same reason uniformly in that case. Preserve the existing
-		// contract that a non-member and a nonexistent project both get the
-		// bare ErrUATProjectForbidden, with no selector detail, so neither
-		// is distinguishable from the other or from "authority exists but
-		// not for this selector." Only a per-selector eligibility denial
-		// (admission passed, this specific selector didn't) surfaces the
-		// typed UATScopeViolationError.
+		// Oracle resistance: MintDenialProjectAccessRequired means
+		// CanMintSelector's ONE admission check for the whole batch failed
+		// (no membership and no exact-permission system authority) -- every
+		// selector gets this same reason uniformly in that case. Preserve
+		// the existing contract that a non-member and a nonexistent project
+		// both get the bare ErrUATProjectForbidden, with no selector
+		// detail, so neither is distinguishable from the other or from
+		// "authority exists but not for this selector." Only a per-selector
+		// eligibility denial (admission passed, this specific selector
+		// didn't) surfaces the typed UATScopeViolationError.
 		if result.Reason == MintDenialProjectAccessRequired {
 			return "", nil, ErrUATProjectForbidden
 		}

@@ -1402,14 +1402,12 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 // ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
 // request falls outside the token's allowed project or scopes, nil otherwise.
 //
-// C.1 (ptone/scion#2092) adds a third check after the two pre-existing ones:
-// live project access for project targets (permissionID is the already-
-// resolved canonical permission Decide computed for this request, so the
-// admission check evaluates the exact permission the kernel will evaluate,
-// not a re-derived one). It runs last so only in-scope requests pay the
-// extra store lookup, and so the ordering documented in
-// C/plan.md §2.2(2) is preserved: project match, then exact scope, then
-// live project access.
+// C.1 (ptone/scion#2092) adds a third check after the two pre-existing ones,
+// in this fixed order: project match, then exact scope, then live project
+// access (permissionID is the already-resolved canonical permission Decide
+// computed for this request, so the admission check evaluates the exact
+// permission the kernel will evaluate, not a re-derived one). It runs last
+// so only in-scope requests pay the extra store lookup.
 func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
 	// Enforce project constraint: the resource must belong to the token's project.
 	projectID := scoped.ScopedProjectID()
@@ -1431,19 +1429,19 @@ func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal Prin
 		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope}
 	}
 
-	// Live project access (design doc "Resource-relative minting for
-	// #2092": "Active project access is required at use time as well as
-	// mint time: retained creation ancestry alone cannot authorize a UAT
-	// request after project access is removed"; F-3 ruling,
-	// D/notes/ruling-f3-project-access.md). The two checks above already
-	// confirm resource is a project target inside the token's own project
-	// (either the "project" resource itself, or a resource whose
-	// ParentType is "project" and whose ParentID matches) -- anything else
-	// was already denied above as hub-level. ProjectTargetAdmission fails
-	// closed on any error (including ErrUnsupportedPrincipalKind for a
-	// non-local-user principal, which cannot occur for a ScopedUserIdentity
-	// today but is handled the same as any other denial rather than
-	// panicking or special-cased here).
+	// Live project access is required at use time, not just at mint time
+	// (ptone/scion#2092): retained creation ancestry or ownership never
+	// substitutes for current project access. The two checks above confirm
+	// resource is either the token's own "project" resource or a resource
+	// whose ParentType is "project" and whose ParentID matches; anything
+	// else was already denied above as hub-level. ProjectTargetAdmission
+	// itself relies on ResolveTargetScope to reject any resource that isn't
+	// really a matching project target (ErrProjectMismatch), so this call
+	// is the actual authority for that classification, not the two checks
+	// above. It fails closed on any error (including
+	// ErrUnsupportedPrincipalKind for a non-local-user principal, which
+	// cannot occur for a ScopedUserIdentity today but is handled the same
+	// as any other denial rather than panicking or special-cased here).
 	admission, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, nil)
 	if err != nil || !admission.Admitted {
 		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}

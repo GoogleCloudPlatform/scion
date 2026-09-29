@@ -575,7 +575,8 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 	// to test ONLY the scope/project confinement logic this test is named
 	// for, not project access itself. (group:read and gcp_service_account:read
 	// specifically are exercised for the SEPARATE system-authority-only
-	// behavior change in TestUATEnforcement_SystemAuthorityExcludesHubWideOnlyPermissions.)
+	// behavior covered in TestUATProjectAdmission_SystemAuthorityForExactPermission,
+	// in uat_project_relationship_test.go.)
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
