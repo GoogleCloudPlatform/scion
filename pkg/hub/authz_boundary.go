@@ -512,24 +512,19 @@ func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal Princ
 	return refs, directKey, groupKeys, nil
 }
 
-// scopedRoleBindingPermissions backs getProjectScopedPermissions's
-// project-scope query (its only caller): given a pre-fetched binding list,
-// it unions the permission IDs granted by every ACTIVE binding whose
-// ScopeType matches scopeType (and, for project scope, whose ScopeID
-// matches scopeID), then applies the same access-constraint reduction
-// (loadAccessConstraintRestrictions) already relied on elsewhere.
-// A role definition referenced by an active binding but missing/unloadable
-// is a data-integrity error, not a routine "skip and continue" case: this
-// function propagates that error to the caller (fail closed) rather than
-// silently omitting the binding's permissions.
-func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, scopeType, scopeID string, closure map[string]struct{}, resourceCtx ResourceContext, now time.Time) ([]string, error) {
+// unionScopedRoleBindingPermissions is projectScopedGrants's binding-union
+// step: given a pre-fetched binding list, it unions the permission IDs
+// granted by every ACTIVE project-scoped binding whose ScopeID matches
+// projectID. A role definition referenced by an active binding but
+// missing/unloadable is a data-integrity error, not a routine "skip and
+// continue" case: this function propagates that error to the caller (fail
+// closed) rather than silently omitting the binding's permissions. It does
+// not apply access-constraint reduction; the caller does that afterward.
+func (a *AuthzService) unionScopedRoleBindingPermissions(ctx context.Context, bindings []*store.RoleBinding, projectID string, now time.Time) ([]string, error) {
 	seen := make(map[string]bool)
 	var result []string
 	for _, b := range bindings {
-		if b.ScopeType != scopeType {
-			continue
-		}
-		if scopeType == ScopeTypeProject && b.ScopeID != scopeID {
+		if b.ScopeType != ScopeTypeProject || b.ScopeID != projectID {
 			continue
 		}
 		if !bindingActivationOK(b, now) {
@@ -549,11 +544,79 @@ func (a *AuthzService) scopedRoleBindingPermissions(ctx context.Context, binding
 			}
 		}
 	}
-	if len(result) > 0 {
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
-		result = applyRestrictions(result, restrictions)
-	}
 	return result, nil
+}
+
+// projectScopedGrants is the shared resolution behind getProjectScopedPermissions
+// (authz.go, serving useraccesstoken.go's project-scoped mint-ceiling
+// resolution) and projectScopedPermissionsStrict below (serving
+// CanMintSelector's flat-role mint path): it resolves principal's
+// group-expanded closure and the permission IDs granted by every active
+// project-scoped role binding for projectID, via
+// unionScopedRoleBindingPermissions. It does not apply access-constraint
+// reduction; each caller does that afterward with its own error-handling
+// choice, since one fails closed on a load error (a deny-all restriction)
+// and the other returns the error.
+func (a *AuthzService) projectScopedGrants(ctx context.Context, principalType, principalID, projectID string) (perms []string, closure map[string]struct{}, err error) {
+	normalizedType := NormalizePrincipalType(principalType)
+
+	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
+	var groupIDs []string
+	var groupErr error
+	switch normalizedType {
+	case store.RoleBindingPrincipalUser:
+		groupIDs, groupErr = a.store.GetEffectiveGroups(ctx, principalID)
+	case store.RoleBindingPrincipalAgent:
+		groupIDs, groupErr = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
+	}
+	if groupErr != nil && !errors.Is(groupErr, store.ErrNotFound) {
+		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
+			"principalType", principalType, "principalID", principalID, "error", groupErr)
+		return nil, nil, fmt.Errorf("group resolution failed (fail-closed): %w", groupErr)
+	}
+	for _, gid := range groupIDs {
+		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
+	}
+
+	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	closure = make(map[string]struct{}, len(principals))
+	for _, p := range principals {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+
+	perms, err = a.unionScopedRoleBindingPermissions(ctx, bindings, projectID, time.Now())
+	if err != nil {
+		return nil, nil, err
+	}
+	return perms, closure, nil
+}
+
+// projectScopedPermissionsStrict is getProjectScopedPermissions's
+// error-returning form, confined to CanMintSelector's flat-role mint path
+// (hasProjectRoleFlatPermission). It shares projectScopedGrants's group and
+// binding resolution with getProjectScopedPermissions, but applies
+// access-constraint reduction via accessConstraintRestrictions instead of
+// loadAccessConstraintRestrictions, so a transient constraint-table load
+// failure surfaces as an error. Every error this function returns is wrapped
+// in ErrProjectAccessDenied, matching every other CanMintSelector path's
+// error classification.
+func (a *AuthzService) projectScopedPermissionsStrict(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
+	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+	}
+	if len(perms) == 0 {
+		return perms, nil
+	}
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	if err != nil {
+		return nil, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
+	return applyRestrictions(perms, restrictions), nil
 }
 
 // applyRestrictions filters permIDs down to those that survive every
@@ -760,14 +823,24 @@ type mintEligibilityCacheKey struct{}
 // ONE CanMintSelector call. Evaluating a selector expansion or a *:manage
 // alias means calling SystemAuthorityProof/MintTimeSystemGrant/
 // hasAnyProjectBinding/hasRelevantProjectAdmission once per permission (and
-// permissionSurvivesProjectConstraints once per relevant project); without
-// this cache, each of those calls independently re-resolves the principal's
+// permissionSurvivesProjectConstraints once per relevant project;
+// hasProjectRoleFlatPermission/projectScopedPermissionsStrict once per
+// flat-role permission, reading the constraint slot only — it resolves its
+// own group/binding closure rather than using the cached one); without this
+// cache, each of those calls independently re-resolves the principal's
 // group/binding closure, reloads role definitions, and re-pages the entire
 // access-constraint table. Carried via context (not a new parameter) so it
 // requires no change to any exported function's signature: every reader
 // falls back to loading fresh when the cache is absent (e.g. every caller
-// outside CanMintSelector), so this is purely a performance optimization,
-// never a source of eligibility facts, and never a behavior difference.
+// outside CanMintSelector), so this is purely a performance optimization and
+// never a source of eligibility facts: every reader that surfaces an error
+// (closureErr/systemErr/constraintsErr) does so because the SAME load would
+// have failed uncached too. The one externally visible difference is scope,
+// not existence: a single failed page is shared by every permission in the
+// batch that reaches it, where an uncached run could have retried the load
+// per permission and possibly succeeded on a later attempt. It never turns a
+// real failure into a fabricated denial or an allow — every caller listed
+// above propagates the cached error as an error.
 type mintEligibilityCache struct {
 	mu sync.Mutex
 
@@ -939,12 +1012,20 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 		return false, nil
 	}
 
-	// Access-constraint reduction, project-scoped.
+	// Access-constraint reduction, project-scoped. Uses the error-returning
+	// accessConstraintRestrictions rather than loadAccessConstraintRestrictions:
+	// ProjectAdmissionForClass's memo must never cache a denial caused by a
+	// transient constraint-table load failure, only a real, reviewable
+	// admission decision — so the load error is returned here and propagated,
+	// which ProjectAdmissionForClass already treats as unmemoized.
 	closure := make(map[string]struct{}, len(refs))
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
 }
@@ -981,7 +1062,16 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{})
+	// Uses the error-returning accessConstraintRestrictions rather than
+	// loadAccessConstraintRestrictions: MintTimeSystemGrant has its own error
+	// return, and CanMintSelector (its only production caller) already fails
+	// the whole batch closed on an error, so a transient load failure should
+	// surface as an error rather than be silently absorbed into a
+	// stable-looking denial reason.
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 
 	resourceType := registryResourceType(permissionID)
 	for _, ck := range classes {
@@ -1083,7 +1173,15 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		if !candidateSetHasPermission(toCandidateBindings(projBindings), roleDefs, permissionID) {
 			continue
 		}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+		// Error-returning form: hasAnyProjectBinding already propagates every
+		// other internal failure (closure, binding-list, role-definition
+		// resolution) as an error rather than a silent deny-all, so a
+		// transient constraint-table load failure must do the same instead
+		// of masquerading as an ordinary denial.
+		restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+		if err != nil {
+			return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		}
 		if survivors := applyRestrictions([]string{permissionID}, restrictions); len(survivors) == 1 {
 			return true, nil
 		}
@@ -1107,7 +1205,14 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
 	}
-	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	// Error-returning form, matching principalClosure's error propagation
+	// just above: a transient constraint-table load failure must surface as
+	// an error here too, not as an indistinguishable "constraint stripped
+	// it" denial.
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	if err != nil {
+		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
 }
@@ -1172,12 +1277,9 @@ type projectAdmissionCacheKey struct {
 // multiple ProjectTargetAdmission calls in one request (e.g. B.2's
 // request-local authority cache). nil is safe (unmemoized). Never persisted
 // or shared ACROSS requests. An error returned FROM ProjectAdmissionForClass
-// is NEVER cached — a failed lookup is recomputed on the next call, never
-// remembered as a denial or an allow. This does not cover every failure
-// inside the call: a failure to load the access-constraint table is reduced
-// to a deny-all restriction by loadAccessConstraintRestrictions rather than
-// returned as an error, so on the system-authority path it IS memoized, as
-// an ordinary (fail-safe) denial for the remainder of the request.
+// is NEVER cached — a failed lookup, including a failure to load the
+// access-constraint table, is recomputed on the next call, never remembered
+// as a denial or an allow.
 type ProjectAdmissionCache struct {
 	mu    sync.Mutex
 	cache map[projectAdmissionCacheKey]ProjectAdmissionResult
@@ -1239,14 +1341,10 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 // Composes ProjectMembershipEvidence(ctx, principal, projectID) OR
 // SystemAuthorityProof(ctx, principal, projectID, permissionID, class). Any
 // error RETURNED BY THIS FUNCTION denies and is never memoized — a failed
-// lookup is recomputed on the next call, never remembered as a denial or an
-// allow. The memo (nil-safe) is keyed on
-// (principal, projectID, permissionID, class). This does not cover every
-// internal failure: a failure to load the access-constraint table is
-// reduced to a deny-all restriction by loadAccessConstraintRestrictions
-// rather than returned as an error, so on the system-authority path it IS
-// memoized, as an ordinary (fail-safe) denial for the remainder of the
-// request.
+// lookup, including a failure to load the access-constraint table on the
+// system-authority path, is recomputed on the next call, never remembered
+// as a denial or an allow. The memo (nil-safe) is keyed on
+// (principal, projectID, permissionID, class).
 //
 // class.ScopeKind must be exactly empty for a resource type with no
 // reviewed scope-kind semantics, and one of validRealProjectScopeKinds's
@@ -1323,7 +1421,12 @@ type SelectorEligibility struct {
 // permissionID as a flat subset of their project-scoped role in projectID —
 // the existing, unchanged project-boundary flat-role mint rule.
 func (a *AuthzService) hasProjectRoleFlatPermission(ctx context.Context, principal PrincipalContext, projectID, permissionID string) (bool, error) {
-	perms, err := a.getProjectScopedPermissions(ctx, string(principal.Kind), principal.ID, projectID)
+	// Uses projectScopedPermissionsStrict, not getProjectScopedPermissions:
+	// this is CanMintSelector's flat-role mint path, and a transient
+	// constraint-load failure here must surface as an error like every other
+	// CanMintSelector path, not the deny-all restriction
+	// getProjectScopedPermissions's other caller (useraccesstoken.go) keeps.
+	perms, err := a.projectScopedPermissionsStrict(ctx, string(principal.Kind), principal.ID, projectID)
 	if err != nil {
 		return false, err
 	}
