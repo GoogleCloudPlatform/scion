@@ -2265,7 +2265,7 @@ func TestBuildReincarnationPreamble_A262_UnresolvedRequester(t *testing.T) {
 	preamble := srv.buildReincarnationPreamble(agent, 5, "h", start, requester, nil)
 
 	assert.Contains(t, preamble, `You are generation 5 of agent "unresolved-agt" (id agent-u).`+"\n",
-		"an unresolved, non-self requester must omit the 'on request of' clause entirely (O2)")
+		"an unresolved, non-self requester must omit the 'on request of' clause entirely (Amendment A26.2 O2)")
 	assert.NotContains(t, preamble, "on request of",
 		"no tautological fallback clause in the header")
 	assert.Contains(t, preamble,
@@ -2485,7 +2485,7 @@ func TestResolveReincarnationRequesterName_A26_1(t *testing.T) {
 		srv, s := testServer(t)
 		user := &store.User{
 			ID:      tid("a261-storeerr-user"),
-			Email:   "r3-storeerr@example.com",
+			Email:   "storeerr@example.com",
 			Role:    store.UserRoleMember,
 			Status:  store.UserStatusActive,
 			Created: time.Now(),
@@ -2835,6 +2835,17 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		assert.Contains(t, final.AppliedConfig.Task,
 			"Changes: template old-template-hash->new-template-hash, image old-image:v1->template-image:v2\n",
 			"the Changes: line must reflect the actual old->new diff, not a self-diff or swapped arguments")
+
+		// Amendment A26.5 O1: pin the by-construction property Amendment
+		// A26.4 O1 relies on directly, rather than only via a hard-coded
+		// expected string that a future reintroduced worker-side recompute
+		// could coincidentally still satisfy — decode the 202 body's own
+		// plan and assert the preamble's line is derived from that exact
+		// value.
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Contains(t, final.AppliedConfig.Task, reincarnationChangesLine(resp.Plan),
+			"the preamble's Changes: line must be exactly reincarnationChangesLine(<the 202 body's plan>)")
 	})
 
 	t.Run("unchanged: no Changes: line at all", func(t *testing.T) {
