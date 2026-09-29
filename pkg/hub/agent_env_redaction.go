@@ -36,8 +36,8 @@ import (
 //     cannot attach to the agent's container cannot read its live env
 //     either, so withholding the persisted copy from them removes a read
 //     path without removing any capability that didn't already exist
-//     (mirrors the attach/port-access carve-out in ownerAdminExcludedActions,
-//     capabilities.go).
+//     (mirrors attach and port access coming only from the owner/ancestor
+//     relationship to the agent, not from project roles).
 //   - canAttach == true: every key is returned except GITHUB_TOKEN, which is
 //     never included in a response regardless of viewer or classification --
 //     it is not a legitimate value to keep surfacing from the durable config

@@ -183,17 +183,8 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
-	// Project owner/admin short-circuit: full access on project and project-scoped
-	// resources. Mirrors the kernel evaluation so capability lists match what
-	// the user can actually do.
-	if user, ok := identity.(UserIdentity); ok {
-		if projectID := projectIDForResource(resource); projectID != "" {
-			if a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID) {
-				return a.projectOwnerAdminCapabilities(ctx, identity, resource, actions)
-			}
-		}
-	}
-
+	// Every action is answered by the common decision, so the capability
+	// list is exactly what the caller can do.
 	var allowed []string
 	for _, action := range actions {
 		decision := a.CheckAccess(ctx, identity, resource, action)
@@ -224,14 +215,6 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	}
 	if IsScopedUserIdentity(identity) {
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
-	}
-
-	// Project owner/admin short-circuit at scope level (e.g. agent:create
-	// inside a project the user owns).
-	if user, ok := identity.(UserIdentity); ok && scopeType == "project" && scopeID != "" {
-		if a.isProjectOwnerOrAdmin(ctx, user.ID(), scopeID) {
-			return allActions(actions)
-		}
 	}
 
 	var allowed []string
@@ -269,33 +252,8 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
-	// Per-batch project ownership cache. Most batches list resources from a
-	// single project, so this collapses to one lookup per project.
-	projectOwnerCache := map[string]bool{}
-	isProjectOwner := func(projectID string) bool {
-		if projectID == "" {
-			return false
-		}
-		user, ok := identity.(UserIdentity)
-		if !ok {
-			return false
-		}
-		if cached, ok := projectOwnerCache[projectID]; ok {
-			return cached
-		}
-		v := a.isProjectOwnerOrAdmin(ctx, user.ID(), projectID)
-		projectOwnerCache[projectID] = v
-		return v
-	}
-
 	caps := make([]*Capabilities, len(resources))
 	for i, resource := range resources {
-		// Project owner/admin short-circuit
-		if isProjectOwner(projectIDForResource(resource)) {
-			caps[i] = a.projectOwnerAdminCapabilities(ctx, identity, resource, actions)
-			continue
-		}
-
 		var allowed []string
 		for _, action := range actions {
 			decision := a.CheckAccess(ctx, identity, resource, action)
@@ -325,47 +283,6 @@ func (a *AuthzService) computeCapabilitiesWithContext(ctx context.Context, ident
 		}
 	}
 	return &Capabilities{Actions: allowed}
-}
-
-// allActions returns a Capabilities with all provided actions.
-// ownerAdminExcludedActions are actions the project owner/admin capability
-// short-circuit must not grant blindly. Agents run with their creator's
-// user-scoped secrets, so attach and port access to another member's agent
-// would expose that member's credentials (miller79/scion#88). The seeded
-// project-owner/project-admin roles do not carry these permissions; access is
-// resolved per resource from the resource-owner/ancestor relationship grants.
-var ownerAdminExcludedActions = map[Action]bool{
-	ActionAttach:     true,
-	ActionPortAccess: true,
-}
-
-// projectOwnerAdminCapabilities returns the capability set for a project
-// owner/admin: every action except those in ownerAdminExcludedActions, which
-// are included only when the user owns the resource or appears in its
-// ancestry. This is a local check (no CheckAccess/DB lookup per action) so
-// ComputeCapabilitiesBatch stays O(resources) for owners/admins.
-func (a *AuthzService) projectOwnerAdminCapabilities(ctx context.Context, identity Identity, resource Resource, actions []Action) *Capabilities {
-	strs := make([]string, 0, len(actions))
-	userID := ""
-	if u, ok := identity.(UserIdentity); ok {
-		userID = u.ID()
-	}
-	ownsOrAncestor := userID != "" && (resource.OwnerID == userID || canAccessAsAncestor(userID, resource))
-	for _, action := range actions {
-		if ownerAdminExcludedActions[action] && !ownsOrAncestor {
-			continue
-		}
-		strs = append(strs, string(action))
-	}
-	return &Capabilities{Actions: strs}
-}
-
-func allActions(actions []Action) *Capabilities {
-	strs := make([]string, len(actions))
-	for i, a := range actions {
-		strs[i] = string(a)
-	}
-	return &Capabilities{Actions: strs}
 }
 
 // capabilityAllows returns true when the capability set includes the action.
