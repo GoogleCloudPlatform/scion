@@ -61,7 +61,7 @@ func TestCheckForReleaseUpdates_UpdateAvailable(t *testing.T) {
 	// we need to test with a server that mirrors the expected URL structure.
 	//
 	// Instead, we test the internal logic by calling update.CheckForUpdate
-	// and resolveReleaseAssetURL separately (they are the two HTTP calls).
+	// and resolveReleaseAssets separately (they are the two HTTP calls).
 	// For an integration-style test, we'd need to inject the HTTP client.
 	//
 	// For unit testing, we verify the result struct is well-formed.
@@ -203,7 +203,7 @@ func TestCheckForReleaseUpdates_MockServer(t *testing.T) {
 	})
 }
 
-func TestResolveReleaseAssetURL(t *testing.T) {
+func TestResolveReleaseAssets(t *testing.T) {
 	t.Run("finds matching asset", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -222,7 +222,7 @@ func TestResolveReleaseAssetURL(t *testing.T) {
 		}))
 		defer server.Close()
 
-		// We can't directly test resolveReleaseAssetURL since it constructs
+		// We can't directly test resolveReleaseAssets since it constructs
 		// api.github.com URLs. Instead, verify it's called correctly in the
 		// integration path above.
 	})
