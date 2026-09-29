@@ -120,8 +120,16 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := decidePerm(authz, tc.identity, tc.resource, tc.action, tc.perm, false)
-			assert.Equal(t, tc.want, d.Allowed, "reason %q", d.Reason)
+			// Isolate the progeny relationship candidate itself, the same
+			// isolation level the retired pure-function test had. Full
+			// Decide is not used here: a global/core skill is separately
+			// allowed for any agent through the unrelated synthetic
+			// agent-skill-catalog kernel binding (ptone/scion#1968), which
+			// would otherwise mask what this grant does or does not admit.
+			out := authz.evaluateRelationshipCandidates(context.Background(),
+				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false)
+			got := out.accepted != nil && out.accepted.Allowed
+			assert.Equal(t, tc.want, got, "candidates: %+v", out.results)
 		})
 	}
 }

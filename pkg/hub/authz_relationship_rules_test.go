@@ -227,7 +227,10 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
 		}), Action("notify"), "agent.notify"},
-		"creator_user_skill": {RelationshipRuleCreatorUserSkill, skillResource(&store.Skill{
+		// ptone/scion#2128: personal skills are a progeny row too now
+		// (skillProgenyAdapter), sharing RelationshipRuleProgeny with the
+		// secret case below; kept as its own case for the skill shape.
+		"progeny_skill": {RelationshipRuleProgeny, skillResource(&store.Skill{
 			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
 		}), ActionRead, "skill.read"},
 		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead},
