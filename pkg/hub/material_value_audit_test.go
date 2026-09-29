@@ -840,6 +840,61 @@ func TestAgentListSecrets_ProjectDenialCarriesDetail(t *testing.T) {
 	}
 }
 
+// TestAgentListSecrets_LivenessErrorRecordsAuditItem covers the list's
+// per-row liveness-check-error branch: the row is skipped from the visible
+// list, but the request's MaterialSelectionEvent still records a
+// backend_error item for it, rather than leaving no audit trace of the
+// skipped row.
+func TestAgentListSecrets_LivenessErrorRecordsAuditItem(t *testing.T) {
+	f := newMaterialFixture(t, "list-liveness-error")
+	ctx := context.Background()
+
+	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name: "LIST_LIVENESS_ERROR_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "LIST_LIVENESS_ERROR_KEY",
+		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+	})
+	require.NoError(t, err)
+
+	// The whole-request precheck (check 5) already calls GetUser once for
+	// the root user and must succeed; only the per-row liveness check's own
+	// GetUser call, made after it, is made to fail.
+	f.Server.store = &materialFailingStore{
+		Store:                f.Store,
+		getUserErr:           errors.New("injected liveness lookup failure"),
+		getUserErrAfterCalls: 1,
+	}
+
+	auditor := newRecordingMaterialAuditor()
+	f.Server.SetAuditLogger(auditor)
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets?scope=user", nil, f.Token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp AgentListSecretsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if len(resp.Secrets) != 0 {
+		t.Fatalf("expected the row to be skipped from the list, got %+v", resp.Secrets)
+	}
+	if len(auditor.events) != 1 {
+		t.Fatalf("expected 1 material selection event, got %d", len(auditor.events))
+	}
+	e := auditor.events[0]
+	if len(e.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(e.Items))
+	}
+	item := e.Items[0]
+	if item.Reason != ReasonBackendError || item.Grant != GrantProgeny || item.Scope != store.ScopeUser {
+		t.Fatalf("expected a user-scope backend_error item, got %+v", item)
+	}
+	if item.Key != "LIST_LIVENESS_ERROR_KEY" {
+		t.Fatalf("expected the item to identify the skipped key, got %+v", item)
+	}
+	if item.Allowed {
+		t.Fatalf("expected the skipped item to not be marked allowed, got %+v", item)
+	}
+}
+
 // TestMaterialAudit_SeparatesActorTargetAndSource pins that the audit event
 // separates the actor, target agent, and sharing source, that
 // project items carry Grant=project_secret_read and user items carry

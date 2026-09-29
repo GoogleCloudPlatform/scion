@@ -127,7 +127,12 @@ func newFullAgentIdentity(agentID, projectID string, ancestry []string, scopes [
 type materialFailingStore struct {
 	store.Store
 
-	getUserErr                       error
+	getUserErr error
+	// getUserErrAfterCalls, if > 0, makes getUserErr apply starting with that
+	// call number (e.g. 1 lets the first GetUser call through and fails the
+	// second onward). 0 (the default) fails every call, as before.
+	getUserErrAfterCalls             int
+	getUserCalls                     int
 	listRoleBindingsForPrincipalErr  error
 	getDelegationEdgesForDelegateErr error
 	delegationEdgesOverride          []*store.DelegationEdge
@@ -142,7 +147,8 @@ func (f *materialFailingStore) ListProgenySecrets(ctx context.Context, ancestorI
 }
 
 func (f *materialFailingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if f.getUserErr != nil {
+	f.getUserCalls++
+	if f.getUserErr != nil && (f.getUserErrAfterCalls == 0 || f.getUserCalls > f.getUserErrAfterCalls) {
 		return nil, f.getUserErr
 	}
 	return f.Store.GetUser(ctx, id)

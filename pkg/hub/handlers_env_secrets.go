@@ -1520,9 +1520,15 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			if lerr != nil {
 				// A liveness-check error is not the same as "not shared":
 				// logged distinctly so an operator is not left to guess
-				// which one occurred.
+				// which one occurred, and recorded as a per-row item so the
+				// audit event shows the row was skipped rather than simply
+				// absent.
 				slog.Error("agent list secrets: progeny source liveness check failed",
 					"agent_id", agentID, "key", m.Name, "err", lerr)
+				items = append(items, materialSelectionItem(ItemResult{
+					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, Meta: m},
+					Reason:    ReasonBackendError,
+				}, "", ""))
 				continue
 			}
 			if !live {
