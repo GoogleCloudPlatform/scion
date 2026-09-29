@@ -332,3 +332,19 @@ func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
 func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
 	t.Skip("requires exact-permission progeny decision")
 }
+
+// TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies pins that
+// progenyEligibleSecretIDs returns an empty, non-nil set with no error for a
+// nil rec, rather than panicking when building the storedAgentIdentity.
+// facts.Agent is always non-nil at the one call site (materialRuntimePrecheck
+// denies before the agent record resolves), so this is a defensive guard
+// rather than a reachable production case.
+func TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies(t *testing.T) {
+	f := newMaterialFixture(t, "progeny-eligible-nil-rec")
+
+	ids, err := f.Server.progenyEligibleSecretIDs(context.Background(), nil)
+	require.NoError(t, err)
+	if len(ids) != 0 {
+		t.Fatalf("expected an empty set for a nil rec, got %v", ids)
+	}
+}

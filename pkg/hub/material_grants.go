@@ -117,11 +117,15 @@ func (s *Server) progenySourceLive(ctx context.Context, meta secret.SecretMeta) 
 
 // progenyEligibleSecretIDs makes one store.ListProgenySecrets call per
 // request and returns the set of secret IDs eligible for the agent's
-// ancestry. It applies the same preconditions as CheckProgenyAccess (stored,
-// hub-attested identity; non-empty ancestry; a non-nil store) and is used
-// only to filter metadata for agentListSecrets — by-key reads (check 8)
-// still call CheckProgenyAccess per item.
+// ancestry. It applies the same preconditions as CheckProgenyAccess (a
+// non-nil rec; stored, hub-attested identity; non-empty ancestry; a non-nil
+// store) and is used only to filter metadata for agentListSecrets — by-key
+// reads (check 8) still call CheckProgenyAccess per item. A nil rec denies
+// with an empty set rather than panicking; callers do not pass one today.
 func (s *Server) progenyEligibleSecretIDs(ctx context.Context, rec *store.Agent) (map[string]bool, error) {
+	if rec == nil {
+		return map[string]bool{}, nil
+	}
 	ident := &storedAgentIdentity{agent: rec}
 	if !AncestryIsHubAttested(ident) {
 		return map[string]bool{}, nil
