@@ -166,5 +166,5 @@ func CheckDrift(discovered map[OperationID][]DiscoveredEntryPoint) []DriftFindin
 }
 
 func (d DiscoveredEntryPoint) asEntryPoint() EntryPoint {
-	return EntryPoint{Kind: d.Kind, Pattern: d.Pattern, Method: d.Method}
+	return EntryPoint(d)
 }
