@@ -1675,6 +1675,29 @@ func TestCanMintSelector_ConstraintLoadErrorReturnsError(t *testing.T) {
 		require.ErrorIs(t, err, ErrProjectAccessDenied)
 		require.Nil(t, results)
 	})
+
+	t.Run("project_boundary_flat_role_descriptor", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		userID := tid("cms-cle-flat")
+		projectID := tid("cms-cle-flat-p")
+		createDelegateTestProject(t, s, projectID, "cms-cle-flat-p", "test")
+		// project-admin carries agent.delete, a permission with no
+		// MintEligibilityRegistry descriptor (flat-role default).
+		createTestUserWithProjectRole(t, s, userID, "cmscleflat@test.com", projectID, store.ProjectRoleAdmin)
+
+		failing := &r2FailingStore{Store: s, failListConstraints: errors.New("injected: constraint load failure")}
+		authz := NewAuthzService(failing, slog.Default())
+
+		// Mirrors TestCanMintSelector_ProjectBoundary_SuperAdminWithoutMembership_AdmittedButFlatIneligible's
+		// flat-descriptor selector: agent:delete has no MintEligibilityRegistry
+		// entry, so selectorMintEligible's default branch reaches
+		// hasProjectRoleFlatPermission -> projectScopedPermissionsStrict.
+		results, err := authz.CanMintSelector(ctx, activeUserPrincipal(userID), TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, []string{"agent:delete"})
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrProjectAccessDenied)
+		require.Nil(t, results)
+	})
 }
 
 // --- Full contradiction matrix ----------------------------------------------
