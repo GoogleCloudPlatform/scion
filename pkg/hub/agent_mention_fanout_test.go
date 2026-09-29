@@ -118,19 +118,27 @@ func TestMentionFanout_SelfMentionDoesNotConsumeRecipientCap(t *testing.T) {
 	}
 }
 
-// A nil Sender or SenderIdent must produce no results rather than panicking
-// on the unconditional field dereferences later in the function (e.g.
-// in.Sender.Slug). Every production call site always supplies both; this is
-// a defensive backstop against a future caller mistake.
+// A nil Sender must produce no results rather than panicking at its first
+// field dereference (in.Sender.Slug, in dropSelfMentionName). A nil
+// SenderIdent does not risk a panic — authorizeAgentMessage already treats a
+// nil identity as unauthorized and denies before any store work — but the
+// guard short-circuits it too, so the caller sees an empty result instead of
+// a per-mention "unauthorized" one. Every production call site always
+// supplies both; this is a defensive backstop against a future caller
+// mistake. Both subtests mention a real, resolvable agent (not an unknown
+// name) so that a guard which only checked in.Sender would still be caught
+// by the nil_sender_ident case: an unguarded nil SenderIdent would reach
+// authorizeAgentMessage and come back "unauthorized" for that agent, not an
+// empty result.
 func TestMentionFanout_NilSenderOrSenderIdentReturnsNoResults(t *testing.T) {
-	srv, _, _, sender, _, _, _, dispatcher := mentionFanoutSetup(t)
+	srv, _, _, sender, _, bystander, _, dispatcher := mentionFanoutSetup(t)
 
 	t.Run("nil_sender", func(t *testing.T) {
 		in := agentMentionFanoutInput{
 			Sender:      nil,
 			SenderIdent: GetAgentIdentityFromContext(agentCtx(context.Background(), sender)),
 			Type:        messages.TypeInstruction,
-			Msg:         "hey @somebody",
+			Msg:         "hey @" + bystander.Slug,
 		}
 		results := srv.fanOutAgentMentions(context.Background(), in)
 		require.Empty(t, results)
@@ -141,13 +149,13 @@ func TestMentionFanout_NilSenderOrSenderIdentReturnsNoResults(t *testing.T) {
 			Sender:      sender,
 			SenderIdent: nil,
 			Type:        messages.TypeInstruction,
-			Msg:         "hey @somebody",
+			Msg:         "hey @" + bystander.Slug,
 		}
 		results := srv.fanOutAgentMentions(context.Background(), in)
-		require.Empty(t, results)
+		require.Empty(t, results, "a nil SenderIdent must produce an empty result, not a per-mention unauthorized one")
 	})
 
-	require.Empty(t, dispatchesTo(dispatcher, sender.ID), "sanity: neither case should have dispatched anything")
+	require.Empty(t, dispatchesTo(dispatcher, bystander.ID), "neither case should have dispatched to the mentioned agent")
 }
 
 // Only a deliberate, human-authored-shaped send triggers fan-out; every

@@ -148,9 +148,13 @@ type agentMentionFanoutInput struct {
 // is bounded well under a typical client's own request timeout.
 func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutInput) []messages.MentionResult {
 	// Every production call site always supplies both; this guard is a
-	// cheap defensive backstop against a future caller mistake rather than
-	// a documented input contract, since in.Sender.Slug and in.SenderIdent
-	// are dereferenced unconditionally below.
+	// cheap defensive backstop against a future caller mistake, not a
+	// documented input contract. A nil in.Sender would panic below, at its
+	// first field dereference (.Slug). A nil in.SenderIdent would not panic
+	// — authorizeAgentMessage already treats a nil identity as unauthorized
+	// and denies before any store work — but short-circuiting it here too
+	// keeps this function's contract for the two fields symmetric and
+	// avoids that per-mention "unauthorized" round trip.
 	if in.Sender == nil || in.SenderIdent == nil {
 		return nil
 	}
