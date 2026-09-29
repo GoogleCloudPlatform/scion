@@ -162,20 +162,9 @@ const (
 // core/src/client.rs at tag rust-v0.158.0 (commit
 // 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex,
 // which is what @openai/codex resolves to on npm as of this writing --
-// harnesses/codex/Dockerfile does not pin a version), and against a local
-// capture: @openai/codex@0.158.0 pointed at a local mock Responses-API
-// server and a local OTLP/HTTP+JSON log sink, no network calls and no real
-// API key. The capture confirmed the exact record shape this rule and its
-// fixture depend on -- the tracing-appender callsite EventName (C1), the
-// real "codex_otel.log_only" scope name, the per-frame duration_ms marker
-// (H1), and the value-type split between the %-formatted fields
-// (stringValue) and the bare i64 fields (intValue) -- for every
-// successful-response record in testdata/usage/codex-0.158.0.pb.json; see
-// loadCodexUsageFixture. The one record the capture could not reach is
-// see_event_completed_failed (H2): the mock forced an HTTP 500 at the
-// request level, which surfaces as a codex.api_request failure (captured
-// and real, just a different event), not a mid-stream SSE error, so that
-// one record stays source-derived, cited above.
+// harnesses/codex/Dockerfile does not pin a version). See
+// loadCodexUsageFixture in usage_codex_test.go for the fixture's capture
+// provenance.
 //
 // Three distinct emitters share event.name=codex.sse_event and
 // event.kind=response.completed, and this rule must tell them apart
@@ -200,10 +189,10 @@ const (
 //     and no token fields, and -- like sse_event_completed -- no
 //     duration_ms.
 //
-// So duration_ms presence is the frame-vs-completion discriminator (H1),
-// and error.message presence (only ever set by the failed-request arm)
-// distinguishes a failed response from a successful, token-bearing one
-// (H2), mirroring the Claude rule's api_request/api_error split.
+// So duration_ms presence is the frame-vs-completion discriminator, and
+// error.message presence (only ever set by the failed-request arm)
+// distinguishes a failed response from a successful, token-bearing one,
+// mirroring the Claude rule's api_request/api_error split.
 //
 // Token mapping (design §5, §3.2), for the success case only: input =
 // input_token_count − cached_token_count (Codex reports input_token_count
@@ -228,12 +217,12 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 	// The per-SSE-frame marker record (sse_event()): never a completion,
 	// never has tokens. Excluding it here, rather than requiring token
 	// fields to be present below, keeps a malformed *and* a legitimately
-	// zero-token completion both matching and countable as one call (H1).
+	// zero-token completion both matching and countable as one call.
 	if logAttrPresent(record.Attributes, "duration_ms") {
 		return usageIncrement{}, false, nil
 	}
 
-	// see_event_completed_failed: a failed request (H2). Mirrors the
+	// see_event_completed_failed: a failed request. Mirrors the
 	// Claude rule's api_error arm -- Calls=1, Status=error, no tokens, and
 	// not malformed (a parse-able error is not a malformed event).
 	if logAttrPresent(record.Attributes, "error.message") {

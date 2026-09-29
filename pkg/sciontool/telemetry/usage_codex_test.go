@@ -25,48 +25,43 @@ import (
 
 const codexUsageFixturePath = "testdata/usage/codex-0.158.0.pb.json"
 
-// loadCodexUsageFixture loads a codex 0.158.0 payload. Three of its four
-// records (the delta frame, the per-frame response.completed marker, and
-// the token-bearing completion) are a scrubbed local capture: npm-installed
-// @openai/codex@0.158.0, run as `codex exec` against a local mock
-// Responses-API server (a tiny Python HTTP server streaming a fixed SSE
-// sequence) and a local OTLP/HTTP+JSON log sink -- no network calls, no
-// real API key, no Anthropic/OpenAI credentials. Scrubbed: conversation.id
-// and host.name are replaced with placeholders; model/slug are replaced
-// with a realistic value (the capture used a placeholder mock model name);
-// originator is normalized from the capture's "codex_exec" (the `codex
-// exec` subcommand) to "codex_cli_rs" (interactive mode, what
-// harnesses/codex's provision.py actually launches, per
-// harnesses/authoring-guide.md's "always configure interactive/REPL mode"
-// requirement) since the two subcommands' originator differs and
-// interactive is what production runs. Every other attribute key, value
-// type (stringValue vs intValue) and the scope name are exactly what the
-// capture produced.
+// loadCodexUsageFixture loads a codex 0.158.0 payload. All four records are
+// a scrubbed local capture: npm-installed @openai/codex@0.158.0, run as
+// `codex exec` against a local mock Responses-API server (a tiny Python
+// HTTP server streaming a fixed SSE sequence) and a local OTLP/HTTP+JSON
+// log sink -- no network calls, no real API key, no Anthropic/OpenAI
+// credentials. The fourth record (the failed-response event,
+// see_event_completed_failed) came from a second run of the same mock,
+// configured to end the SSE body without a response.completed frame, which
+// drives the same failed-request code path as a real mid-stream
+// disconnect; codex retries stream errors, so the fixture keeps only one
+// of the resulting records.
 //
-// The fourth record (the failed-response event, see_event_completed_failed)
-// is not captured: the capture's induced failure (a mock HTTP 500) surfaces
-// as a codex.api_request failure, not a mid-stream SSE error, so it never
-// reached that code path within the time available. That record stays
-// source-derived, pinned to codex-rs/otel/src/events/session_telemetry.rs
-// and core/src/client.rs at tag rust-v0.158.0 (github.com/openai/codex,
-// commit 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff), which is also what
-// @openai/codex resolves to on npm as of this writing (harnesses/codex's
-// Dockerfile does not pin a version); its error.message text is a real
-// string from a sibling SSE-error arm in the same source file
-// (sse_event_failed's idle-timeout case), used as a realistic placeholder
-// since see_event_completed_failed's own text depends on the runtime
-// CodexErr Display implementation, which the capture didn't exercise.
+// Scrubbed: conversation.id and host.name are replaced with placeholders;
+// model/slug are replaced with a realistic value (the capture used a
+// placeholder mock model name); originator is normalized from the
+// capture's "codex_exec" (the `codex exec` subcommand) to "codex_cli_rs"
+// (interactive mode, what harnesses/codex's provision.py actually
+// launches, per harnesses/authoring-guide.md's "always configure
+// interactive/REPL mode" requirement) since the two subcommands'
+// originator differs and interactive is what production runs. The token
+// counts are the mock server's configured usage block, not a real model's
+// output. The fixture is also a *subset* of what the capture produced: a
+// response.created frame and a response.output_item.done frame were
+// emitted too but are omitted here, since the rule ignores every
+// event.kind other than the two included ones. Every other attribute key,
+// value type (stringValue vs intValue), the scope name, and (for the
+// failure record) the error.message text are exactly what the capture
+// produced.
 //
 // See codexUsageRule's doc comment for which emitter each record models
-// and why, and project-log/ut-dev-7.md's round 1 fixes section for the
-// full capture attempt. Every record's LogRecord.EventName is the literal
+// and why. Every record's LogRecord.EventName is the literal
 // tracing-appender callsite string for its emitting
 // log_event!/log_and_trace_event! call ("event
-// otel/src/events/session_telemetry.rs:<line>"), confirmed by the capture
-// -- round 1 review found the original fixture omitted this, which is
-// exactly what let a real codex batch get rejected by
-// normalizedLogEventName (see the policy.go changes alongside this file
-// for the fix).
+// otel/src/events/session_telemetry.rs:<line>"), confirmed by the capture:
+// without recognizing this shape, normalizedLogEventName treats it as
+// conflicting with the record's real event.name attribute and rejects the
+// whole batch (see the policy.go changes alongside this file).
 func loadCodexUsageFixture(t *testing.T) []*logspb.ResourceLogs {
 	t.Helper()
 	data, err := os.ReadFile(codexUsageFixturePath)
@@ -135,14 +130,14 @@ func codexFixtureRecordByEventNameAndKind(t *testing.T, name, kind string) *logs
 
 // codexFixtureSseEventCallsite is the shared tracing-appender callsite
 // EventName for sse_event()'s two records: the plain delta frame and the
-// per-frame response.completed marker (H1). Real codex would emit this
+// per-frame response.completed marker. Real codex would emit this
 // identical EventName for both, since they come from the same source line;
 // event.kind is what distinguishes them.
 const codexFixtureSseEventCallsite = "event otel/src/events/session_telemetry.rs:1039"
 
 const (
 	codexFixtureCompletedEventName = "event otel/src/events/session_telemetry.rs:1103" // sse_event_completed(), the real usage event
-	codexFixtureFailedEventName    = "event otel/src/events/session_telemetry.rs:1090" // see_event_completed_failed(), H2
+	codexFixtureFailedEventName    = "event otel/src/events/session_telemetry.rs:1090" // see_event_completed_failed(), the failed-request event
 )
 
 func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
@@ -184,7 +179,7 @@ func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleExcludesPerFrameMarker pins H1: sse_event() emits a
+// TestCodexUsageRuleExcludesPerFrameMarker pins: sse_event() emits a
 // record with the same event.name/event.kind as sse_event_completed for
 // every SSE frame, including a plain "response.completed" frame with no
 // usage attached yet. Matching it as a second, zero-token call would
@@ -197,7 +192,7 @@ func TestCodexUsageRuleExcludesPerFrameMarker(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleMapsFailedResponseToError pins H2:
+// TestCodexUsageRuleMapsFailedResponseToError pins:
 // see_event_completed_failed reports a failed request (a transport or API
 // error client.rs's map_api_error produced), mirroring the Claude rule's
 // api_error arm -- Calls=1, Status=error, no tokens, and not malformed (a
@@ -219,6 +214,24 @@ func TestCodexUsageRuleMapsFailedResponseToError(t *testing.T) {
 	}
 }
 
+// TestCodexUsageRuleExcludesPerFrameFailureMarker pins the check ordering:
+// sse_event_failed (the per-frame sibling of see_event_completed_failed)
+// can also carry event.kind=response.completed and error.message, but it
+// always carries duration_ms too. The duration_ms exclusion must run
+// before the error.message check, so this record is excluded outright
+// rather than counted as a failed call.
+func TestCodexUsageRuleExcludesPerFrameFailureMarker(t *testing.T) {
+	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventName}}},
+		{Key: "event.kind", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventKind}}},
+		{Key: "duration_ms", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "1200"}}},
+		{Key: "error.message", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "idle timeout waiting for SSE"}}},
+	}}
+	if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
+		t.Errorf("per-frame failure marker (duration_ms + error.message): matched=%v err=%v, want matched=false err=nil", matched, err)
+	}
+}
+
 func TestCodexUsageRuleIgnoresUnrelatedEvents(t *testing.T) {
 	record := codexFixtureRecordByEventNameAndKind(t, codexFixtureSseEventCallsite, "response.output_text.delta")
 	if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
@@ -226,7 +239,7 @@ func TestCodexUsageRuleIgnoresUnrelatedEvents(t *testing.T) {
 	}
 }
 
-// TestCodexUsageRuleScopeIsNotReliedOn pins M1: the rule does not gate on
+// TestCodexUsageRuleScopeIsNotReliedOn pins: the rule does not gate on
 // instrumentation scope (unlike Claude's, which does). An arbitrary,
 // non-empty scope name must not stop a real match.
 func TestCodexUsageRuleScopeIsNotReliedOn(t *testing.T) {
@@ -370,21 +383,20 @@ func TestNewUsageDeriverBuildsCodexRuleForCodexHarness(t *testing.T) {
 	}
 }
 
-// TestPipelineDerivesCodexUsageThroughValidation is round 1's C1/H1/H2/L1
-// regression test. On 624b7ff, every real codex record's LogRecord.EventName
-// (the tracing-appender callsite default) conflicted with its event.name
-// attribute, so validateLogs rejected the whole batch with "conflicting
-// event name representations" before the deriver ever ran (C1) -- this
-// fixture, with realistic EventName values, fails exactly that way without
-// the policy.go fix alongside this test. It also posts a full, realistic
-// response sequence (a delta frame, the per-frame response.completed
-// marker, and the token-bearing completion) plus one failed response, and
-// asserts the resulting canonical counters and point label keys end to end
-// (handleLogs -> validateLogs -> the deriver -> the loopback metrics path
-// -> metricStreams -> the GCP exporter), the same shape as
-// TestPipelineDerivesClaudeUsageEndToEnd but without that test's golden-file
-// and replay-dedup assertions, which are harness-agnostic and already
-// covered there.
+// TestPipelineDerivesCodexUsageThroughValidation is an end-to-end
+// regression test: without the tracing-appender callsite-EventName
+// exemption in normalizedLogEventName, validateLogs rejects this fixture's
+// batch outright with "conflicting event name representations" before the
+// deriver ever runs, since every record's LogRecord.EventName (the
+// tracing-appender callsite default) conflicts with its event.name
+// attribute. It posts a full, realistic response sequence (a delta frame,
+// the per-frame response.completed marker, and the token-bearing
+// completion) plus one failed response, and asserts the resulting
+// canonical counters and point label keys end to end (handleLogs ->
+// validateLogs -> the deriver -> the loopback metrics path -> metricStreams
+// -> the GCP exporter), the same shape as TestPipelineDerivesClaudeUsageEndToEnd
+// but without that test's golden-file and replay-dedup assertions, which
+// are harness-agnostic and already covered there.
 func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "agent-codex-pipeline-1")
 	t.Setenv("SCION_AGENT_SLUG", "codex-agent-slug")
@@ -423,8 +435,8 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 		// dropped by the filter and handleLogs returns before attempting a
 		// (here unconfigured) raw-log export. The derived usage metrics,
 		// which run before the filter (design §3.3, AC-1.4), must still
-		// appear -- this is also the pre-filter-derivation guarantee C1's
-		// fix must not break.
+		// appear -- this is also the pre-filter-derivation guarantee the
+		// callsite-EventName exemption must not break.
 		Filter: FilterConfig{Include: []string{"nonexistent_event"}},
 	}
 	p := NewWithConfig(cfg)
@@ -448,9 +460,9 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	p.usageDeriver.Store(deriver)
 	defer func() { _ = deriver.Shutdown(context.Background()) }()
 
-	// C1: on 624b7ff this returns the InvalidArgument "conflicting event
-	// name representations" policy-rejection error, and nothing below ever
-	// runs.
+	// Without the callsite-EventName exemption, this returns the
+	// InvalidArgument "conflicting event name representations"
+	// policy-rejection error, and nothing below ever runs.
 	if err := p.handleLogs(context.Background(), loadCodexUsageFixture(t)); err != nil {
 		t.Fatalf("handleLogs rejected a realistic codex fixture: %v", err)
 	}
@@ -460,12 +472,12 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	}
 
 	diag := p.UsageDiagnostics()
-	// H1: the delta frame and the per-frame response.completed marker must
-	// not add a second call for the one successful response -- Derived
-	// counts one increment per matched record, so this is 2 (one success,
-	// one error), not 3 or 4.
+	// The delta frame and the per-frame response.completed marker must not
+	// add a second call for the one successful response -- Derived counts
+	// one increment per matched record, so this is 2 (one success, one
+	// error), not 3 or 4.
 	if diag.Derived != 2 || diag.Malformed != 0 {
-		t.Fatalf("diagnostics = %+v, want Derived=2 Malformed=0 (H1: no per-frame double count)", diag)
+		t.Fatalf("diagnostics = %+v, want Derived=2 Malformed=0 (no per-frame double count)", diag)
 	}
 
 	series := allCapturedSeries(capture)
@@ -479,9 +491,9 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 		}
 	}
 
-	// H1 (call count) and H2 (error status): exactly one success call and
-	// one error call, not two successes (which is what 624b7ff's
-	// double-count and mis-mapped-error bugs would have produced together).
+	// Exactly one success call and one error call, not two successes
+	// (which is what a per-frame double count plus a mis-mapped error
+	// status would produce together).
 	if len(calls) != 2 {
 		t.Fatalf("gen_ai.api.calls series = %d, want 2 (success, error)", len(calls))
 	}
@@ -497,9 +509,9 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 		t.Fatalf("calls by status = %+v, want success=1 error=1", byStatus)
 	}
 
-	// L1: assert the exported scion.usage.tokens point label keys are
-	// exactly {harness, model, token_type} plus the exporter-stamped
-	// canonical identity labels -- nothing else (design §3.2).
+	// Assert the exported scion.usage.tokens point label keys are exactly
+	// {harness, model, token_type} plus the exporter-stamped canonical
+	// identity labels -- nothing else (design §3.2).
 	wantTokens := map[string]int64{
 		telemetrycontract.TokenTypeInput:     3000,
 		telemetrycontract.TokenTypeOutput:    842,

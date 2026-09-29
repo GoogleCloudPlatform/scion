@@ -11,7 +11,7 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
-// These tests pin round 1 review's C1 fix (ptone/scion#2053 phase 3c):
+// These tests pin the callsite-default EventName exemption:
 // opentelemetry-appender-tracing unconditionally sets LogRecord.EventName
 // to the tracing callsite string ("event <file>:<line>") for a Rust
 // tracing::event! with no explicit name: field, and codex-rs's
@@ -57,7 +57,7 @@ func TestNormalizedLogEventName_StillRejectsARealConflict(t *testing.T) {
 }
 
 // TestNormalizedLogEventName_CallsiteDefaultAloneIsUnchanged is the no-op
-// case the brief calls out: a callsite-default-shaped EventName with no
+// case: a callsite-default-shaped EventName with no
 // event-name attribute at all has nothing to prefer over it, so it still
 // participates as the (only) event name -- exactly today's behavior,
 // unaffected by this fix. A record whose only "event name" is this kind of

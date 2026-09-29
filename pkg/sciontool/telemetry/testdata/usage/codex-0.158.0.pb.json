@@ -312,7 +312,7 @@
                 {
                   "key":  "error.message",
                   "value":  {
-                    "stringValue":  "idle timeout waiting for SSE"
+                    "stringValue":  "stream disconnected before completion: stream closed before response.completed"
                   }
                 },
                 {
