@@ -2182,17 +2182,6 @@ func resolveIsSharedGitWorkspace() bool {
 // generous headroom with no legitimate case anywhere near it.
 const gitconfigMaxBytes = 1 << 20
 
-// scionPrivateTmpDir is the private, root-owned scratch directory
-// resolvePrivateGitConfigDir self-heals onto when it has to create one: a
-// standard FHS location present and root-owned on every Linux container
-// image this repository ships. A package var, not a const, so a test can
-// point it at a temp location without touching the real "/run/scion/tmp".
-var scionPrivateTmpDir = "/run/scion/tmp"
-
-// scionPrivateTmpDirMode is the mode scionPrivateTmpDir is created and kept
-// at: root-only, no group/other access.
-const scionPrivateTmpDirMode = 0o700
-
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
 // (git-workspace hybrid) projects. The workspace is a pre-cloned git repo shared
 // by all agents; each agent gets its own credential helper in $HOME/.gitconfig
@@ -2356,7 +2345,7 @@ func resolvePrivateGitConfigDir(rootless bool) (string, error) {
 		return os.MkdirTemp("", "scion-gitconfig-*")
 	}
 
-	// A real root PID 1: nothing has necessarily created scionPrivateTmpDir's
+	// A real root PID 1: nothing has necessarily created hooks.PrivateRootTmpDir's
 	// parent here. Self-heal onto a hardened location:
 	// EnsureDirNoFollowRootOwned already verifies "/run" itself is
 	// root-owned and not group/other-writable before creating anything
@@ -2365,12 +2354,12 @@ func resolvePrivateGitConfigDir(rootless bool) (string, error) {
 	// "/run". "/run" is a standard FHS directory present and root-owned on
 	// every Linux container image this repository ships, so this succeeds
 	// in the overwhelming majority of real deployments.
-	parent := filepath.Dir(scionPrivateTmpDir)
-	if pf, perr := dirfd.EnsureDirNoFollowRootOwned(parent, scionPrivateTmpDirMode); perr == nil {
+	parent := filepath.Dir(hooks.PrivateRootTmpDir)
+	if pf, perr := dirfd.EnsureDirNoFollowRootOwned(parent, hooks.PrivateRootTmpDirMode); perr == nil {
 		_ = pf.Close()
-		if f, err := dirfd.EnsureDirNoFollowRootOwned(scionPrivateTmpDir, scionPrivateTmpDirMode); err == nil {
+		if f, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode); err == nil {
 			_ = f.Close()
-			if dir, err := os.MkdirTemp(scionPrivateTmpDir, "gitconfig-*"); err == nil {
+			if dir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*"); err == nil {
 				return dir, nil
 			}
 		}
@@ -2388,7 +2377,7 @@ func resolvePrivateGitConfigDir(rootless bool) (string, error) {
 	base := os.TempDir()
 	if !dirfd.AmbientTempDirTrusted(base) {
 		return "", fmt.Errorf("neither %s nor the ambient temp directory %s are a verified root-owned (or sticky) location",
-			scionPrivateTmpDir, base)
+			hooks.PrivateRootTmpDir, base)
 	}
 	return os.MkdirTemp("", "scion-gitconfig-*")
 }

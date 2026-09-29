@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -2887,22 +2888,22 @@ func newTrustedPrivateTmpParent(t *testing.T) string {
 }
 
 // TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile
-// proves a race cannot disclose an arbitrary file: the private
-// directory configureSharedWorkspaceGit stages a rewritten gitconfig in
-// used to be os.MkdirTemp("", ...) — a location a concurrent workload-uid
-// process can freely write to. A racer goroutine watches that same
-// directory, and the instant it sees an entry whose name mentions
-// "gitconfig" appear, renames it away and plants a symlink pointing at an
-// attacker-controlled directory. In fact, TMPDIR has no
-// bearing at all on where the private directory is created — it is
-// anchored under scionPrivateTmpDir instead — so nothing bearing the name
-// "gitconfig" ever appears under the directory this racer watches.
+// proves a race cannot disclose an arbitrary file: the private directory
+// configureSharedWorkspaceGit stages a rewritten gitconfig in is anchored
+// under hooks.PrivateRootTmpDir, not os.MkdirTemp("", ...) — so TMPDIR has
+// no bearing at all on where the private directory is created, and nothing
+// bearing the name "gitconfig" ever appears under a location a concurrent
+// workload-uid process can freely write to. A racer goroutine watches that
+// same directory, and if it ever saw an entry whose name mentions
+// "gitconfig" appear, it would rename it away and plant a symlink pointing
+// at an attacker-controlled directory — but nothing bearing that name ever
+// appears there for it to catch.
 func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *testing.T) {
 	agentHome := t.TempDir()
 
-	origDir := scionPrivateTmpDir
-	scionPrivateTmpDir = filepath.Join(newTrustedPrivateTmpParent(t), "scion", "tmp")
-	t.Cleanup(func() { scionPrivateTmpDir = origDir })
+	origDir := hooks.PrivateRootTmpDir
+	hooks.PrivateRootTmpDir = filepath.Join(newTrustedPrivateTmpParent(t), "scion", "tmp")
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
 
 	racerParent := t.TempDir()
 	t.Setenv("TMPDIR", racerParent)
@@ -2980,7 +2981,7 @@ func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *te
 
 // TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed proves
 // dirfd.EnsureDirNoFollowRootOwned's chain check is what actually runs, not
-// a check that always happens to pass: pointing scionPrivateTmpDir directly
+// a check that always happens to pass: pointing hooks.PrivateRootTmpDir directly
 // at a directory that already EXISTS but is group/other-writable must
 // refuse that leaf. With the ambient fallback ALSO made untrusted (so this
 // test isolates the bad-mode leaf refusal specifically, rather than
@@ -2990,8 +2991,8 @@ func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *te
 // all. badDir sits under a trusted, self-owned chain (see
 // newTrustedPrivateTmpParent) so only badDir's own leaf mode is under test.
 func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) {
-	origDir := scionPrivateTmpDir
-	t.Cleanup(func() { scionPrivateTmpDir = origDir })
+	origDir := hooks.PrivateRootTmpDir
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
 
 	trustedParent := newTrustedPrivateTmpParent(t)
 	badDir := filepath.Join(trustedParent, "scion", "tmp")
@@ -3006,7 +3007,7 @@ func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) 
 	if err := os.Chmod(badDir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	scionPrivateTmpDir = badDir
+	hooks.PrivateRootTmpDir = badDir
 
 	untrustedTmp := t.TempDir()
 	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
@@ -3024,15 +3025,15 @@ func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) 
 
 // TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion is the
 // required regression test for the bug that would make this function
-// silently install nothing whenever scionPrivateTmpDir's parent ("/run/
+// silently install nothing whenever hooks.PrivateRootTmpDir's parent ("/run/
 // scion") doesn't already exist and this process cannot create it (e.g.
 // non-root on the real filesystem): configureSharedWorkspaceGit must still
 // install a .gitconfig — falling back to the checked ambient temp directory
 // — instead of returning having silently done nothing.
 func TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion(t *testing.T) {
-	orig := scionPrivateTmpDir
-	scionPrivateTmpDir = "/run/scion/tmp"
-	t.Cleanup(func() { scionPrivateTmpDir = orig })
+	orig := hooks.PrivateRootTmpDir
+	hooks.PrivateRootTmpDir = "/run/scion/tmp"
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
 
 	if !dirfd.AmbientTempDirTrusted(os.TempDir()) {
 		t.Skip("this environment's ambient temp directory is not sticky/root-owned; the checked fallback is expected to refuse here too, by design")
@@ -3053,11 +3054,11 @@ func TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion(t *testi
 // TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly proves
 // the rootless branch (no separate root/workload identity exists to
 // protect against at all) installs a gitconfig via the plain, historical
-// ambient temp directory without ever attempting scionPrivateTmpDir.
+// ambient temp directory without ever attempting hooks.PrivateRootTmpDir.
 func TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly(t *testing.T) {
-	orig := scionPrivateTmpDir
-	scionPrivateTmpDir = filepath.Join(t.TempDir(), "nonexistent-parent", "run", "scion", "tmp")
-	t.Cleanup(func() { scionPrivateTmpDir = orig })
+	orig := hooks.PrivateRootTmpDir
+	hooks.PrivateRootTmpDir = filepath.Join(t.TempDir(), "nonexistent-parent", "run", "scion", "tmp")
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
 
 	// Make the ambient temp directory itself untrusted (world-writable, no
 	// sticky bit) for the duration of this test: if the rootless flag were
@@ -3080,15 +3081,15 @@ func TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly(t *testi
 
 // TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted
 // proves resolvePrivateGitConfigDir's non-rootless branch never falls open:
-// with scionPrivateTmpDir's self-heal attempt pointed somewhere this
+// with hooks.PrivateRootTmpDir's self-heal attempt pointed somewhere this
 // process cannot create AND the ambient temp directory itself untrusted,
 // no .gitconfig may be installed at all — there is no third, unverified
 // fallback.
 func TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted(t *testing.T) {
-	orig := scionPrivateTmpDir
+	orig := hooks.PrivateRootTmpDir
 	// A path this non-root test process cannot create any part of.
-	scionPrivateTmpDir = "/run-nonexistent-for-test/scion/tmp"
-	t.Cleanup(func() { scionPrivateTmpDir = orig })
+	hooks.PrivateRootTmpDir = "/run-nonexistent-for-test/scion/tmp"
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
 
 	untrustedTmp := t.TempDir()
 	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
