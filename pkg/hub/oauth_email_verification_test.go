@@ -26,7 +26,7 @@ import (
 // Regression coverage: Google and GitHub web-login userinfo must require a
 // provider-verified email before that email is usable for account
 // association, matching OIDC's existing behavior. roundTripFunc and
-// httpJSONResponse are defined in handlers_auth_test.go (same package).
+// httpJSONResponse are defined in roundtrip_helpers_test.go (same package).
 // ---------------------------------------------------------------------------
 
 func TestOAuthService_GetGoogleUserInfo_VerifiedEmail_Accepted(t *testing.T) {
