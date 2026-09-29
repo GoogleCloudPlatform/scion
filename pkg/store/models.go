@@ -1108,6 +1108,13 @@ const (
 // a genuine, differently-reasoned delivery failure. Both sites must use this
 // single constant — two independent literals can drift, silently breaking
 // the backfill's ability to find and repair swept rows.
+//
+// Do not change this value. Production messages.dispatch_failure_reason rows
+// already carry this exact string, written before this constant existed;
+// changing it would silently strand those rows outside the backfill's exact-
+// match predicate. Pinned by TestMessageExpiredStuckPendingReason_Value in
+// pkg/store/models_test.go — if this literal ever needs to change, that
+// change must ship together with a data migration for existing rows.
 const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
 
 // =============================================================================
