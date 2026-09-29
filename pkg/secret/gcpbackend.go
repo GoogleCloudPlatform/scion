@@ -1063,7 +1063,7 @@ func (b *GCPBackend) canDeleteLegacyName(ctx context.Context, name, scope, scope
 	// no-ref record never reaches this line, since its legacy read above
 	// returned NotFound.
 	if hasRecord && !refIsPrefixed {
-		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef is not yet repaired to the prefixed name %s — call RepairRefToPrefixed first", legacyFull, prefixedName)
+		return false, fmt.Errorf("refusing to delete legacy secret %s: its DB record's SecretRef does not yet designate the prefixed name %s; run migrate-names without --delete-legacy first, or inspect the record directly if it is reported as ORPHAN", legacyFull, prefixedName)
 	}
 
 	if hasRecord && refIsPrefixed {
@@ -1179,28 +1179,38 @@ const (
 // WARN, ptone/scion#2152 round-5 review finding 2) instead of retried, up to
 // maxPlanOrRepairRefAttempts times for every other case.
 //
-// What this does and does not guarantee, precisely: any concurrent write
-// that is visible in the DB row (a changed SecretRef, or a changed Version
-// from any UpsertSecret — including a same-ref old-binary rotation) by the
-// time of the recheck or the CAS is detected, and the ref is never
-// repointed onto a value this attempt didn't itself confirm — the ref-CAS
-// failing IS that detection and is never silent (see ErrConflictingWrite
-// above). What is NOT prevented, and IS silent at the GCP SM layer itself
-// (ptone/scion#2152 round-5 review finding 2 — round-3/4 understated this as
-// "brief"): GCP Secret Manager has no compare-and-swap on AddSecretVersion,
-// so if a concurrent writer's own AddSecretVersion to the *prefixed* name
-// lands at any point before this attempt's AddSecretVersion call — even
-// before this attempt's very first read — this attempt's (now-stale) value
-// can still become the prefixed name's latest version, silently, at the GCP
-// SM layer, regardless of what the DB-level CAS above does afterward. The
-// DB-level detection still fires in that case (this is exactly when
-// ErrConflictingWrite is returned instead of silently retrying), so the
-// operator IS told to verify or re-set the secret — but the stale GCP SM
-// value itself is not automatically corrected, and persists until the key
-// is next written. In this codebase only a new-binary Set() writes the
-// prefixed name directly, so this interleaving requires exactly that kind of
-// concurrent write; see .design/secret-id-hub-refactor.md #7 for the full
-// statement.
+// What this does and does not guarantee, precisely (ptone/scion#2152 round-6
+// review findings 1 and 2 — round 5 overclaimed this as a single, uniform
+// guarantee, and never actually updated .design/secret-id-hub-refactor.md §7
+// to say so): whether a concurrent writer's own AddSecretVersion to the
+// *prefixed* name (GCP Secret Manager has no compare-and-swap on which
+// version becomes latest) is caught depends entirely on when that writer's
+// own DB upsert lands relative to THIS attempt's recheck and CAS above, not
+// on when its GCP write landed:
+//   - If the concurrent writer's DB upsert lands between this attempt's
+//     recheck and its CAS (or is otherwise visible in the DB row at CAS
+//     time), the CAS's version predicate fails to match, applied=false, and
+//     — if this attempt had already written a version to the prefixed name —
+//     that is reported as ErrConflictingWrite (logged at WARN) rather than
+//     silently retried. This is the case ErrConflictingWrite exists for.
+//   - If the concurrent writer's DB upsert lands AFTER this attempt's CAS
+//     has already applied, nothing detects it: the CAS already succeeded
+//     against the (now stale) values this attempt read, no recheck or CAS
+//     runs again, and this attempt's stale value can be left as the
+//     prefixed name's latest version — silently, with no error and no log —
+//     until the key is next written. This is not "brief": nothing about
+//     this design repairs it on its own, and it persists indefinitely until
+//     some other write touches the same key. TestSPREV6_
+//     SetUpsertAfterCASIsUndetectedLostUpdate pins this exact interleaving.
+//
+// In this codebase only a new-binary Set() writes the prefixed name
+// directly, so either interleaving requires a concurrent Set() (or another
+// replica's boot copy-forward) racing with this call on the same key; see
+// .design/secret-id-hub-refactor.md §7 for the same statement in operator
+// terms, including what to do about it (re-set the secret directly —
+// re-running migrate-names does not detect or repair either case, since by
+// then the ref already matches whatever this attempt or the concurrent
+// writer left behind).
 //
 // Returns:
 //   - ("", nil) if there is nothing to do: no DB record, the ref already

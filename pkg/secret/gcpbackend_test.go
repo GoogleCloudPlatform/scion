@@ -2731,3 +2731,240 @@ func TestSPREV5_CopyHubSecretForward_ReportsConflictNotSilence(t *testing.T) {
 		t.Errorf("expected CopyHubSecretForward to return ErrConflictingWrite, got: %v", err)
 	}
 }
+
+// =============================================================================
+// Round 6 review regression tests (ptone/scion#2152 PR 2171, sp-rev-6.md)
+//
+// This round is scoped docs/text-only by the maintainer (no new mechanisms,
+// no behavior changes). Every test below is an *inverted* repro: instead of
+// asserting the fix the reviewer's original repro wanted, it asserts the
+// actual (documented, in this round, for the first time accurately) current
+// behavior, so the doc and the behavior stay pinned together and any future
+// accidental change to either is caught.
+// =============================================================================
+
+func sprev6Seed(t *testing.T) (*GCPBackend, *mockSMClient, string, string, string) {
+	t.Helper()
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	prefixedRef := "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev6"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: legacyRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return backend, mock, legacyName, prefixedName, prefixedRef
+}
+
+// TestSPREV6_SetUpsertAfterCASIsUndetectedLostUpdate pins round-6 review
+// finding 2's undetected half of the residual window: when a concurrent
+// new-binary Set's GCP write lands before this attempt's prefixed read (so
+// this attempt correctly plans a resync), but Set's DB upsert lands only
+// AFTER this attempt's own CAS has already applied, nothing detects it —
+// no error, no WARN. The CAS already succeeded against the values this
+// attempt read; there is no second recheck. This is the interleaving
+// .design/secret-id-hub-refactor.md §7 and the doc comment on
+// planOrRepairRef now describe as "not brief" and undetected, in contrast
+// to TestSPREV5_CASRefusedAfterWriteReportsConflictNotSilence, where the
+// upsert instead lands BEFORE the CAS and IS detected.
+func TestSPREV6_SetUpsertAfterCASIsUndetectedLostUpdate(t *testing.T) {
+	backend, mock, _, prefixedName, prefixedRef := sprev6Seed(t)
+	ctx := context.Background()
+	rec := &recordingHandler{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	defer slog.SetDefault(orig)
+
+	// The concurrent Set's GCP half lands before our prefixed read.
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() { seedMockSecret(t, mock, backend.projectID, prefixedName, "v2-new-binary-set") }
+	raceBackend := NewGCPBackendWithClient(backend.store, race, backend.projectID, backend.hubID)
+
+	action, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil {
+		t.Fatalf("expected the CAS to apply here (the concurrent upsert hasn't landed yet): action=%q err=%v", action, err)
+	}
+	if action != RefRepairResynced {
+		t.Fatalf("expected a resynced action, got %q", action)
+	}
+
+	// The concurrent Set's DB half lands only now, after our CAS already applied.
+	if _, err := backend.store.UpsertSecret(ctx, &store.Secret{
+		Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: prefixedRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sv, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if sv.Value != "v1" {
+		t.Errorf("expected the documented undetected lost update to leave our stale %q as latest, got %q", "v1", sv.Value)
+	}
+	if rec.hasWarnContaining("lost a race") {
+		t.Error("expected no WARN: this interleaving is undetected by design (round-6 review finding 2), not merely unlucky")
+	}
+}
+
+// TestSPREV6_RerunAfterConflictIsSilentNoOp pins round-6 review finding 3:
+// after a genuine CONFLICT, the corrected guidance says the operator must
+// re-set the secret directly, and that re-running migrate-names will NOT
+// detect or repair it. This test proves why: by the time of a re-run, the
+// DB ref already matches the prefixed ref (whichever attempt last won the
+// CAS), so planOrRepairRefAttempt's very first check reports "nothing to
+// do" — the CONFLICT silently disappears from a subsequent report even
+// though the hub may still be serving a stale value.
+func TestSPREV6_RerunAfterConflictIsSilentNoOp(t *testing.T) {
+	backend, mock, _, prefixedName, prefixedRef := sprev6Seed(t)
+	ctx := context.Background()
+	race := &onceAtCallAccessSMClient{mockSMClient: mock, call: 2}
+	race.hook = func() { seedMockSecret(t, mock, backend.projectID, prefixedName, "v2-new-binary-set") }
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: prefixedRef}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	composite := &sprev5CompositeSMClient{mockSMClient: mock, access: race, add: hooked}
+	raceBackend := NewGCPBackendWithClient(backend.store, composite, backend.projectID, backend.hubID)
+	if _, err := raceBackend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1"); !errors.Is(err, ErrConflictingWrite) {
+		t.Fatalf("setup: expected the first attempt to report ErrConflictingWrite, got %v", err)
+	}
+
+	// The operator follows the (now-corrected, but let's confirm the old
+	// advice really was wrong) guidance to re-run.
+	action, err := backend.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	if err != nil || action != "" {
+		t.Fatalf("expected the re-run to silently report nothing to do, got action=%q err=%v", action, err)
+	}
+	sv, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if sv.Value != "v1" {
+		t.Errorf("expected the re-run to leave the stale %q in place (a re-run neither detects nor repairs a CONFLICT), got %q", "v1", sv.Value)
+	}
+}
+
+// TestSPREV6_MetaEditDuringCopyIsFalsePositiveConflict pins a known,
+// documented limitation (round-6 review non-blocking finding 5, DEFERRED —
+// fixing it needs a code-behavior change out of scope for this docs-only
+// round; see dev-notes.md's "Round-6 review dispositions"): a metadata-only
+// edit (UpdateSecretMeta) racing with a copy/resync bumps Version without
+// touching SecretRef, which the CAS can't distinguish from an
+// authority-relevant ref change. It is reported as ErrConflictingWrite even
+// though the ref never moved and a plain retry would have converged safely.
+func TestSPREV6_MetaEditDuringCopyIsFalsePositiveConflict(t *testing.T) {
+	backend, mock, _, prefixedName, _ := sprev6Seed(t)
+	ctx := context.Background()
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() {
+		d := "edited"
+		if _, err := backend.store.UpdateSecretMeta(ctx, "API_KEY", ScopeUser, "user-1", &store.SecretMetaUpdate{Description: &d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hb := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
+	_, err := hb.RepairRefToPrefixed(ctx, "API_KEY", ScopeUser, "user-1")
+	if !errors.Is(err, ErrConflictingWrite) {
+		t.Errorf("expected the known false-positive CONFLICT for a metadata-only edit (ref unchanged, only Version bumped), got err=%v", err)
+	}
+}
+
+// TestSPREV6_TwoReplicaCopyForwardConflictIsBenign pins round-6 review FYI
+// 1: two replicas of the same hub running boot copy-forward concurrently
+// both write identical key material, so even though the losing replica gets
+// ErrConflictingWrite (logged at WARN, pure noise in this specific case),
+// startup is not broken and the key is preserved.
+func TestSPREV6_TwoReplicaCopyForwardConflictIsBenign(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("agent_signing_key", store.ScopeHub, backend.hubID)
+	prefixedName := backend.gcpSecretName("agent_signing_key", store.ScopeHub, backend.hubID)
+	seedMockSecret(t, mock, backend.projectID, legacyName, "KEYMATERIAL")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev6-rep"), Key: "agent_signing_key", Scope: store.ScopeHub, ScopeID: backend.hubID,
+		SecretRef: "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var bErr error
+	hooked := &addHookSMClient{mockSMClient: mock, match: prefixedName}
+	hooked.hook = func() { bErr = backend.CopyHubSecretForward(ctx, "agent_signing_key") }
+	a := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
+	aErr := a.CopyHubSecretForward(ctx, "agent_signing_key")
+	sv, gerr := backend.Get(ctx, "agent_signing_key", store.ScopeHub, backend.hubID)
+	t.Logf("replicaA err=%v replicaB err=%v served=%q getErr=%v", aErr, bErr, sv.Value, gerr)
+	if gerr != nil || sv.Value != "KEYMATERIAL" {
+		t.Errorf("key material not preserved")
+	}
+}
+
+// sprev6DeleteHookSMClient fires hook once, immediately before the delete
+// call whose target's secret ID matches, so a concurrent write can be
+// injected exactly between DeleteLegacySecretName's safety check and its
+// actual delete call.
+type sprev6DeleteHookSMClient struct {
+	*mockSMClient
+	match string
+	hook  func()
+	fired bool
+}
+
+func (c *sprev6DeleteHookSMClient) DeleteSecret(ctx context.Context, req *smpb.DeleteSecretRequest) error {
+	if !c.fired && strings.HasSuffix(req.Name, "/"+c.match) {
+		c.fired = true
+		c.hook()
+	}
+	return c.mockSMClient.DeleteSecret(ctx, req)
+}
+
+// TestSPREV6_DeleteLegacyTOCTOUWithOldBinaryWriter pins a known, documented
+// data-loss precondition (round-6 review finding 4): GCP SM has no
+// conditional delete, so this cannot be closed in code without a new
+// mechanism (out of scope for this docs-only round). --delete-legacy must
+// only run after every replica of a hub is on a binary that no longer
+// writes legacy names -- see the --help text, .design/secret-id-hub-refactor.md
+// §7, and the docs-site caution this round added. This test proves the
+// failure mode the precondition exists to avoid: an old-binary Set racing
+// between canDeleteLegacyName's safety check and the actual DeleteSecret
+// call destroys the concurrent write's only copy.
+func TestSPREV6_DeleteLegacyTOCTOUWithOldBinaryWriter(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+	legacyName := backend.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)
+	prefixedName := backend.gcpSecretName("API_KEY", ScopeUser, "user-1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "v1")
+	seedMockSecret(t, mock, backend.projectID, prefixedName, "v1")
+	if err := backend.store.CreateSecret(ctx, &store.Secret{
+		ID: tid("sprev6-toctou"), Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1",
+		SecretRef: "gcpsm:" + fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, prefixedName),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hooked := &sprev6DeleteHookSMClient{mockSMClient: mock, match: legacyName}
+	hooked.hook = func() {
+		// Old binary Set("v2"): AddSecretVersion on legacy, then upserts
+		// ref=legacy, exactly as an old (pre-ptone/scion#2152) binary does.
+		if _, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{Parent: legacyFull, Payload: &smpb.SecretPayload{Data: []byte("v2-old-binary")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.store.UpsertSecret(ctx, &store.Secret{Key: "API_KEY", Scope: ScopeUser, ScopeID: "user-1", SecretRef: "gcpsm:" + legacyFull}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hb := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
+
+	if err := hb.DeleteLegacySecretName(ctx, "API_KEY", ScopeUser, "user-1"); err != nil {
+		t.Fatalf("DeleteLegacySecretName itself doesn't error even though the concurrent write it destroyed was real: %v", err)
+	}
+	if _, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1"); gerr == nil {
+		t.Error("expected the concurrent old-binary write's only copy to have been destroyed by the TOCTOU race (Get should now fail) -- this is exactly the data loss the --delete-legacy precondition text exists to prevent")
+	}
+}
