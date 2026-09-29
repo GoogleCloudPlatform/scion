@@ -245,4 +245,23 @@ func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testi
 		})
 		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
 	})
+
+	t.Run("soft-deleted agent rejects config update with 409 Conflict", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		agent := seedCreatedAgentForHarnessTest(t, s, "deleted-model-update", "claude")
+		dbAgent, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		dbAgent.Phase = string(state.PhaseStopped)
+		dbAgent.DeletedAt = dbAgent.Created
+		require.NoError(t, s.UpdateAgent(ctx, dbAgent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{
+				"model": "claude-opus-4-8",
+			},
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	})
 }
