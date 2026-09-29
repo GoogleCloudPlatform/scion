@@ -797,8 +797,10 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 }
 
 // TestGetAgent_SelfRead covers `scion whoami --full`, which reads the agent's
-// own record through GET /api/v1/agents/{id}: every role with project:read
-// may read itself, a token without it may not, and peers stay denied.
+// own record through GET /api/v1/agents/{id}: a baseline-role token may read
+// itself, a token without project:read may not, peers stay denied, and a
+// token carrying the caller's own agent ID but bound to another project is
+// answered 404 rather than treated as a self-read.
 func TestGetAgent_SelfRead(t *testing.T) {
 	t.Run("baseline role reads itself", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
@@ -824,11 +826,39 @@ func TestGetAgent_SelfRead(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "self-read without project:read: %s", rec.Body.String())
 	})
+
+	t.Run("self ID with a token bound to another project is 404", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		svc := f.srv.GetAgentTokenService()
+		require.NotNil(t, svc)
+		tok, err := svc.GenerateAgentToken(f.caller.ID, f.other.ID, ScopesForRole(AgentRoleBaseline), nil)
+		require.NoError(t, err)
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"project isolation must run before the self-read exemption: %s", rec.Body.String())
+	})
 }
 
 // ============================================================================
 // Cross-route parity — the regression guard for the drift class itself
 // ============================================================================
+
+// TestAgentSelfRead_SameBodyOnBothRoutes asserts that a self-read returns an
+// identical decoded JSON body whether it goes through the unscoped
+// GET /api/v1/agents/{id} route or the project-scoped
+// GET /api/v1/projects/{id}/agents/{id} route.
+func TestAgentSelfRead_SameBodyOnBothRoutes(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	unscoped := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil)
+	scoped := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents/"+f.caller.ID, nil)
+	require.Equal(t, http.StatusOK, unscoped.Code, "unscoped self-read: %s", unscoped.Body.String())
+	require.Equal(t, http.StatusOK, scoped.Code, "project-scoped self-read: %s", scoped.Body.String())
+
+	var unscopedBody, scopedBody map[string]interface{}
+	require.NoError(t, json.Unmarshal(unscoped.Body.Bytes(), &unscopedBody))
+	require.NoError(t, json.Unmarshal(scoped.Body.Bytes(), &scopedBody))
+	assert.Equal(t, unscopedBody, scopedBody, "self-read must return the same body on both routes")
+}
 
 // TestBypassAgents_CreateRouteParity asserts that the same request body gets
 // the same verdict on both create routes.
