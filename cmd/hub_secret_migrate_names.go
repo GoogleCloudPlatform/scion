@@ -96,14 +96,22 @@ action taken (or, under --dry-run, that would be taken):
      is nothing left for it to copy.
   3. If --delete-legacy is set and the legacy name still exists, delete it —
      but only once step 2 has confirmed the DB ref no longer depends on it,
-     so a secret can never become unreadable as a result (DELETED LEGACY).
+     so a secret cannot become unreadable as a result once no old-binary
+     writer remains (DELETED LEGACY) — see the --delete-legacy precondition
+     below; GCP SM has no conditional delete, so this is not automatic.
 
 If step 1 or 2 writes a new version to the prefixed name and then detects
 that a concurrent write already changed the secret's ref, that secret is
 reported as CONFLICT with a non-zero exit instead of being silently treated
 as done: its prefixed name's latest version may now be stale relative to
-the concurrent write. Re-run migrate-names, or re-set the secret directly,
-to verify or restore its current value.
+the concurrent write. Re-running migrate-names does NOT detect or repair
+this — by then the ref already matches whatever landed, so a re-run reports
+nothing to do and the CONFLICT will not reappear even though the value may
+still be stale. The only fix is to re-set the secret directly to its
+intended value through the normal secret-set path. (For a hub-scope signing
+key, a CONFLICT from two replicas of the same hub racing at boot is benign:
+both wrote identical key material, so nothing is actually lost — the WARN
+is noise in that specific case.)
 
 Hub ID: resolved the same way the running hub server resolves it at startup
 (--hub-id, then this command's --config file's server.hub.hub_id, then the
@@ -120,6 +128,14 @@ permission error otherwise. Keep the legacy grant in place until
 removing the legacy grant, not after — once it's gone, this command can no
 longer read legacy names at all, so a "zero pending" dry-run at that point
 only proves IAM is narrowed, not that migration finished.
+
+--delete-legacy precondition: run --delete-legacy only after EVERY replica
+of this hub is running a binary that includes this change, i.e. no replica
+is still writing legacy names. GCP SM has no conditional delete, so if an
+older binary is still a live writer during a mixed-version rolling deploy,
+its Set can land between this command's safety check and the actual delete
+call, and the delete then destroys that write's only copy along with the
+legacy container it lived in.
 
 It is idempotent: re-running is always safe, and any candidate already fully
 migrated (copied, ref repaired, legacy gone or never existed) is skipped.
@@ -455,8 +471,11 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 				// prefixed name, so the secret's current value can't be
 				// trusted without a human looking at it. Still counts
 				// toward a non-zero exit, since silently continuing would
-				// hide it.
-				fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-run migrate-names or re-set the secret to verify its current value\n", c.name, c.scope, c.scopeID)
+				// hide it. The guidance says re-set, not re-run: a re-run
+				// takes the "ref already matches" no-op path and the
+				// CONFLICT would simply vanish from the report while the
+				// stale value remains (round-6 review finding 3).
+				fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-set the secret directly to its intended value (re-running migrate-names will NOT detect or repair this)\n", c.name, c.scope, c.scopeID)
 			} else {
 				fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
 			}
@@ -557,8 +576,10 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 			case errors.Is(err, secret.ErrConflictingWrite):
 				// Propagated as-is; runMigrateNames reports this as a
 				// distinct CONFLICT outcome (round-5 review finding 2) rather
-				// than a generic ERROR, since the advice differs (re-run or
-				// re-set the secret, not check an IAM grant).
+				// than a generic ERROR, since the advice differs (re-set the
+				// secret directly, not check an IAM grant -- and definitely
+				// not re-run this command, which would silently no-op once
+				// the ref already matches; round-6 review finding 3).
 				return false, err
 			default:
 				return false, fmt.Errorf("failed to migrate/repair (check the hub's IAM grant on the legacy name): %w", err)
