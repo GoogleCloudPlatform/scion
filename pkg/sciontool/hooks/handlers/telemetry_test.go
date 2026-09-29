@@ -926,7 +926,7 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 				t.Errorf("%s recorded=%v, want %v", telemetrycontract.MetricUsageTokens, found[telemetrycontract.MetricUsageTokens], tc.wantUsage)
 			}
 			// gen_ai.api.duration is not part of the usage contract (design
-			// §3.5 "the switch covers only usage"), so it is unaffected.
+			// D4 "the switch covers only usage"), so it is unaffected.
 			if !foundAPIDuration {
 				t.Error("expected gen_ai.api.duration to be recorded regardless of SCION_USAGE_SOURCE")
 			}
