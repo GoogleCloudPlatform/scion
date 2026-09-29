@@ -269,9 +269,24 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		return "", nil, ErrUATProjectForbidden
 	}
 	for _, result := range eligibility {
-		if !result.OK {
-			return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
+		if result.OK {
+			continue
 		}
+		// A-5 oracle resistance (pat-c-lead review, 2026-09-29, C/decisions.md):
+		// MintDenialProjectAccessRequired means CanMintSelector's ONE
+		// admission check for the whole batch failed (no membership and no
+		// exact-permission system authority) -- every selector gets this
+		// same reason uniformly in that case. Preserve the existing
+		// contract that a non-member and a nonexistent project both get the
+		// bare ErrUATProjectForbidden, with no selector detail, so neither
+		// is distinguishable from the other or from "authority exists but
+		// not for this selector." Only a per-selector eligibility denial
+		// (admission passed, this specific selector didn't) surfaces the
+		// typed UATScopeViolationError.
+		if result.Reason == MintDenialProjectAccessRequired {
+			return "", nil, ErrUATProjectForbidden
+		}
+		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
 	}
 
 	// --- Atomic mint: token insert + audit in one transaction ---

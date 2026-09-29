@@ -1207,3 +1207,39 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 			"no authority at all must deny at the real route: %s", rec.Body.String())
 	})
 }
+
+// TestProjectUAT_MintForbiddenIsOracleResistant pins A-5 (pat-c-lead review,
+// 2026-09-29, C/decisions.md): CanMintSelector's admission check is ONE
+// check for the whole request, with a single reason
+// (MintDenialProjectAccessRequired) whenever it fails -- CreateToken must
+// map that reason to the existing, bare ErrUATProjectForbidden (no
+// selector, no reason code in the response), so a non-member of a real
+// project and a caller naming a project that does not exist at all get the
+// byte-identical HTTP response. Neither case may be distinguishable from
+// the other, or from "the project doesn't exist," by the response alone.
+func TestProjectUAT_MintForbiddenIsOracleResistant(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("uatp-oracle-project")
+	ownerID := tid("uatp-oracle-owner")
+	outsiderID := tid("uatp-oracle-outsider")
+	createRS1Project(t, s, projectID, ownerID)
+	outsider := &store.User{
+		ID: outsiderID, Email: outsiderID + "@test.com", DisplayName: "Outsider", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+	ensureHubMembership(ctx, s, outsiderID)
+
+	body := map[string]any{"name": "oracle-test", "projectId": projectID, "scopes": []string{"agent:read"}}
+	recNonMember := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", body)
+
+	nonexistentProjectID := tid("uatp-oracle-nonexistent")
+	bodyNonexistent := map[string]any{"name": "oracle-test-2", "projectId": nonexistentProjectID, "scopes": []string{"agent:read"}}
+	recNonexistent := doRequestAsUser(t, srv, outsider, http.MethodPost, "/api/v1/auth/tokens", bodyNonexistent)
+
+	assert.Equal(t, http.StatusForbidden, recNonMember.Code, "non-member mint: %s", recNonMember.Body.String())
+	assert.Equal(t, recNonMember.Code, recNonexistent.Code,
+		"non-member and nonexistent-project mint must return the same HTTP status")
+	assert.JSONEq(t, recNonMember.Body.String(), recNonexistent.Body.String(),
+		"non-member and nonexistent-project mint must return the byte-identical error body")
+}
