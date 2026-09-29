@@ -32,6 +32,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { html, render } from 'lit';
 import { apiFetch } from '../../../client/api.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -81,6 +82,19 @@ function mount(): any {
   const el = document.createElement('scion-chat-space-rail') as any;
   document.body.appendChild(el);
   return el;
+}
+
+/**
+ * Resolve once the rail's `loadData()` finishes — its `finally` block
+ * dispatches `rail-loaded` regardless of success or failure. Used to flush
+ * the *initial*, connectedCallback-triggered load without calling
+ * `reload()` a second time, so cold-deep-link tests (R4) observe exactly
+ * what the first load produced.
+ */
+function waitForRailLoaded(el: EventTarget): Promise<void> {
+  return new Promise((resolve) => {
+    el.addEventListener('rail-loaded', () => resolve(), { once: true });
+  });
 }
 
 /**
@@ -316,6 +330,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'thread-1';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    el._prefsLoaded = true;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-live']));
 
     el.maybeAutoExpandGroupForSelectedKey();
@@ -334,6 +349,7 @@ describe('space rail — auto-expand group for a selected/deep-linked thread (N1
     el.collapsedGroups = new Set(['g-live']);
     el.selectedKey = 'not-in-any-group';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-live', name: 'Live', threadIds: ['thread-1'] }] });
+    el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
 
@@ -385,6 +401,7 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
     document.body.appendChild(el);
     el.selectedKey = 'thread-1';
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+    el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
     expect(el.autoExpandedGroupId).toBe('g-sel');
@@ -408,6 +425,7 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
     // g-stale no longer exists server-side; g-sel still does and still holds
     // the selected thread.
     el.prefs = railPrefs({ 'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }] });
+    el._prefsLoaded = true;
 
     el.maybeAutoExpandGroupForSelectedKey();
     expect(el.autoExpandedGroupId).toBe('g-sel');
@@ -463,6 +481,151 @@ describe('space rail — auto-expand must never leak into the persisted set (R2 
 
     expect(el.collapsedGroups.has('g-sel')).toBe(true);
     expect(el.autoExpandedGroupId).not.toBe('g-sel');
+  });
+});
+
+/** Mocks spaces/threads/prefs so space "p-a" has one collapsed group, `g-sel`,
+ * holding `thread-1` — the deep-link target for the R4 tests. */
+function serveColdDeepLinkFixture(): void {
+  apiFetchMock.mockImplementation((path: string) => {
+    if (path === '/api/v1/chat/spaces') {
+      return Promise.resolve(
+        new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha')] }), { status: 200 })
+      );
+    }
+    if (path.startsWith('/api/v1/chat/spaces/')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            threads: [
+              {
+                id: 'thread-1',
+                name: 'sel-thread',
+                isGeneral: false,
+                pinned: false,
+                hasUnread: false,
+                hasUnreadMention: false,
+              },
+            ],
+          }),
+          { status: 200 }
+        )
+      );
+    }
+    if (path === '/api/v1/chat/user-prefs') {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            threadGroups: JSON.stringify({
+              'p-a': [{ id: 'g-sel', name: 'Sel', threadIds: ['thread-1'] }],
+            }),
+          }),
+          { status: 200 }
+        )
+      );
+    }
+    return Promise.resolve(new Response('{}', { status: 200 }));
+  });
+}
+
+describe('space rail — cold deep link auto-expands before any reload (R4 regression)', () => {
+  it('auto-expands the group on the very first load — selectedKey set before the element connects', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
+    serveColdDeepLinkFixture();
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    // Set before appending, the same order chat.ts's attribute bindings
+    // produce (round-2 review, F5) — this is what makes the very first
+    // updated() fire before any data has loaded, which is the case R4
+    // regressed on.
+    el.selectedKey = 'thread-1';
+    el.currentUserId = 'user-1';
+    const loaded = waitForRailLoaded(el);
+    document.body.appendChild(el);
+    // Flush the *initial* connectedCallback-triggered load — not reload(),
+    // which round 2's tests used and which is what masked this regression.
+    await loaded;
+
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+  });
+
+  it('auto-expands when rendered the way chat.ts actually renders it (lit.render)', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
+    serveColdDeepLinkFixture();
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    render(
+      html`<scion-chat-space-rail
+        selectedKey=${'thread-1'}
+        currentUserId=${'user-1'}
+      ></scion-chat-space-rail>`,
+      container
+    );
+    const el = container.querySelector('scion-chat-space-rail') as any;
+    await waitForRailLoaded(el);
+
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+  });
+});
+
+describe('space rail — toggling the auto-expanded group (R5 regression)', () => {
+  it('clicking the auto-expanded group only clears the override — nothing is saved or removed', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
+    serveColdDeepLinkFixture();
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    el.selectedKey = 'thread-1';
+    document.body.appendChild(el);
+    await waitForRailLoaded(el);
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+
+    // The click that's supposed to visually re-collapse the group.
+    el.toggleGroupCollapse('g-sel');
+
+    expect(el.autoExpandedGroupId).toBeNull();
+    // The real preference was already collapsed and stays that way — this
+    // click didn't expand it (that's the M2 mutation: without the
+    // override branch, this toggle instead deletes g-sel and persists the
+    // deletion).
+    expect(el.collapsedGroups.has('g-sel')).toBe(true);
+    const stored = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:user-1`) ?? '[]') as string[];
+    expect(stored).toContain('g-sel');
+
+    // A later reload with the same selectedKey must not re-open it: it is
+    // now indistinguishable from any other group the user has collapsed.
+    await el.reload();
+    expect(el.autoExpandedGroupId).not.toBe('g-sel');
+    expect(el.collapsedGroups.has('g-sel')).toBe(true);
+  });
+
+  it('renders the auto-expanded group open, and collapsed again once the override clears', async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-sel']));
+    serveColdDeepLinkFixture();
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.currentUserId = 'user-1';
+    el.selectedKey = 'thread-1';
+    document.body.appendChild(el);
+    await waitForRailLoaded(el);
+    // Force the space itself open so the group header actually renders
+    // (spaces collapse by default on first load — a separate mechanism).
+    el.collapsedSpaces = new Set();
+    await el.updateComplete;
+
+    expect(el.autoExpandedGroupId).toBe('g-sel');
+    let chevron = el.shadowRoot.querySelector('.thread-group-header .chevron');
+    expect(chevron?.classList.contains('collapsed')).toBe(false);
+    expect(el.shadowRoot.querySelector('.thread-group')).not.toBeNull();
+
+    // Same action a click on the header performs.
+    el.toggleGroupCollapse('g-sel');
+    await el.updateComplete;
+
+    chevron = el.shadowRoot.querySelector('.thread-group-header .chevron');
+    expect(chevron?.classList.contains('collapsed')).toBe(true);
+    expect(el.shadowRoot.querySelector('.thread-group')).toBeNull();
   });
 });
 

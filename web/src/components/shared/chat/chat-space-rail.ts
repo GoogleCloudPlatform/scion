@@ -333,6 +333,16 @@ export class ScionChatSpaceRail extends LitElement {
    * (round-2 review, R3).
    */
   private _autoExpandComputedForKey: string | null = null;
+  /**
+   * Whether `loadPrefs` has completed successfully at least once. On a cold
+   * deep link, `selectedKey` is set as an attribute before `connectedCallback`
+   * (chat.ts binds it that way), so the very first `updated()` fires and
+   * would otherwise lock in "no override" while `prefs.threadGroups` is
+   * simply not loaded yet — not "this user has no groups". Gating on this
+   * flag, rather than on `threadGroups` being defined, avoids that false
+   * signal (round-3 review, R4).
+   */
+  private _prefsLoaded = false;
   /** Group header id the drag is hovering over. */
   @state() private dragOverGroupId: string | null = null;
   /** State for the group name prompt (inline input). */
@@ -869,8 +879,13 @@ export class ScionChatSpaceRail extends LitElement {
    * topic changes, etc.), and re-deciding it each time would force the group
    * back open right after the user collapses it, seconds later, with no way
    * to keep it shut while the thread stays open (round-2 review, R3).
+   *
+   * Does not record a decision until `_prefsLoaded` is true — see that
+   * field's doc comment for why a cold deep link would otherwise lock in
+   * "no override" before the groups are even known (round-3 review, R4).
    */
   private maybeAutoExpandGroupForSelectedKey(): void {
+    if (!this._prefsLoaded) return;
     if (this._autoExpandComputedForKey === this.selectedKey) return;
     this._autoExpandComputedForKey = this.selectedKey;
     this.autoExpandedGroupId = null;
@@ -1024,6 +1039,7 @@ export class ScionChatSpaceRail extends LitElement {
       const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
         this.prefs = parseRailPrefs(await res.json());
+        this._prefsLoaded = true;
         return true;
       }
       return false;
