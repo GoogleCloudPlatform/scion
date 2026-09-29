@@ -137,7 +137,11 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 		case item.Selected:
 			results = append(results, secretFetchResult{Key: key, Value: sv.Value, Status: "ok"})
 			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, true, "", true, correlationID)
-		case item.Reason == ReasonBackendError:
+		case item.Allowed || item.Reason == ReasonBackendError:
+			// The project-level decision allowed this item (or check 7 hit an
+			// infrastructure error before deciding). Either way a backend
+			// fault or a check-9 record race confirms nothing about the key,
+			// so it is reported unavailable rather than not found.
 			results = append(results, secretFetchResult{Key: key, Status: "entitled_but_unavailable", Error: "secret unavailable"})
 			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, false, item.Reason, true, correlationID)
 		default:

@@ -113,11 +113,91 @@ func TestAgentSecretRead_RecordReplacedBetweenMetaAndGetNotDelivered(t *testing.
 	})
 }
 
+// TestAgentSecretFetch_RecordChangedIsUnavailable covers check 9's
+// record-race rule on the bulk fetch endpoint (P7): a project secret whose
+// record changes between GetMeta and Get is entitled_but_unavailable, not
+// not_found, because the project-level decision already allowed it. Mirrors
+// TestAgentSecretRead_RecordReplacedBetweenMetaAndGetNotDelivered's two
+// subtests (an ID change, and a deleted record) on the fetch endpoint
+// instead of get.
+func TestAgentSecretFetch_RecordChangedIsUnavailable(t *testing.T) {
+	t.Run("id_changed", func(t *testing.T) {
+		f := newMaterialFixture(t, "fetch-record-replaced-id")
+		seedSecret(t, f.Server.secretBackend, "FETCH_RACE_ID_KEY", "v", "", "", f.ProjectID)
+
+		race := &raceSecretBackend{SecretBackend: f.Server.secretBackend}
+		race.overrideGet = func(sv *secret.SecretWithValue, err error) (*secret.SecretWithValue, error) {
+			if err != nil || sv == nil {
+				return sv, err
+			}
+			cp := *sv
+			cp.ID = "a-different-id"
+			return &cp, nil
+		}
+		f.Server.SetSecretBackend(race)
+
+		auditor := newRecordingMaterialAuditor()
+		f.Server.SetAuditLogger(auditor)
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"FETCH_RACE_ID_KEY"}}, f.Token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 (per-item status), got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp secretFetchResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		if len(resp.Secrets) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(resp.Secrets))
+		}
+		got := resp.Secrets[0]
+		if got.Status != "entitled_but_unavailable" || got.Error != "secret unavailable" || got.Value != "" {
+			t.Fatalf("expected entitled_but_unavailable/\"secret unavailable\" with no value, got %+v", got)
+		}
+		assertRecordChangedAudited(t, auditor)
+	})
+
+	t.Run("record_deleted", func(t *testing.T) {
+		f := newMaterialFixture(t, "fetch-record-replaced-deleted")
+		seedSecret(t, f.Server.secretBackend, "FETCH_RACE_DELETED_KEY", "v", "", "", f.ProjectID)
+
+		race := &raceSecretBackend{SecretBackend: f.Server.secretBackend}
+		race.overrideGet = func(sv *secret.SecretWithValue, err error) (*secret.SecretWithValue, error) {
+			return &secret.SecretWithValue{
+				SecretMeta: secret.SecretMeta{ID: "", SecretType: store.SecretTypeInternal},
+				Value:      "leaked-if-delivered",
+			}, nil
+		}
+		f.Server.SetSecretBackend(race)
+
+		auditor := newRecordingMaterialAuditor()
+		f.Server.SetAuditLogger(auditor)
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"FETCH_RACE_DELETED_KEY"}}, f.Token)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 (per-item status), got %d: %s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "leaked-if-delivered") {
+			t.Fatalf("value must never be delivered on record_changed: %s", rec.Body.String())
+		}
+		var resp secretFetchResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		if len(resp.Secrets) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(resp.Secrets))
+		}
+		got := resp.Secrets[0]
+		if got.Status != "entitled_but_unavailable" || got.Error != "secret unavailable" || got.Value != "" {
+			t.Fatalf("expected entitled_but_unavailable/\"secret unavailable\" with no value, got %+v", got)
+		}
+		assertRecordChangedAudited(t, auditor)
+	})
+}
+
 // TestAgentSecretRead_SharingDisabledBetweenMetaAndGetNotDelivered covers
 // check 9: AllowProgeny turned off between GetMeta and Get, on a user-scope
 // shared secret, with the same ID and a bumped Version, still denies
-// delivery. A user-scope secret is used (F4) so that the AllowProgeny
-// comparison itself trips the race, rather than the SecretType check that a
+// delivery. A user-scope secret is used so that the AllowProgeny comparison
+// itself trips the race, rather than the SecretType check that a
 // project-scope secret would exercise instead.
 func TestAgentSecretRead_SharingDisabledBetweenMetaAndGetNotDelivered(t *testing.T) {
 	f := newMaterialFixture(t, "sharing-disabled-race")
