@@ -138,6 +138,14 @@ func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
 // declared directly (not inherited through the embedded UserIdentity field)
 // because Go only promotes methods declared by an embedded interface's own
 // method set, and localAncestryProvenance is not part of UserIdentity.
+//
+// This method's mere presence is what AncestryIsHubAttested tests for, so it
+// cannot itself refuse to be "implemented" when the wrapped identity turns
+// out to be federated — see AncestryIsHubAttested's explicit unwrap check for
+// where that case is actually rejected. Production only ever wraps
+// *AuthenticatedUser (useraccesstoken.go), so this path is not reachable
+// today; it exists so a future caller cannot silently attest a UAT issued
+// against a federated identity.
 func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
 	return ancestryProvenanceLocalUser
 }
@@ -232,8 +240,40 @@ func AncestryIsHubAttested(identity Identity) bool {
 	if _, isFederated := identity.(FederatedIdentity); isFederated {
 		return false
 	}
+	// A *ScopedUserIdentity is attested unconditionally by the marker check
+	// below, whatever UserIdentity it wraps — because IssuerURL is not part
+	// of the UserIdentity interface's method set, Go does not promote it
+	// through the embedded field, so a ScopedUserIdentity wrapping a
+	// FederatedUserIdentity would not satisfy the FederatedIdentity check
+	// above. Unwrap explicitly instead of trusting the outer type's marker.
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if _, wrappedFederated := scoped.UserIdentity.(FederatedIdentity); wrappedFederated {
+			return false
+		}
+	}
 	_, ok := identity.(localAncestryProvenanceIdentity)
 	return ok
+}
+
+// explicitIdentityClassification is an opt-in marker for identity types that
+// need a PrincipalKind/CredentialKind from principalContextForIdentity and
+// credentialContextForIdentity without being one of the reviewed concrete
+// production types those functions switch on directly (AuthenticatedUser,
+// ScopedUserIdentity, DevUser, agentIdentityWrapper, storedAgentIdentity,
+// peerAgentIdentity, explainAgentIdentity, brokerIdentityImpl,
+// FederatedUserIdentity, FederatedAgentIdentity, FederatedServiceIdentity).
+// Its only current implementers are package-hub test fakes that stand in for
+// one of those types (ptone/scion#2123). The method is unexported for the
+// same reason localAncestryProvenance is: no type outside package hub can
+// implement it, so classification can never be forged by an external caller,
+// and a package-hub test fake must opt in with a reviewed, explicit method
+// rather than acquiring a kind by accident — in particular, never by
+// returning a Type() string that happens to match a recognized one. A type
+// that does not implement this interface, and is not one of the concrete
+// types above, is classified with an empty PrincipalKind/CredentialKind,
+// which Decide's fail-closed entry check denies.
+type explicitIdentityClassification interface {
+	authzClassification() (PrincipalKind, CredentialKind)
 }
 
 // HasScope returns true if this identity has the given scope.
@@ -354,6 +394,37 @@ func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
 // contextWithCredentialContext records credential caveats for request-based authorization.
 func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
 	return context.WithValue(ctx, credentialContextKey{}, credential)
+}
+
+// BrokerOnBehalfOf is the hub-set marker proving that a broker-authenticated
+// request's effective identity was substituted by BrokerAuthMiddleware (or
+// its audited variant) after HMAC verification and a successful
+// X-Scion-On-Behalf-Of resolution — never merely by the presence of the
+// header or a caller-supplied broker credential. BrokerID duplicates
+// Broker.ID() so a compatibility check can bind Credential.ID to it without
+// re-deriving it from the interface value.
+type BrokerOnBehalfOf struct {
+	Broker   BrokerIdentity
+	BrokerID string
+}
+
+// brokerOnBehalfOfContextKey is the context key for the BrokerOnBehalfOf marker.
+type brokerOnBehalfOfContextKey struct{}
+
+// contextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
+// unexported: the only caller is the shared authenticated-broker/OBO context
+// helper in brokerauth.go, invoked only after HMAC verification and a
+// successful resolveOnBehalfOf. An invalid HMAC or a bare/unresolved header
+// must never reach this function.
+func contextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
+	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
+}
+
+// BrokerOnBehalfOfFromContext returns the BrokerOnBehalfOf marker set by the
+// broker authentication middleware, and whether one was set at all.
+func BrokerOnBehalfOfFromContext(ctx context.Context) (BrokerOnBehalfOf, bool) {
+	obo, ok := ctx.Value(brokerOnBehalfOfContextKey{}).(BrokerOnBehalfOf)
+	return obo, ok
 }
 
 // AuthType constants for request logging.

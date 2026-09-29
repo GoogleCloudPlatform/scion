@@ -269,64 +269,73 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
-	principal := request.Principal
-	derivedPrincipal := principalContextForIdentity(principal.Identity)
-	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
-	}
-	principal.Kind = derivedPrincipal.Kind
-	if principal.ID == "" {
-		principal.ID = derivedPrincipal.ID
-	}
+	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
+	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
-	// A supplied Credential is deliberately independent of Principal.Identity
-	// in one direction: callers may layer a narrower CredentialContext (for
-	// example a UAT-shaped Scopes caveat) onto any identity to exercise
-	// restriction logic that keys on Credential.Kind/Scopes alone — the
-	// kernel's credential_scope restriction (below) works this way today.
-	// That direction only ever adds a restriction, so it is allowed through
-	// unchanged. The rule enforced here is the other direction: when the
-	// identity's own classification is UAT — i.e. the identity is actually
-	// a *ScopedUserIdentity — a supplied credential kind must equal that
-	// classification, because both the step 1 gate below and the
-	// credential_scope restriction apply their UAT-specific caveats only
-	// when Credential.Kind == CredentialKindUAT.
-	derivedCredential := credentialContextForIdentity(principal.Identity)
-	credential := request.Credential
-	if credential.Kind != "" {
-		if derivedCredential.Kind == CredentialKindUAT && credential.Kind != derivedCredential.Kind {
-			return decorateDecision(Decision{Allowed: false, Reason: "credential kind does not match identity"}, principal, derivedCredential)
+	// ── One rejection block: fail closed on unrecognized or mismatched
+	// classification (ptone/scion#2123) ─────────────────────────────────
+	// Evaluated once, after both derivations and before any candidate
+	// gathering, so an unrecognized or misrepresented identity never reaches
+	// step 1 or the kernel below. Every deny here decorates the decision
+	// with, and audits, the DERIVED principal and credential — never the
+	// caller's rejected claim — and emits exactly one audit record.
+	//
+	// A request with an omitted Principal.Kind/Credential.Kind still derives
+	// from the identity via the adapter below, so established callers that
+	// supply only an identity keep working — an omitted kind never reaches
+	// either check.
+	//
+	// A supplied Credential is independent of Principal.Identity in the
+	// directions suppliedCredentialCompatible admits: a narrower
+	// CredentialContext may be layered onto a local user's own
+	// classification (a UAT-shaped Scopes caveat, or an authenticated broker
+	// acting on that user's behalf) to exercise restriction logic that keys
+	// on Credential.Kind/Scopes/ID alone — the kernel's credential_scope
+	// restriction and the UAT/broker on-behalf-of gates work this way. Each
+	// admitted direction only ever adds a restriction or binds an
+	// independently-verified actor; it never grants the caller's chosen
+	// kind on its own say-so. Every other mismatch denies, including a
+	// recognized-looking supplied kind on an identity whose own derived kind
+	// is empty: an unrecognized identity can never be upgraded into a
+	// recognized one by supplied context.
+	var denyReason string
+	switch {
+	case request.Principal.Kind != "" && request.Principal.Kind != derivedPrincipal.Kind:
+		denyReason = "principal kind does not match identity"
+	case !isRecognizedPrincipalKind(derivedPrincipal.Kind) || !isRecognizedCredentialKind(derivedCredential.Kind):
+		if !isRecognizedPrincipalKind(derivedPrincipal.Kind) {
+			denyReason = "unrecognized principal kind"
+		} else {
+			denyReason = "unrecognized credential kind"
 		}
-	} else {
-		credential = derivedCredential
+	case request.Credential.Kind != "" && !isRecognizedCredentialKind(request.Credential.Kind):
+		denyReason = "unrecognized credential kind"
+	case request.Credential.Kind != "" && !suppliedCredentialCompatible(ctx, derivedPrincipal.Kind, derivedCredential, request.Credential):
+		denyReason = "credential kind does not match identity"
 	}
-
-	// ── Fail closed on unrecognized classification (ptone/scion#2123) ──
-	// A request with an omitted Kind still derives from the identity via
-	// the adapter above, so established callers that supply only an
-	// identity keep working. This rejects only what derivation itself
-	// could not classify: an empty or unrecognized derived principal or
-	// credential kind. That includes a nil identity with no supplied
-	// kind, and any identity of an unrecognized concrete type — a caller
-	// cannot dress an unrecognized identity in a recognized-looking
-	// supplied Credential.Kind, because an unrecognized identity always
-	// has an unrecognized (empty) derived *principal* kind, which denies
-	// here regardless of what credential was supplied. This runs after
-	// derivation and before principal-closure resolution, so an
-	// unrecognized identity never reaches candidate gathering.
-	if !isRecognizedPrincipalKind(principal.Kind) || !isRecognizedCredentialKind(credential.Kind) {
-		reason := "unrecognized principal kind"
-		if isRecognizedPrincipalKind(principal.Kind) {
-			reason = "unrecognized credential kind"
-		}
-		result := decorateDecision(Decision{Allowed: false, Reason: reason}, principal, credential)
-		// Emit the audit before returning so unrecognized-identity denies
-		// are diagnosable, matching the broker/federated-service denials
-		// below.
+	if denyReason != "" {
+		result := decorateDecision(Decision{Allowed: false, Reason: denyReason}, derivedPrincipal, derivedCredential)
+		// Emit the audit before returning so every entry deny is
+		// diagnosable, matching the broker/federated-service denials below.
 		if a.decisionAuditEmitter != nil {
 			a.emitDecisionAudit(ctx, request, result)
 		}
 		return result
+	}
+
+	principal := request.Principal
+	principal.Kind = derivedPrincipal.Kind
+	if principal.ID == "" {
+		principal.ID = derivedPrincipal.ID
+	}
+	// credential keeps the caller-supplied value when one was given: both
+	// the narrowing-UAT and the broker-on-behalf-of cases admitted above
+	// carry their own restrictions/effective credential ID forward exactly
+	// as supplied. An omitted kind falls back to the identity's own
+	// derivation, as before.
+	credential := request.Credential
+	if credential.Kind == "" {
+		credential = derivedCredential
 	}
 
 	// Unsupported principal kinds — fail closed.
@@ -1460,67 +1469,161 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 	}
 }
 
-// principalContextForIdentity classifies identity into its PrincipalKind.
-// Every known concrete identity type has an explicit arm. There is no
-// default arm: an identity of an unrecognized type (or a nil identity)
-// leaves Kind empty, which Decide's fail-closed classification check denies
-// rather than letting it fall through to any implicit default.
+// suppliedCredentialCompatible reports whether a caller-supplied
+// Credential.Kind may stand in for an identity's own derived classification.
+// It implements rule B (ruling-identity-fail-closed.md, 06:03Z), extended for
+// broker on-behalf-of (08:04Z). It is admitted only when:
+//
+//  1. supplied equals derived; or
+//  2. principalKind is PrincipalKindUser, derived is CredentialKindInteractive
+//     (a plain local user, not a *ScopedUserIdentity — that derives UAT and so
+//     only ever reaches case 1), and supplied is CredentialKindUAT — a
+//     narrowing overlay used by recorded/reconstructed UAT evaluation. Every
+//     UAT scope, boundary, and live-authority check still applies to the
+//     supplied credential itself; this predicate only admits it past this
+//     gate; or
+//  3. the same principal/derived precondition as case 2, supplied is
+//     CredentialKindBroker, and ctx proves BrokerAuthMiddleware (or its
+//     audited variant) resolved this exact user on behalf of the
+//     authenticated broker named by supplied — see
+//     brokerOnBehalfOfAuthorizes. The broker credential remains effective for
+//     the rest of Decide, so route/credential restrictions still apply.
+//
+// Nothing else passes: dev is not in the UAT/broker exception (a used UAT or
+// broker-OBO grant represents its local user owner, not dev's token-issuing
+// power), and an unrecognized derived identity never reaches this predicate —
+// it denies earlier, on the unrecognized-kind check. This consumes ctx
+// provenance for case 3, not just the two kinds, so a caller cannot fabricate
+// the broker exception by supplying CredentialKindBroker alone.
+func suppliedCredentialCompatible(ctx context.Context, principalKind PrincipalKind, derived, supplied CredentialContext) bool {
+	if supplied.Kind == derived.Kind {
+		return true
+	}
+	if principalKind != PrincipalKindUser || derived.Kind != CredentialKindInteractive {
+		return false
+	}
+	switch supplied.Kind {
+	case CredentialKindUAT:
+		return true
+	case CredentialKindBroker:
+		return brokerOnBehalfOfAuthorizes(ctx, supplied)
+	default:
+		return false
+	}
+}
+
+// brokerOnBehalfOfAuthorizes reports whether ctx proves that the current
+// request's effective local-user identity was substituted by
+// BrokerAuthMiddleware (or its audited variant) on behalf of the broker named
+// by supplied, per the 08:04Z ruling. It requires ALL of:
+//   - the broker identity marker (contextWithBrokerIdentity), installed for
+//     every HMAC-authenticated broker request;
+//   - the dedicated BrokerOnBehalfOf marker, installed only after HMAC
+//     verification and a successful resolveOnBehalfOf — never by a bare or
+//     invalid header;
+//   - supplied.ID equal to both the marker's BrokerID and the ctx broker
+//     identity's own ID;
+//   - the ctx broker identity's Type() equal to the expected broker
+//     credential type ("broker").
+//
+// A header alone, or a fabricated CredentialKindBroker with no marker, never
+// qualifies: this reads ctx provenance the middleware sets, not the supplied
+// kind by itself.
+func brokerOnBehalfOfAuthorizes(ctx context.Context, supplied CredentialContext) bool {
+	broker := GetBrokerIdentityFromContext(ctx)
+	if broker == nil || broker.Type() != "broker" {
+		return false
+	}
+	obo, ok := BrokerOnBehalfOfFromContext(ctx)
+	if !ok || obo.BrokerID == "" {
+		return false
+	}
+	if obo.BrokerID != broker.ID() || obo.Broker == nil || obo.Broker.ID() != broker.ID() {
+		return false
+	}
+	return supplied.ID == broker.ID()
+}
+
+// principalContextForIdentity classifies identity into its PrincipalKind by
+// concrete type — a type assertion switch, never identity.Type(). Type() is
+// informational only (see its doc comment): any concrete type, including one
+// this package has never reviewed, is free to return "user", "agent", or any
+// other string, and must not thereby be admitted as if it were the reviewed
+// type that string names. Every known concrete production identity type has
+// an explicit arm. The default arm covers everything else: a nil identity,
+// an unrecognized concrete type, and a package-hub test fake that has not
+// opted into explicitIdentityClassification. It leaves Kind empty, which
+// Decide's fail-closed classification check denies rather than letting it
+// fall through to any implicit default.
 func principalContextForIdentity(identity Identity) PrincipalContext {
 	if identity == nil {
 		return PrincipalContext{}
 	}
 	principal := PrincipalContext{ID: identity.ID(), Identity: identity}
-	switch identity.Type() {
-	case "user":
+	switch identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity:
 		principal.Kind = PrincipalKindUser
-	case "agent":
-		principal.Kind = PrincipalKindAgent
-	case "federated_user":
-		principal.Kind = PrincipalKindFederatedUser
-	case "federated_agent":
-		principal.Kind = PrincipalKindFederatedAgent
-	case "federated_service":
-		principal.Kind = PrincipalKindFederatedService
-	case "broker":
-		principal.Kind = PrincipalKindBroker
-	case "dev":
+	case *DevUser:
 		principal.Kind = PrincipalKindDev
+	case *agentIdentityWrapper, *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
+		principal.Kind = PrincipalKindAgent
+	case *FederatedUserIdentity:
+		principal.Kind = PrincipalKindFederatedUser
+	case *FederatedAgentIdentity:
+		principal.Kind = PrincipalKindFederatedAgent
+	case *FederatedServiceIdentity:
+		principal.Kind = PrincipalKindFederatedService
+	case *brokerIdentityImpl:
+		principal.Kind = PrincipalKindBroker
+	default:
+		if c, ok := identity.(explicitIdentityClassification); ok {
+			principal.Kind, _ = c.authzClassification()
+		}
 	}
 	return principal
 }
 
-// credentialContextForIdentity classifies identity into its CredentialKind.
-// The *ScopedUserIdentity check stays first: any UAT-backed identity is
-// CredentialKindUAT regardless of what its underlying UserIdentity reports
-// for Type(). Every other known concrete identity type has its own explicit
-// arm, including "user" for a plain interactive session. The default arm
-// covers only an unrecognized concrete type: it returns an empty Kind rather
-// than CredentialKindInteractive, so Decide's fail-closed classification
-// check denies it instead of treating an unknown identity as an ordinary
+// credentialContextForIdentity classifies identity into its CredentialKind by
+// concrete type, for the same reason principalContextForIdentity does: a
+// caller-defined or otherwise unreviewed type's Type() string must never
+// stand in for classification. The *ScopedUserIdentity check stays first: any
+// UAT-backed identity is CredentialKindUAT regardless of what its underlying
+// UserIdentity's concrete type is. Every other known concrete identity type
+// has its own explicit arm, including *AuthenticatedUser for a plain
+// interactive session. The default arm covers a nil identity, an
+// unrecognized concrete type, and a package-hub test fake that has not opted
+// into explicitIdentityClassification: it returns an empty Kind rather than
+// CredentialKindInteractive, so Decide's fail-closed classification check
+// denies it instead of treating an unknown identity as an ordinary
 // interactive session.
 func credentialContextForIdentity(identity Identity) CredentialContext {
 	if identity == nil {
 		return CredentialContext{}
 	}
-	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
-	}
-	switch identity.Type() {
-	case "user":
+	switch v := identity.(type) {
+	case *ScopedUserIdentity:
+		return CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes()}
+	case *AuthenticatedUser:
 		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
-	case "agent":
+	case *DevUser:
+		return CredentialContext{Kind: CredentialKindDev}
+	case *agentIdentityWrapper:
 		credential := CredentialContext{Kind: CredentialKindAgentJWT}
-		if agent, ok := identity.(*agentIdentityWrapper); ok && agent.AgentTokenClaims != nil {
-			credential.ID = agent.Claims.ID
+		if v.AgentTokenClaims != nil {
+			credential.ID = v.Claims.ID
 		}
 		return credential
-	case "federated_user", "federated_agent", "federated_service":
+	case *storedAgentIdentity, *peerAgentIdentity, *explainAgentIdentity:
+		return CredentialContext{Kind: CredentialKindAgentJWT}
+	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
-	case "broker":
+	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
-	case "dev":
-		return CredentialContext{Kind: CredentialKindDev}
 	default:
+		if c, ok := identity.(explicitIdentityClassification); ok {
+			_, kind := c.authzClassification()
+			return CredentialContext{Kind: kind, Type: identity.Type()}
+		}
 		return CredentialContext{}
 	}
 }
