@@ -178,6 +178,31 @@ func TestOAuthService_GetGitHubUserInfo_ProfileEmailVerified_Selected(t *testing
 	}
 }
 
+// TestOAuthService_GetGitHubUserInfo_ProfileEmailVerifiedNotPrimary_PreferredWithListCasing
+// pins two properties of the selection order together: the profile email is
+// preferred over a different primary verified address even when the profile
+// email is not itself primary, and the match against the list is
+// case-insensitive while the returned value is always the list's own copy
+// of the address (not whatever casing the profile happened to report).
+func TestOAuthService_GetGitHubUserInfo_ProfileEmailVerifiedNotPrimary_PreferredWithListCasing(t *testing.T) {
+	svc := &OAuthService{httpClient: &http.Client{
+		Transport: githubUserInfoRoundTrip(
+			`{"id":1,"login":"octocat","name":"Test User","email":"Public@Example.com","avatar_url":""}`,
+			`[
+				{"email":"public@example.com","primary":false,"verified":true},
+				{"email":"primary@example.com","primary":true,"verified":true}
+			]`, 0),
+	}}
+
+	info, err := svc.getGitHubUserInfo(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Email != "public@example.com" {
+		t.Errorf("email = %q, want the list's copy %q (verified-but-not-primary profile email, matched case-insensitively, must still be preferred over the primary)", info.Email, "public@example.com")
+	}
+}
+
 // TestOAuthService_GetGitHubUserInfo_ProfileEmailUnverified_FallsBackToVerified
 // is the R1 regression: the profile's public email, always present and
 // always taken as-is before this fix, is listed unverified. It must never be
