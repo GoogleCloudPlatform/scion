@@ -592,7 +592,7 @@ usage contract, `.design/hosted/usage-telemetry.md` §3.2); a `fields`
 mapping is a pure path copy with no arithmetic, so if the tool reports
 output and reasoning as exclusive values, the hook/bridge script must sum
 them into the payload field your `output_tokens` mapping reads, before the
-payload reaches sciontool. yaml cannot do this. (A built-in Go dialect
+payload reaches sciontool. YAML cannot do this. (A built-in Go dialect
 would sum them in Go instead.)
 
 Your `capabilities.limits` claims must match this wiring: `max_turns` needs
