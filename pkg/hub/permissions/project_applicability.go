@@ -63,9 +63,21 @@ var ProjectTargetApplicability = map[string]bool{
 	"harness_config.create": true, "harness_config.read": true, "harness_config.update": true,
 	"harness_config.delete": true, "harness_config.list": true,
 
-	// group.* — hub-wide resource, no project-scoped variant exists.
-	"group.create": false, "group.read": false, "group.update": false, "group.delete": false,
-	"group.list": false, "group.addMember": false, "group.removeMember": false,
+	// group.* — create/list always authorize against a parentless collection
+	// Resource (createGroup uses Resource{Type:"group"} with no ParentID;
+	// project_agents groups are auto-created internally with no Decide call
+	// at all) and are reviewed false. read/update/delete/addMember/
+	// removeMember are reviewed true: groupResource (capabilities.go) sets
+	// ParentType="project" for project_agents groups, and BOTH real
+	// enforcement (updateGroup/deleteGroup/addGroupMember/removeGroupMember
+	// each call s.authorize against that exact resource) AND capability
+	// computation (getGroup/listGroups call ComputeCapabilities[Batch]
+	// against it, which evaluates every ResourceActions["group"] entry —
+	// read/update/delete/addMember/removeMember) run Decide against that
+	// project-parented target today; this table records that existing Decide
+	// behavior as admission metadata rather than granting anything new.
+	"group.create": false, "group.read": true, "group.update": true, "group.delete": true,
+	"group.list": false, "group.addMember": true, "group.removeMember": true,
 
 	// user.* — hub-wide.
 	"user.read": false, "user.update": false, "user.invite": false, "user.suspend": false,
@@ -79,17 +91,29 @@ var ProjectTargetApplicability = map[string]bool{
 	"broker.create": false, "broker.read": false, "broker.update": false,
 	"broker.delete": false, "broker.list": false, "broker.dispatch": false,
 
-	// gcp_service_account.* — hub/user resource; assign authorizes against
-	// the EXISTING service account being assigned (gcpServiceAccountResource,
-	// capabilities.go:150-163), whose own ParentType/ParentID can be a
-	// project scope, so it is reviewed true as the one exception in this
-	// family (same pattern as project.create/skill.create_global: the
-	// resource family default does not decide every member) — it is never
-	// collection-level, since it always names that existing SA instance
-	// (see CollectionTargetClasses).
-	"gcp_service_account.create": false, "gcp_service_account.read": false,
-	"gcp_service_account.delete": false, "gcp_service_account.list": false,
-	"gcp_service_account.verify": false, "gcp_service_account.mint": false,
+	// gcp_service_account.* — create/list/mint are CapabilityScope: create
+	// has no existing SA yet, list is the hub collection view, and mint (a
+	// CapabilityScope action) is never evaluated per-instance — all three
+	// stay reviewed false. read/delete/verify/assign are CapabilityResource:
+	// each authorizes against the EXISTING service account
+	// (gcpServiceAccountResource, capabilities.go:150-163), whose own
+	// ParentType/ParentID is a project scope whenever sa.Scope ==
+	// store.ScopeProject. ComputeCapabilities/ComputeCapabilitiesBatch
+	// (capabilities.go) evaluate every ResourceActions["gcp_service_account"]
+	// entry — read, delete, verify, assign — against that exact
+	// project-parented resource today (getGCPServiceAccount,
+	// listGCPServiceAccounts, handlers_gcp_identity_scoped.go), so all four
+	// are reviewed true — this table records that existing Decide behavior
+	// as admission metadata rather than granting anything new. Note that
+	// the actual MUTATING enforcement gate for project-scoped SAs
+	// (gcpServiceAccountVerdict, handlers_gcp_identity.go) authorizes
+	// project-scope management through project.manage instead of these
+	// permission IDs directly — the true-here classification reflects the
+	// capability-computation Decide call, a real and separate code path,
+	// not a claim about which permission the mutating handler itself checks.
+	"gcp_service_account.create": false, "gcp_service_account.read": true,
+	"gcp_service_account.delete": true, "gcp_service_account.list": false,
+	"gcp_service_account.verify": true, "gcp_service_account.mint": false,
 	"gcp_service_account.assign": true,
 
 	// hub.* — hub-wide by definition, every entry false.
@@ -107,10 +131,11 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.validate.execute": false, "hub.github_app.read": false, "hub.github_app.update": false,
 	"hub.metrics.read": false, "hub.audit.read": false,
 
-	// quota.* — entitlements can bind to a project's usage; reviewed true,
-	// flagged lower-confidence for D.2 confirmation (definitions themselves
-	// are global, but the table is per-permission-ID, not per-record).
-	"quota.read": true, "quota.create": true, "quota.update": true, "quota.delete": true,
+	// quota.* — every live route (handlers_quota.go) authorizes against
+	// Resource{Type:"quota", ID:"hub"}, matching this family's own
+	// CollectionTargetClasses (HubResource for all four). Reviewed false: no
+	// project target exists for these permissions today.
+	"quota.read": false, "quota.create": false, "quota.update": false, "quota.delete": false,
 
 	// role.* — role DEFINITIONS are hub-wide, never project-scoped.
 	"role.read": false, "role.create": false, "role.update": false, "role.delete": false,
@@ -132,18 +157,21 @@ var ProjectTargetApplicability = map[string]bool{
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
 // permissionID. reviewed is false when permissionID has no entry — callers
-// (e.g. hub.ActiveProjectAccess) must treat that as "not established,"
-// never "true because unreviewed."
+// (e.g. hub.SystemAuthorityProof, hub.hasAnyProjectBinding) must treat that
+// as "not established," never "true because unreviewed."
 func AppliesToExistingProjectTarget(permissionID string) (applies bool, reviewed bool) {
 	v, ok := ProjectTargetApplicability[permissionID]
 	return v, ok
 }
 
 // PermissionAllowedBoundaries is a SEPARATE hand-reviewed table: which
-// boundary kinds may select this permission's UAT scope at MINT time. Only
-// covers permissions with a non-empty Permission.UATScope today (that is
-// the current universe of selectors); a drift test requires an entry for
-// every such Registry row.
+// boundary kinds may select this permission's UAT scope at MINT time.
+// Covers every permission with a non-empty Permission.UATScope today (that
+// is the current universe of selectors) — a drift test requires an entry
+// for every such Registry row — plus a small, explicit allowlist of
+// permissions pre-reviewed ahead of their UATScope landing (see
+// permissionAllowedBoundariesPreReviewedWithoutUATScope in registry_test.go,
+// e.g. broker.create); a stale-key test rejects any other key.
 //
 // "Hub-only" families (group/user/policy/broker/gcp_service_account except
 // assign) get []BoundaryKind{BoundaryKindHub}; everything else reviewed
@@ -176,8 +204,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
 
 	// broker.create has no Permission.UATScope yet (not a resolvable
-	// selector today) but is pre-reviewed here as hub-only per pat-a-lead:
-	// when D.1 adds UATScope: "broker:create" to that Registry row,
+	// selector today) but is pre-reviewed here as hub-only:
+	// when a future Registry row adds UATScope: "broker:create",
 	// ResolveSelector starts succeeding immediately with the correct
 	// boundary, no second A.1-side change required.
 	"broker.create": {BoundaryKindHub},
@@ -242,9 +270,9 @@ const (
 // mintable selectors) — including hub-only permissions such as user.invite.
 // Used ONLY for hub-boundary mint-time contemplation
 // (hub.MintTimeSystemGrant) — NEVER inferred from ProjectTargetApplicability
-// or PermissionAllowedBoundaries (pat-refactor blocker #8, 2026-09-28): a
-// permission can legitimately support BOTH a global-catalog and a
-// project-scoped class (skill/template/harness_config read/list), and a
+// or PermissionAllowedBoundaries: a permission can legitimately support
+// BOTH a global-catalog and a project-scoped class (skill/template/
+// harness_config read/list), and a
 // hub-only permission with no entry here must deny rather than silently
 // inherit a guessed class — an unreviewed or absent permission ID returns
 // nil from SupportedTargetClassesFor, which MintTimeSystemGrant treats as
@@ -272,37 +300,54 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.register": {TargetClassKindHubResource},
 
-	// template.*, harness_config.* — same shape as skill.
-	"template.create": {TargetClassKindProjectScoped},
+	// template.*, harness_config.* — unlike skill, a single create
+	// permission covers every scope (templateScopeResource/
+	// templateUserScopeResource/harnessConfigScopeResource all route through
+	// template.create/harness_config.create regardless of scope), so create
+	// supports GlobalCatalog too, not just ProjectScoped.
+	"template.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"template.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"template.update": {TargetClassKindProjectScoped}, "template.delete": {TargetClassKindProjectScoped},
 	"template.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
-	"harness_config.create": {TargetClassKindProjectScoped},
+	"harness_config.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"harness_config.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"harness_config.update": {TargetClassKindProjectScoped}, "harness_config.delete": {TargetClassKindProjectScoped},
 	"harness_config.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
-	// group.* — hub-wide resource, no project-scoped variant.
-	"group.create": {TargetClassKindHubResource}, "group.read": {TargetClassKindHubResource},
-	"group.update": {TargetClassKindHubResource}, "group.delete": {TargetClassKindHubResource},
-	"group.list": {TargetClassKindHubResource}, "group.addMember": {TargetClassKindHubResource},
-	"group.removeMember": {TargetClassKindHubResource},
+	// group.* — create/list are the hub collection actions (no project-scoped
+	// variant reaches Decide, see ProjectTargetApplicability). read/update/
+	// delete/addMember/removeMember support BOTH classes: PermissionAllowedBoundaries
+	// keeps these Hub-only at MINT time (unchanged, pending a separate mint
+	// review per the ruling), but a hub-boundary token's mint-time
+	// contemplation must still list ProjectScoped here because
+	// SystemAuthorityProof now admits a real project-parented target for
+	// these IDs (see ProjectTargetApplicability) — mint and use must read the
+	// same per-permission facts.
+	"group.create": {TargetClassKindHubResource}, "group.read": {TargetClassKindHubResource, TargetClassKindProjectScoped},
+	"group.update": {TargetClassKindHubResource, TargetClassKindProjectScoped}, "group.delete": {TargetClassKindHubResource, TargetClassKindProjectScoped},
+	"group.list": {TargetClassKindHubResource}, "group.addMember": {TargetClassKindHubResource, TargetClassKindProjectScoped},
+	"group.removeMember": {TargetClassKindHubResource, TargetClassKindProjectScoped},
 
 	// user.* — hub-wide. user.invite is the reviewed super-admin hub-only
-	// mint case pat-refactor's blocker #8 requires covering explicitly.
+	// mint case this table must cover explicitly, not by omission.
 	"user.read": {TargetClassKindHubResource}, "user.invite": {TargetClassKindHubResource},
 	"user.list": {TargetClassKindHubResource},
 
 	// broker.* — user-owned hub resource.
 	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},
 
-	// gcp_service_account.* — hub/user resource; assign is the mixed-class
-	// exception, since the existing SA it authorizes against can itself
-	// carry a project scope.
-	"gcp_service_account.read":   {TargetClassKindHubResource},
+	// gcp_service_account.* — read/verify/assign are all mixed-class: each
+	// authorizes against the existing SA (gcpServiceAccountResource), which
+	// carries a project scope whenever sa.Scope == store.ScopeProject (see
+	// ProjectTargetApplicability). list has no per-instance variant (hub
+	// collection view only). gcp_service_account.delete has no UATScope, so
+	// it is not a selector and has no entry in this UATScope-only table,
+	// even though ProjectTargetApplicability[gcp_service_account.delete] is
+	// also true.
+	"gcp_service_account.read":   {TargetClassKindHubResource, TargetClassKindProjectScoped},
 	"gcp_service_account.list":   {TargetClassKindHubResource},
-	"gcp_service_account.verify": {TargetClassKindHubResource},
+	"gcp_service_account.verify": {TargetClassKindHubResource, TargetClassKindProjectScoped},
 	"gcp_service_account.assign": {TargetClassKindProjectScoped},
 
 	// broker.create has no UATScope yet (see PermissionAllowedBoundaries);

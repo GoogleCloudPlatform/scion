@@ -189,6 +189,42 @@ func TestRS4_IssuerAuthority(t *testing.T) {
 		assert.ErrorIs(t, err, ErrUATScopeViolation, "T-I2: scope not held must be denied")
 	})
 
+	t.Run("T-I11_dangling_role_definition_fails_closed", func(t *testing.T) {
+		// A role binding whose role definition is missing/unloadable must
+		// fail the mint closed (ErrUATProjectForbidden), not silently skip
+		// the dangling binding and resolve authority from whatever bindings
+		// remain. The store's own integrity checks refuse to delete a role
+		// definition that still has an active binding (by design), so this
+		// injects the failure at the exact point scopedRoleBindingPermissions
+		// reads it (store.GetRoleDefinition), rather than trying to force an
+		// inconsistent state the store is specifically built to prevent.
+		srv, s := testServer(t)
+		ctx := context.Background()
+		projectID := tid("rs4-i11-p")
+		ownerID := tid("rs4-i11-o")
+		userID := tid("rs4-i11-u")
+		rs4Project(t, s, projectID, ownerID)
+		require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "rs4i11@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "rs4-i11-role", ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
+		})
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		fs := &r2FailingStore{failGetRoleDefinition: store.ErrNotFound}
+		restore := installFailStore(srv, fs)
+		defer restore()
+
+		mintCtx := rs4MintContext(userID)
+		_, _, err = srv.uatService.CreateToken(mintCtx, userID, "dangle", projectID, []string{"agent:read"}, nil)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden, "T-I11: a dangling role-definition binding must deny the mint, not skip silently")
+	})
+
 	t.Run("T-I3_mixed_held_and_unheld", func(t *testing.T) {
 		srv, s := testServer(t)
 		projectID := tid("rs4-i3-p")
@@ -1551,3 +1587,4 @@ func TestRS4_CrossProjectMembershipDenied(t *testing.T) {
 //    widen the serialization window unnecessarily.
 //
 // This is documented here per R1 review O1.
+
