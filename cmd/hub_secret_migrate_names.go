@@ -104,12 +104,17 @@ If step 1 or 2 writes a new version to the prefixed name and then detects
 that a concurrent write already changed the secret's ref, that secret is
 reported as CONFLICT with a non-zero exit instead of being silently treated
 as done: its prefixed name's latest version may now be stale relative to
-the concurrent write. Re-running migrate-names once is always safe and
-tells you which of two cases applies: if the re-run reports an action for
-that secret (MIGRATED/RESYNCED/REPAIRED REF), the CONFLICT was a false
-positive (something bumped the record's Version without moving its ref --
-e.g. a metadata edit, or a legacy-name rotation) and is now resolved. If
-the re-run instead reports nothing further to do for that secret, the ref
+the concurrent write. Diagnose by re-running migrate-names once WITHOUT
+--delete-legacy (safe either way): if that re-run reports MIGRATED, RESYNCED
+or REPAIRED REF for this secret, the CONFLICT was a false positive
+(something bumped the record's Version without moving its ref -- e.g. a
+metadata edit, or a legacy-name rotation) and is now resolved. DELETED
+LEGACY / WOULD DELETE LEGACY is NOT that signal -- a true conflict's ref
+already matches the prefixed name, so --delete-legacy deletes the legacy
+copy regardless of whether the CONFLICT was ever actually resolved, and a
+re-run that includes --delete-legacy reports that action even for a true
+conflict, wrongly appearing to resolve it. If a plain re-run (without
+--delete-legacy) reports nothing further to do for that secret, the ref
 itself was already moved by a concurrent write, and further re-runs will
 NOT detect or repair it -- you must re-set the secret directly to its
 intended value through the normal secret-set path. (For a hub-scope
@@ -483,11 +488,11 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 				// stale value remains; round-6 review finding 3) from a
 				// false positive (a metadata edit or a legacy-name rotation
 				// bumped Version without moving the ref -- a re-run then
-				// converges normally; a known, deferred limitation, see the
-				// tracked follow-up issue -- round-7 review finding 2/item
-				// 5). Re-running once is always safe either way, and its
-				// result tells the two cases apart.
-				_, _ = fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-run migrate-names once (safe either way) -- if it now reports an action for this secret, the CONFLICT was a false positive and is resolved; if it reports nothing further to do, the ref was already moved by a concurrent write and you must re-set the secret directly to its intended value\n", c.name, c.scope, c.scopeID)
+				// converges normally; a known, deferred limitation, see
+				// ptone/scion#2254 item 5). Re-running once without
+				// --delete-legacy is always safe either way, and its result
+				// tells the two cases apart.
+				_, _ = fmt.Fprintf(out, "  CONFLICT  %s (scope: %s/%s) - a concurrent write was detected after this run already wrote a version to the prefixed name; re-run migrate-names once WITHOUT --delete-legacy (safe either way) -- if it now reports MIGRATED, RESYNCED or REPAIRED REF for this secret, the CONFLICT was a false positive and is resolved (DELETED LEGACY / WOULD DELETE LEGACY is NOT that signal); if it reports nothing further to do, the ref was already moved by a concurrent write and you must re-set the secret directly to its intended value\n", c.name, c.scope, c.scopeID)
 			} else {
 				_, _ = fmt.Fprintf(out, "  ERROR  %s (scope: %s/%s) - %v\n", c.name, c.scope, c.scopeID, err)
 			}
@@ -588,10 +593,10 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 			case errors.Is(err, secret.ErrConflictingWrite):
 				// Propagated as-is; runMigrateNames reports this as a
 				// distinct CONFLICT outcome (round-5 review finding 2) rather
-				// than a generic ERROR, since the advice differs (re-set the
-				// secret directly, not check an IAM grant -- and definitely
-				// not re-run this command, which would silently no-op once
-				// the ref already matches; round-6 review finding 3).
+				// than a generic ERROR, since the advice differs (see the
+				// CONFLICT line in runMigrateNames: a diagnostic re-run
+				// without --delete-legacy, then re-set directly for a true
+				// conflict).
 				return false, err
 			default:
 				return false, fmt.Errorf("failed to migrate/repair (check the hub's IAM grant on the legacy name): %w", err)

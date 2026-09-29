@@ -519,21 +519,31 @@ formula can never drift apart):
     edit (`UpdateSecretMeta`), or an old-binary rotation through a name
     other than the prefixed one — can also make the CAS's version predicate
     fail, and is currently reported as the same `ErrConflictingWrite` /
-    `CONFLICT` even though the ref never actually moved and a plain retry
-    (a single re-run of `migrate-names`, or the hub's own next boot) always
-    converges to the correct value. This means the "re-set directly, a
+    `CONFLICT` even though the ref never actually moved, and a plain retry
+    (a single re-run of `migrate-names`, or — for the hub-scope signing keys
+    only — the hub's next boot) converges to the correct value unless
+    another concurrent write races it. This means the "re-set directly, a
     re-run will not help" remediation above is accurate only for a *true*
     conflict (the ref itself was repointed by a concurrent write); for this
     false-positive case a re-run does help. Since nothing here can tell the
     two apart without re-reading the record and checking whether its ref
     has actually become the prefixed ref — a behavior change tracked
     separately rather than made in this PR — the practical guidance is: a
-    re-run is always safe to try first, and its result distinguishes the
-    two cases (an action reported means it was a false positive and is now
-    resolved; nothing further to do means it was a true conflict). Pinned by
+    re-run **without `--delete-legacy`** is always safe to try first, and
+    its result distinguishes the two cases — a MIGRATED, RESYNCED or
+    REPAIRED REF line for this secret means it was a false positive and is
+    now resolved; nothing further to do means it was a true conflict.
+    `DELETED LEGACY` / `WOULD DELETE LEGACY` is **not** that signal: once
+    the ref already designates the prefixed name (true for both a resolved
+    false positive and an unresolved true conflict), `--delete-legacy`
+    deletes the legacy copy regardless, so a re-run that includes
+    `--delete-legacy` reports that action even for a true conflict, wrongly
+    appearing to resolve it. Pinned by
     `TestSPREV6_MetaEditDuringCopyIsFalsePositiveConflict`,
-    `TestR7_Item5_MetaEdit_RerunConverges`, and
-    `TestR7_Item5_OldBinaryRotationFalsePositive_RerunConverges`.
+    `TestR7_Item5_MetaEdit_RerunConverges`,
+    `TestR7_Item5_OldBinaryRotationFalsePositive_RerunConverges`, and (for
+    the `--delete-legacy` carve-out)
+    `TestSPREV8_TrueConflictRerunWithDeleteLegacyReportsAction`.
 - **Deploy ordering**: grant the new hub-prefixed IAM condition to a hub's
   service account *before* deploying a binary built from this change —
   every `Set` (new secret, new version, signing-key rotation) targets the
