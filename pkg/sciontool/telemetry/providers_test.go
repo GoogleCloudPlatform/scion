@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -264,9 +266,9 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 	}
 	meter := providers.MeterProvider.Meter(hookMetricScope)
 	tool, _ := meter.Int64Counter("agent.tool.calls", metric.WithUnit("{call}"))
-	tokens, _ := meter.Int64Counter("scion.hook.tokens.input", metric.WithUnit("{token}"))
+	tokens, _ := meter.Int64Counter(telemetrycontract.MetricUsageTokens, metric.WithUnit("{token}"))
 	tool.Add(context.Background(), 1)
-	tokens.Add(context.Background(), 3)
+	tokens.Add(context.Background(), 3, metric.WithAttributes(attribute.String(telemetrycontract.TokenTypeLabel, telemetrycontract.TokenTypeInput)))
 	if err := providers.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
