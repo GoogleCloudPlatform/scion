@@ -16,56 +16,85 @@ package agent
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TestRealTmuxLoadBufferDeliversLargePayload is an end-to-end check against a
-// real tmux server (ptone/scion#2256): it loads 200 KB through the exact
-// "tmux load-buffer -b <name> -" / "tmux paste-buffer ... -p -d -b <name>"
-// argv pair deliverImmediate uses, and verifies the payload arrives at the
-// receiving process byte-for-byte — well past the 16 KB argv cap that broke
-// "tmux set-buffer -- <message>".
+// real tmux server (ptone/scion#2256): it drives deliverImmediate's actual
+// argv through a thin Runtime shim onto a real tmux socket, and verifies a
+// 200 KB message arrives at the receiving process byte-for-byte — well past
+// the 16 KB argv cap that broke "tmux set-buffer -- <message>".
 //
-// This exercises tmux itself rather than our Runtime abstraction (Exec and
-// ExecWithStdin are mocked everywhere else in this package). A container
-// runtime (docker) was not available in the environment this test was
-// written in, so the target pane runs under a private, temporary local tmux
-// server instead of inside a container; this test is skipped when tmux
-// itself is not installed.
+// This exercises tmux itself rather than mocking the Runtime abstraction (as
+// every other test in this package does). A container runtime (docker) was
+// not available in the environment this test was written in, so the target
+// pane runs under a private, temporary local tmux server instead of inside a
+// container; this test is skipped in short mode and when tmux itself is not
+// installed.
 func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-tmux integration test in short mode")
+	}
+
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux not installed; skipping real-tmux integration test")
 	}
 
-	dir := t.TempDir()
+	// A short directory (os.MkdirTemp rather than t.TempDir, which embeds the
+	// full test name) keeps the socket path within the Unix sun_path limit,
+	// which a long TMPDIR or test name can otherwise exceed on macOS.
+	dir, err := os.MkdirTemp("", "tmx")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
 	sock := filepath.Join(dir, "sock")
 	outFile := filepath.Join(dir, "out")
 
-	runTmux := func(args ...string) []byte {
-		t.Helper()
+	runTmux := func(args ...string) (string, error) {
 		cmd := exec.Command(tmuxPath, append([]string{"-S", sock}, args...)...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("tmux %v failed: %v (%s)", args, err, out)
+			return string(out), fmt.Errorf("tmux %v failed: %w (%s)", args, err, out)
+		}
+		return string(out), nil
+	}
+	mustTmux := func(args ...string) string {
+		t.Helper()
+		out, err := runTmux(args...)
+		if err != nil {
+			t.Fatal(err)
 		}
 		return out
 	}
 
 	// A pane running "cat" redirected to a file stands in for the agent's
 	// terminal input: whatever is pasted into the pane arrives on cat's
-	// stdin, and cat writes it back out verbatim.
-	runTmux("new-session", "-d", "-s", "t", "-x", "220", "-y", "50", "cat > "+outFile)
+	// stdin, and cat writes it back out verbatim. The session is named
+	// "scion" so it matches deliverImmediate's hardcoded "-t scion:0" target.
+	// "-f /dev/null" keeps the new server from loading the invoking user's
+	// ~/.tmux.conf, which can otherwise change pane behavior (e.g.
+	// remain-on-exit, a default-command) and make the test environment-
+	// dependent; it only needs to be on the call that starts the server.
+	mustTmux("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "220", "-y", "50", "cat > "+outFile)
 	// Best-effort cleanup: once cat exits below (via C-d), tmux's default
 	// exit-empty behavior tears the server down on its own, so a later
 	// kill-server legitimately finds nothing left to kill.
 	defer func() {
-		_ = exec.Command(tmuxPath, "-S", sock, "kill-server").Run()
+		_, _ = runTmux("kill-server")
 	}()
 
 	// Build a payload well past the 16 KB argv cap that broke set-buffer,
@@ -77,22 +106,50 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	}
 	payload := b.String()
 
-	loadCmd := exec.Command(tmuxPath, "-S", sock, "load-buffer", "-b", msgBufferName, "-")
-	loadCmd.Stdin = strings.NewReader(payload)
-	if out, err := loadCmd.CombinedOutput(); err != nil {
-		t.Fatalf("tmux load-buffer failed: %v (%s)", err, out)
+	// Drive deliverImmediate's actual argv against the private tmux socket
+	// via a thin Runtime shim, rather than a hand-copy of its commands: if
+	// the argv deliverImmediate builds ever changes, this test exercises it
+	// directly instead of a stale copy that would keep passing regardless.
+	shim := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "local", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return runTmux(cmd[1:]...)
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
+			c.Stdin = stdin
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
+			}
+			return string(out), nil
+		},
+	}
+	mgr := &AgentManager{Runtime: shim}
+
+	if err := mgr.deliverImmediate(context.Background(), "test-agent", "", payload, false); err != nil {
+		t.Fatalf("deliverImmediate failed: %v", err)
 	}
 
-	// Mirror deliverImmediate's paste-buffer argv exactly (same -p, -d, -b
-	// <name> shape; only the target differs because this test's session
-	// isn't named "scion"). Note: tmux only wraps the paste in bracketed-paste
-	// escape codes when the destination application has itself requested
-	// bracketed-paste mode; plain "cat" never does, so no markers appear here.
-	runTmux("paste-buffer", "-t", "t:0.0", "-p", "-d", "-b", msgBufferName)
-
-	// Give tmux time to finish feeding the pasted bytes into the pane's pty
-	// before sending EOF; sending EOF too early truncates the paste.
-	time.Sleep(1 * time.Second)
+	// Bounded poll on the pane's output instead of a fixed sleep before
+	// sending EOF: GNU/busybox cat writes each read immediately, so outFile
+	// grows as the paste lands, and this lets the test proceed as soon as it
+	// has rather than depending on a timing-sensitive guess.
+	wantSize := int64(len(payload))
+	pollDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if info, statErr := os.Stat(outFile); statErr == nil && info.Size() >= wantSize {
+			break
+		}
+		if time.Now().After(pollDeadline) {
+			t.Fatal("timed out waiting for the paste to reach the output file")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	// Send EOF so cat exits and flushes its stdio buffer to outFile. Killing
 	// the server first (SIGHUP) can terminate cat before its last,
@@ -100,9 +157,7 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	// cat exiting also tears down the pane's only session, so the tmux
 	// server itself may exit immediately afterward (default exit-empty) —
 	// this is expected and is not polled for; only the file content is.
-	runTmux("send-keys", "-t", "t:0.0", "C-d")
-
-	wantSize := int64(len(payload))
+	mustTmux("send-keys", "-t", "scion:0", "C-d")
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -129,7 +184,11 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	stripped := bytes.TrimPrefix(got, []byte("\x1b[200~"))
 	stripped = bytes.TrimSuffix(stripped, []byte("\x1b[201~"))
 
-	if string(stripped) != payload {
-		t.Fatalf("pane output did not match payload byte-for-byte: got %d bytes, want %d bytes", len(stripped), len(payload))
+	// deliverImmediate also sends trailing confirmation Enter keypresses
+	// after the paste, unrelated to the payload itself, so the pane output
+	// may contain a little more than the payload. Check that the payload
+	// landed byte-for-byte as a prefix rather than requiring exact equality.
+	if !bytes.HasPrefix(stripped, []byte(payload)) {
+		t.Fatalf("pane output did not start with the payload byte-for-byte: got %d bytes, want a prefix of length %d", len(stripped), len(payload))
 	}
 }

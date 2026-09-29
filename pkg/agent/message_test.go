@@ -64,17 +64,18 @@ func TestMessage(t *testing.T) {
 		t.Fatalf("Message failed: %v", err)
 	}
 
-	expectedCmds := []string{
-		"tmux send-keys -t scion:0 C-c",
-		"tmux load-buffer -b scion-msg -",
-		"tmux paste-buffer -t scion:0 -p -d -b scion-msg",
-		"tmux send-keys -t scion:0 Enter",
-		"tmux send-keys -t scion:0 Enter",
-		"tmux send-keys -t scion:0 Enter",
+	if len(capturedCmd) != 6 {
+		t.Fatalf("Expected 6 commands, got %d: %v", len(capturedCmd), capturedCmd)
 	}
 
-	if len(capturedCmd) != len(expectedCmds) {
-		t.Fatalf("Expected %d commands, got %d", len(expectedCmds), len(capturedCmd))
+	bufName := bufNameFromLoadCmd(t, capturedCmd[1])
+	expectedCmds := []string{
+		"tmux send-keys -t scion:0 C-c",
+		"tmux load-buffer -b " + bufName + " -",
+		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
+		"tmux send-keys -t scion:0 Enter",
+		"tmux send-keys -t scion:0 Enter",
+		"tmux send-keys -t scion:0 Enter",
 	}
 
 	for i, cmd := range capturedCmd {
@@ -82,6 +83,20 @@ func TestMessage(t *testing.T) {
 			t.Errorf("Expected cmd %d to be '%s', got '%s'", i, expectedCmds[i], cmd)
 		}
 	}
+}
+
+// bufNameFromLoadCmd extracts the buffer name from a captured
+// "tmux load-buffer -b <name> -" command string.
+func bufNameFromLoadCmd(t *testing.T, loadCmd string) string {
+	t.Helper()
+	parts := strings.Fields(loadCmd)
+	for i, p := range parts {
+		if p == "-b" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	t.Fatalf("could not find buffer name in load-buffer command: %q", loadCmd)
+	return ""
 }
 
 func TestBroadcast(t *testing.T) {
@@ -154,21 +169,8 @@ func TestBroadcast(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	expectedCalls := []string{
-		"agent-1: tmux load-buffer -b scion-msg -",
-		"agent-1: tmux paste-buffer -t scion:0 -p -d -b scion-msg",
-		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux load-buffer -b scion-msg -",
-		"agent-2: tmux paste-buffer -t scion:0 -p -d -b scion-msg",
-		"agent-2: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux send-keys -t scion:0 Enter",
-	}
-
-	if len(capturedCalls) != len(expectedCalls) {
-		t.Fatalf("Expected %d calls, got %d: %v", len(expectedCalls), len(capturedCalls), capturedCalls)
+	if len(capturedCalls) != 10 {
+		t.Fatalf("Expected 10 calls, got %d: %v", len(capturedCalls), capturedCalls)
 	}
 
 	// Since buffer delivery is async, agents may flush in either order.
@@ -179,11 +181,37 @@ func TestBroadcast(t *testing.T) {
 	if len(agent1Calls) != 5 || len(agent2Calls) != 5 {
 		t.Fatalf("Expected 5 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
 	}
-	if agent1Calls[0] != "agent-1: tmux load-buffer -b scion-msg -" {
-		t.Errorf("Unexpected agent-1 call[0]: %s", agent1Calls[0])
+
+	buf1 := bufNameFromLoadCmd(t, strings.TrimPrefix(agent1Calls[0], "agent-1: "))
+	buf2 := bufNameFromLoadCmd(t, strings.TrimPrefix(agent2Calls[0], "agent-2: "))
+	if buf1 == buf2 {
+		t.Errorf("expected agent-1 and agent-2 deliveries to use different buffer names, both got %q", buf1)
 	}
-	if agent2Calls[0] != "agent-2: tmux load-buffer -b scion-msg -" {
-		t.Errorf("Unexpected agent-2 call[0]: %s", agent2Calls[0])
+
+	expectedAgent1 := []string{
+		"agent-1: tmux load-buffer -b " + buf1 + " -",
+		"agent-1: tmux paste-buffer -t scion:0 -p -d -b " + buf1,
+		"agent-1: tmux send-keys -t scion:0 Enter",
+		"agent-1: tmux send-keys -t scion:0 Enter",
+		"agent-1: tmux send-keys -t scion:0 Enter",
+	}
+	for i, want := range expectedAgent1 {
+		if agent1Calls[i] != want {
+			t.Errorf("Unexpected agent-1 call[%d]: got %q, want %q", i, agent1Calls[i], want)
+		}
+	}
+
+	expectedAgent2 := []string{
+		"agent-2: tmux load-buffer -b " + buf2 + " -",
+		"agent-2: tmux paste-buffer -t scion:0 -p -d -b " + buf2,
+		"agent-2: tmux send-keys -t scion:0 Enter",
+		"agent-2: tmux send-keys -t scion:0 Enter",
+		"agent-2: tmux send-keys -t scion:0 Enter",
+	}
+	for i, want := range expectedAgent2 {
+		if agent2Calls[i] != want {
+			t.Errorf("Unexpected agent-2 call[%d]: got %q, want %q", i, agent2Calls[i], want)
+		}
 	}
 }
 
@@ -524,6 +552,144 @@ func TestMessageBuffer_CoalescedLargeMessagesDeliveredViaStdin(t *testing.T) {
 	}
 	if string(stdinPayloads[0]) != expected {
 		t.Fatalf("stdin payload mismatch: got %d bytes, want %d bytes", len(stdinPayloads[0]), len(expected))
+	}
+}
+
+// TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames covers
+// ptone/scion#2265: deliveries to the same agent are not serialised (an
+// interrupt can race a buffered flush), so two deliveries overlapping in time
+// must never share a tmux buffer name. A shared fixed name would let one
+// delivery's paste consume the buffer loaded for the other.
+func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+
+	var mu sync.Mutex
+	var loadBufNames []string
+	var pasteBufNames []string
+
+	start := make(chan struct{})
+	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+		<-start // release both goroutines' load-buffer calls together
+		bufName := bufNameFromLoadCmd(t, strings.Join(cmd, " "))
+		mu.Lock()
+		loadBufNames = append(loadBufNames, bufName)
+		mu.Unlock()
+		// Give the other goroutine a chance to be mid-delivery too, mirroring
+		// the interleave the review describes (A.load, B.load, A.paste, B.paste).
+		time.Sleep(5 * time.Millisecond)
+		return "", nil
+	}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
+			for i, arg := range cmd {
+				if arg == "-b" && i+1 < len(cmd) {
+					mu.Lock()
+					pasteBufNames = append(pasteBufNames, cmd[i+1])
+					mu.Unlock()
+				}
+			}
+		}
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = mgr.deliverImmediate(context.Background(), "test-agent", "", "message A", true)
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = mgr.deliverImmediate(context.Background(), "test-agent", "", "message B", false)
+	}()
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("delivery %d failed: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(loadBufNames) != 2 {
+		t.Fatalf("expected 2 load-buffer calls, got %d: %v", len(loadBufNames), loadBufNames)
+	}
+	if loadBufNames[0] == loadBufNames[1] {
+		t.Fatalf("expected distinct buffer names for two interleaved deliveries, both got %q", loadBufNames[0])
+	}
+	if len(pasteBufNames) != 2 {
+		t.Fatalf("expected 2 paste-buffer calls, got %d: %v", len(pasteBufNames), pasteBufNames)
+	}
+	if pasteBufNames[0] == pasteBufNames[1] {
+		t.Fatalf("expected the two pastes to use distinct buffer names, both got %q", pasteBufNames[0])
+	}
+	wantSet := map[string]bool{loadBufNames[0]: true, loadBufNames[1]: true}
+	for _, b := range pasteBufNames {
+		if !wantSet[b] {
+			t.Errorf("paste-buffer referenced a buffer name %q that was never loaded", b)
+		}
+	}
+}
+
+// TestDeliverImmediate_PasteFailureDeletesBuffer covers ptone/scion#2265:
+// paste-buffer's own "-d" only deletes the buffer when the paste succeeds, so
+// a failed paste must trigger an explicit, best-effort
+// "tmux delete-buffer -b <name>" with the same name that was loaded — and its
+// own failure must not change the error reported for the delivery.
+func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+
+	var loadedBufName string
+	var deleteCalls []string
+	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+		loadedBufName = bufNameFromLoadCmd(t, strings.Join(cmd, " "))
+		return "", nil
+	}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		switch {
+		case len(cmd) >= 2 && cmd[1] == "paste-buffer":
+			return "", fmt.Errorf("no buffer %s", loadedBufName)
+		case len(cmd) >= 2 && cmd[1] == "delete-buffer":
+			deleteCalls = append(deleteCalls, strings.Join(cmd, " "))
+			// delete-buffer's own failure must be tolerated (best-effort).
+			return "", fmt.Errorf("delete-buffer also failed")
+		default:
+			return "", nil
+		}
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+	if err == nil {
+		t.Fatal("expected an error from the failed paste-buffer")
+	}
+	if strings.Contains(err.Error(), "delete-buffer") {
+		t.Fatalf("delete-buffer's own failure must be ignored, got: %v", err)
+	}
+
+	if len(deleteCalls) != 1 {
+		t.Fatalf("expected exactly one delete-buffer call, got %d: %v", len(deleteCalls), deleteCalls)
+	}
+	want := "tmux delete-buffer -b " + loadedBufName
+	if deleteCalls[0] != want {
+		t.Fatalf("expected delete-buffer to reuse the loaded buffer's name: got %q, want %q", deleteCalls[0], want)
 	}
 }
 

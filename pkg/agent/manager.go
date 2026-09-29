@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -88,11 +89,45 @@ type AgentManager struct {
 // Messages arriving within this window are coalesced into a single delivery.
 const defaultBufferDelay = 2 * time.Second
 
-// msgBufferName is the named tmux buffer used to load message text via
-// stdin before pasting it into an agent's session. Using a named buffer
-// (rather than the default buffer) avoids clobbering unrelated tmux buffer
-// usage and lets paste-buffer delete it immediately after use (-d).
-const msgBufferName = "scion-msg"
+// msgBufferPrefix is the base name for the named tmux buffer used to load
+// message text via stdin before pasting it into an agent's session. Using a
+// named buffer (rather than the default buffer) avoids clobbering unrelated
+// tmux buffer usage and lets paste-buffer delete it immediately after use
+// (-d). Each delivery appends a unique suffix (see nextMsgBufferName) so that
+// two deliveries to the same agent overlapping in time — an interrupt racing
+// a buffered flush, or two retries — never share a buffer: with a single
+// fixed name, one delivery's paste can consume the buffer loaded for the
+// other, silently swapping which message reaches the terminal and which
+// delivery is reported as failed (ptone/scion#2265).
+const msgBufferPrefix = "scion-msg"
+
+// msgBufferSeq generates the per-delivery suffix for msgBufferPrefix. It only
+// needs to be unique among buffers alive at once on one tmux server, so a
+// process-local counter is enough — it doesn't need to survive a restart.
+var msgBufferSeq atomic.Uint64
+
+// nextMsgBufferName returns a short, unique tmux buffer name for a single
+// deliverImmediate call. It must be computed once per call and reused for
+// every step of that call (load-buffer, paste-buffer, and any cleanup),
+// never regenerated mid-delivery.
+func nextMsgBufferName() string {
+	return fmt.Sprintf("%s-%d", msgBufferPrefix, msgBufferSeq.Add(1))
+}
+
+// loadBufferArgv builds the argv that loads message text into the named tmux
+// buffer bufName via stdin. Shared by deliverImmediate and the real-tmux
+// integration test so the test exercises the exact argv delivery uses.
+func loadBufferArgv(bufName string) []string {
+	return []string{"tmux", "load-buffer", "-b", bufName, "-"}
+}
+
+// pasteBufferArgv builds the argv that pastes the named tmux buffer bufName
+// into target with bracketed paste, deleting the buffer on success. Shared by
+// deliverImmediate and the real-tmux integration test so the test exercises
+// the exact argv delivery uses.
+func pasteBufferArgv(target, bufName string) []string {
+	return []string{"tmux", "paste-buffer", "-t", target, "-p", "-d", "-b", bufName}
+}
 
 func NewManager(rt runtime.Runtime) Manager {
 	mgr := &AgentManager{
@@ -342,6 +377,28 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 	return nil
 }
 
+// deliveryStepKind identifies how deliverImmediate must run a deliveryStep,
+// replacing dispatch on a step's argv contents (e.g. cmd[1] == "load-buffer")
+// with an explicit tag set once when the step is built.
+type deliveryStepKind int
+
+const (
+	// stepSendKeys runs argv via Exec: an interrupt key, a bare Enter, or one
+	// of the trailing confirmation Enters.
+	stepSendKeys deliveryStepKind = iota
+	// stepLoadBuffer runs argv via ExecWithStdin, streaming the message body.
+	stepLoadBuffer
+	// stepPasteBuffer runs argv via Exec. Its success marks the message as
+	// delivered; its failure triggers best-effort buffer cleanup.
+	stepPasteBuffer
+)
+
+// deliveryStep is one command in a deliverImmediate call.
+type deliveryStep struct {
+	kind deliveryStepKind
+	argv []string
+}
+
 // deliverImmediate sends a message to an agent's tmux session right now,
 // bypassing the message buffer. This is the low-level delivery mechanism
 // used both for interrupt messages (called directly) and for buffered
@@ -389,22 +446,27 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	h := harness.New(harnessName)
 
 	// 3. Prepare commands
-	var cmds [][]string
+	var steps []deliveryStep
 
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
 			for _, key := range seq {
-				cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", key})
+				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
 			}
 		} else {
 			key := h.GetInterruptKey()
-			cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", key})
+			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
 		}
 	}
 
+	// bufName names the tmux buffer used below, if this delivery pastes a
+	// message. It is computed once (nextMsgBufferName) and reused for both
+	// the load and paste steps, and for cleanup if the paste step fails.
+	var bufName string
+
 	if message == "" {
 		// Empty messages send a bare Enter keypress to trigger confirmations
-		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", "Enter"})
+		steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}})
 	} else {
 		// Use tmux paste buffer with bracketed paste (-p) instead of send-keys.
 		// send-keys simulates typing character-by-character, which allows TUI
@@ -417,12 +479,18 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		// passed as a "tmux set-buffer" argv element: tmux's client-server
 		// protocol caps a single command's argv at 16 KB, and a coalesced
 		// batch of debounced messages can exceed that (ptone/scion#2256).
-		// Streaming it over stdin has no such limit. The buffer is deleted
-		// on paste (-d) so a later failure can't cause a stale buffer to be
-		// pasted by a subsequent delivery.
-		cmds = append(cmds, []string{"tmux", "load-buffer", "-b", msgBufferName, "-"})
-		cmds = append(cmds, []string{"tmux", "paste-buffer", "-t", "scion:0", "-p", "-d", "-b", msgBufferName})
-		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", "Enter"})
+		// Streaming it over stdin has no such limit.
+		//
+		// The buffer name is unique per delivery (ptone/scion#2265): two
+		// deliveries to the same agent are not otherwise serialised, and a
+		// shared fixed name lets one delivery's paste consume the buffer
+		// loaded for the other. "-d" removes the per-delivery buffer after a
+		// successful paste; on paste failure it is deleted explicitly below,
+		// since "-d" does not run when paste-buffer itself fails.
+		bufName = nextMsgBufferName()
+		steps = append(steps, deliveryStep{kind: stepLoadBuffer, argv: loadBufferArgv(bufName)})
+		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv("scion:0", bufName)})
+		steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}})
 	}
 
 	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
@@ -433,21 +501,31 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// from that point on are wrapped in PartialDeliveryError so the message
 	// buffer's bounded retry knows not to retry them.
 	delivered := false
-	for _, cmd := range cmds {
+	for _, step := range steps {
 		var err error
-		if len(cmd) >= 2 && cmd[1] == "load-buffer" {
-			_, err = m.Runtime.ExecWithStdin(ctx, agent.ContainerID, cmd, strings.NewReader(message))
+		if step.kind == stepLoadBuffer {
+			_, err = m.Runtime.ExecWithStdin(ctx, agent.ContainerID, step.argv, strings.NewReader(message))
 		} else {
-			_, err = m.Runtime.Exec(ctx, agent.ContainerID, cmd)
+			_, err = m.Runtime.Exec(ctx, agent.ContainerID, step.argv)
 		}
 		if err != nil {
+			if step.kind == stepPasteBuffer {
+				// load-buffer succeeded (or this step wouldn't have run), but
+				// the paste itself failed, so paste-buffer's own "-d" never
+				// fired to clean up the per-delivery buffer named above.
+				// Named buffers aren't evicted by buffer-limit, so without
+				// this they would accumulate on the tmux server. Best-effort:
+				// the failure is already being reported below, so a further
+				// error here is ignored.
+				_, _ = m.Runtime.Exec(ctx, agent.ContainerID, []string{"tmux", "delete-buffer", "-b", bufName})
+			}
 			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
 			if delivered {
 				return &PartialDeliveryError{Err: wrapped}
 			}
 			return wrapped
 		}
-		if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
+		if step.kind == stepPasteBuffer {
 			delivered = true
 		}
 	}
