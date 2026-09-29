@@ -22,6 +22,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -299,8 +301,7 @@ func TestRunMigrateNames_KnownHubSigningKeyWithoutDBRecord(t *testing.T) {
 // legacyNameForTest and prefixedNameForTest recompute the GCP SM naming
 // formulas for test setup/assertions, since this test file (package cmd)
 // cannot reach GCPBackend's unexported naming methods (package secret). They
-// mirror the formula pinned in
-// /scion-volumes/scratchpad/projects/secret-prefix/formula-decision.md and
+// mirror the formula documented in .design/secret-id-hub-refactor.md §7 and
 // independently verified by the golden-vector test in
 // pkg/secret/gcpbackend_test.go — a coincidental drift in both places is the
 // only way these could mask a real bug.
@@ -454,15 +455,175 @@ func TestOpenMigrateNamesStore_SQLiteDefaultAndExplicit(t *testing.T) {
 	}
 }
 
-func TestOpenMigrateNamesStore_DryRunSkipsSchemaMigration(t *testing.T) {
-	dbPath := "file:" + t.TempDir() + "/migrate-names-dry-run-test.db"
-	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "sqlite", URL: dbPath}}
-	cs, err := openMigrateNamesStore(context.Background(), cfg, true /* dryRun */)
+// TestOpenMigrateNamesStore_DryRunFailsOnMissingFile reproduces review
+// finding 5: --dry-run must make no writes at all, including to SQLite. The
+// round-1 fix only skipped schema migration, but plain entc.OpenSQLite still
+// creates the database file if it's missing and switches its journal to
+// WAL — both writes. Opening the same nonexistent path under --dry-run must
+// now fail cleanly instead, and critically must not create the file.
+func TestOpenMigrateNamesStore_DryRunFailsOnMissingFile(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "migrate-names-dry-run-missing.db")
+	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "sqlite", URL: "file:" + dbPath}}
+
+	_, err := openMigrateNamesStore(context.Background(), cfg, true /* dryRun */)
+	require.Error(t, err, "opening a nonexistent database read-only must fail, not silently create it")
+
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Errorf("--dry-run must not create the database file; stat error: %v", statErr)
+	}
+}
+
+// TestOpenMigrateNamesStore_DryRunReadsExistingWithoutWriting covers the
+// companion case: --dry-run against an already-migrated database can still
+// read from it (that's the whole point of --dry-run), and the connection is
+// genuinely read-only (a write attempt through it fails).
+func TestOpenMigrateNamesStore_DryRunReadsExistingWithoutWriting(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "migrate-names-dry-run-existing.db")
+	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "sqlite", URL: "file:" + dbPath}}
+
+	// Create and migrate the schema first, as a normal (non-dry-run) run would.
+	seedCS, err := openMigrateNamesStore(context.Background(), cfg, false)
 	require.NoError(t, err)
+	require.NoError(t, seedCS.CreateSecret(context.Background(), &store.Secret{
+		ID: tid("dry-run-existing"), Key: "API_KEY", Scope: "user", ScopeID: "user-1",
+	}))
+	require.NoError(t, seedCS.Close())
+
+	cs, err := openMigrateNamesStore(context.Background(), cfg, true /* dryRun */)
+	require.NoError(t, err, "dry-run must still be able to read an existing, already-migrated database")
 	defer func() { _ = cs.Close() }()
-	// The schema was never created, so a real query against it must fail —
-	// proof that --dry-run didn't migrate the database as a side effect
-	// (ptone/scion#2152 review finding 6).
-	_, err = cs.ListSecrets(context.Background(), store.SecretFilter{})
-	assert.Error(t, err)
+
+	secrets, err := cs.ListSecrets(context.Background(), store.SecretFilter{})
+	require.NoError(t, err)
+	assert.Len(t, secrets, 1)
+
+	// The connection must be genuinely read-only: an attempted write fails.
+	err = cs.CreateSecret(context.Background(), &store.Secret{ID: tid("dry-run-write-attempt"), Key: "OTHER", Scope: "user", ScopeID: "user-1"})
+	assert.Error(t, err, "a write through the --dry-run (read-only) connection must fail")
+}
+
+// TestRunMigrateNames_ResyncsStaleValueFromMixedVersionRollingDeploy
+// reproduces review finding 1: a mixed-version rolling deploy of one hub (or
+// a rollback-then-roll-forward window) can leave a prefixed copy stale
+// relative to the DB ref's designated (legacy) value. migrate-names must
+// resync the prefixed copy to the newer, ref-designated value — not blindly
+// repoint the ref at the stale one — and the hub must serve the correct
+// value afterward.
+func TestRunMigrateNames_ResyncsStaleValueFromMixedVersionRollingDeploy(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{ID: tid("resync-rolling-deploy"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: legacyRef}))
+	mock.seed(t, "test-project", legacyName, "v1-old")
+
+	// First migrate-names run: creates the prefixed copy and repairs the ref.
+	var out1 bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out1))
+
+	// Mixed-version rolling deploy: an old replica (or a rolled-back binary)
+	// still targets the legacy name and rotates the secret through it,
+	// resetting the DB ref back to legacy — all without going through this
+	// hub's migrate-names.
+	_, err := mock.AddSecretVersion(ctx, &smpb.AddSecretVersionRequest{
+		Parent:  "projects/test-project/secrets/" + legacyName,
+		Payload: &smpb.SecretPayload{Data: []byte("v2-rotated")},
+	})
+	require.NoError(t, err)
+	rec, err := db.GetSecret(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+	rec.SecretRef = legacyRef
+	require.NoError(t, db.UpdateSecret(ctx, rec))
+
+	sv, err := backend.Get(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+	require.Equal(t, "v2-rotated", sv.Value, "precondition: hub serves the rotated value before migrate-names runs again")
+
+	// Second migrate-names run must resync, not silently repoint to the stale copy.
+	var out2 bytes.Buffer
+	err = runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out2)
+	require.NoError(t, err)
+	assert.Contains(t, out2.String(), "RESYNCED")
+
+	sv, err = backend.Get(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "v2-rotated", sv.Value, "BUG: hub serves the stale pre-rotation value after migrate-names")
+}
+
+// sprev2DenyLegacyAccess denies AccessSecretVersion for one legacy secret's
+// full resource path, simulating an operator running migrate-names after the
+// legacy IAM grant has already been dropped (or with credentials that never
+// had it).
+type sprev2DenyLegacyAccess struct {
+	*migrateNamesMockSMClient
+	legacyFull string
+}
+
+func (d *sprev2DenyLegacyAccess) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if strings.HasPrefix(req.Name, d.legacyFull+"/") {
+		return nil, status.Error(codes.PermissionDenied, "denied by IAM condition")
+	}
+	return d.migrateNamesMockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// TestRunMigrateNames_FailsWhenLegacyDeniedForDependentRecord reproduces
+// review finding 3: migrate-names must not report success when a DB record's
+// ref still depends on a legacy name it can no longer read (e.g. the legacy
+// IAM grant was dropped too early). Silently skipping it as "absent" would
+// leave the record's ref pointed at an now-unreadable secret while the
+// operator believes migration finished.
+func TestRunMigrateNames_FailsWhenLegacyDeniedForDependentRecord(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyFull := "projects/test-project/secrets/" + legacyName
+	mock.seed(t, "test-project", legacyName, "v")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{ID: tid("legacy-denied"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: "gcpsm:" + legacyFull}))
+	backend := migrateNamesTestBackend(t, db, &sprev2DenyLegacyAccess{mock, legacyFull}, migrateNamesTestHubID)
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, false, &out)
+	t.Logf("output:\n%s", out.String())
+	require.Error(t, err, "migrate-names must not exit 0 while API_KEY's DB ref still depends on an unreadable legacy secret")
+	assert.Contains(t, out.String(), "1 failed")
+
+	// The record's ref must be left untouched — no silent repointing to
+	// somewhere the value was never actually verified.
+	rec, err := db.GetSecret(ctx, "API_KEY", "user", "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "gcpsm:"+legacyFull, rec.SecretRef)
+}
+
+// TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch covers
+// non-blocking finding 13: once a stale prefixed copy exists, --dry-run must
+// plan RESYNC (what the real run would actually do), not a plain
+// DELETE LEGACY that a real run would in fact refuse due to the value
+// mismatch DeleteLegacySecretName checks for.
+func TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	legacyRef := "gcpsm:projects/test-project/secrets/" + legacyName
+	prefixedName := prefixedNameForTest("API_KEY", "user", "user-1")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{ID: tid("dry-run-resync"), Key: "API_KEY", Scope: "user", ScopeID: "user-1", SecretRef: legacyRef}))
+	mock.seed(t, "test-project", legacyName, "v2-rotated")
+	mock.seed(t, "test-project", prefixedName, "v1-old") // stale
+
+	var out bytes.Buffer
+	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true /* dryRun */, true /* deleteLegacy */, &out))
+	assert.Contains(t, out.String(), "RESYNC")
+	assert.NotContains(t, out.String(), "WOULD DELETE LEGACY  API_KEY", "a plain (non-resync) delete-legacy plan would be wrong here: the real run would refuse due to the value mismatch until it resyncs first")
+
+	// Nothing must have been written.
+	mock.mu.Lock()
+	prefixedValue := string(mock.versions["projects/test-project/secrets/"+prefixedName])
+	mock.mu.Unlock()
+	assert.Equal(t, "v1-old", prefixedValue, "dry-run must not have written the resync")
 }

@@ -176,21 +176,37 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 
 // openMigrateNamesStore opens the Hub database using the driver configured in
 // server settings (sqlite or postgres), mirroring openRecoveryStore in
-// cmd/server_recover_authz.go. Unlike that helper, schema migration is
-// skipped when dryRun is set, so --dry-run's "changes nothing" guarantee also
-// covers the database schema, not just GCP SM (ptone/scion#2152 review
-// finding 6: the previous version of this command always opened a local
-// SQLite file regardless of the configured driver, silently migrating
-// nothing — and writing to a stray file — on a Postgres hub).
+// cmd/server_recover_authz.go.
+//
+// Under --dry-run, a sqlite database is opened with entc.OpenSQLiteReadOnly
+// instead of entc.OpenSQLite: the plain (read-write) opener creates the file
+// if it's missing and switches its journal to WAL, both of which are writes,
+// so --dry-run was not actually write-free even though schema migration was
+// already skipped (ptone/scion#2152 round-2 review finding 5, refining
+// round-1 finding 6). The DSN also gets an explicit "mode=ro" so a missing
+// database file is a clear open error instead of being silently created.
+// Postgres has no equivalent stray-file failure mode (a missing database
+// doesn't get created by connecting to it), so --dry-run there is already
+// write-free by skipping Migrate.
 func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun bool) (*entadapter.CompositeStore, error) {
-	pool := entc.PoolConfig{}
-	var cs *entadapter.CompositeStore
-
 	switch strings.ToLower(cfg.Database.Driver) {
 	case "sqlite", "":
 		dsn := cfg.Database.URL
 		if !strings.HasPrefix(dsn, "file:") {
 			dsn = "file:" + dsn
+		}
+		if dryRun {
+			roDSN := dsn
+			if strings.Contains(roDSN, "?") {
+				roDSN += "&mode=ro"
+			} else {
+				roDSN += "?mode=ro"
+			}
+			ec, err := entc.OpenSQLiteReadOnly(roDSN)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open sqlite database read-only: %w", err)
+			}
+			return entadapter.NewCompositeStore(ec), nil
 		}
 		if !strings.Contains(dsn, "cache=") {
 			if strings.Contains(dsn, "?") {
@@ -199,29 +215,33 @@ func openMigrateNamesStore(ctx context.Context, cfg *config.GlobalConfig, dryRun
 				dsn += "?cache=shared"
 			}
 		}
-		ec, err := entc.OpenSQLite(dsn, pool)
+		ec, err := entc.OpenSQLite(dsn, entc.PoolConfig{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 		}
-		cs = entadapter.NewCompositeStore(ec)
+		cs := entadapter.NewCompositeStore(ec)
+		if err := cs.Migrate(ctx); err != nil {
+			_ = cs.Close()
+			return nil, fmt.Errorf("failed to run database migration: %w", err)
+		}
+		return cs, nil
 	case "postgres":
-		ec, err := entc.OpenPostgres(cfg.Database.URL, pool)
+		ec, err := entc.OpenPostgres(cfg.Database.URL, entc.PoolConfig{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open postgres database: %w", err)
 		}
-		cs = entadapter.NewCompositeStore(ec)
+		cs := entadapter.NewCompositeStore(ec)
+		if dryRun {
+			return cs, nil
+		}
+		if err := cs.Migrate(ctx); err != nil {
+			_ = cs.Close()
+			return nil, fmt.Errorf("failed to run database migration: %w", err)
+		}
+		return cs, nil
 	default:
 		return nil, fmt.Errorf("unsupported database driver %q", cfg.Database.Driver)
 	}
-
-	if dryRun {
-		return cs, nil
-	}
-	if err := cs.Migrate(ctx); err != nil {
-		_ = cs.Close()
-		return nil, fmt.Errorf("failed to run database migration: %w", err)
-	}
-	return cs, nil
 }
 
 // migrateNamesCandidate identifies one secret identity to check for name
@@ -329,54 +349,81 @@ func runMigrateNames(ctx context.Context, backend *secret.GCPBackend, db store.S
 	return nil
 }
 
-// migrateOneCandidate performs whichever of copy / ref-repair / legacy-delete
-// apply to one secret identity, in that order, stopping at the first error.
-// acted is true if any of the three actions actually did something (used for
-// the migrated/skipped counters); an identity that was already fully
-// migrated and has nothing left to do returns (false, nil).
-func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migrateNamesCandidate, deleteLegacy bool, out io.Writer, deletedLegacy *int) (acted bool, err error) {
-	// Step 1: copy the value forward if the prefixed name doesn't have one yet.
-	needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
-	if err != nil {
-		if err == store.ErrNotFound {
-			// Not present in GCP SM under either name (e.g. a DB record
-			// whose GCP SM write never completed, or a signing key never
-			// provisioned). Nothing to do for this identity at all.
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to check name migration status: %w", err)
+// migrateNamesActionLabel maps a GCPBackend.RepairRefToPrefixed/PlanRefRepair
+// action to the CLI's human-readable label for it.
+func migrateNamesActionLabel(action string) string {
+	switch action {
+	case "copied":
+		return "MIGRATED"
+	case "resynced":
+		return "RESYNCED"
+	case "repaired":
+		return "REPAIRED REF"
+	default:
+		return action
 	}
-	if needsCopy {
-		if _, err := backend.MigrateNameForward(ctx, c.name, c.scope, c.scopeID); err != nil {
-			return false, fmt.Errorf("failed to migrate: %w", err)
-		}
-		fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
-		acted = true
-	}
+}
 
-	// Step 2: repair the DB ref whenever the prefixed copy exists — whether
-	// this call just created it, a previous run copied it but failed to
-	// update the ref, or the hub-startup signing-key copy-forward created it
-	// without touching the DB at all.
+// migrateOneCandidate performs whichever of copy-or-resync / legacy-delete
+// apply to one secret identity, stopping at the first error. acted is true if
+// any action actually did something (used for the migrated/skipped
+// counters); an identity that was already fully migrated and has nothing
+// left to do returns (false, nil).
+//
+// When a DB record exists, its SecretRef is authoritative (see
+// GCPBackend.RepairRefToPrefixed) and a single call to it handles copying,
+// resyncing a stale prefixed copy, and/or repairing the ref, whichever
+// applies — this is what makes the documented two-step workflow (plain run,
+// then a later --delete-legacy run) converge, and what makes a stale
+// prefixed copy from a mixed-version rolling deploy or a rollback get
+// corrected rather than blindly repointed to (ptone/scion#2152 round-2
+// review findings 1 and 2). Any error from it — including the legacy name
+// being permission-denied — is a real migration failure, not something to
+// silently skip (finding 3): a DB record whose ref depends on an unreadable
+// legacy secret is broken, and reporting success would hide that.
+//
+// Only when no DB record exists at all (a hub-scope key recovered directly
+// from GCP SM, with no ref to consult) does this fall back to the
+// presence-based NeedsNameMigration/MigrateNameForward check, which is where
+// the softer "PermissionDenied on the legacy name means absent" rule still
+// applies (there being no ref that depends on it).
+func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migrateNamesCandidate, deleteLegacy bool, out io.Writer, deletedLegacy *int) (acted bool, err error) {
 	hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, c.name, c.scope, c.scopeID)
 	if err != nil {
-		return acted, fmt.Errorf("failed to check DB ref: %w", err)
-	}
-	if hasRecord && !refIsPrefixed {
-		if err := backend.UpdateSecretRefToPrefixed(ctx, c.name, c.scope, c.scopeID); err != nil {
-			// Counted as a failure (not a WARN-and-continue): a resumable
-			// migration must not report success while a DB ref still
-			// depends on the legacy name (ptone/scion#2152 review finding 2).
-			return acted, fmt.Errorf("migrated GCP SM value but failed to update DB ref: %w", err)
-		}
-		fmt.Fprintf(out, "  REPAIRED REF  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
-		acted = true
+		return false, fmt.Errorf("failed to check DB ref: %w", err)
 	}
 
-	// Step 3: delete the legacy name, only once nothing (that we can detect)
-	// still depends on it. DeleteLegacySecretName independently re-verifies
-	// the DB ref and the GCP SM value match before deleting, so this is
-	// defense in depth, not the only check.
+	if hasRecord {
+		if !refIsPrefixed {
+			action, err := backend.RepairRefToPrefixed(ctx, c.name, c.scope, c.scopeID)
+			if err != nil {
+				return false, fmt.Errorf("failed to migrate/repair (check the hub's IAM grant on the legacy name): %w", err)
+			}
+			if action != "" {
+				fmt.Fprintf(out, "  %s  %s (scope: %s/%s)\n", migrateNamesActionLabel(action), c.name, c.scope, c.scopeID)
+				acted = true
+			}
+		}
+	} else {
+		needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
+		if err != nil && err != store.ErrNotFound {
+			return false, fmt.Errorf("failed to check name migration status: %w", err)
+		}
+		if needsCopy {
+			if _, err := backend.MigrateNameForward(ctx, c.name, c.scope, c.scopeID); err != nil {
+				return false, fmt.Errorf("failed to migrate: %w", err)
+			}
+			fmt.Fprintf(out, "  MIGRATED  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
+			acted = true
+		}
+	}
+
+	// Delete the legacy name, only once nothing (that we can detect) still
+	// depends on it. DeleteLegacySecretName independently re-verifies the DB
+	// ref and the GCP SM value match before deleting, so this is defense in
+	// depth, not the only check. Note this runs even after a resync above:
+	// once resynced, the prefixed and legacy values are identical, so the
+	// value-equality check below passes.
 	if deleteLegacy {
 		legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
 		if err != nil {
@@ -396,37 +443,54 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 }
 
 // planMigrateNamesCandidate is the --dry-run counterpart of
-// migrateOneCandidate: it performs the same three checks, using only
-// read-only backend calls, and prints what would happen instead of doing it.
+// migrateOneCandidate: it performs the same checks, using only read-only
+// backend calls (PlanRefRepair instead of RepairRefToPrefixed), and prints
+// what would happen instead of doing it. A value-mismatch is planned as
+// RESYNC, matching what migrateOneCandidate would actually do — not as a
+// plain MIGRATE/REPAIR REF that would misrepresent the action taken
+// (ptone/scion#2152 round-2 review non-blocking finding 13).
 func planMigrateNamesCandidate(ctx context.Context, backend *secret.GCPBackend, c migrateNamesCandidate, deleteLegacy bool, out io.Writer) (planned bool, err error) {
 	var actions []string
+	absent := false
 
-	needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
-	if err != nil && err != store.ErrNotFound {
-		return false, fmt.Errorf("failed to check name migration status: %w", err)
-	}
-	absent := err == store.ErrNotFound
-	if needsCopy {
-		actions = append(actions, "MIGRATE")
+	hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, c.name, c.scope, c.scopeID)
+	if err != nil {
+		return false, fmt.Errorf("failed to check DB ref: %w", err)
 	}
 
-	if !absent {
-		hasRecord, refIsPrefixed, err := backend.RefPointsAtPrefixed(ctx, c.name, c.scope, c.scopeID)
-		if err != nil {
-			return false, fmt.Errorf("failed to check DB ref: %w", err)
-		}
-		if hasRecord && !refIsPrefixed {
-			actions = append(actions, "REPAIR REF")
-		}
-
-		if deleteLegacy {
-			legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+	if hasRecord {
+		if !refIsPrefixed {
+			action, err := backend.PlanRefRepair(ctx, c.name, c.scope, c.scopeID)
 			if err != nil {
-				return false, fmt.Errorf("failed to check legacy secret: %w", err)
+				return false, fmt.Errorf("failed to check migrate/repair plan (check the hub's IAM grant on the legacy name): %w", err)
 			}
-			if legacyPresent {
-				actions = append(actions, "DELETE LEGACY")
+			switch action {
+			case "copied":
+				actions = append(actions, "MIGRATE")
+			case "resynced":
+				actions = append(actions, "RESYNC")
+			case "repaired":
+				actions = append(actions, "REPAIR REF")
 			}
+		}
+	} else {
+		needsCopy, err := backend.NeedsNameMigration(ctx, c.name, c.scope, c.scopeID)
+		if err != nil && err != store.ErrNotFound {
+			return false, fmt.Errorf("failed to check name migration status: %w", err)
+		}
+		absent = err == store.ErrNotFound
+		if needsCopy {
+			actions = append(actions, "MIGRATE")
+		}
+	}
+
+	if deleteLegacy && !absent {
+		legacyPresent, err := backend.LegacyStillPresent(ctx, c.name, c.scope, c.scopeID)
+		if err != nil {
+			return false, fmt.Errorf("failed to check legacy secret: %w", err)
+		}
+		if legacyPresent {
+			actions = append(actions, "DELETE LEGACY")
 		}
 	}
 
