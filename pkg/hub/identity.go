@@ -129,12 +129,17 @@ func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, sc
 	}
 }
 
-// Decoration returns the descriptive credential metadata attached at
-// authentication time, or nil if none was derived. It is a copy-on-read
-// pointer to caller-owned data only in the sense that callers must not
-// mutate the returned value's Labels map in place; use
-// CredentialDecorationFromContext for a defensively-copied read.
-func (s *ScopedUserIdentity) Decoration() *CredentialDecoration { return s.decoration }
+// Decoration returns a deep copy of the descriptive credential metadata
+// attached at authentication time, or nil if none was derived. Callers may
+// freely mutate the returned value (including its Labels map) without
+// affecting this identity's stored decoration.
+func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
+	if s.decoration == nil {
+		return nil
+	}
+	d := s.decoration.clone()
+	return &d
+}
 
 // ScopedProjectID returns the project this identity is restricted to.
 func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }

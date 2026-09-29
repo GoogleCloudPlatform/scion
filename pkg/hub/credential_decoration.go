@@ -37,12 +37,20 @@ import (
 // mechanically enforces the "never branch on it" half of that rule.
 // ---------------------------------------------------------------------------
 
-// DecorationBoundary is E's own descriptive copy of a credential's boundary,
+// decorationBoundary is E's own descriptive copy of a credential's boundary,
 // rendered for logs and (later) audit. It is derived from A.1's authoritative
 // boundary type through the single adapter decorationBoundaryFromToken below
 // and is never itself consulted for enforcement — enforcement is A.1/D.1's
 // job, using their own type.
-type DecorationBoundary struct {
+//
+// Unexported deliberately (pat-refactor ruling on Q8, 2026-09-28): once the
+// stand-in below is swapped for A.1's TokenBoundary, this type has the same
+// shape ({Kind; ProjectID}) as that type. Keeping it unexported means it is
+// only ever a rendering detail of CredentialDecoration.Boundary and LogValue,
+// with no external API surface — so there is no duplicate *public* boundary
+// model after A.1 integration, satisfying "no duplicate public boundary
+// model may remain after integration."
+type decorationBoundary struct {
 	Kind      string // "project" | "hub" | "invalid" (mapped from A's kind)
 	ProjectID string // set iff Kind == "project"
 }
@@ -69,7 +77,7 @@ type CredentialDecoration struct {
 	// rows created before this field was bounded).
 	TokenName string
 	// Boundary is E's own descriptive render of the credential's boundary.
-	Boundary DecorationBoundary
+	Boundary decorationBoundary
 	// Purpose is optional, issuer-supplied, bounded descriptive text.
 	Purpose string
 	// Labels is optional, issuer-supplied, bounded descriptive metadata.
@@ -113,7 +121,15 @@ func (d CredentialDecoration) LogValue() slog.Value {
 		sort.Strings(keys)
 		labelAttrs := make([]any, 0, len(keys))
 		for _, k := range keys {
-			labelAttrs = append(labelAttrs, slog.String(k, sanitizeForLog(d.Labels[k], uatMaxLabelValueBytes)))
+			// Sanitize the key too, not just the value (review finding F11):
+			// a row written directly to the store does not go through the
+			// validator, so its keys cannot be trusted to already satisfy
+			// the bounded shape either.
+			renderKey := k
+			if !isValidLabelKeyShape(k) {
+				renderKey = sanitizeForLog(k, uatMaxLabelKeyBytes)
+			}
+			labelAttrs = append(labelAttrs, slog.String(renderKey, sanitizeForLog(d.Labels[k], uatMaxLabelValueBytes)))
 		}
 		attrs = append(attrs, slog.Group("labels", labelAttrs...))
 		attrs = append(attrs, slog.String("labels_source", "issuer"))
@@ -130,33 +146,40 @@ func (d CredentialDecoration) LogValue() slog.Value {
 // TokenBoundary (calling .Valid()/.Kind/.ProjectID) and its unit test pins
 // the new mapping; the call site in ValidateToken does not otherwise change.
 // See the E.1 handoff note for the exact planned diff.
-func decorationBoundaryFromToken(projectID string) DecorationBoundary {
+func decorationBoundaryFromToken(projectID string) decorationBoundary {
 	if projectID == "" {
 		// Descriptive only: E does not enforce this, it only avoids
 		// asserting a project boundary with no project.
-		return DecorationBoundary{Kind: "invalid"}
+		return decorationBoundary{Kind: "invalid"}
 	}
-	return DecorationBoundary{Kind: "project", ProjectID: projectID}
+	return decorationBoundary{Kind: "project", ProjectID: projectID}
+}
+
+// clone returns a deep copy of d: a fresh Labels map, so no caller can
+// mutate another caller's (or the identity's own) stored decoration through
+// the returned value. Every accessor that hands a CredentialDecoration to
+// calling code (CredentialDecorationFromContext, ScopedUserIdentity.Decoration)
+// returns clone()'s result, never the internally-held value directly.
+func (d CredentialDecoration) clone() CredentialDecoration {
+	c := d
+	if d.Labels != nil {
+		c.Labels = make(map[string]string, len(d.Labels))
+		for k, v := range d.Labels {
+			c.Labels[k] = v
+		}
+	}
+	return c
 }
 
 // CredentialDecorationFromContext returns the descriptive credential
 // decoration recorded on the request's CredentialContext, if any. It always
-// returns a copy (including a copied Labels map) so callers cannot mutate
-// shared state.
+// returns a deep copy (see clone) so callers cannot mutate shared state.
 func CredentialDecorationFromContext(ctx context.Context) (CredentialDecoration, bool) {
 	cc := GetCredentialContextFromContext(ctx)
 	if cc.Decoration == nil {
 		return CredentialDecoration{}, false
 	}
-	d := *cc.Decoration
-	if d.Labels != nil {
-		cp := make(map[string]string, len(d.Labels))
-		for k, v := range d.Labels {
-			cp[k] = v
-		}
-		d.Labels = cp
-	}
-	return d, true
+	return cc.Decoration.clone(), true
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +193,12 @@ const (
 	uatMaxLabelCount      = 8
 	uatMaxLabelKeyBytes   = 32
 	uatMaxLabelValueBytes = 64
-	uatMaxLabelsJSONBytes = 1024
+	// There is no separate serialized-labels size cap: uatMaxLabelCount *
+	// (uatMaxLabelKeyBytes + uatMaxLabelValueBytes) is already well under
+	// 1KiB (≤8 * (32+64) = 768 bytes of raw content, plus JSON punctuation),
+	// so a dedicated check here could never fire and would be untested dead
+	// code (review finding F10). If any per-field cap above is ever
+	// loosened, reconsider whether a total-size cap is needed again.
 )
 
 // isValidLabelKeyShape reports whether s matches the bounded label-key rule
@@ -230,18 +258,26 @@ var reservedLabelKeyPrefixes = []string{"scion.", "hub.", "x-"}
 
 // isReservedLabelKey reports whether key collides with a reserved
 // attribution/authorization field name, exactly or as a dotted prefix.
+// "-" is normalized to "_" before the exact/dotted-prefix comparisons
+// (review finding F7): the label key shape allows both separators, so
+// "actor-binding", "agent-id" and "on-behalf-of" must be caught the same as
+// their "_" forms, or reserving the "_" form alone would be trivially
+// sidestepped. The scion./hub./x- prefix check runs against the
+// un-normalized lowercase key, since those prefixes are themselves
+// dot/hyphen-based and normalizing first would change what they match.
 func isReservedLabelKey(key string) bool {
 	lower := strings.ToLower(key)
-	if reservedLabelKeys[lower] {
-		return true
-	}
 	for _, prefix := range reservedLabelKeyPrefixes {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
 	}
+	normalized := strings.ReplaceAll(lower, "-", "_")
+	if reservedLabelKeys[normalized] {
+		return true
+	}
 	for reserved := range reservedLabelKeys {
-		if strings.HasPrefix(lower, reserved+".") {
+		if strings.HasPrefix(normalized, reserved+".") {
 			return true
 		}
 	}
@@ -250,15 +286,21 @@ func isReservedLabelKey(key string) bool {
 
 // looksSecretBearing reports whether s appears to contain a pasted token or
 // bearer header value. This is cheap defence-in-depth, not a secret scanner.
+// The comparison is case-insensitive (review finding F8): "SCION_PAT_..." and
+// "bearer abc" are just as much a pasted secret as the canonical casing.
 func looksSecretBearing(s string) bool {
-	return strings.Contains(s, "scion_pat_") || strings.Contains(s, "Bearer ")
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "scion_pat_") || strings.Contains(lower, "bearer ")
 }
 
-// hasControlOrFormatRune reports whether s contains a Unicode Cc (control)
-// or Cf (format, including bidi and zero-width) rune.
+// hasControlOrFormatRune reports whether s contains a Unicode Cc (control),
+// Cf (format, including bidi and zero-width), Zl (line separator, U+2028) or
+// Zp (paragraph separator, U+2029) rune. Zl/Zp are included so "single line"
+// actually means single line: they are not Cc/Cf but render as line breaks
+// in most consumers (review finding F6).
 func hasControlOrFormatRune(s string) bool {
 	for _, r := range s {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return true
 		}
 	}
@@ -286,6 +328,9 @@ func (e *ErrInvalidUATMetadata) Error() string {
 // added. Existing (pre-E.1) rows are never re-validated: they render through
 // the sanitizing LogValue path instead.
 func ValidateCredentialMetadata(name, purpose string, labels map[string]string) error {
+	if !utf8.ValidString(name) {
+		return &ErrInvalidUATMetadata{Field: "name", Rule: "must be valid UTF-8"}
+	}
 	if len(name) > uatMaxNameBytes {
 		return &ErrInvalidUATMetadata{Field: "name", Rule: fmt.Sprintf("must be at most %d bytes", uatMaxNameBytes)}
 	}
@@ -298,6 +343,9 @@ func ValidateCredentialMetadata(name, purpose string, labels map[string]string) 
 
 	trimmedPurpose := strings.TrimSpace(purpose)
 	if trimmedPurpose != "" {
+		if !utf8.ValidString(trimmedPurpose) {
+			return &ErrInvalidUATMetadata{Field: "purpose", Rule: "must be valid UTF-8"}
+		}
 		if len(trimmedPurpose) > uatMaxPurposeBytes {
 			return &ErrInvalidUATMetadata{Field: "purpose", Rule: fmt.Sprintf("must be at most %d bytes", uatMaxPurposeBytes)}
 		}
@@ -313,6 +361,9 @@ func ValidateCredentialMetadata(name, purpose string, labels map[string]string) 
 		return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("at most %d labels are allowed", uatMaxLabelCount)}
 	}
 	for key, value := range labels {
+		if !utf8.ValidString(key) || !utf8.ValidString(value) {
+			return &ErrInvalidUATMetadata{Field: "labels", Rule: "label key and value must be valid UTF-8"}
+		}
 		if !isValidLabelKeyShape(key) {
 			return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("label key must match ^[a-z][a-z0-9_.-]{0,%d}$", uatMaxLabelKeyBytes-1)}
 		}
@@ -330,12 +381,6 @@ func ValidateCredentialMetadata(name, purpose string, labels map[string]string) 
 		}
 		if looksSecretBearing(key) || looksSecretBearing(value) {
 			return &ErrInvalidUATMetadata{Field: "labels", Rule: "must not resemble a bearer token or credential value"}
-		}
-	}
-	if len(labels) > 0 {
-		serialized, err := json.Marshal(labels)
-		if err == nil && len(serialized) > uatMaxLabelsJSONBytes {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("serialized labels must be at most %d bytes", uatMaxLabelsJSONBytes)}
 		}
 	}
 	return nil
@@ -372,12 +417,12 @@ func appendCredentialMetadataAuditFields(summaryJSON string, hasPurpose bool, la
 
 // sanitizeForLog is the render-time defence for legacy rows (created before
 // validation existed) and general defence in depth: it never trusts stored
-// text to already satisfy the bounded schema. Cc/Cf runes are replaced with
-// U+FFFD, then the result is truncated to maxBytes with a "…" marker.
+// text to already satisfy the bounded schema. Cc/Cf/Zl/Zp runes are replaced
+// with U+FFFD, then the result is truncated to maxBytes with a "…" marker.
 func sanitizeForLog(s string, maxBytes int) string {
 	var b strings.Builder
 	for _, r := range s {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			b.WriteRune(utf8.RuneError)
 		} else {
 			b.WriteRune(r)

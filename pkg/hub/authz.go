@@ -1387,11 +1387,9 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		// E.1: carry the descriptive decoration, if ValidateToken attached
 		// one, through to the credential context. This is the single copy
 		// point named in the E.1 design (plan §2.2); decoration is never
-		// otherwise derived here.
-		if d := scoped.Decoration(); d != nil {
-			copied := *d
-			cc.Decoration = &copied
-		}
+		// otherwise derived here. Decoration() already returns a deep copy,
+		// so this assignment cannot alias the identity's stored value.
+		cc.Decoration = scoped.Decoration()
 		return cc
 	}
 	switch identity.Type() {
