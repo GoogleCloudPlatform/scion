@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 )
@@ -130,12 +131,27 @@ func RuntimeUnavailable(w http.ResponseWriter, message string) {
 // AgentLookupUnavailable logs the underlying runtime error that caused an
 // agent lookup to fail (server-side only — see #2164 for keeping raw runtime
 // error text out of response bodies generally) and writes a generic 503
-// response. Callers use this when errors.Is(err, ErrAgentListUnavailable):
-// the container runtime itself failed to respond, which is not the same as
-// the agent being genuinely missing, so the client should retry rather than
-// be told "not found".
-func AgentLookupUnavailable(w http.ResponseWriter, agentID string, err error, message string) {
-	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "error", err)
+// response built from agentID. Callers use this when
+// errors.Is(err, ErrAgentListUnavailable): the container runtime itself
+// failed to respond, which is not the same as the agent being genuinely
+// missing, so the client should retry rather than be told "not found".
+//
+// op identifies the calling handler (e.g. "exec", "reset_auth", "stop",
+// "restart", "pty_attach") and is included in the log line so call-site
+// context isn't lost when several handlers share this one log message.
+//
+// retrySuffix, if non-empty, is inserted into the generic "please retry"
+// sentence (e.g. PTY attach passes "the attach" to produce "please retry the
+// attach in a moment"); pass "" for the plain "please retry in a moment".
+func AgentLookupUnavailable(w http.ResponseWriter, agentID, op string, err error, retrySuffix string) {
+	slog.Warn("agent lookup failed: runtime listing unavailable", "agent_id", agentID, "op", op, "error", err)
+	retry := "retry"
+	if retrySuffix != "" {
+		retry = "retry " + retrySuffix
+	}
+	message := fmt.Sprintf(
+		"Unable to look up agent %q: the container runtime is temporarily unavailable. Please %s in a moment.",
+		agentID, retry)
 	RuntimeUnavailable(w, message)
 }
 

@@ -293,8 +293,8 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 // actually a transient listing failure, not via a 404 but via a 202. Now
 // that the failure surfaces as ErrAgentListUnavailable, projectScopedTarget's
 // existing "surface anything that isn't ErrAgentNotFound" check (handlers.go)
-// must reject it, and stopAgent must report a 5xx instead of a false-success
-// 202, and must never call Stop.
+// must reject it, and stopAgent must report 503 runtime_unavailable instead
+// of a false-success 202, and must never call Stop.
 func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
 	defaultMgr := &filteringMockManager{}
 	defaultMgr.agents = []api.AgentInfo{}
@@ -313,14 +313,21 @@ func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
-	if w.Code == http.StatusAccepted {
-		t.Fatalf("expected a 5xx, not the idempotent 202 no-op, when an auxiliary runtime's list fails: %s", w.Body.String())
-	}
-	if w.Code < 500 {
-		t.Fatalf("expected a 5xx status, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (not the idempotent 202 no-op, nor a bare 500) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
 	}
 	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
 		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
 }
 
@@ -423,6 +430,52 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart is the restart
+// counterpart of TestStopAgent_AuxiliaryListErrorAbortsWithout202, added for
+// the ptone/scion#2176 round-2 review: an auxiliary runtime's List failure
+// inside LookupContainerID must abort the restart with a 503
+// runtime_unavailable, not proceed to Start as if the agent were simply
+// absent from this project — otherwise a runtime hiccup during the
+// stop-target lookup would leave a second container running.
+func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: fmt.Errorf("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (not proceed-with-start) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if defaultMgr.startCalls != 0 || auxMgr.startCalls != 0 {
+		t.Error("Start must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
 }
 

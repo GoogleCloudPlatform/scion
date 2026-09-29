@@ -276,14 +276,15 @@ func (p *attachEndProber) lookupStillResolves(ctx context.Context) lookupResult 
 	}
 	ctx, cancel := context.WithTimeout(ctx, attachProbeTimeout)
 	defer cancel()
-	// LookupAgent, not LookupContainerID: only LookupAgent is hardened to
-	// return ErrAgentListUnavailable from every auxiliary-runtime and
-	// project-fallback List failure (see TestLookupAgent_*ListErrorSurfacesUnavailable
-	// in server_lookup_test.go). LookupContainerID lacks that hardening on
-	// several of the same paths, so using it here would turn a transient
-	// listing failure into a false lookupAbsent — a terminal 4410 instead of
-	// a 4503 retry. The result (including its Phase re-resolution) is
-	// discarded either way; only the error's shape matters.
+	// LookupAgent, not LookupContainerID: both now classify list failures
+	// identically, returning ErrAgentListUnavailable from every
+	// auxiliary-runtime and project-fallback List failure (see
+	// TestLookupAgent_*ListErrorSurfacesUnavailable and
+	// TestLookupContainerID_*ListErrorSurfacesUnavailable in
+	// server_lookup_test.go). LookupAgent is used here because it performs
+	// the same resolution the attach path itself relies on. The result
+	// (including its Phase re-resolution) is discarded either way; only the
+	// error's shape matters.
 	result, err := p.lookup.LookupAgent(ctx, p.slug, p.projectID)
 	switch {
 	case err == nil && result != nil:

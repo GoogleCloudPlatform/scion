@@ -1943,6 +1943,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	target, err := s.projectScopedTarget(ctx, id, projectID)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, ErrAgentListUnavailable) {
+			AgentLookupUnavailable(w, id, "stop", err, "")
+			return
+		}
 		RuntimeError(w, "Failed to stop agent: "+err.Error())
 		return
 	}
@@ -2059,6 +2063,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// without starting a second container — otherwise a runtime hiccup
 		// during the stop-target lookup would leave two containers running
 		// for the same agent.
+		if errors.Is(err, ErrAgentListUnavailable) {
+			AgentLookupUnavailable(w, id, "restart", err, "")
+			return
+		}
 		RuntimeError(w, "Failed to restart agent: "+err.Error())
 		return
 	}
@@ -2256,8 +2264,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		AgentLookupUnavailable(w, id, err, fmt.Sprintf(
-			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry in a moment.", id))
+		AgentLookupUnavailable(w, id, "exec", err, "")
 		return
 	}
 	if err != nil || target == "" {
@@ -2311,8 +2318,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		// The container runtime itself failed to respond, not "no such
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
-		AgentLookupUnavailable(w, id, err, fmt.Sprintf(
-			"Unable to look up agent %q: the container runtime is temporarily unavailable. Please retry in a moment.", id))
+		AgentLookupUnavailable(w, id, "reset_auth", err, "")
 		return
 	}
 	if err != nil || target == "" {
