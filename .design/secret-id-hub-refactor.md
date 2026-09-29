@@ -303,7 +303,77 @@ To avoid breaking `Get()` for existing secrets during the transition:
 
 ## 6. Future Work (Out of Scope)
 
-- **Admin maintenance UI/CLI** for bulk secret migration between naming schemes.
+- **Admin maintenance UI/CLI** for bulk secret migration between naming schemes. — Addressed by `ptone/scion#2152`; see Section 7.
 - **GCS bucket namespacing** for templates and workspaces in shared GCP projects.
 - **Hub ID display** in the web UI admin panel for operator reference.
 - **Cross-hub secret sharing** — intentionally sharing specific secrets between hub instances.
+
+## 7. Follow-up: `ptone/scion#2152` (hub-prefixed names for IAM scoping)
+
+This refactor made hub-scoped secrets unique per hub (Section 3.1–3.4), but the
+per-secret name still only namespaces by hashing `hubID:scopeID` — there is no
+single, fixed-length prefix a hub's own secrets all share. That means an IAM
+condition can scope a hub's own **hub**-scope secrets (since `scopeID ==
+hubID` there), but not its **user**/**project**-scope secrets: the hash
+covers `hubID:userID` / `hubID:projectID`, which differs per secret with no
+common prefix to write a `startsWith()` condition against. In a GCP project
+shared by several hubs, the only workaround was a project-wide
+`roles/secretmanager.admin` grant.
+
+`ptone/scion#2152` closes this gap by adding a hub-prefix layer on top of the
+naming scheme in Section 3.4, for every scope including hub:
+
+```
+{secretNamePrefix}{scope}-{sha256(hubID:scopeID)[:12]}-{name}
+secretNamePrefix = "scion-" + sha256(hubID)[:12 hex chars] + "-"
+```
+
+`secretNamePrefix` depends on `hubID` alone (not `scopeID`), so it is the same
+across every secret a given hub writes, and a least-privilege IAM grant can
+use:
+
+```
+resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h12>-")
+```
+
+Key decisions (superseding anything to the contrary above; see
+`/scion-volumes/scratchpad/projects/secret-prefix/formula-decision.md` for the
+full record agreed with tf-lead):
+- No prefix override or enable/disable setting — the prefix is on by default
+  for every hub, computed the same way by Terraform (`substr(sha256(var.hub_id),
+  0, 12)`) and by the Go backend, so IAM conditions and secret names never
+  drift apart.
+- **Backward compatibility**: secrets with a stored DB `SecretRef` keep
+  resolving through it unchanged (Section 5's "Interim Compatibility
+  Strategy" continues to apply). A DB-less computed-name lookup tries the
+  prefixed name first, then the legacy pre-#2152 name, with a `WARN` log on a
+  legacy hit.
+- **Migration**: `scion hub secret migrate-names [--dry-run] [--delete-legacy]`
+  (a new, separate subcommand from the DB-value migration `scion hub secret
+  migrate`) copies each legacy-named secret's latest value forward to its
+  prefixed name and updates the DB `SecretRef`. It is idempotent and never
+  calls a GCP SM listing API — candidates come only from Hub DB records and a
+  short list of known hub-scope signing-key names. `--delete-legacy` only
+  deletes a legacy secret after verifying the prefixed copy is readable and
+  matches. This is a human-mode-only CLI command (`cmd/cli_mode.go`
+  `assistantDenied`) — not available to AI-assistant or in-container agent
+  callers.
+- **Hub-scope signing keys** (`agent_signing_key`, `user_signing_key`, and any
+  future key synced via `syncSigningKeyToBackend`) get an additional,
+  automatic copy-forward at hub startup (`GCPBackend.CopyHubSecretForward`,
+  called from `ensureSigningKey`) rather than waiting for an operator to run
+  `migrate-names` — losing a signing key invalidates every live session/agent
+  token, so this can't wait on an operator's schedule the way ordinary
+  secrets can.
+- **Rollback**: rolling back to a pre-#2152 binary continues to resolve
+  existing secrets via their stored `SecretRef` (unchanged by this feature
+  unless `migrate-names` has run and rewritten it to the prefixed name, in
+  which case the pre-#2152 binary still reads the ref value literally and
+  works). Legacy secrets are never deleted except by an explicit
+  `--delete-legacy` run, so a rollback window before that step is always
+  safe. The legacy fallback path itself is intended to be removed a release
+  after the migration tooling ships.
+
+See `pkg/secret/gcpbackend.go` (`secretNamePrefix`, `gcpSecretName`,
+`legacyGCPSecretName`, `MigrateNameForward`, `CopyHubSecretForward`) and
+`cmd/hub_secret_migrate_names.go` for the implementation.

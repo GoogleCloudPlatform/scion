@@ -378,6 +378,21 @@ When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
 
+#### IAM Permissions and Secret Naming
+
+Every secret name in GCP Secret Manager is prefixed with a hash derived from the hub's instance ID: `scion-<h12>-<scope>-<hash>-<name>`, where `<h12>` is the first 12 hex characters of `sha256(hub_id)`. This lets you grant a hub's service account access to only its own secrets, instead of every secret in a shared GCP project.
+
+In a project used by a single hub, `roles/secretmanager.admin` on the whole project is simplest. In a project shared by multiple hubs (or by a hub and other workloads), grant a **conditioned** binding scoped to the hub's prefix instead:
+
+```
+role: roles/secretmanager.admin
+condition: resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h12>-")
+```
+
+Note that the condition uses the GCP **project number**, not the project ID. `<h12>` is stable for the life of the hub's instance ID; deployment tooling (e.g. Terraform) computes the same value from `hub_id` to keep the grant in sync.
+
+Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name — a hub's stored reference to a secret is unaffected by this scheme. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); until that command's `--delete-legacy` step runs for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
+
 ---
 
 ## Technical Details
