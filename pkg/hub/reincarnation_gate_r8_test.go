@@ -359,9 +359,11 @@ func TestHandleAgentOutboundMessage_A259_O3_RecipientIDNonCanonicalCase_Canonica
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var resp struct {
-		MessageID string `json:"message_id"`
+		MessageID   string `json:"message_id"`
+		RecipientID string `json:"recipient_id"`
 	}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, user.ID, resp.RecipientID, "the response must carry the canonical-case ID, not the caller's casing")
 
 	msg, err := s.GetMessage(ctx, resp.MessageID)
 	require.NoError(t, err)
