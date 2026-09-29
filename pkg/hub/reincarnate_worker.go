@@ -745,6 +745,30 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // text (help output, --handoff-template, the self-mode blocked status) is
 // Phase 2b.
 //
+// Amendment A26 (Phase 2b): steps 1 and 2 keep their 2a wording verbatim (the
+// A23 neutral step 1 and the A25.2 O-b catch-up-window step 2); "everything
+// else in §3.9" — steps 3-4 and the no-handoff fallback text — comes in from
+// the original design here. Two adjustments from §3.9's literal text, made
+// because the data or the section names it names don't otherwise exist at
+// this call site:
+//   - Step 3 names the target generation (already available as toGeneration)
+//     instead of a resolved {requester} display name. Resolving the
+//     requester's principal ID (AgentReincarnation.RequestedBy) to a
+//     message-able name is unplumbed to this call site and out of A26's
+//     scope; "whoever requested this migration" is unambiguous given the
+//     requester is already subscribed to this agent's status
+//     (ensureReincarnateRequesterSubscribed) and can be found via the
+//     Hub-side notification, so the new generation can still act on step 3
+//     without a literal name.
+//   - Step 4 names the handoff's actual section headings ("Immediate active
+//     work" and "Do not redo") from the --handoff-template sections
+//     (cmd/reincarnate.go's reincarnateHandoffTemplateText), rather than
+//     §3.9's literal "Next action"/"Do not redo" labels — "Next action" is a
+//     sub-field of "Immediate active work (status, next action)" in the
+//     template's actual section list, not its own heading, so pointing at
+//     the real heading keeps the instruction literally followable against
+//     the template the outgoing generation was told to use.
+//
 // migrationStart is step 2's catch-up window start (design §3.7, Amendment
 // A25 2a.3/R4, p2a-r1 review): only the start is named, not an end. An end
 // timestamp would have to be the instant reincarnation_state clears, which
@@ -784,8 +808,8 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		"Messages sent to you since %s were saved to your conversations, not dropped. "+
 		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
 		migrationStart.UTC().Format(time.RFC3339), migrationStart.UTC().Format(time.RFC3339))
-	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")
-	b.WriteString(" 4. Continue from the handoff below. Do not redo anything it says not to.\n")
+	fmt.Fprintf(&b, " 3. Message whoever requested this migration that generation %d is up, and state your next action.\n", toGeneration)
+	b.WriteString(" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")
 	if handoff != "" {
 		b.WriteString(handoff)

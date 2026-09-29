@@ -2,6 +2,13 @@
 
 When to delete an agent, when to stop one, and who may authorize it.
 
+## Upgrading in place instead of replacing
+
+If a long-lived agent (lead, coordinator, architect) needs a newer template, image, or
+harness config but should keep its identity, conversations, and lineage, use
+`scion reincarnate <agent>` (or `scion reincarnate` from inside the agent, to migrate
+itself) instead of delete-and-recreate; see its `--help` for the contract.
+
 ## Default: delete when done
 
 `scion delete <name> --non-interactive` frees system resources.  **Delete is the

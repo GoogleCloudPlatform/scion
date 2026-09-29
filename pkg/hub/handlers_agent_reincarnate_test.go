@@ -2136,6 +2136,73 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
 }
 
+// TestBuildReincarnationPreamble_A26StepsAndNoHandoff is the design
+// Amendment A26 golden test for Phase 2b: steps 1-2 keep their 2a wording
+// (pinned separately by TestBuildReincarnationPreamble_CatchUpWindow above),
+// and "everything else in §3.9" — steps 3-4 and the no-handoff fallback text
+// — comes in here. It also pins Amendment A23's invariant that the preamble
+// carries no workspace-mode-specific text: a clone-per-agent agent and a
+// shared/mounted-workspace agent must produce byte-identical step text, both
+// with a handoff and without one.
+func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+
+	cloneAgent := &store.Agent{
+		ID:   "agent-clone",
+		Slug: "clone-agt",
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitClone: &api.GitCloneConfig{URL: "https://example.invalid/repo.git"},
+		},
+	}
+	sharedAgent := &store.Agent{
+		ID:   "agent-shared",
+		Slug: "shared-agt",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Workspace: "/mnt/shared/project",
+		},
+	}
+
+	assertA26Steps := func(t *testing.T, preamble string, agent *store.Agent, toGeneration int) {
+		t.Helper()
+		assert.Contains(t, preamble, fmt.Sprintf("You are generation %d of agent %q (id %s).", toGeneration, agent.Slug, agent.ID))
+		assert.Contains(t, preamble,
+			" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n",
+			"step 1 must keep A23's neutral wording regardless of workspace mode")
+		assert.Contains(t, preamble,
+			fmt.Sprintf(" 3. Message whoever requested this migration that generation %d is up, and state your next action.\n", toGeneration),
+			"step 3 (§3.9, come in per A26) must name the target generation")
+		assert.Contains(t, preamble,
+			" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n",
+			"step 4 (§3.9, come in per A26) must point at the handoff template's real section headings")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		agent *store.Agent
+	}{
+		{"clone-per-agent", cloneAgent},
+		{"shared/non-clone", sharedAgent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("with handoff", func(t *testing.T) {
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start)
+				assertA26Steps(t, preamble, tc.agent, 4)
+				assert.Contains(t, preamble, "next: ship it")
+				assert.NotContains(t, preamble, "No handoff was provided")
+			})
+			t.Run("no handoff", func(t *testing.T) {
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start)
+				assertA26Steps(t, preamble, tc.agent, 4)
+				assert.Contains(t, preamble,
+					"No handoff was provided. Reconstruct context from your branch, your conversations "+
+						"(`scion conversation list`), and any project scratchpad before acting.",
+					"the no-handoff fallback text (§3.9, come in per A26) must name `scion conversation list`")
+			})
+		})
+	}
+}
+
 // AC-6: a start failure leaves state=failed with an error and phase=error,
 // and the previous config snapshot remains retrievable.
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
