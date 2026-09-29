@@ -92,6 +92,22 @@ describe('terminal sessions', () => {
     expect(first.state.agent?.activity).toBe('executing');
   });
 
+  it('never puts a token or ticket in the PTY WebSocket URL (auth is cookie-based)', async () => {
+    // ptone/scion#2122: browser attach authenticates via
+    // `credentials: 'include'` cookies on the preflight fetch (line ~545),
+    // never a URL parameter. A token/ticket query parameter would leak into
+    // server access logs and browser history, which the WebSocket URL below
+    // must never do.
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(1);
+    const url = new URL(FakeSocket.instances[0].url);
+    expect(url.searchParams.has('token')).toBe(false);
+    expect(url.searchParams.has('ticket')).toBe(false);
+    expect(Array.from(url.searchParams.keys()).sort()).toEqual(['cols', 'rows']);
+  });
+
   it.each(['metadata', 'metadata body', 'preflight', 'resources'])(
     'close during %s prevents a late socket',
     async (stage) => {

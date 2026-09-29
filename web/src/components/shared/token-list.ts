@@ -26,7 +26,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
@@ -53,6 +53,36 @@ interface ScopeOption {
   isAlias: boolean;
   /** For aliases, the list of scopes this alias expands to. */
   expandsTo?: string[];
+  /**
+   * "flat_role" or "relationship" (ptone/scion#2122). Relationship-eligible
+   * scopes (agent:attach, agent:port_access) are checked against the
+   * specific target on every later request -- own agents and their
+   * descendants -- never against a target enumerated at selection time.
+   */
+  eligibilityKind?: string | undefined;
+  /**
+   * Present only once eligibility was requested for a selected project.
+   * Answers only "may you select this restriction"; never a target list
+   * and never widened by anything the browser already holds.
+   */
+  eligible?: boolean | undefined;
+  /** Stable machine reason code, present only when eligible is false. */
+  eligibilityReason?: string | undefined;
+  /** For an alias, which expanded member scopes are not eligible. */
+  ineligibleMembers?: string[] | undefined;
+}
+
+/** Human-readable text for a MintDenialReason code from the eligibility API. */
+const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
+  flat_role_insufficient: 'your project role does not include this permission',
+  no_relationship_candidacy: 'not eligible under your current project access',
+  boundary_not_allowed: 'not selectable for a project-scoped token',
+  unknown_selector: 'unknown scope',
+};
+
+function formatEligibilityReason(reason?: string): string {
+  if (!reason) return 'not currently selectable';
+  return ELIGIBILITY_REASON_LABELS[reason] || reason;
 }
 
 /**
@@ -71,7 +101,11 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * Fallback scope list used when the dynamic fetch from /api/v1/auth/scopes fails.
+ * Fallback scope list used when the dynamic fetch from /api/v1/auth/scopes
+ * fails. This is a static, best-effort snapshot for that offline case only:
+ * it never carries eligibility (every entry is selectable), so it must not
+ * be used to answer "may I select this restriction" -- only the live
+ * /api/v1/auth/scopes response does that.
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
   {
@@ -134,7 +168,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'agent:port_access',
     label: 'agent:port_access',
-    description: 'Access forwarded ports',
+    description: 'Access agent forwarded ports',
     resource: 'agent',
     isAlias: false,
   },
@@ -478,7 +512,8 @@ export class ScionTokenList extends LitElement {
   @state() private projects: Project[] = [];
   @state() private error: string | null = null;
   @state() private availableScopes: ScopeOption[] = [...FALLBACK_SCOPES];
-  private scopesCached = false;
+  /** Cached scope responses, keyed by projectId ('' for the plain catalog). */
+  private scopesCache: Map<string, ScopeOption[]> = new Map();
 
   // Create dialog
   @state() private createDialogOpen = false;
@@ -708,6 +743,25 @@ export class ScionTokenList extends LitElement {
         margin-top: 0.125rem;
       }
 
+      .scope-relationship-badge {
+        display: inline-block;
+        margin-left: 0.375rem;
+        font-size: 0.625rem;
+        font-weight: 500;
+        color: var(--scion-text-muted, #64748b);
+        font-family: inherit;
+      }
+
+      .scope-ineligible-reason {
+        font-size: 0.6875rem;
+        color: var(--sl-color-danger-600, #dc2626);
+        font-family: inherit;
+      }
+
+      sl-checkbox[disabled] .scope-checkbox-label {
+        color: var(--scion-text-muted, #94a3b8);
+      }
+
       .scope-selected-count {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
@@ -741,25 +795,50 @@ export class ScionTokenList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadScopes();
+    void this.loadScopes('');
     void this.loadData();
   }
 
   /**
-   * Fetch available scopes from /api/v1/auth/scopes and cache the result.
-   * Falls back to the hardcoded FALLBACK_SCOPES list on failure.
+   * Fetch scopes from /api/v1/auth/scopes and cache the result per project
+   * (ptone/scion#2122). With projectId set, each entry additionally carries
+   * mint eligibility for that project -- computed fresh by the server for
+   * the current user, never inferred or cached across projects. Falls back
+   * to the hardcoded FALLBACK_SCOPES list (with no eligibility at all) on
+   * failure, and leaves whatever was previously loaded in place rather than
+   * clobbering it with an empty list.
    *
    * Scopes are enriched with `resource` (for grouping) and `isAlias` fields.
    * Aliases are listed first within their resource group for visual separation.
    */
-  private async loadScopes(): Promise<void> {
-    if (this.scopesCached) return;
+  private async loadScopes(projectId: string): Promise<void> {
+    const cacheKey = projectId || '';
+    const cached = this.scopesCache.get(cacheKey);
+    if (cached) {
+      this.availableScopes = cached;
+      return;
+    }
     try {
-      const res = await apiFetch('/api/v1/auth/scopes');
-      if (!res.ok) return; // keep fallback
+      const url = projectId
+        ? `/api/v1/auth/scopes?projectId=${encodeURIComponent(projectId)}`
+        : '/api/v1/auth/scopes';
+      const res = await apiFetch(url);
+      if (!res.ok) return; // keep whatever list is currently shown
       const data = (await res.json()) as {
-        scopes?: Array<{ id: string; resource: string; action: string; description: string }>;
-        aliases?: Array<{ id: string; description: string; expands_to: string[] }>;
+        scopes?: Array<{
+          id: string;
+          resource: string;
+          action: string;
+          description: string;
+          eligibilityKind?: string;
+          eligibility?: { eligible: boolean; reason?: string };
+        }>;
+        aliases?: Array<{
+          id: string;
+          description: string;
+          expands_to: string[];
+          eligibility?: { eligible: boolean; ineligibleMembers?: string[] };
+        }>;
       };
       const scopes: ScopeOption[] = [];
       for (const s of data.scopes || []) {
@@ -769,6 +848,9 @@ export class ScionTokenList extends LitElement {
           description: s.description,
           resource: s.resource,
           isAlias: false,
+          eligibilityKind: s.eligibilityKind,
+          eligible: s.eligibility?.eligible,
+          eligibilityReason: s.eligibility?.reason,
         });
       }
       for (const a of data.aliases || []) {
@@ -781,6 +863,8 @@ export class ScionTokenList extends LitElement {
           resource,
           isAlias: true,
           expandsTo: a.expands_to,
+          eligible: a.eligibility?.eligible,
+          ineligibleMembers: a.eligibility?.ineligibleMembers,
         });
       }
       // Sort: aliases first within each resource, then alphabetically
@@ -791,12 +875,12 @@ export class ScionTokenList extends LitElement {
         return a.value.localeCompare(b.value);
       });
       if (scopes.length > 0) {
+        this.scopesCache.set(cacheKey, scopes);
         this.availableScopes = scopes;
-        this.scopesCached = true;
       }
     } catch {
-      // Keep fallback list — log for debugging
-      console.warn('Failed to fetch dynamic scopes, using fallback list');
+      // Keep whatever list is currently shown — log for debugging.
+      console.warn('Failed to fetch scopes from /api/v1/auth/scopes, keeping previous list');
     }
   }
 
@@ -852,6 +936,15 @@ export class ScionTokenList extends LitElement {
     this.scopeFilter = '';
     this.collapsedGroups = new Set();
     this.createDialogOpen = true;
+    void this.loadScopes(this.createProjectId);
+  }
+
+  private handleProjectChange(projectId: string): void {
+    this.createProjectId = projectId;
+    // Selected scopes may no longer be eligible under the new project;
+    // clear them rather than silently submitting a stale selection.
+    this.createScopes = new Set();
+    void this.loadScopes(projectId);
   }
 
   private closeCreateDialog(): void {
@@ -869,6 +962,8 @@ export class ScionTokenList extends LitElement {
   }
 
   private toggleScope(scope: string): void {
+    const option = this.availableScopes.find((s) => s.value === scope);
+    if (option?.eligible === false) return; // defense in depth; checkbox is also disabled
     const next = new Set(this.createScopes);
     if (next.has(scope)) {
       next.delete(scope);
@@ -916,7 +1011,15 @@ export class ScionTokenList extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, 'Failed to create token'));
+        const info = await parseApiError(response, 'Failed to create token');
+        let message = info.message;
+        // scope_violation carries {selector, reason} (ptone/scion#2122); name
+        // the denied selector so the user knows which checkbox to remove,
+        // without duplicating the server's reason vocabulary here.
+        if (info.code === 'scope_violation' && typeof info.details?.selector === 'string') {
+          message = `${message} (scope: ${info.details.selector})`;
+        }
+        throw new Error(message);
       }
 
       const data = (await response.json()) as { token: string };
@@ -1242,7 +1345,7 @@ export class ScionTokenList extends LitElement {
             placeholder="Select a project"
             value=${this.createProjectId}
             @sl-change=${(e: Event) => {
-              this.createProjectId = (e.target as HTMLSelectElement).value;
+              this.handleProjectChange((e.target as HTMLSelectElement).value);
             }}
             required
           >
@@ -1365,10 +1468,12 @@ export class ScionTokenList extends LitElement {
   }
 
   private renderAliasScope(scope: ScopeOption) {
+    const ineligible = scope.eligible === false;
     return html`
       <div class="scope-alias-item">
         <sl-checkbox
           ?checked=${this.createScopes.has(scope.value)}
+          ?disabled=${ineligible}
           @sl-change=${() => this.toggleScope(scope.value)}
         >
           <span class="scope-checkbox-label">${scope.label}</span>
@@ -1379,21 +1484,41 @@ export class ScionTokenList extends LitElement {
             <sl-icon name="collection"></sl-icon>
             Alias${scope.expandsTo ? ` — expands to ${scope.expandsTo.length} scopes` : ''}
           </span>
+          ${ineligible
+            ? html`<br /><span class="scope-ineligible-reason"
+                  >Not
+                  selectable${scope.ineligibleMembers?.length
+                    ? `: missing ${scope.ineligibleMembers.join(', ')}`
+                    : ''}</span
+                >`
+            : nothing}
         </sl-checkbox>
       </div>
     `;
   }
 
   private renderScopeCheckbox(scope: ScopeOption) {
+    const ineligible = scope.eligible === false;
     return html`
       <div class="scope-checkbox-item">
         <sl-checkbox
           ?checked=${this.createScopes.has(scope.value)}
+          ?disabled=${ineligible}
           @sl-change=${() => this.toggleScope(scope.value)}
         >
           <span class="scope-checkbox-label">${scope.label}</span>
+          ${scope.eligibilityKind === 'relationship'
+            ? html`<span class="scope-relationship-badge"
+                >Own agents &amp; descendants — checked per agent</span
+              >`
+            : nothing}
           <br />
           <span class="scope-checkbox-desc">${scope.description}</span>
+          ${ineligible
+            ? html`<br /><span class="scope-ineligible-reason"
+                  >Not selectable: ${formatEligibilityReason(scope.eligibilityReason)}</span
+                >`
+            : nothing}
         </sl-checkbox>
       </div>
     `;
