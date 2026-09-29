@@ -755,19 +755,28 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
-			// Distinguish accepted dispatch from confirmed delivery.
-			switch result.Status {
-			case "sent":
-				fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
-			case "deferred":
-				// Design agent-reincarnate §3.7: the recipient is mid-`scion
-				// reincarnate`. The message was saved to history, not dropped.
-				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
-			default:
-				fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+			// A25.15 (upstream gemini-code-assist review, GoogleCloudPlatform/scion#2079):
+			// apiclient.DecodeResponse returns (nil, nil) on a 204 No Content,
+			// so result can be nil here even though err is nil. Print the
+			// minimal confirmation instead of dereferencing a nil result.
+			if result == nil {
+				fmt.Printf("Message sent to %s.\n", ref.Raw)
+			} else {
+				// Distinguish accepted dispatch from confirmed delivery.
+				switch result.Status {
+				case "sent":
+					fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+				case "deferred":
+					// Design agent-reincarnate §3.7: the recipient is mid-`scion
+					// reincarnate`. The message was saved to history, not dropped.
+					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
+				default:
+					fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+				}
 			}
 		} else {
-			// JSON output with full result
+			// JSON output with full result. outputJSON encodes a nil *OutboundMessageResult
+			// as JSON null, which is valid output and does not panic.
 			return outputJSON(result)
 		}
 		return nil
