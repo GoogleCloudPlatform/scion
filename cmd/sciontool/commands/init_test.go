@@ -225,9 +225,38 @@ func TestGitCloneWorkspace_NoCloneURL(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(0, 0, "/tmp")
+	err := gitCloneWorkspace(0, 0, "/tmp", false)
 	if err != nil {
 		t.Errorf("expected nil error when SCION_GIT_CLONE_URL is not set, got: %v", err)
+	}
+}
+
+// TestGitCloneWorkspace_EnforcedRefusesUndroppableCredentials proves
+// gitCloneWorkspace refuses outright — before running any git command —
+// when requirePrivilegeDrop is set but uid/gid do not both pass
+// configureGitCommand's own Credential predicate, instead of silently
+// running every git command as this process's own (root, in production)
+// identity. SCION_GIT_CLONE_URL is set so the function does not return
+// early via the "no clone URL configured" path above.
+func TestGitCloneWorkspace_EnforcedRefusesUndroppableCredentials(t *testing.T) {
+	t.Setenv("SCION_GIT_CLONE_URL", "https://example.invalid/repo.git")
+	t.Setenv("SCION_WORKSPACE_PATH", t.TempDir())
+
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "uid0", uid: 0, gid: 1000},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "both0", uid: 0, gid: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := gitCloneWorkspace(tc.uid, tc.gid, "/tmp", true)
+			if err == nil {
+				t.Fatalf("gitCloneWorkspace(uid=%d, gid=%d, requirePrivilegeDrop=true) = nil, want an error refusing to run git as root", tc.uid, tc.gid)
+			}
+		})
 	}
 }
 
@@ -998,7 +1027,7 @@ func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(0, 0, "/tmp")
+	err := gitCloneWorkspace(0, 0, "/tmp", false)
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")
 	}
@@ -1040,7 +1069,7 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(uid, gid, "/tmp")
+	err := gitCloneWorkspace(uid, gid, "/tmp", false)
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")
 	}

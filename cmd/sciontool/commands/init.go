@@ -435,7 +435,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// causing isWorkspaceEmpty to return false and skipping the clone.
 	// See: https://github.com/ptone/scion/issues/739
 	cloneStepStart := time.Now()
-	cloneErr := runGitCloneWorkspace(targetUID, targetGID, agentHome)
+	cloneErr := runGitCloneWorkspace(targetUID, targetGID, agentHome, opts.RequirePrivilegeDrop)
 	slog.Info("sciontool init: clone step complete", "elapsed_ms", time.Since(cloneStepStart).Milliseconds(), "ok", cloneErr == nil)
 	if err := cloneErr; err != nil {
 		log.Error("Git clone failed: %v", err)
@@ -1776,10 +1776,23 @@ func isUIDMapped(uid int) bool {
 // agentHome is the scion user's home directory, used to write the credential
 // helper to the correct .gitconfig (not root's HOME).
 // Returns nil if no clone URL is configured (non-git workspace).
-func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
+//
+// requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop: when
+// set, every git command below must run under configureGitCommand's
+// Credential, never under this process's own (root) identity, so this
+// refuses outright — before running any git command at all — if uid/gid do
+// not both pass the same predicate configureGitCommand's Credential block
+// uses, mirroring supervisor.Supervisor.Run's own ErrPrivilegeDropRequired.
+// In practice RunInit's own requirePrivilegeDropOrFail already refuses to
+// reach this code at all under those conditions, so this is
+// belt-and-suspenders against a future caller that calls it directly.
+func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool) (retErr error) {
 	cloneURL := os.Getenv("SCION_GIT_CLONE_URL")
 	if cloneURL == "" {
 		return nil
+	}
+	if requirePrivilegeDrop && (uid <= 0 || gid <= 0) {
+		return fmt.Errorf("gitCloneWorkspace: privilege drop required but uid/gid were not both set (uid=%d gid=%d); refusing to run git as root", uid, gid)
 	}
 
 	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
