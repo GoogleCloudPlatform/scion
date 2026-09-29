@@ -1,0 +1,157 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/require"
+)
+
+// ---------------------------------------------------------------------------
+// E.2a (ptone/scion#2127, plan §3.2): the single decision-audit exit. Before
+// this change, five early-return denial paths inside Decide (now decide)
+// skipped the audit emit entirely — most notably the UAT project/scope gate,
+// reproduced in the E investigation (plan Appendix A) as "0 audit records"
+// for both an out-of-project and an out-of-scope UAT request.
+// ---------------------------------------------------------------------------
+
+// TestDecide_UATProjectGateDenialIsAudited reproduces the E investigation's
+// Appendix A finding and proves it is fixed: a UAT request denied by the
+// project constraint (pre-kernel gate) now produces exactly one decision
+// audit record, where it previously produced zero.
+func TestDecide_UATProjectGateDenialIsAudited(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID, ownerID := setupUATProjectAndOwner(t, s, "decide-uat-gate")
+	otherProjectID := tid("decide-uat-gate-other-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: otherProjectID, Name: "other", Slug: "decide-uat-gate-other", CreatedBy: ownerID, OwnerID: ownerID,
+	}))
+
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	tokenID := "decide-uat-gate-token"
+	base := NewAuthenticatedUser(ownerID, "owner@test.com", "Owner", "member", "api")
+	scoped := NewScopedUserIdentityWithCredentialID(base, projectID, []string{"project:read"}, tokenID)
+
+	before := len(emitter.records)
+	c := contextWithCredentialContext(contextWithIdentity(ctx, scoped), credentialContextForIdentity(scoped))
+	decision := srv.authzService.Decide(c, AuthzRequestFromContext(c, Resource{Type: "project", ID: otherProjectID}, ActionRead))
+	require.False(t, decision.Allowed)
+	require.Contains(t, decision.Reason, "not scoped for this project")
+
+	require.Equal(t, before+1, len(emitter.records), "the UAT project-gate denial must emit exactly one decision audit record")
+	rec := emitter.records[len(emitter.records)-1]
+	require.Equal(t, "deny", rec.Result)
+	require.Equal(t, tokenID, rec.CredentialID)
+
+	// And the out-of-scope gate (same token, in-project resource, missing scope).
+	before = len(emitter.records)
+	c2 := contextWithCredentialContext(contextWithIdentity(ctx, scoped), credentialContextForIdentity(scoped))
+	decision2 := srv.authzService.Decide(c2, AuthzRequestFromContext(c2, Resource{Type: "project", ID: projectID}, ActionDelete))
+	require.False(t, decision2.Allowed)
+	require.Contains(t, decision2.Reason, "does not have scope")
+	require.Equal(t, before+1, len(emitter.records), "the UAT scope-gate denial must also emit exactly one decision audit record")
+}
+
+// TestDecide_PermissionIDPopulated proves ruling Q7: the decision audit
+// record's PermissionID is the exact canonical permission Decide evaluated,
+// not independently re-derived, and is empty for a decision that fails
+// before permission resolution.
+func TestDecide_PermissionIDPopulated(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	project := &store.Project{ID: tid("permid-project"), Name: "p", Slug: "permid-project", CreatedBy: DevUserID, OwnerID: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Dev", "admin", "api")
+	decision := srv.authzService.CheckAccess(ctx, identity, Resource{Type: "project", ID: project.ID}, ActionRead)
+	require.True(t, decision.Allowed)
+	require.NotEmpty(t, decision.PermissionID)
+
+	last := emitter.records[len(emitter.records)-1]
+	require.Equal(t, decision.PermissionID, last.PermissionID)
+
+	// A decision that fails before permission resolution (missing principal)
+	// leaves PermissionID empty — never invented.
+	before := len(emitter.records)
+	missing := srv.authzService.Decide(ctx, AuthzRequest{Resource: Resource{Type: "project", ID: project.ID}, Action: ActionRead})
+	require.False(t, missing.Allowed)
+	require.Empty(t, missing.PermissionID)
+	require.Equal(t, before+1, len(emitter.records))
+	require.Empty(t, emitter.records[len(emitter.records)-1].PermissionID)
+}
+
+// TestDecide_AlwaysAuditBypassesSampling proves the always-audit marker (for
+// G's delegated-agent events) forces an audit record for an allow decision
+// even when the sample rate would otherwise have dropped it.
+func TestDecide_AlwaysAuditBypassesSampling(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+	srv.authzService.DecisionAuditSampleRate = 0.0 // never sample allows
+
+	project := &store.Project{ID: tid("alwaysaudit-project"), Name: "p", Slug: "alwaysaudit-project", CreatedBy: DevUserID, OwnerID: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, project))
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Dev", "admin", "api")
+
+	before := len(emitter.records)
+	req := AuthzRequestFromContext(contextWithIdentity(ctx, identity), Resource{Type: "project", ID: project.ID}, ActionRead)
+	decision := srv.authzService.Decide(ctx, req)
+	require.True(t, decision.Allowed)
+	require.Equal(t, before, len(emitter.records), "sample rate 0 must drop an ordinary allow")
+
+	req.AlwaysAudit = true
+	decision = srv.authzService.Decide(ctx, req)
+	require.True(t, decision.Allowed)
+	require.Equal(t, before+1, len(emitter.records), "AlwaysAudit must bypass allow-sampling")
+}
+
+// TestBuildDecisionAuditRecord_MatchesEmittedShape proves the exported
+// builder produces the same field mapping Decide's own emit path uses, so a
+// non-Decide caller (e.g. G's aggregated list-filter record) gets
+// schema-consistent records.
+func TestBuildDecisionAuditRecord_MatchesEmittedShape(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	project := &store.Project{ID: tid("builder-project"), Name: "p", Slug: "builder-project", CreatedBy: DevUserID, OwnerID: DevUserID}
+	require.NoError(t, s.CreateProject(ctx, project))
+	identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Dev", "admin", "api")
+
+	req := AuthzRequestFromContext(contextWithIdentity(ctx, identity), Resource{Type: "project", ID: project.ID}, ActionRead)
+	decision := srv.authzService.Decide(ctx, req)
+	require.True(t, decision.Allowed)
+
+	emitted := emitter.records[len(emitter.records)-1]
+	built := BuildDecisionAuditRecord(ctx, req, decision)
+	require.Equal(t, emitted.PrincipalID, built.PrincipalID)
+	require.Equal(t, emitted.PermissionID, built.PermissionID)
+	require.Equal(t, emitted.ResourceType, built.ResourceType)
+	require.Equal(t, emitted.Result, built.Result)
+}
