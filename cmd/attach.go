@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -205,7 +207,26 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		agentID = agentName // Fall back to name if ID not set
 	}
 
-	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
+	if err := wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...); err != nil {
+		return attachErrorWithUATHint(err, token)
+	}
+	return nil
+}
+
+// attachErrorWithUATHint appends a hint to a failed Hub WebSocket handshake
+// when the presented credential is a user access token (ptone/scion#2122):
+// the token may simply lack agent:attach for this agent, which use-time
+// authorization re-checks on every handshake independently of what was
+// eligible to select at mint time. Does not change the underlying error or
+// the reconnect logic — this only augments the message shown once, here.
+func attachErrorWithUATHint(err error, token string) error {
+	if err == nil || !strings.HasPrefix(token, store.UATPrefix) {
+		return err
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("status %d", http.StatusForbidden)) {
+		return err
+	}
+	return fmt.Errorf("%w\nhint: this access token may lack agent:attach for this agent (run `scion hub token scopes --project <project>` to check)", err)
 }
 
 // resolveAttachTransport resolves transport auth for the attach WebSocket path.

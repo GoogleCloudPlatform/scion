@@ -455,3 +455,34 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 	assert.NotContains(t, err.Error(), "no access token found for Hub",
 		"IAP mode with transport source should pass the token gate in startAgentViaHub site 2; got: %v", err)
 }
+
+// TestAttachErrorWithUATHint pins ptone/scion#2122's 403 hint: it fires only
+// for a UAT credential (scion_pat_ prefix) on an actual 403, and never
+// changes the underlying error or wraps it for any other status/credential
+// combination.
+func TestAttachErrorWithUATHint(t *testing.T) {
+	forbidden := fmt.Errorf("connection failed with status %d: forbidden", http.StatusForbidden)
+	notFound := fmt.Errorf("connection failed with status %d: agent not found", http.StatusNotFound)
+
+	t.Run("UAT credential with 403 gets the hint", func(t *testing.T) {
+		err := attachErrorWithUATHint(forbidden, "scion_pat_abc123")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, forbidden)
+		assert.Contains(t, err.Error(), "agent:attach")
+		assert.Contains(t, err.Error(), "hub token scopes")
+	})
+
+	t.Run("session credential with 403 is unchanged", func(t *testing.T) {
+		err := attachErrorWithUATHint(forbidden, "some-session-token")
+		assert.Equal(t, forbidden, err)
+	})
+
+	t.Run("UAT credential with a non-403 error is unchanged", func(t *testing.T) {
+		err := attachErrorWithUATHint(notFound, "scion_pat_abc123")
+		assert.Equal(t, notFound, err)
+	})
+
+	t.Run("nil error stays nil", func(t *testing.T) {
+		assert.NoError(t, attachErrorWithUATHint(nil, "scion_pat_abc123"))
+	})
+}
