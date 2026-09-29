@@ -1457,14 +1457,11 @@ func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal Prin
 
 	// Live project access is required at use time, not just at mint time
 	// (ptone/scion#2092): retained creation ancestry or ownership never
-	// substitutes for current project access. The two checks above confirm
-	// resource is either the token's own "project" resource or a resource
-	// whose ParentType is "project" and whose ParentID matches; anything
-	// else was already denied above as hub-level. ProjectTargetAdmission
-	// itself relies on ResolveTargetScope to reject any resource that isn't
-	// really a matching project target (ErrProjectMismatch), so this call
-	// is the actual authority for that classification, not the two checks
-	// above. It fails closed on any error (including
+	// substitutes for current project access. ProjectTargetAdmission relies
+	// on ResolveTargetScope to reject any resource that isn't really a
+	// matching project target (ErrProjectMismatch), so this call is the
+	// actual authority for that classification, not the two checks above.
+	// It fails closed on any error (including
 	// ErrUnsupportedPrincipalKind for a non-local-user principal, which
 	// cannot occur for a ScopedUserIdentity today but is handled the same
 	// as any other denial rather than panicking or special-cased here).

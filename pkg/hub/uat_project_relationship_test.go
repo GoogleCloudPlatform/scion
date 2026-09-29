@@ -55,7 +55,7 @@ import (
 // this file deliberately do not use a minimal fixture that omits hub
 // membership: the seeded hub-member system role interacts with the
 // live-project-access gate (see
-// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess and the F-3
+// TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess and the
 // seeded-role regressions below), and a fixture without that binding would
 // hide the interaction instead of exposing it.
 func uatpMember(t *testing.T, s store.Store, projectID, userID string) {
@@ -65,8 +65,7 @@ func uatpMember(t *testing.T, s store.Store, projectID, userID string) {
 }
 
 // uatpAgent creates an agent directly via the store with Hub-recorded
-// OwnerID/Ancestry, per plan.md §2.2(4) ("Create agents via the store with
-// Hub-recorded OwnerID/Ancestry").
+// OwnerID/Ancestry, rather than through the HTTP handler.
 func uatpAgent(t *testing.T, s store.Store, projectID, ownerID, idSuffix string, ancestry ...string) *store.Agent {
 	t.Helper()
 	agent := &store.Agent{
@@ -484,12 +483,11 @@ func TestProjectUAT_HubMembershipAloneDoesNotGrantProjectAccess(t *testing.T) {
 }
 
 // TestProjectUAT_ProjectAccessCheckedBeforeRelationshipGrants documents the
-// intended gate placement (plan.md §2.2(2)): once wired into
-// enforceUATConstraints (Decide step 1), a UAT without active project access
-// is denied before the kernel or the owner/ancestor relationship grants
-// (Decide step 9) ever run, so the response never comes from "relationship
-// grant: resource owner" admitting a request project access should have
-// blocked.
+// gate placement: the project access check runs in Decide step 1, inside
+// enforceUATConstraints, so a UAT without active project access is denied
+// before the kernel or the owner/ancestor relationship grants (Decide step
+// 9) ever run -- the response never comes from "relationship grant:
+// resource owner" admitting a request project access should have blocked.
 func TestProjectUAT_ProjectAccessCheckedBeforeRelationshipGrants(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("uatp-gateplacement-project")
@@ -554,8 +552,9 @@ func TestProjectUAT_SystemAuthorityCountsAsProjectAccess(t *testing.T) {
 // synthetic minimal fixtures) to pin that requirement.
 // ---------------------------------------------------------------------------
 
-// TestProjectUAT_FormerMemberRetainedAncestryOnlyCatalogRoles: F-3 case (1).
-// A former project member retains ONLY the seeded hub-member group binding
+// TestProjectUAT_FormerMemberRetainedAncestryOnlyCatalogRoles: seeded
+// catalog-only roles case (1). A former project member retains ONLY the
+// seeded hub-member group binding
 // plus a direct hub-viewer binding (covering "and viewer, if seeded") --
 // both catalog-only system roles -- after their project membership is
 // removed. Neither may restore attach, port access, or read on their former
@@ -607,8 +606,9 @@ func TestProjectUAT_FormerMemberRetainedAncestryOnlyCatalogRoles(t *testing.T) {
 		"former member's catalog-only roles must not restore port access: %s", rec.Body.String())
 }
 
-// TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents: F-3 case (2).
-// Hub-admin (seed.go hubAdminPermissionIDs) carries scheduled_event.* at
+// TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents: seeded
+// catalog-only roles case (2). Hub-admin (seed.go hubAdminPermissionIDs)
+// carries scheduled_event.* at
 // system scope, all reviewed project-target-applicable in general -- but
 // none of it is agent.*. A hub-admin with no project membership must not
 // gain agent access through it.
@@ -634,10 +634,11 @@ func TestProjectUAT_HubAdminScheduledEventGrantsDoNotUnlockAgents(t *testing.T) 
 		"hub-admin's scheduled_event authority must not unlock an unrelated agent target: %s", rec.Body.String())
 }
 
-// TestProjectUAT_CatalogOnlySystemGrantsDoNotCountForAgentTargets: F-3 case
-// (3). A system-scope role holding only skill.read/template.read/
-// harness_config.read -- all reviewed project-target-applicable in A's
-// draft table, none of them agent.* -- must not admit an agent target.
+// TestProjectUAT_CatalogOnlySystemGrantsDoNotCountForAgentTargets: seeded
+// catalog-only roles case (3). A system-scope role holding only
+// skill.read/template.read/harness_config.read -- all reviewed
+// project-target-applicable in general, none of them agent.* -- must not
+// admit an agent target.
 func TestProjectUAT_CatalogOnlySystemGrantsDoNotCountForAgentTargets(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -667,8 +668,9 @@ func TestProjectUAT_CatalogOnlySystemGrantsDoNotCountForAgentTargets(t *testing.
 		"catalog-only system grants (skill/template/harness_config read) must not admit an agent target: %s", rec.Body.String())
 }
 
-// TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach: F-3 case (4). A
-// super-admin's system authority is the EXACT requested permission
+// TestProjectUAT_SuperAdminNoMembershipCanMintAndAttach: seeded catalog-only
+// roles case (4). A super-admin's system authority is the EXACT requested
+// permission
 // (agent.attach is a real, held permission via allPermissionIDs(), not
 // merely "applicable in general"), so it must admit both minting and
 // use-time attach with no project binding at all.
@@ -713,7 +715,7 @@ func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Session characterization (ruling R-c): unchanged, documented only.
+// Session characterization: unchanged, documented only.
 // ---------------------------------------------------------------------------
 
 // TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved documents
@@ -800,7 +802,14 @@ func TestProjectUAT_AccessConstraintsRestrictRelationshipAttach(t *testing.T) {
 	t.Run("mint is rejected once the constraint exists", func(t *testing.T) {
 		_, _, err := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "constrained-attach-2",
 			projectID, []string{"agent:attach"}, nil)
-		require.Error(t, err, "an access constraint excluding agent.attach must block minting it, even though attach is relationship-eligible")
+		assert.ErrorIs(t, err, ErrUATScopeViolation,
+			"an access constraint excluding agent.attach must block minting it, even though attach is relationship-eligible: %v", err)
+		assert.NotErrorIs(t, err, ErrUATProjectForbidden,
+			"the member still has project access; denial must be the per-selector constraint, not the admission gate: %v", err)
+		var violation *UATScopeViolationError
+		if assert.ErrorAs(t, err, &violation) {
+			assert.Equal(t, "agent:attach", violation.Selector)
+		}
 	})
 
 	t.Run("already-minted attach UAT is denied at the real endpoint", func(t *testing.T) {
@@ -876,8 +885,7 @@ func TestProjectUAT_AttachOnlyTokenCannotManageLifecycle(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C.2-adjacent but cheap to land here: revocation takes effect on the next
-// handshake.
+// Revocation takes effect on the next handshake.
 // ---------------------------------------------------------------------------
 
 func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
@@ -981,7 +989,7 @@ func TestCanMintSelector_RelationshipEligibleWithoutTarget(t *testing.T) {
 		for _, r := range results {
 			assert.False(t, r.OK, "selector %s", r.Selector)
 			assert.Equal(t, MintDenialProjectAccessRequired, r.Reason,
-				"a non-member gets the same reason regardless of selector (A-5 oracle resistance): %s", r.Selector)
+				"a non-member gets the same reason regardless of selector (oracle resistance): %s", r.Selector)
 		}
 	})
 
@@ -1161,9 +1169,9 @@ func TestUATProjectAdmission_CrossPermissionMemoIsolation(t *testing.T) {
 	groupClass := ProjectTargetClass{ResourceType: "group"}
 	_, err := srv.authzService.ProjectAdmissionForClass(ctx, principal, projectID, "group.read", groupClass, memo)
 	require.NoError(t, err)
-	// (The group.read result itself is not asserted here -- it currently
-	// denies for the pending A.1 table reason covered above; this test's
-	// only concern is that the memo does not leak across permissions.)
+	// (The group.read result itself is not asserted here -- whichever way
+	// it resolves, this test's only concern is that the memo does not leak
+	// across permissions.)
 
 	agentClass := ProjectTargetClass{ResourceType: "agent"}
 	for _, permID := range []string{"agent.read", "agent.attach", "agent.port_access"} {
@@ -1225,7 +1233,26 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 			"system authority for the exact permission should admit the request even though this scope could never be freshly minted for a project boundary: %s", rec.Body.String())
 	})
 
-	t.Run("missing binding denies at the real route", func(t *testing.T) {
+	t.Run("owner without the system binding is still denied by the project-access gate", func(t *testing.T) {
+		// Identical group-ownership fixture as the positive case above
+		// (OwnerID == caller) -- the pair differs ONLY in the missing
+		// group.addMember system-role binding -- rather than a fixture
+		// with no ownership at all, because addGroupMember's own
+		// role-hierarchy check has a separate allowance for a group's
+		// resource owner, and the owner relationship grant
+		// (checkRelationshipGrants) has no resource-type restriction: if
+		// Decide ever reached the kernel/relationship steps for this
+		// request, ownership alone would admit it regardless of the
+		// group.addMember binding. The project-access gate in
+		// enforceUATConstraints runs BEFORE those steps for a UAT
+		// credential (Decide step 1), so this must still deny -- proving
+		// the positive case above exercises the exact-permission admission
+		// path, not group ownership. A denial via the handler's own "Only
+		// group owners or admins can add members" message would mean the
+		// request passed s.authorize and reached the handler's internal
+		// check instead, which that owner allowance would actually let
+		// through -- so this also asserts the response does NOT contain
+		// that text.
 		srv, s := testServer(t)
 		ctx := context.Background()
 		projectID := tid("uatp-groupaddmember-nobind-project")
@@ -1239,14 +1266,19 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 		require.NoError(t, s.CreateUser(ctx, &store.User{
 			ID: targetID, Email: targetID + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
 		}))
-		group := &store.Group{ID: tid("uatp-groupaddmember-nobind-group"), Slug: "uatp-groupaddmember-nobind-group", Name: "G", ProjectID: projectID}
+		group := &store.Group{
+			ID: tid("uatp-groupaddmember-nobind-group"), Slug: "uatp-groupaddmember-nobind-group", Name: "G",
+			ProjectID: projectID, OwnerID: userID,
+		}
 		require.NoError(t, s.CreateGroup(ctx, group))
 
 		uatKey := uatpInsertLegacyToken(t, s, userID, projectID, []string{"group:addMember"})
 		rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/groups/"+group.ID+"/members",
 			map[string]any{"memberType": "user", "memberId": targetID, "role": "member"})
 		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"no authority at all must deny at the real route: %s", rec.Body.String())
+			"group ownership alone must not satisfy the project-access gate: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "Only group owners or admins can add members",
+			"denial must come from the project-access gate, not from the handler's owner-allowed role-hierarchy check: %s", rec.Body.String())
 	})
 }
 
