@@ -60,6 +60,23 @@ func listProviderCapacity(t *testing.T, srv *Server, projectID string) map[strin
 	return byBroker
 }
 
+// listProviderCapacityRaw issues the same GET as listProviderCapacity but
+// decodes the response into raw JSON objects instead of providerCapacityView.
+// A *int64 field can't distinguish an omitted key from an explicit null, so
+// tests that need to assert a key's absence from the wire format — not just
+// that the decoded pointer is nil — use this instead.
+func listProviderCapacityRaw(t *testing.T, srv *Server, projectID string) []map[string]any {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/providers", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.Providers
+}
+
 // TestListProjectProviders_AgentLimitDefaultNoBindings covers the common
 // path with no entitlement bindings at all: agentLimit must reflect the
 // max_agents_per_broker limit definition's default value (see
@@ -122,18 +139,16 @@ func TestListProjectProviders_AgentLimitBrokerScopedOverride(t *testing.T) {
 	assert.EqualValues(t, overrideValue, *view.AgentLimit, "broker-scoped override must win over the limit definition default")
 }
 
-// TestListProjectProviders_AgentLimitUnsetWhenUnlimited covers the
-// unlimited case: when the effective limit resolves to <= 0, agentLimit
-// must be left unset (nil) — it is never 0, since a non-positive effective
-// limit means unlimited — while agentCount is still reported
-// (ptone/scion#2161). It also pins the
-// documented lag on an unlimited broker: because
-// QuotaService.Reserve returns before creating a reservation when the
-// effective limit is <= 0 (quota.go), a running agent is not reflected in
-// agentCount until the periodic broker-quota-reconcile job
-// (ReconcileStaleBrokerQuotaReservations) backfills it. This exercises both
-// halves — before and after that backfill — rather than only the
-// no-agents-at-all case.
+// TestListProjectProviders_AgentLimitUnsetWhenUnlimited covers the unlimited
+// case: when the effective limit resolves to <= 0, agentLimit must be left
+// unset (nil) — it is never 0, since a non-positive effective limit means
+// unlimited — while agentCount is still reported (ptone/scion#2161). It also
+// pins the documented lag on an unlimited broker: because QuotaService.Reserve
+// returns before creating a reservation when the effective limit is <= 0
+// (quota.go), a running agent is not reflected in agentCount until the
+// periodic broker-quota-reconcile job (ReconcileStaleBrokerQuotaReservations)
+// backfills it. This exercises both halves — before and after that backfill —
+// rather than only the no-agents-at-all case.
 func TestListProjectProviders_AgentLimitUnsetWhenUnlimited(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{createPhase: string(state.PhaseRunning)})
 	brokerID := project.DefaultRuntimeBrokerID
@@ -146,6 +161,13 @@ func TestListProjectProviders_AgentLimitUnsetWhenUnlimited(t *testing.T) {
 	assert.Nil(t, view.AgentLimit, "unlimited must leave agentLimit unset")
 	require.NotNil(t, view.AgentCount, "agentCount must still be reported when unlimited")
 	assert.EqualValues(t, 0, *view.AgentCount)
+
+	raw := listProviderCapacityRaw(t, srv, project.ID)
+	require.Len(t, raw, 1)
+	_, hasLimit := raw[0]["agentLimit"]
+	assert.False(t, hasLimit, "agentLimit key must be absent from the JSON when unlimited")
+	_, hasCount := raw[0]["agentCount"]
+	assert.True(t, hasCount, "agentCount key must be present in the JSON")
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name: "capacity-unlimited-1", ProjectID: project.ID,
@@ -346,6 +368,13 @@ func TestListProjectProviders_LimitDefinitionLookupFailureLeavesAllUnset(t *test
 	require.True(t, ok)
 	assert.Nil(t, view.AgentLimit, "limit definition lookup failure must leave agentLimit unset")
 	assert.Nil(t, view.AgentCount, "limit definition lookup failure must leave agentCount unset")
+
+	raw := listProviderCapacityRaw(t, srv, project.ID)
+	require.Len(t, raw, 1)
+	_, hasLimit := raw[0]["agentLimit"]
+	assert.False(t, hasLimit, "agentLimit key must be absent from the JSON on lookup failure")
+	_, hasCount := raw[0]["agentCount"]
+	assert.False(t, hasCount, "agentCount key must be absent from the JSON on lookup failure")
 }
 
 // failResolveEffectiveLimitStore wraps a store.Store so
