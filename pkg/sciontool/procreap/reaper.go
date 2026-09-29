@@ -100,43 +100,29 @@ func isManagedPID(pid int) bool {
 	return ok
 }
 
-// snapshotProcessNames reads process names from /proc for all current
-// child processes. This must be called before reaping, since /proc/<pid>
-// entries are removed once wait() completes.
-func snapshotProcessNames() map[int]string {
-	names := make(map[int]string)
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return names
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
-		comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-		if err != nil {
-			continue
-		}
-		if name := strings.TrimSpace(string(comm)); name != "" {
-			names[pid] = name
-		}
-	}
-	return names
+// zombieProc pairs a zombie child's PID with its process name (best-effort;
+// "unknown" if the name could not be read), as observed during a single
+// scanZombies pass.
+type zombieProc struct {
+	pid  int
+	name string
 }
 
-// zombiePIDs scans /proc and returns the PIDs of processes currently in
-// zombie state ('Z' in /proc/<pid>/stat) — i.e. processes that have exited
-// but have not yet been reaped by their parent.
-func zombiePIDs() []int {
+// scanZombies performs a single /proc walk and returns every current zombie
+// child along with its process name. A reap pass used to do this as two
+// separate full /proc walks back-to-back — snapshotProcessNames() reading
+// every process's name, then zombiePIDs() separately reading every
+// process's state — both running while execGate.Lock() was held, which
+// blocked managed Start() calls for roughly twice as long as necessary.
+// Reading the name only for processes already confirmed to be zombies
+// (instead of for every process in /proc) makes this both a single walk
+// and strictly less work per walk.
+func scanZombies() []zombieProc {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
-	var pids []int
+	var zombies []zombieProc
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -149,9 +135,30 @@ func zombiePIDs() []int {
 		if err != nil {
 			continue
 		}
-		if isZombieStat(string(stat)) {
-			pids = append(pids, pid)
+		if !isZombieStat(string(stat)) {
+			continue
 		}
+		name := "unknown"
+		if comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
+			if n := strings.TrimSpace(string(comm)); n != "" {
+				name = n
+			}
+		}
+		zombies = append(zombies, zombieProc{pid: pid, name: name})
+	}
+	return zombies
+}
+
+// zombiePIDs scans /proc and returns the PIDs of processes currently in
+// zombie state ('Z' in /proc/<pid>/stat) — i.e. processes that have exited
+// but have not yet been reaped by their parent. It is a thin wrapper around
+// scanZombies, kept as its own function since tests (and nothing else) want
+// just the PIDs without paying for name lookups they don't use.
+func zombiePIDs() []int {
+	zombies := scanZombies()
+	pids := make([]int, len(zombies))
+	for i, z := range zombies {
+		pids[i] = z.pid
 	}
 	return pids
 }
@@ -203,19 +210,15 @@ func reapUnmanagedZombies() {
 	execGate.Lock()
 	defer execGate.Unlock()
 
-	// Snapshot process names before reaping, since /proc/<pid> entries are
-	// removed once wait() completes.
-	names := snapshotProcessNames()
-
-	for _, pid := range zombiePIDs() {
-		if isManagedPID(pid) {
+	for _, z := range scanZombies() {
+		if isManagedPID(z.pid) {
 			// An in-flight exec.Cmd owns this PID; its own Wait call will
 			// reap it. Stealing it here would race that call.
 			continue
 		}
 
 		var ws syscall.WaitStatus
-		reapedPID, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		reapedPID, err := syscall.Wait4(z.pid, &ws, syscall.WNOHANG, nil)
 		if err != nil || reapedPID <= 0 {
 			// Already reaped by someone else (e.g. it became managed and
 			// was waited on between our scan and this call), or WNOHANG
@@ -227,10 +230,6 @@ func reapUnmanagedZombies() {
 		if ws.Signaled() {
 			reason = "killed by signal " + ws.Signal().String()
 		}
-		name := names[pid]
-		if name == "" {
-			name = "unknown"
-		}
-		log.Info("Reaped zombie process %d (%s) (reason: %s, exit code: %d)", pid, name, reason, ws.ExitStatus())
+		log.Info("Reaped zombie process %d (%s) (reason: %s, exit code: %d)", z.pid, z.name, reason, ws.ExitStatus())
 	}
 }

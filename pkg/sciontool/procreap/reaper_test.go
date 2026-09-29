@@ -5,33 +5,48 @@ Copyright 2025 The Scion Authors.
 package procreap
 
 import (
-	"os"
+	"os/exec"
 	"runtime"
 	"testing"
 )
 
-func TestSnapshotProcessNames(t *testing.T) {
+// TestScanZombies_IncludesNameForZombie verifies the single-pass replacement
+// for the old two-walk design (snapshotProcessNames + zombiePIDs) still
+// resolves a process name for a genuine zombie, not just its PID.
+func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("skipping test on non-linux platform")
 	}
-	names := snapshotProcessNames()
 
-	// We should find at least our own process in the snapshot.
-	myPID := os.Getpid()
-	name, ok := names[myPID]
-	if !ok {
-		t.Fatalf("snapshotProcessNames() did not include current process (pid %d)", myPID)
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start test process: %v", err)
 	}
-	if name == "" {
-		t.Fatal("snapshotProcessNames() returned empty name for current process")
+	pid := cmd.Process.Pid
+	defer cmd.Wait()
+
+	waitUntilZombie(t, pid)
+
+	var found bool
+	for _, z := range scanZombies() {
+		if z.pid != pid {
+			continue
+		}
+		found = true
+		if z.name == "" {
+			t.Errorf("scanZombies() returned empty name for zombie pid %d", pid)
+		}
 	}
-	t.Logf("current process (pid %d) name: %s", myPID, name)
+	if !found {
+		t.Fatalf("scanZombies() did not include zombie pid %d", pid)
+	}
 }
 
-func TestSnapshotProcessNames_PID1Excluded(t *testing.T) {
-	names := snapshotProcessNames()
-	if _, ok := names[1]; ok {
-		t.Error("snapshotProcessNames() should exclude PID 1")
+func TestZombiePIDs_PID1Excluded(t *testing.T) {
+	for _, pid := range zombiePIDs() {
+		if pid == 1 {
+			t.Error("zombiePIDs() should exclude PID 1")
+		}
 	}
 }
 
