@@ -873,6 +873,7 @@ type Server struct {
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
 	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
+	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
@@ -1323,6 +1324,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize the dedicated download-URL signing key (#1792).
 	if err := srv.initDownloadSigningKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the dedicated authorized-list cursor sealing key
+	// (ptone/scion#2124).
+	if err := srv.initListCursorSealer(ctx); err != nil {
 		return nil, err
 	}
 

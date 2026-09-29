@@ -203,17 +203,11 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("harness-configs", filter)
-	if cursor != "" {
-		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-	}
+	cursorBinding := scopedCursorBinding("harness-configs", filter, identity)
 	wideAccess := s.hasCatalogWideListAccess(ctx, identity, "harness_config", "harness_config.list")
 	authorizeEach := identity != nil && !wideAccess
 	result, err := listAuthorizedOrAll(
-		ctx, identity, cursor, limit, cursorBinding, authorizeEach,
+		ctx, identity, cursor, limit, cursorBinding, s.listCursorSealer, authorizeEach,
 		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.HarnessConfig], error) {
 			return s.store.ListHarnessConfigs(ctx, filter, opts)
 		},
