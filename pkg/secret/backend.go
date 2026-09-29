@@ -52,8 +52,7 @@ type GCPBackendConfig struct {
 //     the same Version. UpdateSecretMeta is a read-modify-write with no
 //     version predicate, so two concurrent metadata updates can each bump
 //     Version from the same baseline and land on the same new Version with
-//     different field values; Version alone would not catch that (design
-//     F.2 §4.10, v5 O-3);
+//     different field values; Version alone would not catch that.
 //   - its SecretType is (still) internal, since internal secrets are never
 //     candidates for delivery regardless of whether meta already recorded
 //     that.

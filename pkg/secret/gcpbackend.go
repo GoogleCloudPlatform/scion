@@ -205,11 +205,15 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		return FetchResult{Err: err}
 	}
 
-	// Narrow the window between the DB record check above and the Secret
-	// Manager read above: re-read the DB record and repeat the same
-	// comparison. A Set or delete-and-recreate that lands in that window is
-	// caught here instead of silently returning its value under the old
-	// generation's metadata (N1).
+	// Re-read the DB record and repeat the comparison. A metadata update,
+	// or a Set whose database write lands between the Secret Manager read
+	// and this re-read, is reported as not found instead of returning a
+	// value under metadata that no longer matches. This narrows the race
+	// but does not close it: Set adds the Secret Manager version before it
+	// writes the database record, so a fetch that completes both reads
+	// between those two writes still returns the new value under the old
+	// metadata. Closing it needs the Secret Manager version recorded in
+	// the database record.
 	after, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
 	if err != nil {
 		return FetchResult{Err: err}

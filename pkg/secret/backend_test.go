@@ -259,12 +259,9 @@ func TestSecretFetch_MissingRecordNotResolvedByName(t *testing.T) {
 // different scope. A positive control confirms the current meta still
 // resolves.
 //
-// This is the regression test for the check the review found untested
-// (R1): deleting the condition from either backend's fetchValue (for
-// example, replacing it with `if false`) turns every subtest but
-// "positive_control" red, because the only existing negative FetchValues
-// tests used a record that was never created (ErrNotFound from GetSecret,
-// before the condition is ever reached).
+// Each negative subtest reaches the record comparison itself: the record
+// exists at the meta's triple, so GetSecret succeeds and only the
+// comparison can reject it.
 func TestSecretFetch_RecordGenerationChecked(t *testing.T) {
 	run := func(t *testing.T, backend SecretBackend) {
 		ctx := context.Background()
@@ -404,15 +401,15 @@ func TestSecretFetch_RecordGenerationChecked(t *testing.T) {
 	})
 }
 
-// TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered verifies the R3
-// fix: FetchValues also compares AllowProgeny, CreatedBy and SecretType, not
+// TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered verifies that
+// FetchValues also compares AllowProgeny, CreatedBy and SecretType, not
 // just ID and Version. UpdateSecretMeta is a read-modify-write with no
 // version predicate, so two concurrent metadata updates can each bump
 // Version from the same baseline and land on the same new Version with
-// different field values (design F.2 §4.10, v5 O-3); Version alone would not
-// catch that. Each subtest simulates the caller having captured a meta whose
-// recorded field disagrees with the current record even though the Version
-// matches, by copying the live meta and changing exactly one field.
+// different field values; Version alone would not catch that. Each subtest
+// simulates the caller having captured a meta whose recorded field disagrees
+// with the current record even though the Version matches, by copying the
+// live meta and changing exactly one field.
 func TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered(t *testing.T) {
 	run := func(t *testing.T, backend SecretBackend) {
 		ctx := context.Background()
@@ -483,17 +480,104 @@ func TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered(t *testing.T) {
 }
 
 // ============================================================================
-// Resolve: decryptRawValue fail-closed (R2)
+// FetchValues: GCP post-read re-check
+// ============================================================================
+
+// hookSMClient wraps mockSMClient so a test can run code at the exact point
+// GCPBackend.fetchValue reads Secret Manager, to place a database write
+// precisely between that read and fetchValue's own re-read of the database
+// record afterward. Each hook fires at most once and then clears itself.
+type hookSMClient struct {
+	*mockSMClient
+	beforeAccess, afterAccess func()
+}
+
+func (h *hookSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if f := h.beforeAccess; f != nil {
+		h.beforeAccess = nil
+		f()
+	}
+	resp, err := h.mockSMClient.AccessSecretVersion(ctx, req)
+	if f := h.afterAccess; f != nil {
+		h.afterAccess = nil
+		f()
+	}
+	return resp, err
+}
+
+// TestSecretFetch_RecordChangedDuringSecretManagerReadNotDelivered verifies
+// that GCPBackend.fetchValue's post-read re-check catches a database write
+// landing between the Secret Manager read and that re-read, instead of
+// delivering the Secret Manager value it just read under metadata that no
+// longer matches the current record. It models GCPBackend.Set's own write
+// order: the Secret Manager version changes before the database record does.
+func TestSecretFetch_RecordChangedDuringSecretManagerReadNotDelivered(t *testing.T) {
+	ctx := context.Background()
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("failed to migrate test store: %v", err)
+	}
+	hook := &hookSMClient{mockSMClient: newMockSMClient()}
+	backend := NewGCPBackendWithClient(st, hook, "test-project", "test-hub-id")
+
+	_, meta, err := backend.Set(ctx, &SetSecretInput{
+		Name: "RACE_KEY", Value: "v1", SecretType: TypeEnvironment,
+		Scope: ScopeUser, ScopeID: "race-user",
+	})
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	smPath, ok := extractGCPSMPath(meta.SecretRef)
+	if !ok {
+		t.Fatalf("meta.SecretRef %q is not a gcpsm ref", meta.SecretRef)
+	}
+
+	// beforeAccess lands the new Secret Manager version immediately before
+	// fetchValue's read of it, so that read returns the new value.
+	hook.beforeAccess = func() {
+		hook.mockSMClient.mu.Lock()
+		hook.mockSMClient.versions[smPath] = []byte("v2")
+		hook.mockSMClient.mu.Unlock()
+	}
+	// afterAccess lands the corresponding database write right after
+	// fetchValue's Secret Manager read but before its re-read, the same way
+	// a concurrent Set's own database upsert would.
+	hook.afterAccess = func() {
+		current, err := backend.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+		if err != nil {
+			t.Fatalf("GetSecret failed: %v", err)
+		}
+		if _, err := backend.store.UpsertSecret(ctx, current); err != nil {
+			t.Fatalf("UpsertSecret failed: %v", err)
+		}
+	}
+
+	results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+	if err != nil {
+		t.Fatalf("FetchValues failed: %v", err)
+	}
+	res := results[meta.ID]
+	if res.Err != store.ErrNotFound {
+		t.Errorf("expected store.ErrNotFound, got value=%q err=%v", res.Value, res.Err)
+	}
+	if res.Value != "" {
+		t.Errorf("expected empty value, got %q", res.Value)
+	}
+}
+
+// ============================================================================
+// Resolve: decrypt failures are skipped
 // ============================================================================
 
 // TestResolve_DecryptErrorSkipsSecret verifies that decryptRawValue's
 // fail-closed behaviour reaches Resolve: a secret whose stored value fails
 // to decrypt is left out of the Resolve result entirely, not delivered with
-// an empty value. This exercises decryptRawValue through Resolve directly
-// (own-scope and progeny), which is a different path than
-// TestSecretFetch_DecryptErrorReportsUnavailable: that test goes through
-// FetchValues -> decryptStoreSecret, whose error path already existed at
-// base and would pass even if decryptRawValue's P13 fix were reverted.
+// an empty value. This covers the Resolve -> decryptRawValue path;
+// TestSecretFetch_DecryptErrorReportsUnavailable covers the FetchValues ->
+// decryptStoreSecret path.
 // Reverting localbackend.go's decryptRawValue to `return "", nil` on a
 // decrypt failure turns this test red: the corrupt secret would then be
 // merged into the Resolve result with Value == "" instead of being skipped.
@@ -663,20 +747,18 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 // variable) and Backend (an exported config field, including through a
 // selector such as cfg.Backend). This is a name-based regex match, not a
 // type-aware one: a new caller written under a different local name (for
-// example backend.Get( or b.Get() would not be matched. Test files are
-// scanned separately from production files below (skipped entirely) so a
-// fake or mock's own Get method on an unrelated receiver can't produce a
-// false positive or mask a real new caller.
+// example backend.Get( or b.Get() would not be matched. _test.go files are
+// not scanned, so a fake's own Get method never counts as a caller.
 var getCallerPattern = regexp.MustCompile(`\b(?:secretBackend|sb|Backend)\.Get\(`)
 
-// hubInternalGetCallers is the reviewed set of files outside this package
+// hubInternalGetCallers is the curated set of files outside this package
 // that call SecretBackend.Get, with the number of call sites each currently
 // has. Get keeps its fallback behaviour (see its doc comment) only for this
 // fixed set: hub-owned infrastructure loaders, hub-side clone credentials
 // that are never delivered to an agent, and agent material paths that have
 // not yet switched to FetchValues. Adding a new caller, or a new call site
 // in one of these files, requires a deliberate update here so the change is
-// reviewed rather than silently inherited.
+// surfaced rather than silently inherited.
 var hubInternalGetCallers = map[string]int{
 	filepath.Join("pkg", "hub", "server.go"):                      2, // hub signing keys (current + legacy)
 	filepath.Join("pkg", "hub", "oidckeys.go"):                    1, // OIDC signing key material
@@ -717,9 +799,9 @@ func repoRootFromWD(t *testing.T) string {
 // a fixed set of hub infrastructure loaders, hub-side clone credentials that
 // are never delivered to an agent, and the material paths that have not yet
 // switched to FetchValues. It scans non-test .go files under pkg/, cmd/ and
-// extras/ so a new caller anywhere in the tree is caught, not silently
-// accepted; a genuinely new or changed caller requires a deliberate update to
-// hubInternalGetCallers.
+// extras/ for calls through the recognized receiver names (see below); a
+// new or changed call site under those names requires a deliberate update
+// to hubInternalGetCallers.
 //
 // The match (getCallerPattern) is a regex over the receiver name, not a
 // type-aware scan of call sites: it recognizes secretBackend.Get(, sb.Get(
@@ -788,6 +870,6 @@ func TestSecretBackendGet_CallersAreHubInternal(t *testing.T) {
 
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		t.Errorf("SecretBackend.Get has callers outside the reviewed allow-list:\n%s", strings.Join(problems, "\n"))
+		t.Errorf("SecretBackend.Get has callers outside the allow-list:\n%s", strings.Join(problems, "\n"))
 	}
 }

@@ -1235,8 +1235,8 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 }
 
 // TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError verifies
-// the P13 fix directly: decryptRawValue returns a non-nil error and an empty
-// string for ciphertext that fails AES-GCM authentication, rather than
+// that decryptRawValue returns a non-nil error and an empty string for
+// ciphertext that fails AES-GCM authentication, rather than
 // silently returning ("", nil) as if the value were legitimately empty.
 // Reverting the fix at localbackend.go (restoring `return "", nil` on a
 // decrypt failure) turns this test red.
