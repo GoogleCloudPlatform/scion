@@ -92,9 +92,9 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete are CapabilityResource (always an existing skill).
-	"skill.create": {TargetClassKindProjectScoped},
+	"skill.create":        {TargetClassKindProjectScoped},
 	"skill.create_global": {TargetClassKindHubResource},
-	"skill.read": {}, "skill.update": {}, "skill.delete": {},
+	"skill.read":          {}, "skill.update": {}, "skill.delete": {},
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.register": {TargetClassKindHubResource},
 
@@ -111,11 +111,11 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// harnessConfigScopeResource (harness_config_handlers.go) is the same
 	// shape for harness_config.create.
 	"template.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"template.read": {}, "template.update": {}, "template.delete": {},
+	"template.read":   {}, "template.update": {}, "template.delete": {},
 	"template.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
 	"harness_config.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"harness_config.read": {}, "harness_config.update": {}, "harness_config.delete": {},
+	"harness_config.read":   {}, "harness_config.update": {}, "harness_config.delete": {},
 	"harness_config.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 
 	// group.* — create/list are CapabilityScope; everything else targets
@@ -154,8 +154,8 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// collection-level); classifying it from the call site's context (agent
 	// creation) rather than the actual Resource authorized would be wrong.
 	"gcp_service_account.create": {TargetClassKindHubResource},
-	"gcp_service_account.read": {}, "gcp_service_account.delete": {},
-	"gcp_service_account.list": {TargetClassKindHubResource},
+	"gcp_service_account.read":   {}, "gcp_service_account.delete": {},
+	"gcp_service_account.list":   {TargetClassKindHubResource},
 	"gcp_service_account.verify": {}, "gcp_service_account.assign": {},
 	"gcp_service_account.mint": {TargetClassKindHubResource},
 
