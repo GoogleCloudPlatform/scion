@@ -56,7 +56,16 @@ type GCPBackendConfig struct {
 //   - its SecretType is (still) internal, since internal secrets are never
 //     candidates for delivery regardless of whether meta already recorded
 //     that.
+//
+// A nil s reports changed rather than dereferencing it. Every current caller
+// only reaches this check after SecretStore.GetSecret has returned a nil
+// error, and that interface's contract promises a non-nil record in that
+// case, so s is not expected to be nil in practice; this is defense in depth
+// against a future SecretStore implementation that returns (nil, nil).
 func recordGenerationChanged(s *store.Secret, meta SecretMeta) bool {
+	if s == nil {
+		return true
+	}
 	return s.ID != meta.ID ||
 		s.Version != meta.Version ||
 		s.AllowProgeny != meta.AllowProgeny ||

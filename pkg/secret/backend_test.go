@@ -401,6 +401,21 @@ func TestSecretFetch_RecordGenerationChecked(t *testing.T) {
 	})
 }
 
+// TestRecordGenerationChanged_NilRecordFailsClosed verifies that
+// recordGenerationChanged reports a change, rather than dereferencing a nil
+// record, when its store.Secret argument is nil. No current caller passes
+// recordGenerationChanged a nil record — each only reaches the call after
+// SecretStore.GetSecret has returned a nil error, and that interface's
+// contract promises a non-nil record in that case — but the guard is
+// exercised directly here as defense in depth against a future
+// implementation that violates the contract.
+func TestRecordGenerationChanged_NilRecordFailsClosed(t *testing.T) {
+	meta := SecretMeta{ID: tid("nil-record-meta"), Version: 1}
+	if !recordGenerationChanged(nil, meta) {
+		t.Error("expected recordGenerationChanged(nil, meta) to report changed (fail closed), got false")
+	}
+}
+
 // TestSecretFetch_MetaFieldChangedAtSameVersionNotDelivered verifies that
 // FetchValues also compares AllowProgeny, CreatedBy and SecretType, not
 // just ID and Version. UpdateSecretMeta is a read-modify-write with no
