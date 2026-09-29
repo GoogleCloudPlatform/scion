@@ -113,9 +113,11 @@ type ScopeEligibility struct {
 	Eligible bool          `json:"eligible"`
 	// Reason is a stable machine code (e.g. "flat_role_insufficient",
 	// "no_relationship_candidacy", "boundary_not_allowed",
-	// "unknown_selector"), present only when !Eligible.
-	// "project_access_required" never appears here: that failure becomes
-	// the request-level error instead (see ListScopes).
+	// "unknown_selector", "project_access_required"), present only when
+	// !Eligible. "project_access_required" appears here only when at least
+	// one other selector in the same response was eligible; when EVERY
+	// evaluated selector lacks project access, the whole request fails
+	// with the request-level error instead (see ListScopes).
 	Reason string `json:"reason,omitempty"`
 	Note   string `json:"note,omitempty"`
 	// IneligibleMembers is set only on a ScopeAliasInfo entry: the subset

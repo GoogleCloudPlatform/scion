@@ -78,6 +78,12 @@ const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
   no_relationship_candidacy: 'not eligible under your current project access',
   boundary_not_allowed: 'not selectable for a project-scoped token',
   unknown_selector: 'unknown scope',
+  // Appears per-scope only when at least one other scope in the response
+  // was eligible (ptone/scion#2122 DTO v3); a project with zero eligible
+  // scopes fails the whole request instead, so this label is never the
+  // only signal that the project itself is inaccessible.
+  project_access_required:
+    'you do not currently have authority for this permission in this project',
 };
 
 function formatEligibilityReason(reason?: string): string {

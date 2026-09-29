@@ -1787,12 +1787,13 @@ func tokenBoundaryToDTO(b TokenBoundary) TokenBoundaryDTO {
 type ScopeEligibility struct {
 	Boundary TokenBoundaryDTO `json:"boundary"`
 	Eligible bool             `json:"eligible"`
-	// Reason is a MintDenialReason code, present only when !Eligible.
-	// MintDenialProjectAccessRequired never appears here: a request whose
-	// admission fails becomes the endpoint's 403 instead (see
-	// handleAuthScopes), so this field never distinguishes "no membership"
-	// from "not a member of this selector's system authority" for the
-	// admission step itself.
+	// Reason is a MintDenialReason code, present only when !Eligible,
+	// including "project_access_required" (DTO v3): that code appears here
+	// whenever at least one OTHER selector in the same request was
+	// admitted, since the caller already knows the project exists in that
+	// case. It appears ONLY as the request's uniform 403 -- never here --
+	// when EVERY evaluated selector was denied for project access; see
+	// handleAuthScopes.
 	Reason string `json:"reason,omitempty"`
 	Note   string `json:"note,omitempty"`
 	// IneligibleMembers is set only on an alias entry (AuthScopeAlias): the
@@ -1937,8 +1938,24 @@ func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *
 // additionally reports whether the authenticated user may currently select
 // it as a project-boundary restriction (CanMintSelector), computed fresh for
 // the principal and never widened by whatever credential made this request.
-// A project the caller cannot access, or that does not exist, returns the
-// same oracle-resistant 403 as token mint.
+//
+// Project-access aggregation (DTO v3, pat-c-lead 06:45Z): the whole response
+// collapses to the same oracle-resistant 403 as token mint ONLY when the
+// batch has at least one MintDenialProjectAccessRequired result AND no
+// result is admitted (OK=true) -- that combination is indistinguishable
+// from "project does not exist" (no membership and no exact-permission
+// system authority for anything relevant), so existence stays unobservable
+// in that all-denied case. A selector denied for an unrelated, structural
+// reason (boundary_not_allowed, unknown_selector -- e.g. a hub-only
+// selector requested under a project boundary, true for every principal)
+// neither triggers nor blocks the collapse; it is orthogonal to project
+// access and always shown per-entry either way. Otherwise the response
+// answers per-entry, and an entry denied for project access reports
+// eligible=false, reason="project_access_required" verbatim: a caller
+// admitted for at least one selector already knows the project exists, so
+// seeing which of their own selectors also lack authority is not a new
+// oracle. This keeps the listing consistent with mint: a selector the list
+// shows eligible must mint, and one it shows ineligible must not.
 func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -1972,16 +1989,34 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 			return
 		}
+		// Aggregate across the whole batch. A selector denied for a reason
+		// OTHER than project access (boundary_not_allowed, unknown_selector)
+		// is a static, principal-independent fact -- e.g. a hub-only
+		// selector requested under a project boundary always fails that
+		// way, for every principal -- and must not count toward, or
+		// against, "every selector lacks project access": it is simply
+		// irrelevant to that question. Only project_access_required
+		// results and OK=true results inform the aggregate.
+		var sawProjectAccessDenial, sawAdmitted bool
+		for _, res := range results {
+			if res.OK {
+				sawAdmitted = true
+			}
+			if res.Reason == MintDenialProjectAccessRequired {
+				sawProjectAccessDenial = true
+			}
+		}
+		if sawProjectAccessDenial && !sawAdmitted {
+			// Every selector that reached the project-admission gate was
+			// denied for lack of project access, and nothing else was
+			// admitted: identical to a nonexistent or wholly inaccessible
+			// project. Collapse to mint's uniform 403 rather than confirm
+			// "you have zero authority here" per entry.
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+			return
+		}
 		eligByScope = make(map[string]SelectorEligibility, len(results))
 		for _, res := range results {
-			if res.Reason == MintDenialProjectAccessRequired {
-				// The batch's ONE admission check failed: this is
-				// indistinguishable from "project does not exist" and must
-				// never surface per-entry (that would be a new oracle).
-				// Collapse the whole response to mint's uniform 403.
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
-				return
-			}
 			eligByScope[res.Selector] = res
 		}
 	}

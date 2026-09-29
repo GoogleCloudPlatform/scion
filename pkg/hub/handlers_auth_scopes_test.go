@@ -398,10 +398,14 @@ func TestAuthScopes_ProjectEligibilityForMember(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "uatp-agent")
 }
 
-// TestAuthScopes_ProjectEligibilityRequiresProjectAccess verifies that
-// ?projectId= for a project the caller cannot access returns the same
+// TestAuthScopes_ProjectEligibilityRequiresProjectAccess verifies DTO v3's
+// all-denied case (pat-c-lead 06:45Z): an outsider with no membership and
+// no exact-permission system authority for anything gets the same
 // oracle-resistant 403 as token mint, byte-identical to a nonexistent
-// project -- the endpoint must not become a project-existence oracle.
+// project -- the endpoint must not become a project-existence oracle. See
+// TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry
+// for the other half: once at least one selector is genuinely admitted,
+// the response answers per-entry instead.
 func TestAuthScopes_ProjectEligibilityRequiresProjectAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -431,6 +435,113 @@ func TestAuthScopes_ProjectEligibilityRequiresProjectAccess(t *testing.T) {
 	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
 	assert.Equal(t, "forbidden", resp.Error.Message)
 	assert.Nil(t, resp.Error.Details)
+}
+
+// TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry
+// verifies DTO v3's other case (pat-c-lead 06:45Z): a non-member holding
+// EXACT system authority for exactly one permission (agent.attach, via a
+// dedicated system-scope role binding, not membership and not a broader
+// role) is genuinely admitted for that one selector -- 200, eligible=true
+// -- while every other project-applicable selector they lack authority for
+// reports eligible=false, reason="project_access_required" verbatim. The
+// whole response must NOT collapse to the oracle-resistant 403 here: since
+// at least one selector was admitted, the caller already knows the project
+// exists, so showing the rest of their own authority is not a new oracle.
+func TestAuthScopes_ProjectEligibility_PartialSystemAuthorityAnswersPerEntry(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-partial-project")
+	ownerID := tid("authscopes-partial-owner")
+	userID := tid("authscopes-partial-user")
+	createRS1Project(t, s, projectID, ownerID)
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: userID + "@test.com", DisplayName: "User", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, s, userID)
+	grantPermissionViaRoleBinding(t, s, userID, "agent.attach", store.RoleScopeSystem, "")
+
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	byID := map[string]AuthScopeEntry{}
+	for _, entry := range resp.Scopes {
+		byID[entry.ID] = entry
+	}
+
+	attach, ok := byID["agent:attach"]
+	require.True(t, ok, "agent:attach missing from response")
+	require.NotNil(t, attach.Eligibility)
+	assert.True(t, attach.Eligibility.Eligible,
+		"exact system authority for agent.attach should admit and relationship-mint-eligible it: %+v", attach.Eligibility)
+	assert.Empty(t, attach.Eligibility.Reason)
+
+	// None of these permissions were granted, and this user has no project
+	// membership: every one must be denied specifically for project
+	// access, not any other reason (flat_role_insufficient would wrongly
+	// suggest admission succeeded).
+	for _, id := range []string{"agent:read", "agent:delete", "agent:port_access", "project:read"} {
+		entry, ok := byID[id]
+		require.True(t, ok, "scope %s missing from response", id)
+		require.NotNil(t, entry.Eligibility, "scope %s missing eligibility", id)
+		assert.False(t, entry.Eligibility.Eligible, "scope %s should be denied for project access", id)
+		assert.Equal(t, string(MintDenialProjectAccessRequired), entry.Eligibility.Reason, "scope %s", id)
+	}
+}
+
+// TestAuthScopes_ListingAgreesWithMint pins DTO v3's consistency
+// requirement end to end through both real HTTP endpoints, for the same
+// principal and selectors: a selector the listing reports eligible for a
+// project also mints, and one it reports ineligible for does not.
+func TestAuthScopes_ListingAgreesWithMint(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-agree-project")
+	ownerID := tid("authscopes-agree-owner")
+	memberID := tid("authscopes-agree-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	byID := map[string]AuthScopeEntry{}
+	for _, entry := range resp.Scopes {
+		byID[entry.ID] = entry
+	}
+
+	eligible, ok := byID["agent:attach"]
+	require.True(t, ok)
+	require.NotNil(t, eligible.Eligibility)
+	require.True(t, eligible.Eligibility.Eligible, "precondition: listing must say agent:attach is eligible")
+
+	ineligible, ok := byID["agent:delete"]
+	require.True(t, ok)
+	require.NotNil(t, ineligible.Eligibility)
+	require.False(t, ineligible.Eligibility.Eligible, "precondition: listing must say agent:delete is ineligible")
+
+	mintEligible := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "agree-eligible", "projectId": projectID, "scopes": []string{"agent:attach"},
+	})
+	assert.Equal(t, http.StatusCreated, mintEligible.Code,
+		"listing said agent:attach eligible, mint should succeed: %s", mintEligible.Body.String())
+
+	mintIneligible := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", map[string]any{
+		"name": "agree-ineligible", "projectId": projectID, "scopes": []string{"agent:delete"},
+	})
+	assert.Equal(t, http.StatusForbidden, mintIneligible.Code,
+		"listing said agent:delete ineligible, mint should fail: %s", mintIneligible.Body.String())
 }
 
 // TestAuthScopes_AliasEligibleOnlyWhenAllMembersEligible verifies the
