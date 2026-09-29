@@ -24,7 +24,16 @@ import (
 // Identity represents an authenticated identity (user or agent).
 type Identity interface {
 	ID() string
-	Type() string // "user", "agent", "dev"
+	// Type returns a human-readable identity kind, e.g. "user", "agent",
+	// "dev", "federated_user", "federated_agent", "federated_service", or
+	// "broker". It is informational only — new concrete types are free to
+	// return any string, including one already used by another type — and
+	// must never be trusted for authorization classification. Principal and
+	// credential kind, and ancestry attestation, are decided through
+	// explicit type assertions and opt-in markers (principalContextForIdentity,
+	// credentialContextForIdentity, AncestryIsHubAttested), which fail closed
+	// on any identity they don't explicitly recognize.
+	Type() string
 }
 
 // UserIdentity represents an authenticated user.
@@ -72,6 +81,12 @@ func (u *AuthenticatedUser) ID() string { return u.id }
 // Type returns the identity type ("user").
 func (u *AuthenticatedUser) Type() string { return "user" }
 
+// localAncestryProvenance reports that a local user is the root of its own
+// ancestry chain: it opts AuthenticatedUser into AncestryIsHubAttested.
+func (u *AuthenticatedUser) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
 // Email returns the user email.
 func (u *AuthenticatedUser) Email() string { return u.email }
 
@@ -118,6 +133,15 @@ func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
 // CredentialID returns the persisted ID of the UAT that authenticated this identity.
 func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
 
+// localAncestryProvenance reports that a UAT-backed identity is still a local
+// user: the wrapped UserIdentity is the root of its own ancestry chain. It is
+// declared directly (not inherited through the embedded UserIdentity field)
+// because Go only promotes methods declared by an embedded interface's own
+// method set, and localAncestryProvenance is not part of UserIdentity.
+func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
 // IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
 // Scoped credentials must not use role-only administrative bypasses.
 func IsScopedUserIdentity(identity Identity) bool {
@@ -148,27 +172,68 @@ func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
 	return !federated
 }
 
-// AncestryIsHubAttested returns true when the identity's ancestry chain
-// was signed by this hub and can be trusted for delegation decisions.
-// Federated agent ancestry is a remote claim about local principal IDs
-// and must not be used for delegation matching or ceiling evaluation.
+// ancestryProvenance names the recognized source of an identity's local
+// ancestry chain, for explain/audit and tests. It is unexported: the value
+// itself carries no authority, only the presence of a
+// localAncestryProvenanceIdentity implementation does.
+type ancestryProvenance string
+
+const (
+	// ancestryProvenanceLocalUser marks a local user (interactive or
+	// UAT-backed) as the root of its own ancestry chain.
+	ancestryProvenanceLocalUser ancestryProvenance = "local_user"
+	// ancestryProvenanceAgentJWT marks an ancestry chain carried in a hub-signed
+	// agent JWT.
+	ancestryProvenanceAgentJWT ancestryProvenance = "agent_jwt"
+	// ancestryProvenanceStoreAgent marks an ancestry chain read back from a
+	// hub-persisted agent record (not from the JWT that authenticated the
+	// request).
+	ancestryProvenanceStoreAgent ancestryProvenance = "store_agent"
+)
+
+// localAncestryProvenanceIdentity is implemented only by identity wrappers
+// whose ancestry chain has recognized local provenance: signed by this hub
+// (agent JWT) or persisted by this hub (store-derived wrappers), or is
+// itself the root of the chain (a local user). The method is unexported so
+// that a type outside package hub cannot implement it, and so that a type
+// inside package hub — including a test fake — must opt in explicitly
+// rather than acquiring attestation by accident (e.g. by merely returning
+// Type() == "agent").
+type localAncestryProvenanceIdentity interface {
+	localAncestryProvenance() ancestryProvenance
+}
+
+// AncestryIsHubAttested returns true when the identity's ancestry chain has
+// recognized local provenance: signed by this hub (agent JWT) or persisted
+// by this hub (store-derived wrappers), or is itself the root of the chain
+// (a local user). Federated agent ancestry is a remote claim about local
+// principal IDs and must not be used for delegation matching or ceiling
+// evaluation, so FederatedIdentity is rejected first, before any local
+// allow path.
 //
 // This is the single predicate for ancestry trust. There will be more
 // consumers of ancestry after F1.7, and each one must answer this
 // question the same way — not via scattered Type() comparisons.
 //
 // The parameter is typed as Identity (not interface{}) so that callers
-// cannot accidentally pass an unrelated type. Unknown identity types
-// return false (fail closed — unknown is not attested).
+// cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
+// identity types all return false (fail closed): an identity is attested
+// only if it implements localAncestryProvenanceIdentity, which — unlike
+// Type() — cannot be satisfied by an arbitrary or future type string.
 func AncestryIsHubAttested(identity Identity) bool {
 	if identity == nil {
 		return false
 	}
 	// All FederatedIdentity types (FederatedAgentIdentity,
 	// FederatedUserIdentity, FederatedServiceIdentity) are NOT
-	// hub-attested. Test the interface, not a single concrete type.
-	_, isFederated := identity.(FederatedIdentity)
-	return !isFederated
+	// hub-attested. Test the interface, not a single concrete type. This
+	// check comes first: federated ancestry must never reach the local
+	// allow path below, however it is packaged.
+	if _, isFederated := identity.(FederatedIdentity); isFederated {
+		return false
+	}
+	_, ok := identity.(localAncestryProvenanceIdentity)
+	return ok
 }
 
 // HasScope returns true if this identity has the given scope.
@@ -191,6 +256,12 @@ func (a *agentIdentityWrapper) ID() string { return a.Subject }
 
 // Type returns the identity type ("agent").
 func (a *agentIdentityWrapper) Type() string { return "agent" }
+
+// localAncestryProvenance reports that this ancestry chain came from a
+// hub-signed agent JWT.
+func (a *agentIdentityWrapper) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 
 // ProjectID returns the project ID.
 func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }

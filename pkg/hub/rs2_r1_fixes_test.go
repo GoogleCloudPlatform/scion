@@ -652,6 +652,13 @@ func (a *testAgentIdentity) Ancestry() []string            { return nil }
 func (a *testAgentIdentity) OriginUserID() string          { return "" }
 func (a *testAgentIdentity) TokenID() string               { return a.tokenID }
 
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
 // TestRS2_AgentJWTMineShared verifies that an agent JWT identity gets empty
 // Mine (since agents can't hold project-owner bindings) and full-scope Shared.
 func TestRS2_AgentJWTMineShared(t *testing.T) {

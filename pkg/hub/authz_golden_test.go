@@ -1164,6 +1164,13 @@ func (a *testProgenyAgentIdentity) OriginUserID() string {
 }
 func (a *testProgenyAgentIdentity) TokenID() string { return "" }
 
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testProgenyAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
 // =============================================================================
 // C1 Regression: Members-group owner cannot escalate to project-owner
 // =============================================================================

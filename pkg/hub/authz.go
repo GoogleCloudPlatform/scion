@@ -270,9 +270,6 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 // All reductions are traced to a named restriction. No undocumented bypasses.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
-	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential)
-	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
 		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential)
@@ -282,9 +279,54 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		principal.ID = derivedPrincipal.ID
 	}
 
+	// A supplied Credential is deliberately independent of Principal.Identity
+	// in one direction: callers may layer a narrower CredentialContext (for
+	// example a UAT-shaped Scopes caveat) onto any identity to exercise
+	// restriction logic that keys on Credential.Kind/Scopes alone — the
+	// kernel's credential_scope restriction (below) works this way today.
+	// That direction only ever adds a restriction, so it is allowed through
+	// unchanged. The rule enforced here is the other direction: when the
+	// identity's own classification is UAT — i.e. the identity is actually
+	// a *ScopedUserIdentity — a supplied credential kind must equal that
+	// classification, because both the step 1 gate below and the
+	// credential_scope restriction apply their UAT-specific caveats only
+	// when Credential.Kind == CredentialKindUAT.
+	derivedCredential := credentialContextForIdentity(principal.Identity)
 	credential := request.Credential
-	if credential.Kind == "" {
-		credential = credentialContextForIdentity(principal.Identity)
+	if credential.Kind != "" {
+		if derivedCredential.Kind == CredentialKindUAT && credential.Kind != derivedCredential.Kind {
+			return decorateDecision(Decision{Allowed: false, Reason: "credential kind does not match identity"}, principal, derivedCredential)
+		}
+	} else {
+		credential = derivedCredential
+	}
+
+	// ── Fail closed on unrecognized classification (ptone/scion#2123) ──
+	// A request with an omitted Kind still derives from the identity via
+	// the adapter above, so established callers that supply only an
+	// identity keep working. This rejects only what derivation itself
+	// could not classify: an empty or unrecognized derived principal or
+	// credential kind. That includes a nil identity with no supplied
+	// kind, and any identity of an unrecognized concrete type — a caller
+	// cannot dress an unrecognized identity in a recognized-looking
+	// supplied Credential.Kind, because an unrecognized identity always
+	// has an unrecognized (empty) derived *principal* kind, which denies
+	// here regardless of what credential was supplied. This runs after
+	// derivation and before principal-closure resolution, so an
+	// unrecognized identity never reaches candidate gathering.
+	if !isRecognizedPrincipalKind(principal.Kind) || !isRecognizedCredentialKind(credential.Kind) {
+		reason := "unrecognized principal kind"
+		if isRecognizedPrincipalKind(principal.Kind) {
+			reason = "unrecognized credential kind"
+		}
+		result := decorateDecision(Decision{Allowed: false, Reason: reason}, principal, credential)
+		// Emit the audit before returning so unrecognized-identity denies
+		// are diagnosable, matching the broker/federated-service denials
+		// below.
+		if a.decisionAuditEmitter != nil {
+			a.emitDecisionAudit(ctx, request, result)
+		}
+		return result
 	}
 
 	// Unsupported principal kinds — fail closed.
@@ -1361,6 +1403,40 @@ func isUserPrincipal(kind PrincipalKind) bool {
 	return kind == PrincipalKindUser || kind == PrincipalKindDev || kind == PrincipalKindFederatedUser
 }
 
+// isRecognizedPrincipalKind reports whether kind is one of the classifications
+// principalContextForIdentity can produce for a known identity type. An empty
+// kind (a nil identity, or an identity of an unrecognized concrete type) is
+// not recognized, and neither is any string a caller might supply that isn't
+// one of these constants.
+func isRecognizedPrincipalKind(kind PrincipalKind) bool {
+	switch kind {
+	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
+		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev:
+		return true
+	default:
+		return false
+	}
+}
+
+// isRecognizedCredentialKind reports whether kind is one of the
+// classifications credentialContextForIdentity can produce for a known
+// identity type. An empty kind (a nil identity, or an identity of an
+// unrecognized concrete type) is not recognized.
+func isRecognizedCredentialKind(kind CredentialKind) bool {
+	switch kind {
+	case CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
+		CredentialKindFederation, CredentialKindBroker, CredentialKindDev:
+		return true
+	default:
+		return false
+	}
+}
+
+// principalContextForIdentity classifies identity into its PrincipalKind.
+// Every known concrete identity type has an explicit arm. There is no
+// default arm: an identity of an unrecognized type (or a nil identity)
+// leaves Kind empty, which Decide's fail-closed classification check denies
+// rather than letting it fall through to any implicit default.
 func principalContextForIdentity(identity Identity) PrincipalContext {
 	if identity == nil {
 		return PrincipalContext{}
@@ -1385,6 +1461,15 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 	return principal
 }
 
+// credentialContextForIdentity classifies identity into its CredentialKind.
+// The *ScopedUserIdentity check stays first: any UAT-backed identity is
+// CredentialKindUAT regardless of what its underlying UserIdentity reports
+// for Type(). Every other known concrete identity type has its own explicit
+// arm, including "user" for a plain interactive session. The default arm
+// covers only an unrecognized concrete type: it returns an empty Kind rather
+// than CredentialKindInteractive, so Decide's fail-closed classification
+// check denies it instead of treating an unknown identity as an ordinary
+// interactive session.
 func credentialContextForIdentity(identity Identity) CredentialContext {
 	if identity == nil {
 		return CredentialContext{}
@@ -1393,6 +1478,8 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
 	}
 	switch identity.Type() {
+	case "user":
+		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
 	case "agent":
 		credential := CredentialContext{Kind: CredentialKindAgentJWT}
 		if agent, ok := identity.(*agentIdentityWrapper); ok && agent.AgentTokenClaims != nil {
@@ -1406,7 +1493,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	case "dev":
 		return CredentialContext{Kind: CredentialKindDev}
 	default:
-		return CredentialContext{Kind: CredentialKindInteractive, Type: identity.Type()}
+		return CredentialContext{}
 	}
 }
 
