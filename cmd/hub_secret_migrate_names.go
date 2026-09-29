@@ -55,6 +55,7 @@ var (
 	migrateNamesDeleteLegacy bool
 	migrateNamesHubID        string
 	migrateNamesTimeout      time.Duration
+	migrateNamesConfigPath   string
 )
 
 // hubSecretMigrateNamesCmd renames GCP Secret Manager secrets from the legacy
@@ -78,23 +79,40 @@ secrets with a conditioned role binding:
 
 For each candidate secret identity, this command independently checks three
 things and performs whichever apply, so it is safe to run repeatedly at any
-point in the migration and always converges:
+point in the migration and always converges. A plan line is printed for each
+action taken (or, under --dry-run, that would be taken):
   1. If the legacy name has a value the prefixed name doesn't yet, copy the
-     latest version's value (and GCP SM labels) to the prefixed name.
+     latest version's value (and GCP SM labels) to the prefixed name
+     (MIGRATED). If the prefixed name already exists but holds a different
+     value than the one the secret's ref designates (a mixed-version rolling
+     deploy, or a rollback-then-roll-forward window), overwrite it with the
+     ref-designated value instead of leaving it stale (RESYNCED).
   2. If the secret's Hub DB record exists and its SecretRef isn't the
      prefixed name yet (whether because this run just copied it, an earlier
      run partially failed, or the hub-startup signing-key copy-forward
      created the copy without ever being asked to touch the DB), repair the
-     ref.
+     ref (REPAIRED REF). A record whose stored ref designates a value that's
+     gone is reported as ORPHAN and skipped, not treated as a failure — there
+     is nothing left for it to copy.
   3. If --delete-legacy is set and the legacy name still exists, delete it —
      but only once step 2 has confirmed the DB ref no longer depends on it,
-     so a secret can never become unreadable as a result.
+     so a secret can never become unreadable as a result (DELETED LEGACY).
+
+Hub ID: resolved the same way the running hub server resolves it at startup
+(--hub-id, then this command's --config file's server.hub.hub_id, then the
+server's own environment/hostname fallback) — pass --config if the server
+runs with a non-default configuration file, or --hub-id explicitly, so this
+command's hub ID always matches the server's.
 
 Deploy ordering: grant the new hub-prefixed IAM condition to this hub's
 service account BEFORE deploying a binary built from this or a later commit —
 every write immediately targets the prefixed name, so writes fail with a
 permission error otherwise. Keep the legacy grant in place until
---delete-legacy has been run and verified; only then remove it.
+--delete-legacy has been run and verified; only then remove it. Run a final
+"--dry-run --delete-legacy" pass to confirm zero pending items BEFORE
+removing the legacy grant, not after — once it's gone, this command can no
+longer read legacy names at all, so a "zero pending" dry-run at that point
+only proves IAM is narrowed, not that migration finished.
 
 It is idempotent: re-running is always safe, and any candidate already fully
 migrated (copied, ref repaired, legacy gone or never existed) is skipped.
@@ -121,6 +139,7 @@ func init() {
 	hubSecretMigrateNamesCmd.Flags().BoolVar(&migrateNamesDeleteLegacy, "delete-legacy", false, "Delete each legacy secret after verifying its hub-prefixed copy (run a plain migrate-names first)")
 	hubSecretMigrateNamesCmd.Flags().StringVar(&migrateNamesHubID, "hub-id", "", "Hub instance ID for secret namespacing (defaults to the resolved server hub ID)")
 	hubSecretMigrateNamesCmd.Flags().DurationVar(&migrateNamesTimeout, "timeout", 5*time.Minute, "Maximum time to run before aborting (increase for a large number of secrets)")
+	hubSecretMigrateNamesCmd.Flags().StringVarP(&migrateNamesConfigPath, "config", "c", "", "Path to server configuration file (must match the one the running hub server uses, so hub ID resolution agrees — ptone/scion#2152 round-4 review Consider 3)")
 
 	_ = hubSecretMigrateNamesCmd.MarkFlagRequired("gcp-project")
 }
@@ -136,7 +155,7 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), migrateNamesTimeout)
 	defer cancel()
 
-	cfg, err := config.LoadGlobalConfig("")
+	cfg, err := config.LoadGlobalConfig(migrateNamesConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -537,11 +556,15 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 	}
 
 	// Delete the legacy name, only once nothing (that we can detect) still
-	// depends on it. DeleteLegacySecretName independently re-verifies the DB
-	// ref and the GCP SM value match before deleting, so this is defense in
-	// depth, not the only check. Note this runs even after a resync above:
-	// once resynced, the prefixed and legacy values are identical, so the
-	// value-equality check below passes.
+	// depends on it. PlanLegacyDeletion/DeleteLegacySecretName independently
+	// re-verify this via canDeleteLegacyName (defense in depth, not the only
+	// check): once a DB ref designates the prefixed name, deletion is safe
+	// once the prefixed copy is confirmed accessible -- value equality with
+	// the legacy copy is not required and is not checked in that case (a
+	// rotation performed after migration legitimately leaves the legacy
+	// value stale; see ptone/scion#2152 round-3 review finding 2). Value
+	// equality is used only for the no-DB-record path, where there is no ref
+	// to establish authority from.
 	if deleteLegacy {
 		canDelete, err := backend.PlanLegacyDeletion(ctx, c.name, c.scope, c.scopeID)
 		if err != nil {

@@ -432,6 +432,41 @@ func TestRunMigrateNames_DryRunPlansRefRepairAndDelete(t *testing.T) {
 	assert.Equal(t, legacyRef, rec2.SecretRef, "dry-run must not repair the ref")
 }
 
+// TestHubSecretMigrateNamesCmd_HasConfigFlag reproduces round-4 review
+// Consider 3: migrate-names must accept --config (mirroring `server start`),
+// so an operator whose hub runs with a non-default settings file can make
+// this command resolve the identical hub ID the server does.
+func TestHubSecretMigrateNamesCmd_HasConfigFlag(t *testing.T) {
+	f := hubSecretMigrateNamesCmd.Flags().Lookup("config")
+	require.NotNil(t, f, "migrate-names must have a --config flag")
+	assert.Equal(t, "c", f.Shorthand)
+	assert.Equal(t, "", f.DefValue)
+}
+
+// TestStripDSNQueryParam reproduces round-4 review Consider 4: a table test
+// for the previously-untested stripDSNQueryParam.
+func TestStripDSNQueryParam(t *testing.T) {
+	cases := []struct {
+		name string
+		dsn  string
+		key  string
+		want string
+	}{
+		{"no query at all", "file:/tmp/x.db", "mode", "file:/tmp/x.db"},
+		{"key alone", "file:/tmp/x.db?mode", "mode", "file:/tmp/x.db"},
+		{"key with value among others", "file:/tmp/x.db?mode=rwc&cache=shared", "mode", "file:/tmp/x.db?cache=shared"},
+		{"key with value, only param", "file:/tmp/x.db?mode=rwc", "mode", "file:/tmp/x.db"},
+		{"similarly-prefixed key is kept", "file:/tmp/x.db?modex=1", "mode", "file:/tmp/x.db?modex=1"},
+		{"key not present", "file:/tmp/x.db?cache=shared", "mode", "file:/tmp/x.db?cache=shared"},
+		{"key appears twice", "file:/tmp/x.db?mode=ro&cache=shared&mode=rwc", "mode", "file:/tmp/x.db?cache=shared"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, stripDSNQueryParam(c.dsn, c.key))
+		})
+	}
+}
+
 func TestOpenMigrateNamesStore_UnsupportedDriver(t *testing.T) {
 	cfg := &config.GlobalConfig{Database: config.DatabaseConfig{Driver: "mysql", URL: "unused"}}
 	_, err := openMigrateNamesStore(context.Background(), cfg, false)
@@ -603,7 +638,20 @@ func TestRunMigrateNames_FailsWhenLegacyDeniedForDependentRecord(t *testing.T) {
 // plan RESYNC (what the real run would actually do), not a plain
 // DELETE LEGACY that a real run would in fact refuse due to the value
 // mismatch DeleteLegacySecretName checks for.
-func TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch(t *testing.T) {
+// TestRunMigrateNames_DryRunPlansResyncThenDelete pins the plan for a
+// candidate that needs both a resync (the prefixed copy is stale relative to
+// the ref-designated value) and a delete-legacy in the same pass. Since
+// round-3, the correct plan is a combined "WOULD RESYNC AND DELETE LEGACY"
+// line, not a bare RESYNC with no delete: a real run performs the resync
+// first (making the ref-designated value and the prefixed copy match) and
+// then deletes the now-safely-superseded legacy copy in the same invocation
+// — see planMigrateNamesCandidate's actionPlanned handling. An earlier
+// version of this test only asserted the *absence* of a differently-worded
+// string ("WOULD DELETE LEGACY  API_KEY", which the real output never
+// contains verbatim either way since it's always combined with "AND"), which
+// never actually distinguished a correct plan from a wrong one (round-4
+// review nit 10).
+func TestRunMigrateNames_DryRunPlansResyncThenDelete(t *testing.T) {
 	ctx := context.Background()
 	db := newTestStore(t)
 	mock := newMigrateNamesMockSMClient()
@@ -618,8 +666,7 @@ func TestRunMigrateNames_DryRunPlansResyncNotDeleteOnMismatch(t *testing.T) {
 
 	var out bytes.Buffer
 	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true /* dryRun */, true /* deleteLegacy */, &out))
-	assert.Contains(t, out.String(), "RESYNC")
-	assert.NotContains(t, out.String(), "WOULD DELETE LEGACY  API_KEY", "a plain (non-resync) delete-legacy plan would be wrong here: the real run would refuse due to the value mismatch until it resyncs first")
+	assert.Contains(t, out.String(), "WOULD RESYNC AND DELETE LEGACY  API_KEY", "a real run resyncs the stale prefixed copy first, then safely deletes the now-superseded legacy copy in the same invocation")
 
 	// Nothing must have been written.
 	mock.mu.Lock()
@@ -896,4 +943,99 @@ func TestRunMigrateNames_DeleteLegacyDryRunMatchesRealRunAfterRotation(t *testin
 	require.NoError(t, runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true /* deleteLegacy */, &out))
 	assert.Contains(t, out.String(), "DELETED LEGACY")
 	assert.False(t, mock.has(fmt.Sprintf("projects/test-project/secrets/%s", legacyName)))
+}
+
+// =============================================================================
+// Round 4 review regression tests (ptone/scion#2152 PR 2171, sp-rev-4.md)
+// =============================================================================
+
+// sprev4DenyNonPrefixed denies AccessSecretVersion on every name outside
+// this hub's prefix: a hub whose SA holds only the new-prefix conditioned
+// grant (fresh least-privilege hub, or after the legacy grant was removed
+// per ptone/scion#2180).
+type sprev4DenyNonPrefixed struct {
+	*migrateNamesMockSMClient
+	prefix string
+}
+
+func (d *sprev4DenyNonPrefixed) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if !strings.Contains(req.Name, "/secrets/"+d.prefix) {
+		return nil, status.Error(codes.PermissionDenied, "denied by IAM condition")
+	}
+	return d.migrateNamesMockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// TestSPREV4_DeleteLegacyDryRunRealRunParity_NoRecordLegacyDenied reproduces
+// round-4 review finding 2: for the known hub-scope keys with no DB record,
+// --dry-run --delete-legacy used to skip the delete check when the legacy
+// name was permission-denied, but the real --delete-legacy run had no such
+// guard and failed on the same signal. Both now route through
+// canDeleteLegacyName's shared legacyReadErrIsFatal classification and must
+// agree.
+func TestSPREV4_DeleteLegacyDryRunRealRunParity_NoRecordLegacyDenied(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+	deny := &sprev4DenyNonPrefixed{mock, secret.SecretNamePrefixForHubID(migrateNamesTestHubID)}
+	backend := migrateNamesTestBackend(t, db, deny, migrateNamesTestHubID)
+
+	var dry bytes.Buffer
+	dryErr := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true, true, &dry)
+	t.Logf("dry-run (err=%v):\n%s", dryErr, dry.String())
+	assert.NoError(t, dryErr)
+	assert.Contains(t, dry.String(), "0 failed")
+
+	var real bytes.Buffer
+	realErr := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true, &real)
+	t.Logf("real run (err=%v):\n%s", realErr, real.String())
+	assert.NoError(t, realErr)
+	assert.Contains(t, real.String(), "0 failed")
+
+	assert.Equal(t, dryErr == nil, realErr == nil,
+		"BUG: --dry-run --delete-legacy and --delete-legacy disagree on success for the same state")
+}
+
+// sprev4FailedPreconditionOnLegacy simulates a legacy secret whose container
+// exists but whose latest version has been disabled/destroyed: GCP SM
+// returns FailedPrecondition, not NotFound, for that state.
+type sprev4FailedPreconditionOnLegacy struct {
+	*migrateNamesMockSMClient
+	legacyFullName string
+}
+
+func (d *sprev4FailedPreconditionOnLegacy) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if strings.HasPrefix(req.Name, d.legacyFullName+"/versions/") {
+		return nil, status.Error(codes.FailedPrecondition, "version disabled")
+	}
+	return d.migrateNamesMockSMClient.AccessSecretVersion(ctx, req)
+}
+
+// TestSPREV4_DeleteLegacyDryRunRealRunParity_NoRecordLegacyFailedPrecondition
+// is the FailedPrecondition variant of the finding-2 repro above: a legacy
+// secret whose latest version is disabled must also get the same outcome in
+// both --dry-run and the real run.
+func TestSPREV4_DeleteLegacyDryRunRealRunParity_NoRecordLegacyFailedPrecondition(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := newMigrateNamesMockSMClient()
+
+	legacyName := legacyNameForTest(hub.SecretKeyUserSigningKey, "hub", migrateNamesTestHubID)
+	legacyFull := fmt.Sprintf("projects/test-project/secrets/%s", legacyName)
+	mock.seed(t, "test-project", legacyName, "key-material")
+
+	fp := &sprev4FailedPreconditionOnLegacy{mock, legacyFull}
+	backend := migrateNamesTestBackend(t, db, fp, migrateNamesTestHubID)
+
+	var dry bytes.Buffer
+	dryErr := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, true, true, &dry)
+	t.Logf("dry-run (err=%v):\n%s", dryErr, dry.String())
+	assert.NoError(t, dryErr)
+
+	var real bytes.Buffer
+	realErr := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true, &real)
+	t.Logf("real run (err=%v):\n%s", realErr, real.String())
+	assert.NoError(t, realErr)
+
+	assert.Equal(t, dryErr == nil, realErr == nil,
+		"BUG: --dry-run --delete-legacy and --delete-legacy disagree on success for a FailedPrecondition legacy secret")
 }
