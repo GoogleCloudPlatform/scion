@@ -61,3 +61,39 @@ broker logic without hardcoding a single runtime's assumptions.
   `resume -a` before the PTY dial, and a runtime's declined-logs response
   passes through the hub with a fixed, generic message rather than
   whatever text the broker supplied.
+
+## Attach-refusal surfacing
+
+- `attachSupportedByBroker` no longer defaults to "supported" when the
+  runtime broker's point-GET fails. It falls back to matching the same
+  broker by ID in the `RuntimeBrokers().List` response, and only refuses
+  before dialing (fixed message, no raw server text) when neither read can
+  produce the record. A record read by either path keeps the existing
+  profile-then-broker-wide ruling unchanged. The LIST fallback's pagination
+  has a page cap and stops on a repeated cursor, so a misbehaving response
+  can't turn one attach call into an unbounded loop; the point-GET and LIST
+  errors discarded from the user-facing message are debug-logged for
+  diagnosability.
+- Added `ClosePTYAttachUnsupported` (4501) / `attach_unsupported`, a close
+  code distinct from the retriable 4503/session_not_ready it used to share
+  with an actual readiness failure. Mirrored into the close-code parity
+  fixture and the TypeScript client. The control-channel pre-check that
+  refuses a stream before starting the tmux exec now emits
+  4501/attach_unsupported; the direct-connect pre-upgrade path keeps its
+  existing 501/runtime_attach_unsupported HTTP response, since no
+  WebSocket has been upgraded yet at that point. A 4501 close arriving
+  after the WebSocket is already upgraded now maps to an explicit
+  "attach is not supported for this agent's runtime" error with a
+  non-zero exit, instead of a raw close-code error string.
+- The hub's "PTY session started"/"ended" log lines now carry
+  `routed_broker_id` (the broker the stream is actually routed to via
+  OpenStream) as its own field, distinct from the process-wide `broker_id`
+  attr a combo-mode server attaches to every log line (which names the
+  locally co-located broker instead).
+- `PTYClient` reads stdin through an injected field, captured once at
+  construction, instead of the shared `os.Stdin` package variable — a
+  leaked reader goroutine touching that global under test raced a later
+  reassignment. Separately: a non-TTY stdin already at EOF is treated by
+  the CLI's own read loop as a clean detach, so it sends its own
+  normal-closure frame and exits 0 before any broker rejection can
+  arrive — a client-side close, not a broker defect.
