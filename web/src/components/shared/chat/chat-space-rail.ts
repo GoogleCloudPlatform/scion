@@ -98,6 +98,60 @@ function safeJsonParse(value: unknown): unknown {
   }
 }
 
+/**
+ * localStorage key for persisted thread-group collapse state (#1698 follow-up).
+ *
+ * Group IDs (`generateGroupId`) mix `Math.random()` with a timestamp, so they
+ * are already unique across every space, not just within one — a flat set of
+ * IDs is enough and there is no need to nest the key under a project/space
+ * id.
+ */
+const GROUP_COLLAPSE_STORAGE_KEY = 'scion-chat-group-collapse';
+
+/**
+ * Hard cap on remembered collapsed-group entries. Stale entries (for groups
+ * that were since deleted) are pruned opportunistically once the rail knows
+ * the current set of groups, but this cap is the backstop in case pruning
+ * never runs for a given session.
+ */
+const GROUP_COLLAPSE_STORAGE_LIMIT = 500;
+
+/**
+ * Read the persisted set of collapsed thread-group IDs. Missing storage,
+ * unavailable storage (private browsing), a JSON parse error, or an
+ * unexpected shape all fall back to an empty set silently — collapse state
+ * is a nicety, not something that should ever block the rail from loading.
+ */
+function loadCollapsedGroupIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(GROUP_COLLAPSE_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Persist the given set of collapsed group IDs, bounded to the most
+ * recently touched entries. Failures (storage unavailable or full) are
+ * swallowed for the same reason the read side falls back silently.
+ */
+function saveCollapsedGroupIds(ids: Set<string>): void {
+  try {
+    let list = [...ids];
+    if (list.length > GROUP_COLLAPSE_STORAGE_LIMIT) {
+      list = list.slice(list.length - GROUP_COLLAPSE_STORAGE_LIMIT);
+    }
+    localStorage.setItem(GROUP_COLLAPSE_STORAGE_KEY, JSON.stringify(list));
+  } catch {
+    // Storage unavailable (private browsing) or full — collapse state just
+    // won't survive a reload this time.
+  }
+}
+
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
@@ -708,6 +762,9 @@ export class ScionChatSpaceRail extends LitElement {
     // Restore persisted filter/sort from localStorage
     const savedFilter = localStorage.getItem('scion-chat-space-filter');
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    // Restore collapsed thread-groups before the first render so there is no
+    // expand-then-collapse flash.
+    this.collapsedGroups = loadCollapsedGroupIds();
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
@@ -787,6 +844,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
     try {
       await Promise.all([this.loadSpaces(), this.loadPrefs()]);
+      this.pruneCollapsedGroups();
     } finally {
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
@@ -1224,6 +1282,28 @@ export class ScionChatSpaceRail extends LitElement {
       next.add(groupId);
     }
     this.collapsedGroups = next;
+    saveCollapsedGroupIds(next);
+  }
+
+  /**
+   * Drop stored collapse entries for groups that no longer exist (deleted,
+   * or belonging to a space the user lost access to). Only runs once spaces
+   * have actually loaded — on a failed or empty load `this.spaces` would be
+   * `[]` and every entry would look stale, wiping collapse state for a
+   * merely transient failure rather than a real deletion.
+   */
+  private pruneCollapsedGroups(): void {
+    if (this.spaces.length === 0 || this.collapsedGroups.size === 0) return;
+    const validIds = new Set<string>();
+    for (const space of this.spaces) {
+      for (const group of this.getGroups(space.projectId)) {
+        validIds.add(group.id);
+      }
+    }
+    const next = new Set([...this.collapsedGroups].filter((id) => validIds.has(id)));
+    if (next.size === this.collapsedGroups.size) return;
+    this.collapsedGroups = next;
+    saveCollapsedGroupIds(next);
   }
 
   /** Generate a simple unique id for a new group. */
