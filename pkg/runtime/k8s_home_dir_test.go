@@ -20,176 +20,157 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// TestBuildPod_HomeDir_RootUser verifies that every k8s pod-building site that
-// derives the in-container home directory resolves the root user to /root,
-// matching util.GetHomeDir, instead of the previously hardcoded /home/root.
-func TestBuildPod_HomeDir_RootUser(t *testing.T) {
-	rt, _, _ := newTestK8sRuntime()
-
-	config := RunConfig{
-		Name:         "test-agent",
-		Image:        "test:latest",
-		UnixUsername: "root",
-		ResolvedSecrets: []api.ResolvedSecret{
-			{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user"},
-			{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
-			{Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/creds.json", Value: "cred-data", Source: "user"},
-		},
-		ResolvedAuth: &api.ResolvedAuth{
-			Method: "api-key",
-			Files: []api.FileMapping{
-				{SourcePath: "/host/path/to/cred.json", ContainerPath: "~/.config/gcloud/adc.json"},
-			},
-		},
+// TestBuildPod_HomeDir verifies that every k8s pod-building site that derives
+// the in-container home directory resolves it via util.GetHomeDir — /root for
+// the root user, /home/<user> otherwise — instead of the previously
+// hardcoded /home/%s. It runs the same assertions for a root and a non-root
+// user against both secret-mounting strategies: the fallback K8s-Secret path
+// and the GKE CSI path (secrets-store, used when a secret carries a Ref).
+func TestBuildPod_HomeDir(t *testing.T) {
+	cases := []struct {
+		name         string
+		unixUsername string
+		home         string
+	}{
+		{name: "root", unixUsername: "root", home: "/root"},
+		{name: "alice", unixUsername: "alice", home: "/home/alice"},
 	}
 
-	pod, err := rt.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("fallback_secrets", func(t *testing.T) {
+				rt, _, _ := newTestK8sRuntime()
 
-	// HOME env var should be /root, not /home/root.
-	foundHome := false
-	for _, env := range pod.Spec.Containers[0].Env {
-		if env.Name == "HOME" {
-			foundHome = true
-			if env.Value != "/root" {
-				t.Errorf("HOME = %q, want /root", env.Value)
-			}
-		}
-	}
-	if !foundHome {
-		t.Fatal("HOME not found in pod env")
-	}
+				config := RunConfig{
+					Name:         "test-agent",
+					Image:        "test:latest",
+					UnixUsername: tc.unixUsername,
+					ResolvedSecrets: []api.ResolvedSecret{
+						{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user"},
+						{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
+						{Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/creds.json", Value: "cred-data", Source: "user"},
+					},
+					ResolvedAuth: &api.ResolvedAuth{
+						Method: "api-key",
+						Files: []api.FileMapping{
+							{SourcePath: "/host/path/to/cred.json", ContainerPath: "~/.config/gcloud/adc.json"},
+						},
+					},
+				}
 
-	// Tilde-expanded file secret mount should land under /root.
-	foundSSH := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "agent-secrets" && vm.SubPath == "SSH_KEY" {
-			foundSSH = true
-			if vm.MountPath != "/root/.ssh/id_rsa" {
-				t.Errorf("SSH_KEY MountPath = %q, want /root/.ssh/id_rsa", vm.MountPath)
-			}
-		}
-	}
-	if !foundSSH {
-		t.Error("expected volume mount for SSH_KEY")
-	}
+				pod, err := rt.buildPod("default", config)
+				if err != nil {
+					t.Fatalf("buildPod failed: %v", err)
+				}
 
-	// Variable secrets are staged under <home>/.scion/secrets.json.
-	foundSecretsJSON := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "agent-secrets" && vm.SubPath == "secrets.json" {
-			foundSecretsJSON = true
-			if vm.MountPath != "/root/.scion/secrets.json" {
-				t.Errorf("secrets.json MountPath = %q, want /root/.scion/secrets.json", vm.MountPath)
-			}
-		}
-	}
-	if !foundSecretsJSON {
-		t.Error("expected volume mount for secrets.json")
-	}
+				// HOME env var should match the expected home for this user.
+				foundHome := false
+				for _, env := range pod.Spec.Containers[0].Env {
+					if env.Name == "HOME" {
+						foundHome = true
+						if env.Value != tc.home {
+							t.Errorf("HOME = %q, want %q", env.Value, tc.home)
+						}
+					}
+				}
+				if !foundHome {
+					t.Fatal("HOME not found in pod env")
+				}
 
-	// ResolvedAuth file mount should also land under /root.
-	foundAuthMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "auth-files" && vm.MountPath == "/root/.config/gcloud/adc.json" {
-			foundAuthMount = true
-		}
-	}
-	if !foundAuthMount {
-		t.Error("expected auth-files volume mount at /root/.config/gcloud/adc.json")
-	}
+				// Tilde-expanded file secret mount should land under home.
+				wantSSH := tc.home + "/.ssh/id_rsa"
+				foundSSH := false
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "agent-secrets" && vm.SubPath == "SSH_KEY" {
+						foundSSH = true
+						if vm.MountPath != wantSSH {
+							t.Errorf("SSH_KEY MountPath = %q, want %q", vm.MountPath, wantSSH)
+						}
+					}
+				}
+				if !foundSSH {
+					t.Error("expected volume mount for SSH_KEY")
+				}
 
-	// GCP telemetry credential env var should point under /root.
-	foundTelemetry := false
-	for _, env := range pod.Spec.Containers[0].Env {
-		if env.Name == telemetryGCPCredentialsEnvVar {
-			foundTelemetry = true
-			if env.Value != "/root/.config/gcloud/creds.json" {
-				t.Errorf("%s = %q, want /root/.config/gcloud/creds.json", telemetryGCPCredentialsEnvVar, env.Value)
-			}
-		}
-	}
-	if !foundTelemetry {
-		t.Error("expected telemetry credential env var")
-	}
-}
+				// Variable secrets are staged under <home>/.scion/secrets.json.
+				wantSecretsJSON := tc.home + "/.scion/secrets.json"
+				foundSecretsJSON := false
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "agent-secrets" && vm.SubPath == "secrets.json" {
+						foundSecretsJSON = true
+						if vm.MountPath != wantSecretsJSON {
+							t.Errorf("secrets.json MountPath = %q, want %q", vm.MountPath, wantSecretsJSON)
+						}
+					}
+				}
+				if !foundSecretsJSON {
+					t.Error("expected volume mount for secrets.json")
+				}
 
-// TestBuildPod_HomeDir_NonRootUser is the non-root counterpart to
-// TestBuildPod_HomeDir_RootUser: it verifies the same sites resolve to
-// /home/<user> for an arbitrary non-root username (not just the common
-// "scion" fixture used elsewhere), matching util.GetHomeDir.
-func TestBuildPod_HomeDir_NonRootUser(t *testing.T) {
-	rt, _, _ := newTestK8sRuntime()
+				// ResolvedAuth file mount should also land under home.
+				wantAuthMount := tc.home + "/.config/gcloud/adc.json"
+				foundAuthMount := false
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "auth-files" && vm.MountPath == wantAuthMount {
+						foundAuthMount = true
+					}
+				}
+				if !foundAuthMount {
+					t.Errorf("expected auth-files volume mount at %q", wantAuthMount)
+				}
 
-	config := RunConfig{
-		Name:         "test-agent",
-		Image:        "test:latest",
-		UnixUsername: "alice",
-		ResolvedSecrets: []api.ResolvedSecret{
-			{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user"},
-			{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
-		},
-		ResolvedAuth: &api.ResolvedAuth{
-			Method: "api-key",
-			Files: []api.FileMapping{
-				{SourcePath: "/host/path/to/cred.json", ContainerPath: "~/.config/gcloud/adc.json"},
-			},
-		},
-	}
+				// GCP telemetry credential env var should point under home.
+				wantTelemetry := tc.home + "/.config/gcloud/creds.json"
+				foundTelemetry := false
+				for _, env := range pod.Spec.Containers[0].Env {
+					if env.Name == telemetryGCPCredentialsEnvVar {
+						foundTelemetry = true
+						if env.Value != wantTelemetry {
+							t.Errorf("%s = %q, want %q", telemetryGCPCredentialsEnvVar, env.Value, wantTelemetry)
+						}
+					}
+				}
+				if !foundTelemetry {
+					t.Error("expected telemetry credential env var")
+				}
+			})
 
-	pod, err := rt.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
+			// GKE CSI path: a resolved secret with a Ref routes file-type
+			// secrets through the secrets-store CSI volume instead of the
+			// agent-secrets K8s Secret. This covers the buildPod site at the
+			// GKE CSI mount (k8s_runtime.go's useGKEPath "file" case).
+			t.Run("gke_csi_file_secret", func(t *testing.T) {
+				rt, _, _ := newTestK8sRuntime()
+				rt.GKEMode = true
 
-	foundHome := false
-	for _, env := range pod.Spec.Containers[0].Env {
-		if env.Name == "HOME" {
-			foundHome = true
-			if env.Value != "/home/alice" {
-				t.Errorf("HOME = %q, want /home/alice", env.Value)
-			}
-		}
-	}
-	if !foundHome {
-		t.Fatal("HOME not found in pod env")
-	}
+				config := RunConfig{
+					Name:         "test-agent",
+					Image:        "test:latest",
+					UnixUsername: tc.unixUsername,
+					ResolvedSecrets: []api.ResolvedSecret{
+						{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user", Ref: "projects/p/secrets/s"},
+					},
+				}
 
-	foundSSH := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "agent-secrets" && vm.SubPath == "SSH_KEY" {
-			foundSSH = true
-			if vm.MountPath != "/home/alice/.ssh/id_rsa" {
-				t.Errorf("SSH_KEY MountPath = %q, want /home/alice/.ssh/id_rsa", vm.MountPath)
-			}
-		}
-	}
-	if !foundSSH {
-		t.Error("expected volume mount for SSH_KEY")
-	}
+				pod, err := rt.buildPod("default", config)
+				if err != nil {
+					t.Fatalf("buildPod failed: %v", err)
+				}
 
-	foundSecretsJSON := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "agent-secrets" && vm.SubPath == "secrets.json" {
-			foundSecretsJSON = true
-			if vm.MountPath != "/home/alice/.scion/secrets.json" {
-				t.Errorf("secrets.json MountPath = %q, want /home/alice/.scion/secrets.json", vm.MountPath)
-			}
-		}
-	}
-	if !foundSecretsJSON {
-		t.Error("expected volume mount for secrets.json")
-	}
-
-	foundAuthMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "auth-files" && vm.MountPath == "/home/alice/.config/gcloud/adc.json" {
-			foundAuthMount = true
-		}
-	}
-	if !foundAuthMount {
-		t.Error("expected auth-files volume mount at /home/alice/.config/gcloud/adc.json")
+				wantPath := tc.home + "/.ssh/id_rsa"
+				found := false
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "secrets-store" && vm.MountPath != "/mnt/secrets-store" {
+						found = true
+						if vm.MountPath != wantPath {
+							t.Errorf("SSH_KEY CSI MountPath = %q, want %q", vm.MountPath, wantPath)
+						}
+					}
+				}
+				if !found {
+					t.Error("expected CSI subPath mount for tilde-expanded file secret")
+				}
+			})
+		})
 	}
 }
