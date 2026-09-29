@@ -549,19 +549,19 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 // logUATRejection logs a single "credential rejected" line for a UAT that
 // failed ValidateToken (plan §3.1(3)). It classifies the reason from the
-// returned error's *UATRejection, when present, falling back to the generic
-// "invalid" reason for any other error shape.
+// returned error's *UATRejection, when present. Any other error shape means
+// ValidateToken itself could not complete — a store or database failure, not
+// a client-presented bad credential — so it is logged distinctly (reason
+// "lookup_error", at Error level), never folded into the client-facing
+// "invalid" reason: an operator must be able to tell an outage from a wave
+// of bad tokens.
 func logUATRejection(log *slog.Logger, ctx context.Context, err error) {
-	reason := "invalid"
-	found := false
-	tokenID := ""
 	var rej *UATRejection
 	if errors.As(err, &rej) {
-		reason = rej.Reason
-		found = rej.Found
-		tokenID = rej.TokenID
+		logCredentialRejected(log, ctx, rej.Reason, rej.Found, rej.TokenID)
+		return
 	}
-	logCredentialRejected(log, ctx, reason, found, tokenID)
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelError, "lookup_error", false, "")
 }
 
 // logCredentialRejected logs the standard "credential rejected" warning line.
@@ -570,6 +570,13 @@ func logUATRejection(log *slog.Logger, ctx context.Context, err error) {
 // rejected, never as an authenticated principal (rulings, plan correction
 // (b)). The presented token string itself is never logged (ruling Q3).
 func logCredentialRejected(log *slog.Logger, ctx context.Context, reason string, found bool, tokenID string) {
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelWarn, reason, found, tokenID)
+}
+
+// logCredentialRejectedAtLevel is logCredentialRejected's implementation,
+// parameterized on level so an internal lookup failure (logUATRejection's
+// fallback) can be distinguished from an ordinary client-side rejection.
+func logCredentialRejectedAtLevel(log *slog.Logger, ctx context.Context, level slog.Level, reason string, found bool, tokenID string) {
 	attrs := []any{
 		slog.String("auth_type", AuthTypeUAT),
 		slog.String("reason", reason),
@@ -580,7 +587,7 @@ func logCredentialRejected(log *slog.Logger, ctx context.Context, reason string,
 	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
 		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
 	}
-	log.Warn("credential rejected", attrs...)
+	log.Log(ctx, level, "credential rejected", attrs...)
 }
 
 // detectTokenType identifies the type of token.
