@@ -553,9 +553,9 @@ func TestSecretFetch_RecordChangedDuringSecretManagerReadNotDelivered(t *testing
 	// beforeAccess lands the new Secret Manager version immediately before
 	// fetchValue's read of it, so that read returns the new value.
 	hook.beforeAccess = func() {
-		hook.mockSMClient.mu.Lock()
-		hook.mockSMClient.versions[smPath] = []byte("v2")
-		hook.mockSMClient.mu.Unlock()
+		hook.mu.Lock()
+		hook.versions[smPath] = []byte("v2")
+		hook.mu.Unlock()
 	}
 	// afterAccess lands the corresponding database write right after
 	// fetchValue's Secret Manager read but before its re-read, the same way
