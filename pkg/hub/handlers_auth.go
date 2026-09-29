@@ -803,7 +803,15 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrUATScopeEmpty):
 			ValidationError(w, err.Error(), nil)
 		case errors.Is(err, ErrUATScopeViolation):
-			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), nil)
+			var details map[string]interface{}
+			var violation *UATScopeViolationError
+			if errors.As(err, &violation) {
+				details = map[string]interface{}{
+					"selector": violation.Selector,
+					"reason":   string(violation.Reason),
+				}
+			}
+			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), details)
 		case errors.Is(err, ErrUATProjectForbidden):
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
 		default:
@@ -1752,12 +1760,77 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TokenBoundaryDTO is the wire shape for a UAT boundary: {"kind":"project",
+// "projectId":"..."} for a project boundary, or {"kind":"hub"} (projectId
+// omitted) for a hub boundary. This is the shared shape referenced from both
+// the scopes-eligibility response below and the token create/response
+// boundary field; keep both call sites on this one type rather than two
+// independently drifting json structs.
+type TokenBoundaryDTO struct {
+	Kind      string `json:"kind"`
+	ProjectID string `json:"projectId,omitempty"`
+}
+
+func tokenBoundaryToDTO(b TokenBoundary) TokenBoundaryDTO {
+	dto := TokenBoundaryDTO{Kind: string(b.Kind)}
+	if b.Kind == BoundaryKindProject {
+		dto.ProjectID = b.ProjectID
+	}
+	return dto
+}
+
+// ScopeEligibility answers, for one selector and one requested boundary,
+// only "may the authenticated user select this restriction" -- never a
+// capability and never a target list. Eligible is computed fresh from the
+// principal's current authority; it is never widened by any credential the
+// caller happens to present.
+type ScopeEligibility struct {
+	Boundary TokenBoundaryDTO `json:"boundary"`
+	Eligible bool             `json:"eligible"`
+	// Reason is a MintDenialReason code, present only when !Eligible.
+	// MintDenialProjectAccessRequired never appears here: a request whose
+	// admission fails becomes the endpoint's 403 instead (see
+	// handleAuthScopes), so this field never distinguishes "no membership"
+	// from "not a member of this selector's system authority" for the
+	// admission step itself.
+	Reason string `json:"reason,omitempty"`
+	Note   string `json:"note,omitempty"`
+	// IneligibleMembers is set only on an alias entry (AuthScopeAlias): the
+	// subset of ExpandsTo that is not eligible. An alias is Eligible only
+	// when every member is.
+	IneligibleMembers []string `json:"ineligibleMembers,omitempty"`
+}
+
 // AuthScopeEntry is a single UAT scope in the scopes endpoint response.
 type AuthScopeEntry struct {
 	ID          string `json:"id"`
 	Resource    string `json:"resource"`
 	Action      string `json:"action"`
 	Description string `json:"description"`
+
+	// PermissionID is the canonical registry permission ID (e.g.
+	// "agent.attach") this selector resolves to via
+	// permissions.ResolveSelector.
+	PermissionID string `json:"permissionId,omitempty"`
+	// AllowedBoundaries mirrors permissions.PermissionAllowedBoundaries for
+	// this selector: which TokenBoundary kinds may select it at mint time.
+	AllowedBoundaries []string `json:"allowedBoundaries,omitempty"`
+	// EligibilityKind is "flat_role" (the project role's own flat
+	// permission subset, the default for a selector absent from
+	// permissions.MintEligibilityRegistry) or "relationship" (also
+	// mintable via a declared owner/ancestor relationship candidacy, with
+	// no target required to exist yet).
+	EligibilityKind string `json:"eligibilityKind,omitempty"`
+	// Relationships names the candidate relationship types (e.g. "owner",
+	// "ancestor") when EligibilityKind is "relationship".
+	Relationships []string `json:"relationships,omitempty"`
+	// RequiresExistingTarget is always false today: every published
+	// selector, including relationship-eligible ones, may be selected
+	// before any matching target exists.
+	RequiresExistingTarget bool `json:"requiresExistingTarget,omitempty"`
+	// Eligibility is present only when the request named a boundary
+	// (?projectId= or ?boundary=).
+	Eligibility *ScopeEligibility `json:"eligibility,omitempty"`
 }
 
 // AuthScopeAlias is a convenience alias that expands to multiple scopes.
@@ -1765,6 +1838,10 @@ type AuthScopeAlias struct {
 	ID          string   `json:"id"`
 	Description string   `json:"description"`
 	ExpandsTo   []string `json:"expands_to"`
+
+	// Eligibility is present only when the request named a boundary. An
+	// alias is eligible only when every member selector is.
+	Eligibility *ScopeEligibility `json:"eligibility,omitempty"`
 }
 
 // AuthScopesResponse is the response for GET /api/v1/auth/scopes.
@@ -1773,23 +1850,180 @@ type AuthScopesResponse struct {
 	Aliases []AuthScopeAlias `json:"aliases"`
 }
 
+// scopeEligibilityNote returns optional human-readable framing for a
+// !eligible relationship-kind entry: eligibility here answers only "may you
+// select this restriction," and a relationship-eligible selector is
+// re-checked against the actual target on every later request.
+func scopeEligibilityNote(kind permissions.MintEligibilityKind) string {
+	if kind == permissions.MintEligibilityRelationship {
+		return "checked on each target: your own agents and their descendants"
+	}
+	return ""
+}
+
+// dedupStrings returns ss with duplicates removed, order preserved.
+func dedupStrings(ss []string) []string {
+	if len(ss) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// boundaryKindsToStrings converts registry boundary kinds to their wire
+// strings for AuthScopeEntry.AllowedBoundaries.
+func boundaryKindsToStrings(kinds []permissions.BoundaryKind) []string {
+	if len(kinds) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		out = append(out, string(k))
+	}
+	return out
+}
+
+// parseAuthScopesBoundary interprets the ?boundary=/?projectId= query
+// parameters for GET /api/v1/auth/scopes. A nil *TokenBoundary with a nil
+// error means "no boundary requested" (today's unchanged catalog-only
+// response). This validation is intentionally independent of the hub-
+// boundary feature gate below it: when that gate is later removed, the
+// projectId-conflict and missing-projectId 400s must still hold.
+func parseAuthScopesBoundary(w http.ResponseWriter, r *http.Request) (boundary *TokenBoundary, handled bool) {
+	query := r.URL.Query()
+	boundaryParam := query.Get("boundary")
+	projectID := query.Get("projectId")
+
+	switch boundaryParam {
+	case "":
+		if projectID == "" {
+			return nil, false
+		}
+		return &TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, false
+	case "project":
+		if projectID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "projectId is required for boundary=project", nil)
+			return nil, true
+		}
+		return &TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, false
+	case "hub":
+		// A hub boundary never accepts a projectId, regardless of whether
+		// hub eligibility itself is enabled yet.
+		if projectID != "" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "boundary=hub does not accept projectId", nil)
+			return nil, true
+		}
+		// D.3 flips this single switch to enable hub-boundary eligibility;
+		// the two validation cases above must keep returning 400 unchanged.
+		writeError(w, http.StatusBadRequest, "unsupported_boundary", "hub boundary eligibility is not available yet", nil)
+		return nil, true
+	default:
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "unknown boundary", nil)
+		return nil, true
+	}
+}
+
 // handleAuthScopes handles GET /api/v1/auth/scopes.
-// Returns all valid UAT scopes from the permissions registry.
+// Returns all valid UAT scopes from the permissions registry. With
+// ?projectId= (or the equivalent ?boundary=project&projectId=), each entry
+// additionally reports whether the authenticated user may currently select
+// it as a project-boundary restriction (CanMintSelector), computed fresh for
+// the principal and never widened by whatever credential made this request.
+// A project the caller cannot access, or that does not exist, returns the
+// same oracle-resistant 403 as token mint.
 func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
 	}
 
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+
+	boundary, handled := parseAuthScopesBoundary(w, r)
+	if handled {
+		return
+	}
+
 	options := permissions.UATScopeOptions(false)
+
+	var eligByScope map[string]SelectorEligibility
+	if boundary != nil {
+		selectors := make([]string, 0, len(options))
+		for _, opt := range options {
+			selectors = append(selectors, opt.UATScope)
+		}
+		principal := principalContextForIdentity(user)
+		results, err := s.authzService.CanMintSelector(r.Context(), principal, *boundary, selectors)
+		if err != nil {
+			// Fail closed, oracle-resistant: identical to mint's forbidden
+			// response for an inaccessible or nonexistent project.
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+			return
+		}
+		eligByScope = make(map[string]SelectorEligibility, len(results))
+		for _, res := range results {
+			if res.Reason == MintDenialProjectAccessRequired {
+				// The batch's ONE admission check failed: this is
+				// indistinguishable from "project does not exist" and must
+				// never surface per-entry (that would be a new oracle).
+				// Collapse the whole response to mint's uniform 403.
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+				return
+			}
+			eligByScope[res.Selector] = res
+		}
+	}
+
 	scopes := make([]AuthScopeEntry, 0, len(options))
 	for _, opt := range options {
-		scopes = append(scopes, AuthScopeEntry{
-			ID:          opt.UATScope,
-			Resource:    opt.Resource,
-			Action:      opt.Action,
-			Description: opt.Description,
-		})
+		entry := AuthScopeEntry{
+			ID:           opt.UATScope,
+			Resource:     opt.Resource,
+			Action:       opt.Action,
+			Description:  opt.Description,
+			PermissionID: opt.ID,
+		}
+		if mapping, ok := permissions.ResolveSelector(opt.UATScope); ok {
+			entry.AllowedBoundaries = boundaryKindsToStrings(mapping.AllowedBoundaries)
+		}
+		entry.EligibilityKind = string(permissions.MintEligibilityFlatRole)
+		if descriptor, ok := permissions.MintEligibilityRegistry[opt.ID]; ok {
+			entry.RequiresExistingTarget = descriptor.RequiresExistingTarget
+			var relationships []string
+			for _, src := range descriptor.Sources {
+				if src.Kind == permissions.MintEligibilityRelationship {
+					entry.EligibilityKind = string(permissions.MintEligibilityRelationship)
+					relationships = append(relationships, src.RelationshipTypes...)
+				}
+			}
+			entry.Relationships = dedupStrings(relationships)
+		}
+		if boundary != nil {
+			if res, ok := eligByScope[opt.UATScope]; ok {
+				elig := &ScopeEligibility{
+					Boundary: tokenBoundaryToDTO(*boundary),
+					Eligible: res.OK,
+				}
+				if !res.OK {
+					elig.Reason = string(res.Reason)
+				}
+				elig.Note = scopeEligibilityNote(permissions.MintEligibilityKind(entry.EligibilityKind))
+				entry.Eligibility = elig
+			}
+		}
+		scopes = append(scopes, entry)
 	}
 
 	// Build aliases dynamically from the manage alias registry.
@@ -1801,11 +2035,31 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	aliases := make([]AuthScopeAlias, 0, len(aliasKeys))
 	for _, alias := range aliasKeys {
 		resource := permissions.UATManageAliases[alias]
-		aliases = append(aliases, AuthScopeAlias{
+		expandsTo := permissions.UATManageScopesFor(resource)
+		aliasEntry := AuthScopeAlias{
 			ID:          alias,
 			Description: fmt.Sprintf("All %s management operations", resource),
-			ExpandsTo:   permissions.UATManageScopesFor(resource),
-		})
+			ExpandsTo:   expandsTo,
+		}
+		if boundary != nil {
+			elig := &ScopeEligibility{
+				Boundary: tokenBoundaryToDTO(*boundary),
+				Eligible: true,
+			}
+			var ineligible []string
+			for _, member := range expandsTo {
+				res, ok := eligByScope[member]
+				if !ok || !res.OK {
+					ineligible = append(ineligible, member)
+				}
+			}
+			if len(ineligible) > 0 {
+				elig.Eligible = false
+				elig.IneligibleMembers = ineligible
+			}
+			aliasEntry.Eligibility = elig
+		}
+		aliases = append(aliases, aliasEntry)
 	}
 
 	writeJSON(w, http.StatusOK, AuthScopesResponse{

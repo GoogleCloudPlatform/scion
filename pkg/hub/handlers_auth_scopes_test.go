@@ -26,6 +26,9 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestHandleAuthScopes_Authenticated verifies the scopes endpoint returns all
@@ -335,4 +338,206 @@ func TestUATScopes_AllManageAliasesValid(t *testing.T) {
 			t.Errorf("manage alias %q not valid in UATValidScopes()", alias)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ptone/scion#2122: project-boundary eligibility surfaced through
+// GET /api/v1/auth/scopes?projectId=.
+// ---------------------------------------------------------------------------
+
+// TestAuthScopes_ProjectEligibilityForMember verifies that an ordinary
+// project member's eligibility is reported correctly before they own any
+// agent: relationship-eligible selectors (agent:attach, agent:port_access)
+// are eligible, and a flat selector their role does not hold (agent:delete)
+// is ineligible with a stable reason -- never a target list.
+func TestAuthScopes_ProjectEligibilityForMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-member-project")
+	ownerID := tid("authscopes-member-owner")
+	memberID := tid("authscopes-member-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	byID := map[string]AuthScopeEntry{}
+	for _, entry := range resp.Scopes {
+		byID[entry.ID] = entry
+	}
+
+	for _, id := range []string{"agent:attach", "agent:port_access"} {
+		entry, ok := byID[id]
+		require.True(t, ok, "scope %s missing from response", id)
+		require.NotNil(t, entry.Eligibility, "scope %s missing eligibility", id)
+		assert.True(t, entry.Eligibility.Eligible,
+			"member should be eligible to select %s before owning an agent: reason %q", id, entry.Eligibility.Reason)
+		assert.Equal(t, string(permissions.MintEligibilityRelationship), entry.EligibilityKind)
+		assert.ElementsMatch(t, []string{"owner", "ancestor"}, entry.Relationships)
+		assert.False(t, entry.RequiresExistingTarget)
+		assert.Empty(t, entry.Eligibility.Reason)
+		assert.NotEmpty(t, entry.Eligibility.Note)
+	}
+
+	deleteEntry, ok := byID["agent:delete"]
+	require.True(t, ok)
+	require.NotNil(t, deleteEntry.Eligibility)
+	assert.False(t, deleteEntry.Eligibility.Eligible)
+	assert.Equal(t, string(MintDenialFlatRoleInsufficient), deleteEntry.Eligibility.Reason)
+	assert.Equal(t, string(permissions.MintEligibilityFlatRole), deleteEntry.EligibilityKind)
+
+	// Eligibility answers only "may you select this restriction": it must
+	// never enumerate a target (no agent has been created in this test).
+	assert.NotContains(t, rec.Body.String(), "uatp-agent")
+}
+
+// TestAuthScopes_ProjectEligibilityRequiresProjectAccess verifies that
+// ?projectId= for a project the caller cannot access returns the same
+// oracle-resistant 403 as token mint, byte-identical to a nonexistent
+// project -- the endpoint must not become a project-existence oracle.
+func TestAuthScopes_ProjectEligibilityRequiresProjectAccess(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-noaccess-project")
+	ownerID := tid("authscopes-noaccess-owner")
+	outsiderID := tid("authscopes-noaccess-outsider")
+	createRS1Project(t, s, projectID, ownerID)
+	outsider := &store.User{
+		ID: outsiderID, Email: outsiderID + "@test.com", DisplayName: "Outsider", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+	ensureHubMembership(ctx, s, outsiderID)
+
+	recNonMember := doRequestAsUser(t, srv, outsider, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+
+	nonexistentProjectID := tid("authscopes-nonexistent-project")
+	recNonexistent := doRequestAsUser(t, srv, outsider, http.MethodGet, "/api/v1/auth/scopes?projectId="+nonexistentProjectID, nil)
+
+	require.Equal(t, http.StatusForbidden, recNonMember.Code, recNonMember.Body.String())
+	assert.Equal(t, recNonMember.Code, recNonexistent.Code,
+		"non-member and nonexistent-project eligibility must return the same HTTP status")
+	assert.JSONEq(t, recNonMember.Body.String(), recNonexistent.Body.String(),
+		"non-member and nonexistent-project eligibility must return the byte-identical error body")
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(recNonMember.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+	assert.Equal(t, "forbidden", resp.Error.Message)
+	assert.Nil(t, resp.Error.Details)
+}
+
+// TestAuthScopes_AliasEligibleOnlyWhenAllMembersEligible verifies the
+// agent:manage alias reports eligible only when every expanded member
+// selector is individually eligible, and names the ineligible members
+// otherwise instead of collapsing to a single opaque flag.
+func TestAuthScopes_AliasEligibleOnlyWhenAllMembersEligible(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-alias-project")
+	ownerID := tid("authscopes-alias-owner")
+	memberID := tid("authscopes-alias-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/auth/scopes?projectId="+projectID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp AuthScopesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	var manage *AuthScopeAlias
+	for i := range resp.Aliases {
+		if resp.Aliases[i].ID == "agent:manage" {
+			manage = &resp.Aliases[i]
+		}
+	}
+	require.NotNil(t, manage, "agent:manage alias missing from response")
+	require.NotNil(t, manage.Eligibility)
+	assert.False(t, manage.Eligibility.Eligible,
+		"the curated member role lacks agent.delete/lifecycle/message, so agent:manage must be ineligible")
+	assert.Contains(t, manage.Eligibility.IneligibleMembers, "agent:delete")
+	assert.Empty(t, manage.Eligibility.Reason, "an alias-level denial has no single reason code, only ineligibleMembers")
+}
+
+// TestAuthScopes_BoundaryParamValidation pins every 400 case for
+// ?boundary=/?projectId=, independent of whether hub-boundary eligibility
+// is enabled yet: when D.3 flips that single gate, these structural
+// validations must keep returning 400 unchanged.
+func TestAuthScopes_BoundaryParamValidation(t *testing.T) {
+	srv, _ := testServer(t)
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"boundary=project without projectId", "/api/v1/auth/scopes?boundary=project"},
+		{"boundary=hub with projectId", "/api/v1/auth/scopes?boundary=hub&projectId=" + tid("authscopes-boundary-hub-proj")},
+		{"unknown boundary value", "/api/v1/auth/scopes?boundary=nonsense"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodGet, c.path, nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		})
+	}
+
+	t.Run("boundary=hub alone is the single not-yet-enabled gate", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/auth/scopes?boundary=hub", nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, "unsupported_boundary", resp.Error.Code)
+	})
+
+	t.Run("neither boundary nor projectId keeps the unchanged catalog", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/auth/scopes", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp AuthScopesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		for _, entry := range resp.Scopes {
+			assert.Nil(t, entry.Eligibility, "catalog-only response must not include eligibility")
+		}
+		for _, alias := range resp.Aliases {
+			assert.Nil(t, alias.Eligibility, "catalog-only response must not include eligibility")
+		}
+	})
+}
+
+// TestTokenCreate_ScopeViolationNamesSelector verifies the 403
+// scope_violation body from POST /api/v1/auth/tokens carries structured
+// details naming the denied selector and reason, once project admission has
+// already succeeded (never on the uniform, detail-free
+// ErrUATProjectForbidden path -- see TestProjectUAT_MintForbiddenIsOracleResistant).
+func TestTokenCreate_ScopeViolationNamesSelector(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("authscopes-violation-project")
+	ownerID := tid("authscopes-violation-owner")
+	memberID := tid("authscopes-violation-member")
+	createRS1Project(t, s, projectID, ownerID)
+	uatpMember(t, s, projectID, memberID)
+
+	member, err := s.GetUser(ctx, memberID)
+	require.NoError(t, err)
+
+	body := map[string]any{"name": "violation-test", "projectId": projectID, "scopes": []string{"agent:delete"}}
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/auth/tokens", body)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "scope_violation", resp.Error.Code)
+	require.NotNil(t, resp.Error.Details)
+	assert.Equal(t, "agent:delete", resp.Error.Details["selector"])
+	assert.Equal(t, string(MintDenialFlatRoleInsufficient), resp.Error.Details["reason"])
 }
