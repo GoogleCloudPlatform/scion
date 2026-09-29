@@ -190,9 +190,9 @@ func TestDecisionAndMutationAudit_AgreeOnCorrelation(t *testing.T) {
 
 // TestBoundedLabelsJSON_SanitizesAndBoundsALegacyRow proves review-1 finding
 // F2: a labels map that never went through ValidateCredentialMetadata (the
-// shape a row written directly to the store, bypassing issuance-time
-// validation, would have) still renders as bounded, sanitized, valid JSON —
-// never raw control characters, and never over the 1 KiB cap — in both the
+// shape of a row written directly to the store, outside the issuance-time
+// validation path) still renders as bounded, sanitized, valid JSON — never
+// raw control characters, and never over the 1 KiB cap — in both the
 // decision-audit and mutation-audit snapshot.
 func TestBoundedLabelsJSON_SanitizesAndBoundsALegacyRow(t *testing.T) {
 	labels := make(map[string]string, 22)
