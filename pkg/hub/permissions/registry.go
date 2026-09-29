@@ -384,13 +384,12 @@ func uatScopesForResource(resource string) []string {
 // agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
 // so that existing CI tokens continue to work (miller79/scion#88).
 //
-// NOTE (ptone/scion#2117, pat-refactor ruling 2026-09-28): this map is NOT
-// honored on the Decide path today (enforceUATConstraints uses exact
-// HasScope) — only inconsistently through CanDelegate's
-// intersectCredentialCaveats. A.2 must preserve the OBSERVED Decide-path
-// behavior (attach-only stays attach-only) and narrow CanDelegate to match,
-// never widen Decide to match CanDelegate's historical over-grant. See
-// A/notes/a2-legacy-attach-ruling.md.
+// NOTE: this map is NOT honored on the Decide path today
+// (enforceUATConstraints uses exact HasScope) — only inconsistently through
+// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
+// attach does not imply lifecycle. Any future alignment must narrow
+// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
+// match CanDelegate.
 var LegacyUATScopeImplications = map[string][]string{
 	"agent:attach": {"agent:lifecycle"},
 }
@@ -409,7 +408,7 @@ const (
 	BoundaryKindHub     BoundaryKind = "hub"
 )
 
-// ValidBoundary is defined in project_applicability.go (F-2: shared with
+// ValidBoundary is defined in project_applicability.go (shared with
 // pkg/store, which cannot import pkg/hub).
 
 // SelectorMapping is the resolved, explicit mapping from one published
@@ -424,12 +423,13 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it replaces useraccesstoken.go's scopeToPermissionIDs,
-// which reconstructs "resource:action" and would silently collapse two
-// permissions sharing a resource/action pair (e.g. hub.settings.read and
-// hub.config.read, both {hub, read}) into one selector once either becomes
-// UAT-selectable. A.2 owns wiring the mint/runtime call sites to this
-// table; A.1 owns the table and its build/validate logic.
+// selector vocabulary: it is the replacement for useraccesstoken.go's
+// scopeToPermissionIDs, which reconstructs "resource:action" and would
+// silently collapse two permissions sharing a resource/action pair (e.g.
+// hub.settings.read and hub.config.read, both {hub, read}) into one
+// selector once either becomes UAT-selectable. A.2 owns wiring the
+// mint/runtime call sites to this table; A.1 owns the table and its
+// build/validate logic.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string
@@ -634,9 +634,9 @@ type MintEligibilitySource struct {
 // a specific target still goes through full request-time authorization.
 //
 // It does NOT carry its own AllowedBoundaries or ActionAllowlist: those
-// duplicated PermissionAllowedBoundaries/RelationshipPolicy and were removed
-// per pat-refactor's correction (2026-09-28) — callers derive boundaries via
-// SelectorAllowedBoundaries(PermissionID) and derive the action limit for a
+// would duplicate PermissionAllowedBoundaries/RelationshipPolicy — callers
+// derive boundaries via SelectorAllowedBoundaries(PermissionID) and derive
+// the action limit for a
 // MintEligibilityRelationship source via RelationshipPolicyAllows against
 // RelationshipPolicies (relationship_policy.go), the ONE shared authoring
 // surface B.1's runtime relationship-grant evaluator also reads — so there

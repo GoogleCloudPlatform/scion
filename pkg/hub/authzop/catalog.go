@@ -1565,10 +1565,20 @@ var Catalog = []OperationSpec{
 		Description: "Access forwarded ports on an agent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
-			// web.go:1808 also routes the actual port proxy under the same
-			// permission; the catalog previously declared only the list
-			// route.
+			// port_forward_handlers.go's proxyAgentPort (invoked from
+			// handleAgentPorts for the "{port}/proxy" and "{port}/proxy/*"
+			// suffixes) authorizes via authorizePortAccess for EVERY HTTP
+			// method and any subpath after "/proxy" — there is no
+			// method-based routing before that authorization check. Entry
+			// points here are representative, not exhaustive (the schema
+			// has no wildcard method/pattern), so every method this route
+			// actually accepts is listed explicitly, plus one representative
+			// subpath.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
