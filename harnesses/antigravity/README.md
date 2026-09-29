@@ -59,3 +59,30 @@ docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-antigravity:lates
 # Cloud Build
 gcloud builds submit --config cloudbuild.yaml .
 ```
+
+## Usage telemetry
+
+`config.yaml`'s `capabilities.telemetry.native_emitter` is `no`: antigravity
+has no native OTel integration (`enableTelemetry` in its own settings is
+product telemetry, unrelated to OTLP, and stays disabled). `provision.py`
+sets `SCION_USAGE_SOURCE=hooks` unconditionally, so `gen_ai.api.calls` comes
+from the `PreInvocation`/`PostInvocation` hooks that `dialect.yaml` already
+maps to `model-start`/`model-end`.
+
+**Granularity.** `PostInvocation` fires once per real model **request**, not
+once per agent turn. A single turn that makes a tool call and then a
+follow-up call produces two full `PreInvocation`/`PostInvocation` pairs
+(`invocationNum` 0 and 1) before its one `Stop`; `invocationNum` resets to 0
+on the next turn. Confirmed by driving the real `agy` 1.2.12 binary against
+a local, credential-free mock model backend — see
+`pkg/sciontool/hooks/dialects/testdata/antigravity/README.md` in the scion
+checkout for the captured fixture and how it was taken.
+
+**Usage (calls-only).** `PreInvocation` and `PostInvocation` are identical
+in shape — neither carries any usage or token field, regardless of whether
+the underlying model response had one. This matches `agy`'s own embedded
+hooks documentation, which states the `PostInvocation` input is "Same as
+`PreInvocation` input." So `dialect.yaml` maps no token fields for either
+event, and antigravity publishes calls only; a tokens follow-up would need
+`agy` to add usage data to this hook payload, or a different capture
+mechanism.
