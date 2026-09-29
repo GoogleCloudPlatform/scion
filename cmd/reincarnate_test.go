@@ -381,6 +381,13 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 			assert.NotContains(t, out, reincarnateHandoffTemplateText)
 		})
 
+		t.Run("a plain, non-dry-run reincarnate is still gated", func(t *testing.T) {
+			out, err := run(t, []string{"reincarnate", "some-agent"})
+			require.Error(t, err, "the agent-container gate must still reject an ordinary reincarnate call")
+			assert.Contains(t, err.Error(), "agent container")
+			assert.NotContains(t, out, reincarnateHandoffTemplateText)
+		})
+
 		t.Run("--handoff-template=false is still gated", func(t *testing.T) {
 			out, err := run(t, []string{"reincarnate", "--handoff-template=false"})
 			require.Error(t, err, "an explicit false must not be treated as the exemption")
@@ -402,6 +409,12 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 
 		t.Run("an ordinary --dry-run still hits the requires-project error", func(t *testing.T) {
 			_, err := run(t, []string{"reincarnate", "--dry-run", "some-agent"})
+			require.Error(t, err, "the requires-project gate must still reject an ordinary reincarnate call")
+			assert.Contains(t, err.Error(), "not in a scion project")
+		})
+
+		t.Run("a plain, non-dry-run reincarnate still hits the requires-project error", func(t *testing.T) {
+			_, err := run(t, []string{"reincarnate", "some-agent"})
 			require.Error(t, err, "the requires-project gate must still reject an ordinary reincarnate call")
 			assert.Contains(t, err.Error(), "not in a scion project")
 		})

@@ -384,7 +384,15 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // also implements the A26.2 R1 self-request fix) once the preamble is
 // actually built (below) — not any earlier, so a slow or failing lookup can
 // never delay or abort the stop/reprovision/start steps that matter more.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string) {
+//
+// plan is the request handler's already-computed ReincarnationPlan — the
+// exact same value returned in the 202 response (Amendment A26.4 O1: passed
+// in rather than recomputed here, so "the preamble shows exactly what the
+// requester saw in the 202" is true by construction, not just true today by
+// coincidence of shared inputs). nil omits the Changes: line entirely
+// (buildReincarnationPreamble/reincarnationChangesLine both handle it) —
+// this line must never be able to fail the reincarnation.
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -456,14 +464,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	toGeneration := agent.Generation + 1
 	requesterCtx := s.buildReincarnationRequesterContext(ctx, agent, requestedBy)
-	// Amendment A26.3 FYI-1: the "Changes:" line is recomputed here with the
-	// exact same pure function (computeReincarnationPlan) and the exact same
-	// previous/fresh AppliedConfig values the request handler already used
-	// for the dry-run plan and the 202 response's Plan field — no new store
-	// queries. dispatcher is already in scope (fetched above), so
-	// dispatchImageRegistry needs no new plumbing either.
-	imageRegistry := dispatchImageRegistry(dispatcher)
-	plan := computeReincarnationPlan(previous, fresh, nil, imageRegistry)
 	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart, requesterCtx, plan)
 	fresh.Task = preamble
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
@@ -775,9 +775,9 @@ const reincarnationRequesterFallback = "whoever requested this migration"
 // Resolution order: GetUser → "user:<email>"; on a miss (store.ErrNotFound),
 // GetAgent → "agent:<slug>". The returned bool is true only on a genuine
 // resolution; every other outcome — an empty id, a miss in both lookups, a
-// user found with an empty Email (N5: logged with its own distinct WARN
-// rather than falling through to the generic "could not resolve" message,
-// since the principal itself was found), or any *other* store error along
+// user found with an empty Email (logged with its own distinct WARN rather
+// than the generic "could not resolve" message, since the principal itself
+// was found), or any *other* store error along
 // either lookup — returns (reincarnationRequesterFallback, false) with a
 // WARN log identifying the unresolved id. Callers that must never emit a
 // specific principal without proof (e.g. the self-request guard in
@@ -905,12 +905,17 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 //     as a tautology), while step 3 keeps reincarnationRequesterFallback,
 //     since a next action ("message someone") is still better than none.
 //
-// plan is the same old→new diff computeReincarnationPlan produces for the
-// dry-run response (Amendment A26.3 FYI-1): a "Changes: template A->B, image
-// X->Y, harness-config P->Q" line is rendered right after the header, naming
-// only the fields that actually changed, and omitted entirely when nothing
-// did. §3.9 also has a second header line naming the migration time, which
-// is declined here as redundant with step 2's stated window start.
+// plan is the request handler's already-computed ReincarnationPlan (Amendment
+// A26.4 O1: passed in by runReincarnationWorker rather than recomputed here,
+// so this is exactly what the requester saw in the 202 response, by
+// construction). nil omits the line entirely — see reincarnationChangesLine,
+// defined below this function. A "Changes: template A->B, image X->Y,
+// harness-config P->Q" line is rendered right after the header, naming only
+// the fields that actually changed, with hash-valued fields abbreviated to
+// `sha256:` plus 12 hex in this preamble line only (Amendment A26.4 O2) —
+// the dry-run CLI output is unaffected and still shows the full hash. §3.9
+// also has a second header line naming the migration time, which is
+// declined here as redundant with step 2's stated window start.
 //
 // migrationStart is step 2's catch-up window start (design §3.7, Amendment
 // A25): only the start is named, not an end — an end timestamp would have to
@@ -934,42 +939,7 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 // path persists-and-defers instead of rejecting/dropping while
 // agents.reincarnation_state is non-terminal) make it true again, so it
 // comes back here.
-
-// reincarnationChangesLine renders §3.9's "Changes:" preamble line from a
-// ReincarnationPlan (design Amendment A26.3 FYI-1), naming only the fields
-// that actually changed between the outgoing and incoming generation, and
-// returning "" (no line at all) when nothing did. Bounded deliberately: only
-// the three fields the plan already carries for the dry-run response
-// (Template, Image, HarnessCfg) are considered, and no new store queries are
-// introduced — see the call site in runReincarnationWorker.
-func reincarnationChangesLine(plan ReincarnationPlan) string {
-	var parts []string
-	if plan.Template.Old != plan.Template.New {
-		parts = append(parts, fmt.Sprintf("template %s->%s", reincarnateValueOrNone(plan.Template.Old), reincarnateValueOrNone(plan.Template.New)))
-	}
-	if plan.Image.Old != plan.Image.New {
-		parts = append(parts, fmt.Sprintf("image %s->%s", reincarnateValueOrNone(plan.Image.Old), reincarnateValueOrNone(plan.Image.New)))
-	}
-	if plan.HarnessCfg.Old != plan.HarnessCfg.New {
-		parts = append(parts, fmt.Sprintf("harness-config %s->%s", reincarnateValueOrNone(plan.HarnessCfg.Old), reincarnateValueOrNone(plan.HarnessCfg.New)))
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "Changes: " + strings.Join(parts, ", ") + "\n"
-}
-
-// reincarnateValueOrNone renders an empty FieldChange side as "(none)" so
-// e.g. a legacy agent with no recorded template hash reads clearly rather
-// than as a blank.
-func reincarnateValueOrNone(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
-}
-
-func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext, plan ReincarnationPlan) string {
+func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time, requester reincarnationRequesterContext, plan *ReincarnationPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s)", toGeneration, agent.Slug, agent.ID)
 	switch {
@@ -983,8 +953,10 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 		// whoever requested this migration" reads as a tautology.
 		b.WriteString(".\n")
 	}
-	if changes := reincarnationChangesLine(plan); changes != "" {
-		b.WriteString(changes)
+	if plan != nil {
+		if changes := reincarnationChangesLine(*plan); changes != "" {
+			b.WriteString(changes)
+		}
 	}
 	b.WriteString("Before resuming:\n")
 	// Design §3.4 Amendment A23: neutral wording, since Phase 1b also serves
@@ -1022,6 +994,64 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 			"(`scion conversation list`), and any project scratchpad before acting.")
 	}
 	return b.String()
+}
+
+// reincarnationChangesLine renders §3.9's "Changes:" preamble line from a
+// ReincarnationPlan, naming only the fields that actually changed between
+// the outgoing and incoming generation, and returning "" (no line at all)
+// when nothing did. Bounded deliberately: only the three fields the plan
+// already carries for the dry-run response (Template, Image, HarnessCfg)
+// are considered. Template and HarnessCfg are content hashes
+// (`sha256:<64 hex>`, pkg/transfer/hash.go); Amendment A26.4 O2 abbreviates
+// them to `sha256:` plus 12 hex in this line only, since the full hash tells
+// the new generation nothing beyond "it changed" — the dry-run CLI output
+// (printReincarnationPlan) is untouched and still shows the full value.
+func reincarnationChangesLine(plan ReincarnationPlan) string {
+	var parts []string
+	if plan.Template.Old != plan.Template.New {
+		parts = append(parts, fmt.Sprintf("template %s->%s", reincarnateAbbreviateHash(plan.Template.Old), reincarnateAbbreviateHash(plan.Template.New)))
+	}
+	if plan.Image.Old != plan.Image.New {
+		parts = append(parts, fmt.Sprintf("image %s->%s", reincarnateValueOrNone(plan.Image.Old), reincarnateValueOrNone(plan.Image.New)))
+	}
+	if plan.HarnessCfg.Old != plan.HarnessCfg.New {
+		parts = append(parts, fmt.Sprintf("harness-config %s->%s", reincarnateAbbreviateHash(plan.HarnessCfg.Old), reincarnateAbbreviateHash(plan.HarnessCfg.New)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Changes: " + strings.Join(parts, ", ") + "\n"
+}
+
+// reincarnateValueOrNone renders an empty FieldChange side as "(none)" so
+// e.g. a legacy agent with no recorded template hash reads clearly rather
+// than as a blank.
+func reincarnateValueOrNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+// reincarnateHashPrefixLen is how many hex characters of a content hash
+// Amendment A26.4 O2 keeps in the Changes: preamble line — enough to be a
+// stable, greppable short reference without printing all 64.
+const reincarnateHashPrefixLen = 12
+
+// reincarnateAbbreviateHash renders s as "(none)" when empty (via
+// reincarnateValueOrNone), or, when it matches the `sha256:<64 hex>` shape
+// (pkg/transfer/hash.go), abbreviates it to `sha256:` plus the first
+// reincarnateHashPrefixLen hex characters. Any other shape (a legacy value
+// that isn't a content hash) is returned unabbreviated, unchanged.
+func reincarnateAbbreviateHash(s string) string {
+	if s == "" {
+		return reincarnateValueOrNone(s)
+	}
+	const prefix = "sha256:"
+	if strings.HasPrefix(s, prefix) && len(s) == len(prefix)+64 {
+		return prefix + s[len(prefix):len(prefix)+reincarnateHashPrefixLen]
+	}
+	return s
 }
 
 // reincarnationStaleAfter bounds how long a non-terminal reincarnation
