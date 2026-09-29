@@ -143,21 +143,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: remove agent.message (policy alignment with agent.attach)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -297,6 +297,13 @@ func projectOwnerPermissionIDs() []string {
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// owner assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management
 		"harness_config.create",
 		"harness_config.delete",
@@ -360,6 +367,13 @@ func projectAdminPermissionIDs() []string {
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// admin assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management (no delete)
 		"harness_config.create",
 		"harness_config.list",
@@ -409,6 +423,13 @@ func projectMemberCuratedPermissionIDs() []string {
 		"agent.create",
 		"agent.list",
 		"agent.read",
+		// GCP service account management (project-scoped). Lets a project
+		// member assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config (create, read, list)
 		"harness_config.create",
 		"harness_config.list",

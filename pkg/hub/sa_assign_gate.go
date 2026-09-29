@@ -229,9 +229,11 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 //
 // ⚠️ ActionAssign, not ActionRead. A grant to READ a service account is not a
 // grant to ASSIGN one; the two were conflated here until svc-accnt Step 2.
-// Reachability is preserved by the assign baselines that landed first for this
-// purpose: authz.go step 3b for agent callers, the per-project
-// member-assign-service-accounts policy in seed.go for humans.
+// Reachability for project-scoped accounts comes from: authz.go's AgentScopes
+// wiring (project:agent:create) for agent callers, and the
+// gcp_service_account.assign permission curated into the project-owner,
+// project-admin and project-member RoleDefinitions in seed.go for humans
+// (ptone/scion#2147).
 //
 // ⚠️ WHAT THE CONVERSION CHANGES DEPENDS ON THE CALLER KIND. Hub scope removes
 // confinement for humans and adds it for agents, so no single sentence about

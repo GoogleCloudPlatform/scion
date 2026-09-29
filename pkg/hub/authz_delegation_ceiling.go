@@ -595,7 +595,7 @@ func (a *AuthzService) getCachedEffectivePermissions(ctx context.Context, princi
 }
 
 // checkUserHoldsPermission checks if a user still holds a specific permission
-// via their role bindings and policy grants.
+// via their role bindings (system- and project-scoped).
 func (a *AuthzService) checkUserHoldsPermission(
 	ctx context.Context,
 	userID, permissionID, scopeType, scopeID string,
