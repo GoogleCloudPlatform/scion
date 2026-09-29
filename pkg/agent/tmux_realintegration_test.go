@@ -159,19 +159,29 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	// this is expected and is not polled for; only the file content is.
 	mustTmux("send-keys", "-t", "scion:0", "C-d")
 
+	// Wait for outFile to stop growing rather than re-checking the same
+	// size threshold the first poll already satisfied (that would return
+	// immediately and prove nothing new): a second, unwanted paste lands
+	// after the first and takes its own moment to arrive, so the file needs
+	// to be quiet for a bit before it's safe to say nothing more is coming.
+	const quietFor = 100 * time.Millisecond
 	deadline := time.Now().Add(10 * time.Second)
+	lastSize := int64(-1)
+	quietSince := time.Now()
 	for {
-		if info, err := os.Stat(outFile); err == nil && info.Size() >= wantSize {
-			break
+		info, statErr := os.Stat(outFile)
+		if statErr == nil {
+			if info.Size() != lastSize {
+				lastSize = info.Size()
+				quietSince = time.Now()
+			} else if time.Since(quietSince) >= quietFor {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
-			size := int64(-1)
-			if info, statErr := os.Stat(outFile); statErr == nil {
-				size = info.Size()
-			}
-			t.Fatalf("timed out waiting for the pasted payload to reach the output file (want >= %d bytes, got %d)", wantSize, size)
+			t.Fatalf("timed out waiting for the pane output to settle (last size %d)", lastSize)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	got, err := os.ReadFile(outFile)
@@ -184,11 +194,22 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	stripped := bytes.TrimPrefix(got, []byte("\x1b[200~"))
 	stripped = bytes.TrimSuffix(stripped, []byte("\x1b[201~"))
 
-	// deliverImmediate also sends trailing confirmation Enter keypresses
-	// after the paste, unrelated to the payload itself, so the pane output
-	// may contain a little more than the payload. Check that the payload
-	// landed byte-for-byte as a prefix rather than requiring exact equality.
+	// The payload must land byte-for-byte, and exactly once: a double paste
+	// (the round-1 failure mode this test guards against) would reappear
+	// right after the first copy, not blend into it.
 	if !bytes.HasPrefix(stripped, []byte(payload)) {
 		t.Fatalf("pane output did not start with the payload byte-for-byte: got %d bytes, want a prefix of length %d", len(stripped), len(payload))
+	}
+	// deliverImmediate also sends a trailing confirmation Enter keypress
+	// after the paste, unrelated to the payload itself, which arrives as a
+	// bare LF (via the pty's ICRNL translation of the Enter's CR). Bound
+	// what follows the payload to just that, rather than accepting any
+	// trailing bytes: a second paste would put a full, non-"\n" copy of the
+	// payload there instead, and this catches it.
+	tail := stripped[len(payload):]
+	for _, c := range tail {
+		if c != '\n' {
+			t.Fatalf("pane output carried more than the payload plus trailing Enters: got %d extra byte(s) after the payload, starting %q", len(tail), tail)
+		}
 	}
 }

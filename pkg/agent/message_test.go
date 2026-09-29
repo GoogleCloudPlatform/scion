@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -85,18 +86,30 @@ func TestMessage(t *testing.T) {
 	}
 }
 
-// bufNameFromLoadCmd extracts the buffer name from a captured
-// "tmux load-buffer -b <name> -" command string.
-func bufNameFromLoadCmd(t *testing.T, loadCmd string) string {
-	t.Helper()
+// parseBufNameFromLoadCmd extracts the buffer name from a captured
+// "tmux load-buffer -b <name> -" command string. It reports failure via its
+// return value rather than *testing.T so it's safe to call from a goroutine
+// other than the test's own, e.g. inside a mock invoked concurrently by
+// deliverImmediate's delivery goroutines.
+func parseBufNameFromLoadCmd(loadCmd string) (string, error) {
 	parts := strings.Fields(loadCmd)
 	for i, p := range parts {
 		if p == "-b" && i+1 < len(parts) {
-			return parts[i+1]
+			return parts[i+1], nil
 		}
 	}
-	t.Fatalf("could not find buffer name in load-buffer command: %q", loadCmd)
-	return ""
+	return "", fmt.Errorf("could not find buffer name in load-buffer command: %q", loadCmd)
+}
+
+// bufNameFromLoadCmd is parseBufNameFromLoadCmd for callers on the test
+// goroutine itself, where failing the test directly is safe.
+func bufNameFromLoadCmd(t *testing.T, loadCmd string) string {
+	t.Helper()
+	name, err := parseBufNameFromLoadCmd(loadCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return name
 }
 
 func TestBroadcast(t *testing.T) {
@@ -182,11 +195,13 @@ func TestBroadcast(t *testing.T) {
 		t.Fatalf("Expected 5 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
 	}
 
+	// Buffer names are not required to differ across agents: each agent has
+	// its own tmux server (a different container), so a name reused there
+	// isn't a collision. TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames
+	// covers uniqueness for two overlapping deliveries to one agent, which is
+	// the property that actually matters.
 	buf1 := bufNameFromLoadCmd(t, strings.TrimPrefix(agent1Calls[0], "agent-1: "))
 	buf2 := bufNameFromLoadCmd(t, strings.TrimPrefix(agent2Calls[0], "agent-2: "))
-	if buf1 == buf2 {
-		t.Errorf("expected agent-1 and agent-2 deliveries to use different buffer names, both got %q", buf1)
-	}
 
 	expectedAgent1 := []string{
 		"agent-1: tmux load-buffer -b " + buf1 + " -",
@@ -431,7 +446,7 @@ func TestDeliverImmediate_LargeMessageOverStdin(t *testing.T) {
 	for _, cmd := range argvCmds {
 		for _, arg := range cmd {
 			if strings.Contains(arg, "quotes") {
-				t.Fatalf("message body leaked into argv: %q (full cmd %v)", arg, cmd)
+				t.Fatalf("message body found in argv: %q (full cmd %v)", arg, cmd)
 			}
 		}
 	}
@@ -555,6 +570,48 @@ func TestMessageBuffer_CoalescedLargeMessagesDeliveredViaStdin(t *testing.T) {
 	}
 }
 
+// msgBufferNameRE matches nextMsgBufferName's format: the fixed prefix, a
+// 64-bit per-process nonce as 16 lowercase hex digits, and a decimal
+// per-delivery sequence number.
+var msgBufferNameRE = regexp.MustCompile(`^scion-msg-[0-9a-f]{16}-[0-9]+$`)
+
+// TestNextMsgBufferName_CarriesProcessNonce covers ptone/scion#2265's
+// cross-process gap: a process-local counter alone restarts at 1 in every
+// new process, so two short-lived CLI invocations (or a CLI call racing the
+// broker) against the same agent would otherwise both name their first
+// delivery "scion-msg-1". Every name nextMsgBufferName produces must carry
+// this process's random nonce, and that nonce must stay the same across
+// calls within the process (it's generated once, not per call).
+func TestNextMsgBufferName_CarriesProcessNonce(t *testing.T) {
+	first := nextMsgBufferName()
+	second := nextMsgBufferName()
+
+	for _, name := range []string{first, second} {
+		if !msgBufferNameRE.MatchString(name) {
+			t.Errorf("buffer name %q does not match the expected %s-<16 hex>-<seq> format", name, msgBufferPrefix)
+		}
+	}
+
+	nonceOf := func(name string) string {
+		parts := strings.Split(name, "-")
+		if len(parts) < 3 {
+			t.Fatalf("buffer name %q has too few components to extract a nonce", name)
+		}
+		return parts[len(parts)-2]
+	}
+	firstNonce, secondNonce := nonceOf(first), nonceOf(second)
+	if firstNonce != secondNonce {
+		t.Errorf("expected the same process nonce on every call, got %q then %q", firstNonce, secondNonce)
+	}
+	if firstNonce != msgBufferNonce() {
+		t.Errorf("buffer name nonce %q did not match msgBufferNonce() %q", firstNonce, msgBufferNonce())
+	}
+
+	if first == second {
+		t.Errorf("expected distinct names for two calls, both got %q", first)
+	}
+}
+
 // TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames covers
 // ptone/scion#2265: deliveries to the same agent are not serialised (an
 // interrupt can race a buffered flush), so two deliveries overlapping in time
@@ -572,16 +629,25 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 	var mu sync.Mutex
 	var loadBufNames []string
 	var pasteBufNames []string
+	var parseErrs []error
 
 	start := make(chan struct{})
 	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 		<-start // release both goroutines' load-buffer calls together
-		bufName := bufNameFromLoadCmd(t, strings.Join(cmd, " "))
+		// This runs on the delivery goroutines below, not the test goroutine,
+		// so a parse failure is recorded rather than reported directly:
+		// t.Fatalf (via bufNameFromLoadCmd) is only safe to call from the
+		// test's own goroutine.
+		bufName, err := parseBufNameFromLoadCmd(strings.Join(cmd, " "))
 		mu.Lock()
-		loadBufNames = append(loadBufNames, bufName)
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+		} else {
+			loadBufNames = append(loadBufNames, bufName)
+		}
 		mu.Unlock()
 		// Give the other goroutine a chance to be mid-delivery too, mirroring
-		// the interleave the review describes (A.load, B.load, A.paste, B.paste).
+		// an interleaved A.load, B.load, A.paste, B.paste.
 		time.Sleep(5 * time.Millisecond)
 		return "", nil
 	}
@@ -613,6 +679,13 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 	}()
 	close(start)
 	wg.Wait()
+
+	for _, err := range parseErrs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
 
 	for i, err := range errs {
 		if err != nil {
@@ -646,7 +719,10 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 // paste-buffer's own "-d" only deletes the buffer when the paste succeeds, so
 // a failed paste must trigger an explicit, best-effort
 // "tmux delete-buffer -b <name>" with the same name that was loaded — and its
-// own failure must not change the error reported for the delivery.
+// own failure must not change the error reported for the delivery. The
+// caller's ctx is already cancelled when this happens (a plausible reason
+// paste-buffer itself failed), so the cleanup call must still run: it needs
+// its own ctx, detached from the caller's.
 func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -658,6 +734,7 @@ func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
 
 	var loadedBufName string
 	var deleteCalls []string
+	var deleteCtxErrs []error
 	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 		loadedBufName = bufNameFromLoadCmd(t, strings.Join(cmd, " "))
 		return "", nil
@@ -668,6 +745,7 @@ func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
 			return "", fmt.Errorf("no buffer %s", loadedBufName)
 		case len(cmd) >= 2 && cmd[1] == "delete-buffer":
 			deleteCalls = append(deleteCalls, strings.Join(cmd, " "))
+			deleteCtxErrs = append(deleteCtxErrs, ctx.Err())
 			// delete-buffer's own failure must be tolerated (best-effort).
 			return "", fmt.Errorf("delete-buffer also failed")
 		default:
@@ -676,7 +754,12 @@ func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
 	}
 
 	mgr := &AgentManager{Runtime: mockRT}
-	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+	// The caller's ctx is already cancelled before delivery starts, standing
+	// in for the caller cancelling mid-delivery: the cleanup call below must
+	// not inherit that cancellation.
+	callerCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := mgr.deliverImmediate(callerCtx, "test-agent", "", "hello", false)
 	if err == nil {
 		t.Fatal("expected an error from the failed paste-buffer")
 	}
@@ -690,6 +773,9 @@ func TestDeliverImmediate_PasteFailureDeletesBuffer(t *testing.T) {
 	want := "tmux delete-buffer -b " + loadedBufName
 	if deleteCalls[0] != want {
 		t.Fatalf("expected delete-buffer to reuse the loaded buffer's name: got %q, want %q", deleteCalls[0], want)
+	}
+	if deleteCtxErrs[0] != nil {
+		t.Fatalf("expected the delete-buffer cleanup to run with a ctx detached from the already-cancelled caller ctx, got: %v", deleteCtxErrs[0])
 	}
 }
 

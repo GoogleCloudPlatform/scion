@@ -16,11 +16,14 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -101,17 +104,41 @@ const defaultBufferDelay = 2 * time.Second
 // delivery is reported as failed (ptone/scion#2265).
 const msgBufferPrefix = "scion-msg"
 
-// msgBufferSeq generates the per-delivery suffix for msgBufferPrefix. It only
-// needs to be unique among buffers alive at once on one tmux server, so a
-// process-local counter is enough — it doesn't need to survive a restart.
+// msgBufferSeq generates the per-delivery suffix for msgBufferPrefix. A
+// counter alone is only unique within the process that owns it: every
+// AgentManager in one broker process shares this package-level counter, so
+// it tells their deliveries apart, but a short-lived CLI invocation (scion
+// message, scion broadcast) starts a fresh process whose counter restarts at
+// 1, so two such processes — two concurrent CLI calls, or a CLI call racing
+// the broker, against the same agent — would otherwise both name their first
+// delivery "scion-msg-1". msgBufferNonce below supplies the part that tells
+// processes apart; the counter only needs to tell apart deliveries within
+// one process.
 var msgBufferSeq atomic.Uint64
+
+// msgBufferNonce is a random value generated once per process (not once per
+// call) so that every buffer name that process produces carries it. It is
+// what makes nextMsgBufferName unique across processes: two processes each
+// generate their own nonce independently, so their names never collide even
+// though each process's msgBufferSeq counter restarts at 1. A PID is not
+// enough for this, since containerized brokers can share PID 1.
+var msgBufferNonce = sync.OnceValue(func() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is effectively unrecoverable on any supported
+		// platform; fail loudly rather than silently falling back to a
+		// predictable, collision-prone name.
+		panic(fmt.Sprintf("agent: reading random buffer-name nonce: %v", err))
+	}
+	return hex.EncodeToString(b[:])
+})
 
 // nextMsgBufferName returns a short, unique tmux buffer name for a single
 // deliverImmediate call. It must be computed once per call and reused for
 // every step of that call (load-buffer, paste-buffer, and any cleanup),
 // never regenerated mid-delivery.
 func nextMsgBufferName() string {
-	return fmt.Sprintf("%s-%d", msgBufferPrefix, msgBufferSeq.Add(1))
+	return fmt.Sprintf("%s-%s-%d", msgBufferPrefix, msgBufferNonce(), msgBufferSeq.Add(1))
 }
 
 // loadBufferArgv builds the argv that loads message text into the named tmux
@@ -516,8 +543,14 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 				// Named buffers aren't evicted by buffer-limit, so without
 				// this they would accumulate on the tmux server. Best-effort:
 				// the failure is already being reported below, so a further
-				// error here is ignored.
-				_, _ = m.Runtime.Exec(ctx, agent.ContainerID, []string{"tmux", "delete-buffer", "-b", bufName})
+				// error here is ignored. Uses a ctx detached from the
+				// caller's (context.WithoutCancel, with its own short
+				// timeout) so the cleanup still runs when the caller's ctx
+				// is already cancelled — which may be why paste-buffer
+				// itself failed.
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				_, _ = m.Runtime.Exec(cleanupCtx, agent.ContainerID, []string{"tmux", "delete-buffer", "-b", bufName})
+				cancel()
 			}
 			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
 			if delivered {
