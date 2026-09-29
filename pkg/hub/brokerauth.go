@@ -1037,7 +1037,7 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 //     CredentialContext, with no marker set — so a broker acting for itself,
 //     with no on-behalf-of header, is never mistaken for an authorized
 //     narrowing of a local user (it stays broker/broker and is denied by
-//     Decide's unsupported-principal switch, matching today).
+//     Decide's unsupported-principal switch).
 //
 // A missing header resolves userIdent == nil, which takes the broker-only
 // branch below and never calls contextWithBrokerOnBehalfOf. An invalid or

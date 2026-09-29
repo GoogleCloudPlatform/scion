@@ -86,6 +86,22 @@ type userShapedMockIdentity struct {
 func (m *userShapedMockIdentity) ID() string   { return m.id }
 func (m *userShapedMockIdentity) Type() string { return "user" }
 
+// recognizedPrincipalEmptyCredentialMockIdentity opts into
+// explicitIdentityClassification with a recognized PrincipalKind but an
+// empty (unrecognized) CredentialKind — the shape credentialContextForIdentity
+// produces for a concrete type whose classifier arm was added for the
+// principal side but never for the credential side. It pins the rejection
+// block's credential-side arm independently of the principal-side one.
+type recognizedPrincipalEmptyCredentialMockIdentity struct {
+	id string
+}
+
+func (m *recognizedPrincipalEmptyCredentialMockIdentity) ID() string   { return m.id }
+func (m *recognizedPrincipalEmptyCredentialMockIdentity) Type() string { return "user" }
+func (m *recognizedPrincipalEmptyCredentialMockIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindUser, ""
+}
+
 // =============================================================================
 // Source-scan drift guard
 // =============================================================================
@@ -702,6 +718,18 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 			wantPrincipalKind: PrincipalKindUser,
 			wantCredKind:      string(CredentialKindInteractive),
 			wantPrincipalID:   interactiveUserID,
+		},
+		{
+			name: "recognized principal with an unrecognized derived credential kind denies at entry",
+			request: AuthzRequest{
+				Principal: PrincipalContext{Identity: &recognizedPrincipalEmptyCredentialMockIdentity{id: tid("audit-recognized-principal-empty-cred")}},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "unrecognized credential kind",
+			wantPrincipalKind: PrincipalKindUser,
+			wantCredKind:      "",
+			wantPrincipalID:   tid("audit-recognized-principal-empty-cred"),
 		},
 	}
 

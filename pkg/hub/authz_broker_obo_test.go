@@ -572,4 +572,21 @@ func TestSuppliedCredentialCompatible_NonUserPrincipalNeverAdmitsInteractiveNarr
 				"the broker on-behalf-of exception must require PrincipalKindUser even with a fully valid OBO context")
 		})
 	}
+
+	// The broker on-behalf-of exception also requires the derived credential
+	// kind to be CredentialKindInteractive, independent of the PrincipalKind
+	// check above: a user principal whose own derived credential is
+	// CredentialKindUAT (a real *ScopedUserIdentity) must not admit a
+	// supplied broker credential through this predicate, even with a fully
+	// valid OBO context for that same user, because that would replace the
+	// UAT's scope/project caveats with the broker credential for the rest of
+	// Decide.
+	t.Run("user principal with a UAT derivation", func(t *testing.T) {
+		principal := PrincipalContext{Kind: PrincipalKindUser, ID: user.ID()}
+		derived := CredentialContext{Kind: CredentialKindUAT}
+
+		ctx := validOBOCtx()
+		assert.False(t, suppliedCredentialCompatible(ctx, principal, derived, CredentialContext{Kind: CredentialKindBroker, ID: broker.ID(), Type: "broker"}),
+			"the broker on-behalf-of exception must require an interactive derivation, not a UAT one, even with a fully valid OBO context")
+	})
 }

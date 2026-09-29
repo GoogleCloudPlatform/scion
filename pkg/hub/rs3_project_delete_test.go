@@ -382,15 +382,14 @@ func TestRS3_ProjectDeleteScopedUATDenied(t *testing.T) {
 	assert.Equal(t, 403, decision.HTTPStatus)
 }
 
-// TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied closes a gap flagged
-// against the identity classification fail-closed work (ptone/scion#2123):
-// the session-only gates tested elsewhere (requireSessionCredential,
-// (*UserAccessTokenService).enforceSessionCredential) don't cover this
-// service's own credential ceiling. An unrecognized credential kind — as
-// credentialContextForIdentity's fail-closed default produces for an
-// unclassified identity — is denied by the same session-only ceiling as a
-// scoped UAT above, not silently admitted because it isn't one of the
-// specifically-named non-session kinds.
+// TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied: an unrecognized
+// credential kind — as credentialContextForIdentity's fail-closed default
+// produces for an unclassified identity — is denied by the same
+// session-only ceiling as a scoped UAT above, not silently admitted because
+// it isn't one of the specifically-named non-session kinds.
+// ProjectDeletionService.Delete enforces this credential ceiling directly,
+// independent of requireSessionCredential and
+// (*UserAccessTokenService).enforceSessionCredential.
 func TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

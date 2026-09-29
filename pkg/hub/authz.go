@@ -337,7 +337,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// the narrowing-UAT and the broker-on-behalf-of cases admitted above
 	// carry their own restrictions/effective credential ID forward exactly
 	// as supplied. An omitted kind falls back to the identity's own
-	// derivation, as before.
+	// derivation.
 	credential := request.Credential
 	if credential.Kind == "" {
 		credential = derivedCredential
