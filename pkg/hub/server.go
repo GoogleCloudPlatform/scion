@@ -3529,16 +3529,19 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
-		// E.2b: log the recorded initiator alongside the executor context set
-		// by the caller (fireEvent / executeSchedule), so a scheduled message
-		// is distinguishable in logs from a live send without changing the
-		// live authorization identity above (cutover rule).
+		// Log the recorded initiator alongside the executor context set by
+		// the caller (fireEvent / executeSchedule), so a scheduled message is
+		// distinguishable in logs from a live send without changing the live
+		// authorization identity above (cutover rule).
 		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
 			"initiator_principal_kind", initiator.PrincipalKind,
 			"initiator_credential_kind", initiator.CredentialKind,
-			"initiator_credential_id", initiator.CredentialID)
+			"initiator_credential_id", initiator.CredentialID,
+			"executor_kind", executor.Kind,
+			"executor_id", executor.ID)
 		return nil
 	}
 }
@@ -4042,11 +4045,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// actor is.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
-		// when the initiator is the same principal as the creator (review
-		// R4): after an update or resume by a different user, the initiator
-		// is not the creator, and ApplyActor exists specifically to prevent
-		// naming principal A with principal B's credential. When it does
-		// match, the value is mapped back to hub.CredentialKind's vocabulary
+		// when the initiator is the same principal as the creator: after an
+		// update or resume by a different user, the initiator is not the
+		// creator, and ApplyActor exists specifically to prevent naming
+		// principal A with principal B's credential. When it does match, the
+		// value is mapped back to hub.CredentialKind's vocabulary
 		// (uat/agent_jwt/interactive), since actor_credential_type is a
 		// column every other writer fills from that domain, not
 		// InitiatorAttribution's smaller one.
@@ -4085,12 +4088,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
+		dispatchExecutor, _ := ExecutorContextFromContext(ctx)
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			slog.Warn("Scheduler: no dispatcher available, agent created but not started",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
-				"agentName", agent.Name)
+				"agentName", agent.Name,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return nil
 		}
 
@@ -4099,13 +4105,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"agentName", agent.Name,
-				"error", err)
+				"error", err,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"project_id", evt.ProjectID)
+			"project_id", evt.ProjectID,
+			"executor_kind", dispatchExecutor.Kind,
+			"executor_id", dispatchExecutor.ID)
 		return nil
 	}
 }

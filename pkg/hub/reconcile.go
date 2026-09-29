@@ -72,11 +72,13 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		if rec := s.dispatchMetrics; rec != nil {
 			rec.IncClaimed(ctx, 1, opAttr)
 		}
-		// E.2b: this node is executing a durable intent recorded by another
+		// This node is executing a durable intent recorded by another
 		// request (possibly on another node), so mark it as deferred
 		// execution and log the initiator it was opened under, alongside the
-		// dispatch row's own correlation id.
+		// dispatch row's own correlation id and the executor that is now
+		// running it.
 		dispatchCtx := ContextWithExecutor(ctx, ExecutorContext{Kind: "broker_dispatch", ID: d.ID})
+		dispatchExecutor, _ := ExecutorContextFromContext(dispatchCtx)
 		initiatorLogArgs := []any{
 			"id", d.ID, "op", d.Op,
 			"initiator_principal_kind", d.InitiatorPrincipalKind,
@@ -84,6 +86,8 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 			"initiator_credential_kind", d.InitiatorCredentialKind,
 			"initiator_credential_id", d.InitiatorCredentialID,
 			"correlation_id", d.CorrelationID,
+			"executor_kind", dispatchExecutor.Kind,
+			"executor_id", dispatchExecutor.ID,
 		}
 		result, execErr := s.execDispatch(dispatchCtx, d)
 		if execErr != nil {
