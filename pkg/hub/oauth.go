@@ -661,17 +661,6 @@ func selectVerifiedGitHubEmail(emails []githubEmail, profileEmail string) (strin
 	return requireVerifiedEmail(hubclient.OAuthProviderGitHub, candidate.Email, candidate.Verified)
 }
 
-// getGitHubPrimaryEmail fetches and selects a verified email from GitHub's
-// emails endpoint, with no profile-email preference (see
-// selectVerifiedGitHubEmail).
-func (s *OAuthService) getGitHubPrimaryEmail(ctx context.Context, accessToken string) (string, error) {
-	emails, err := s.getGitHubEmails(ctx, accessToken)
-	if err != nil {
-		return "", err
-	}
-	return selectVerifiedGitHubEmail(emails, "")
-}
-
 // DeviceCodeResponse holds the response from a device authorization request.
 type DeviceCodeResponse struct {
 	DeviceCode              string `json:"device_code"`

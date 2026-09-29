@@ -85,17 +85,18 @@ func TestOAuthService_GetGoogleUserInfo_MissingEmail_Rejected(t *testing.T) {
 	}
 }
 
-func TestOAuthService_GetGitHubPrimaryEmail_PrimaryVerified_Preferred(t *testing.T) {
-	svc := &OAuthService{httpClient: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return httpJSONResponse(http.StatusOK, `[
-				{"email":"secondary@example.com","primary":false,"verified":true},
-				{"email":"primary@example.com","primary":true,"verified":true}
-			]`), nil
-		}),
-	}}
+// These four cases exercise selectVerifiedGitHubEmail directly (a pure
+// function, no HTTP needed) with no profile-email preference — the shape
+// getGitHubPrimaryEmail used to test before it was removed as a
+// production-dead wrapper around this same function.
 
-	email, err := svc.getGitHubPrimaryEmail(context.Background(), "token")
+func TestSelectVerifiedGitHubEmail_NoPreference_PrimaryVerified_Preferred(t *testing.T) {
+	emails := []githubEmail{
+		{Email: "secondary@example.com", Primary: false, Verified: true},
+		{Email: "primary@example.com", Primary: true, Verified: true},
+	}
+
+	email, err := selectVerifiedGitHubEmail(emails, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,17 +105,13 @@ func TestOAuthService_GetGitHubPrimaryEmail_PrimaryVerified_Preferred(t *testing
 	}
 }
 
-func TestOAuthService_GetGitHubPrimaryEmail_AnyVerified_FallbackWhenNoPrimary(t *testing.T) {
-	svc := &OAuthService{httpClient: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return httpJSONResponse(http.StatusOK, `[
-				{"email":"unverified@example.com","primary":true,"verified":false},
-				{"email":"verified@example.com","primary":false,"verified":true}
-			]`), nil
-		}),
-	}}
+func TestSelectVerifiedGitHubEmail_NoPreference_AnyVerified_FallbackWhenNoPrimary(t *testing.T) {
+	emails := []githubEmail{
+		{Email: "unverified@example.com", Primary: true, Verified: false},
+		{Email: "verified@example.com", Primary: false, Verified: true},
+	}
 
-	email, err := svc.getGitHubPrimaryEmail(context.Background(), "token")
+	email, err := selectVerifiedGitHubEmail(emails, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,29 +120,19 @@ func TestOAuthService_GetGitHubPrimaryEmail_AnyVerified_FallbackWhenNoPrimary(t 
 	}
 }
 
-func TestOAuthService_GetGitHubPrimaryEmail_NoVerifiedEmail_Rejected(t *testing.T) {
-	svc := &OAuthService{httpClient: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return httpJSONResponse(http.StatusOK, `[
-				{"email":"unverified@example.com","primary":true,"verified":false}
-			]`), nil
-		}),
-	}}
+func TestSelectVerifiedGitHubEmail_NoPreference_NoVerifiedEmail_Rejected(t *testing.T) {
+	emails := []githubEmail{
+		{Email: "unverified@example.com", Primary: true, Verified: false},
+	}
 
-	email, err := svc.getGitHubPrimaryEmail(context.Background(), "token")
+	email, err := selectVerifiedGitHubEmail(emails, "")
 	if err == nil {
 		t.Fatalf("expected an error when no email is verified, got email=%q", email)
 	}
 }
 
-func TestOAuthService_GetGitHubPrimaryEmail_EmptyList_Rejected(t *testing.T) {
-	svc := &OAuthService{httpClient: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return httpJSONResponse(http.StatusOK, `[]`), nil
-		}),
-	}}
-
-	if _, err := svc.getGitHubPrimaryEmail(context.Background(), "token"); err == nil {
+func TestSelectVerifiedGitHubEmail_NoPreference_EmptyList_Rejected(t *testing.T) {
+	if _, err := selectVerifiedGitHubEmail(nil, ""); err == nil {
 		t.Fatal("expected an error when the provider lists no email at all")
 	}
 }
