@@ -97,9 +97,13 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
-	// Check 5: root human live authority. Interim: current membership only
-	// (system authority for the exact permission is evaluated in a later
-	// change).
+	// Check 5: root human live authority. Admission is membership OR
+	// target-applicable system authority for the exact secret.use permission
+	// (ptone/scion#2129), via ProjectAdmissionForClass. The root's own
+	// liveness (found, active) is still checked directly here, so the
+	// specific reason code (target_unresolved / source_inactive / a genuine
+	// lookup fault) is preserved regardless of admission's own, coarser,
+	// fail-closed error handling.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -116,11 +120,20 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if u.Status != store.UserStatusActive {
 		return nil, ReasonSourceInactive, http.StatusForbidden
 	}
-	m := s.CheckEffectiveMembership(ctx, root.ID, rec.ProjectID)
-	if m.Err != nil {
+	if s.authzService == nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	if !m.IsMember {
+	admission, err := s.authzService.ProjectAdmissionForClass(ctx,
+		PrincipalContext{Kind: PrincipalKindUser, ID: root.ID},
+		rec.ProjectID,
+		"secret.use",
+		ProjectTargetClass{ResourceType: "secret", ScopeKind: store.ScopeProject},
+		nil,
+	)
+	if err != nil {
+		return nil, ReasonBackendError, http.StatusInternalServerError
+	}
+	if !admission.Admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
 	}
 
