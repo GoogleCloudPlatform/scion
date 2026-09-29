@@ -817,18 +817,20 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 
 	agent := dcAgentIdentity(ceilingAgentID, f.projectAlpha.ID, AgentRoleFull)
 
-	// Resource in Beta with the AGENT's ID in Ancestry. This triggers:
+	// Agent in Beta with the AGENT's ID in Ancestry. This triggers:
 	//  - Kernel deny: synthetic binding scoped to Alpha, resource in Beta.
-	//  - Ancestor relationship grant: agent is in Ancestry.
-	//  - Scope restriction passes: project.read is in agent scopes.
+	//  - Ancestor relationship grant: agent is in Ancestry, and
+	//    agent.lifecycle is listed for agent ancestors of agents.
+	//  - Scope restriction passes: agent.lifecycle is in agent scopes.
 	//  - Ceiling: edge scoped to Beta exists, user holds permission in Beta.
 	resource := Resource{
-		Type: "project", ID: f.projectBeta.ID,
-		Ancestry: []string{ceilingAgentID},
+		Type: "agent", ID: tid("relceil-child"),
+		ParentType: "project", ParentID: f.projectBeta.ID,
+		Ancestry: []string{ceilingUserID, ceilingAgentID},
 	}
 
 	// ALLOWED: relationship grant fires (kernel denied), ceiling passes.
-	decision := f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	decision := f.authz.CheckAccess(ctx, agent, resource, ActionLifecycle)
 	assert.True(t, decision.Allowed,
 		"agent should be allowed via ancestry relationship grant when ceiling passes; got reason: %s", decision.Reason)
 	assert.Contains(t, decision.Reason, "relationship grant",
@@ -848,7 +850,7 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 	// denies because the delegator no longer holds the permission. Before
 	// the C-1 fix, this would incorrectly return allowed because Step 9
 	// returned early before Step 10 (ceiling check).
-	decision = f.authz.CheckAccess(ctx, agent, resource, ActionRead)
+	decision = f.authz.CheckAccess(ctx, agent, resource, ActionLifecycle)
 	assert.False(t, decision.Allowed,
 		"agent MUST be denied via ceiling even when allowed by relationship grant (C-1 fix)")
 	assert.Contains(t, decision.Reason, "delegator",
@@ -899,8 +901,8 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 	}
 	// Progeny secret reads name project.secret_read, as the production
 	// callers do. The nil-scope agent gets the fail-closed credential scope
-	// restriction, which also applies to the relationship grant, and the
-	// final decision keeps the kernel denial ("no candidate bindings").
+	// restriction, which also applies to the relationship candidate; the
+	// deny reason names the restriction kind.
 	decision := f.authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agentIdentity),
 		Credential: credentialContextForIdentity(agentIdentity),
@@ -909,8 +911,8 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		Permission: permissionProjectSecretRead,
 	})
 	assert.False(t, decision.Allowed,
-		"progeny grant is restricted by agent credential scope in CheckAccess path")
-	assert.Equal(t, "no candidate bindings", decision.Reason)
+		"progeny grant is restricted by agent credential scope")
+	assert.Equal(t, "relationship grant restricted by credential_scope", decision.Reason)
 
 	// An agent NOT in the ancestry should also be denied
 	outsiderAgent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("golden-outsider-agent")}, ProjectID: f.projectBeta.ID}}

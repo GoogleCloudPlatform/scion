@@ -161,6 +161,19 @@ type AuthzRequest struct {
 	Action     Action
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
+
+	// Actor and Purpose describe who initiated the operation and why, when
+	// that differs from Principal (for example a delivery performed for a
+	// target agent). They are recorded in provenance for audit and never
+	// contribute to the decision.
+	Actor   *DecisionActor
+	Purpose string
+}
+
+// DecisionActor identifies the initiator of an operation. Audit-only.
+type DecisionActor struct {
+	Kind PrincipalKind `json:"kind,omitempty"`
+	ID   string        `json:"id"`
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -236,6 +249,10 @@ type AuthzService struct {
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
+
+	// progenyAdapters holds progeny sharing-source adapters registered
+	// through RegisterProgenyAdapter.
+	progenyAdapters progenyAdapterRegistry
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -534,24 +551,34 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	kernelResult := Evaluate(kernelReq)
 
-	// ── Step 9: Relationship grants (checked alongside kernel) ────────
-	// If the kernel denied, check named relationship grants. These
-	// replace the legacy bypasses (owner, ancestor, progeny) with
-	// documented, traceable grant paths.
+	// ── Step 9: Relationship candidates ───────────────────────────────
+	// On a kernel deny, named relationships (owner, ancestor, progeny,
+	// hub-member assign, creator user skill) are evaluated as typed
+	// candidates through the common stages in authz_relationship_rules.go:
+	// relationship policy, hub-attested ancestry, relationship fact, source
+	// activity, and the same restrictions the kernel applied (7a/7b/7c).
+	// With Explain, candidates are also evaluated on a kernel allow so the
+	// provenance lists them.
 	decision := kernelDecisionToDecision(kernelResult, permissionID)
-	if !kernelResult.Allowed {
-		if relDecision, ok := a.checkRelationshipGrants(ctx, principal, request.Resource, request.Action, permissionID, credential); ok {
-			// Apply credential restrictions to relationship grants too.
-			for _, r := range restrictions {
-				if r.Check == nil || !r.Check(permissionID) {
-					relDecision.Allowed = false
-					relDecision.Reason = "relationship grant restricted by " + r.Kind
-					break
+	if !kernelResult.Allowed || request.Explain {
+		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		if !kernelResult.Allowed {
+			if rel.accepted != nil {
+				kernelProvenance := decision.Provenance
+				decision = *rel.accepted
+				if request.Explain && kernelProvenance != nil {
+					kernelProvenance.DenyReasons = nil
+					decision.Provenance = kernelProvenance
+				}
+			} else if rel.restrictedBy != "" {
+				decision.Reason = "relationship grant restricted by " + rel.restrictedBy
+				if decision.Provenance != nil {
+					decision.Provenance.DenyReasons = append([]string{decision.Reason}, decision.Provenance.DenyReasons...)
 				}
 			}
-			if relDecision.Allowed {
-				decision = relDecision
-			}
+		}
+		if request.Explain && decision.Provenance != nil {
+			decision.Provenance.Relationships = rel.results
 		}
 	}
 
@@ -595,6 +622,8 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
+		decision.Provenance.Actor = request.Actor
+		decision.Provenance.Purpose = request.Purpose
 	}
 
 	result := decorateDecision(decision, principal, credential)
@@ -971,102 +1000,8 @@ func formatBoundaryScope(scopeType, scopeID string) string {
 // Relationship grants (replacing legacy bypasses)
 // =============================================================================
 
-// checkRelationshipGrants evaluates named relationship grants. These replace
-// the legacy owner, ancestor, and progeny bypasses with documented, traceable
-// grant paths. Returns (decision, true) if a relationship grant applied,
-// (zero, false) otherwise.
-func (a *AuthzService) checkRelationshipGrants(
-	ctx context.Context,
-	principal PrincipalContext,
-	resource Resource,
-	action Action,
-	permissionID string,
-	credential CredentialContext,
-) (Decision, bool) {
-	// 1. Ancestry-based transitive access.
-	// Any principal (user or agent) in the resource's creation chain has
-	// access. This replaces the old canAccessAsAncestor bypass with a named
-	// relationship grant. Hub-attested ancestry is enforced for agents.
-	if canAccessAsAncestor(principal.ID, resource) {
-		// For agents, verify ancestry is hub-attested.
-		if isAgentPrincipal(principal.Kind) {
-			if !AncestryIsHubAttested(principal.Identity) {
-				return Decision{}, false
-			}
-		}
-		return Decision{
-			Allowed:      true,
-			Reason:       "relationship grant: ancestor access",
-			Scope:        ScopeTypeRelationship,
-			MatchedGrant: "ancestor",
-		}, true
-	}
-
-	// 2. Resource owner access.
-	// The resource creator retains access to their own resources. This
-	// replaces the old owner bypass. Exception: ActionAssign on hub-scoped
-	// gcp_service_account requires current hub membership (D7 constraint).
-	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID {
-		if action == ActionAssign && resource.Type == "gcp_service_account" &&
-			resource.ParentType == "" && resource.ParentID == "" {
-			// Hub-scoped SA assign: owner bypass suppressed, fall through to
-			// hub membership check below.
-		} else {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: resource owner",
-				Scope:        ScopeTypeRelationship,
-				MatchedGrant: "owner",
-			}, true
-		}
-	}
-
-	// 3. Hub-scoped service-account assign for current hub members.
-	// Current hub members may assign hub-scoped SAs. This is a narrow
-	// code-defined grant that replaces the old hub-member baseline.
-	if isUserPrincipal(principal.Kind) &&
-		action == ActionAssign && resource.Type == "gcp_service_account" &&
-		resource.ParentType == "" && resource.ParentID == "" {
-		if a.isCurrentHubMember(ctx, principal.ID) {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: hub member hub-scoped assign",
-				Scope:        "hub",
-				MatchedGrant: "hub-member-assign",
-			}, true
-		}
-	}
-
-	// 4. Creator user-skill read (agents only).
-	// An agent may read its creator's own user-scoped skills; see
-	// agentCreatorUserSkillGrant. The origin user must also still exist and
-	// be active. The agent JWT restriction and access constraints (applied
-	// by the caller) and the delegation ceiling still apply on top.
-	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
-		return d, true
-	}
-
-	// 5. Progeny relationship grants (agents only).
-	// Agent reads on secrets, env vars, and skill injections via the
-	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
-	// policy pattern.
-	if isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			result := a.relationshipResolver.CheckProgenyAccess(ctx, agent, resource, action)
-			if result.Allowed {
-				return Decision{
-					Allowed:      true,
-					Reason:       "relationship grant: " + string(result.RelationshipType),
-					Scope:        ScopeTypeRelationship,
-					MatchedGrant: result.Provenance.RoleName,
-					BindingID:    result.Provenance.BindingID,
-				}, true
-			}
-		}
-	}
-
-	return Decision{}, false
-}
+// Relationship grants are evaluated by evaluateRelationshipCandidates
+// (authz_relationship_rules.go).
 
 // =============================================================================
 // Agent synthetic binding construction
