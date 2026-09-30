@@ -351,6 +351,58 @@ class CodexProvisionTest(unittest.TestCase):
                 self.assertNotIn('reasoning_effort = "medium"', content)
                 self.assertIn('other_key = "value"', content)
 
+    def test_reconcile_codex_toml_writes_model(self) -> None:
+        # ptone/scion#2365: SCION_MODEL (already alias-resolved by the Go
+        # side) must be written into config.toml rather than relying on a
+        # static baked-in `model` line, so alias updates take effect without
+        # rebuilding the harness image.
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                provision._reconcile_codex_toml(None, None, model="gpt-6.1-sol")
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model = "gpt-6.1-sol"', content)
+
+    def test_reconcile_codex_toml_omits_model_when_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                provision._reconcile_codex_toml(None, None, model=None)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertNotIn("model =", content)
+
+    def test_reconcile_codex_toml_replaces_baked_in_model(self) -> None:
+        """A static `model` baked into the harness image (or a stale prior
+        provision) must not silently win over the resolved SCION_MODEL."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('model = "gpt-5.5"\nother_key = "value"\n')
+                provision._reconcile_codex_toml(None, None, model="gpt-6.1-sol")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model = "gpt-6.1-sol"', content)
+                self.assertEqual(content.count("model ="), 1)
+                self.assertNotIn("gpt-5.5", content)
+                self.assertIn('other_key = "value"', content)
+
+    def test_reconcile_codex_toml_does_not_clobber_model_reasoning_effort_key(self) -> None:
+        """`model` must be stripped as a top-level key without matching the
+        `model_reasoning_effort` key's shared prefix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                provision._reconcile_codex_toml(None, None, reasoning_effort="high", model="gpt-6.1-sol")
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model = "gpt-6.1-sol"', content)
+                self.assertIn('model_reasoning_effort = "high"', content)
+
     def test_strip_toml_top_level_key_section_safety(self) -> None:
         content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
         result = provision._strip_toml_top_level_key(content, "reasoning_effort")

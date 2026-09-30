@@ -262,6 +262,7 @@ def _reconcile_codex_toml(
     telemetry: dict[str, Any] | None,
     env: dict[str, str] | None,
     reasoning_effort: str | None = None,
+    model: str | None = None,
 ) -> None:
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
@@ -272,7 +273,12 @@ def _reconcile_codex_toml(
             content = f.read()
     content = _strip_toml_top_level_key(content, "reasoning_effort")
     content = _strip_toml_top_level_key(content, "model_reasoning_effort")
+    content = _strip_toml_top_level_key(content, "model")
     content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]" or h.startswith("[otel."))
+
+    if model:
+        model_line = f'model = "{scion_harness.toml_escape(model)}"'
+        content = content.rstrip("\n\t ") + "\n" + model_line + "\n"
 
     if reasoning_effort:
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
@@ -403,10 +409,21 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
     if not isinstance(env_overlay, dict):
         env_overlay = None
+
+    # SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
+    # and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before
+    # the container starts). Write it into config.toml so it isn't silently
+    # shadowed by a static `model` baked into the harness home image
+    # (ptone/scion#2365).
+    model = os.environ.get("SCION_MODEL", "").strip()
+    if model:
+        ctx.info(f"model={model}")
+
     _reconcile_codex_toml(
         telemetry if isinstance(telemetry, dict) else None,
         env_overlay,
         reasoning_effort=reasoning_effort,
+        model=model or None,
     )
 
     extra: dict[str, Any] | None = None

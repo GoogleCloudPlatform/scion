@@ -36,6 +36,12 @@ skills_dir: .codex/skills
 interrupt_key: C-c
 instructions_file: .codex/AGENTS.md
 system_prompt_mode: prepend_to_instructions
+# Default model for agents started without an explicit --model. Resolved
+# through model_aliases below (broker-side: pkg/agent/provision.go; hub-side:
+# pkg/hub/harness_capabilities.go) rather than a static value, so it tracks
+# alias updates instead of drifting like the old hardcoded
+# home/.codex/config.toml `model` did (ptone/scion#2365).
+model: medium
 model_aliases:
   small: gpt-6-luna
   medium: gpt-6.1-sol
