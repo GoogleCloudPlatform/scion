@@ -162,3 +162,17 @@ its names, signatures, and returned struct shapes.
 as `=` (byte-identical patches, only the base changed). Re-ran every gate
 above after the rebase; all still pass. New head `eaaac21a`. New fork PR
 against `main`: ptone/scion#2360 (the old stacked PR is not reopened).
+
+## Upstream review follow-up: ReviewOverdue's day boundary
+
+Upstream review on GoogleCloudPlatform/scion#2152 asked whether
+`Experiment.ReviewOverdue` should evaluate `ReviewBy` against the caller's
+local calendar date instead of UTC. Declined: `ReviewBy` is a zone-less
+calendar date evaluated the same way for every caller, so the boundary
+stays UTC midnight — every hub replica agrees on the same instant
+regardless of its host's timezone setting, and the doc comment now says so
+explicitly. Added `TestReviewOverdue_LocationIndependent`, which re-expresses
+the same instant in `time.UTC` and two `time.FixedZone` locations 14 hours
+ahead and 12 hours behind, around and exactly at the day boundary, and
+checks all three agree. Confirmed by mutation that the test fails against a
+version parsing `ReviewBy` in the caller's location.

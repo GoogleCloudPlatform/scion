@@ -164,6 +164,44 @@ func TestReviewOverdue(t *testing.T) {
 	}
 }
 
+// TestReviewOverdue_LocationIndependent asserts that ReviewOverdue answers
+// the same way for the same instant regardless of now's Location: the day
+// boundary is UTC midnight, not a wall-clock calendar boundary in now's own
+// zone, so every hub replica (whatever its host's TZ setting) and every
+// caller agree. time.FixedZone is used instead of a real IANA zone so the
+// test does not depend on tzdata being installed.
+func TestReviewOverdue_LocationIndependent(t *testing.T) {
+	e := valid("web.reviewed", LayerWeb)
+	e.ReviewBy = "2026-06-15"
+	boundary := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC) // ReviewBy + 1 day, UTC midnight
+
+	farPositive := time.FixedZone("UTC+14", 14*60*60)  // e.g. Pacific/Kiritimati
+	farNegative := time.FixedZone("UTC-12", -12*60*60) // e.g. Etc/GMT+12
+	locations := []*time.Location{time.UTC, farPositive, farNegative}
+
+	tests := []struct {
+		name    string
+		instant time.Time
+		want    bool
+	}{
+		{"1s before the boundary", boundary.Add(-time.Second), false},
+		{"exactly at the boundary", boundary, true},
+		{"1s after the boundary", boundary.Add(time.Second), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, loc := range locations {
+				// .In(loc) re-expresses the same instant in a different
+				// Location; it does not change what instant tt.instant is.
+				now := tt.instant.In(loc)
+				if got := e.ReviewOverdue(now); got != tt.want {
+					t.Errorf("ReviewOverdue(%v) = %v, want %v (same instant, different Location must not change the answer)", now, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 // TestAll_ReturnsIndependentCopies proves that mutating a slice returned by
 // All(), or a Layers slice passed into NewRegistry, cannot reach the
 // Registry's internal state: the Registry is immutable and shares no
