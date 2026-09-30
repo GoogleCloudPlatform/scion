@@ -103,11 +103,25 @@ describe('scion-file-browser — shared date formatter', () => {
     expect(ctorSpy).not.toHaveBeenCalled();
   });
 
-  it('formats a valid date the same way as before', async () => {
-    const el = await mountWithFiles([makeEntry('a.txt', '2026-03-14T09:41:00Z')]);
+  it('formats a valid date exactly as the pre-fix per-row formatter did', async () => {
+    const modTime = '2026-03-14T09:41:00Z';
+    // Computed with a fresh, independently-constructed formatter using the
+    // exact same locale/options formatDate() used before this change — this
+    // is what the old per-row `new Intl.DateTimeFormat(...).format(date)`
+    // call would have produced, so a change to the options (dropping the
+    // hour/minute, changing the locale, etc.) would fail this test even if
+    // it happened to still contain "Mar 14, 2026".
+    const expected = new Intl.DateTimeFormat('en', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(modTime));
+
+    const el = await mountWithFiles([makeEntry('a.txt', modTime)]);
     const [text] = dateCellsText(el);
-    // 'en' locale, short month/numeric day+year, 2-digit hour:minute.
-    expect(text).toMatch(/Mar 14, 2026/);
+    expect(text).toBe(expected);
   });
 
   it('falls back to the raw string for an invalid date', async () => {
@@ -115,6 +129,12 @@ describe('scion-file-browser — shared date formatter', () => {
     const [text] = dateCellsText(el);
     expect(text).toBe('not-a-real-date');
   });
+
+  // Mounting 1000 real rows (each with several Shoelace icon-buttons) in
+  // happy-dom is inherently slower than the default 5s test timeout — that
+  // is DOM/custom-element upgrade cost in the test environment, not the
+  // formatter behavior under test, hence the longer explicit timeout below.
+  const REPRESENTATIVE_ROW_COUNT_TIMEOUT_MS = 20_000;
 
   it(
     'renders a representative 1000-row listing without constructing new formatters',
@@ -130,10 +150,6 @@ describe('scion-file-browser — shared date formatter', () => {
       expect(dateCellsText(el).length).toBe(1000);
       expect(ctorSpy).not.toHaveBeenCalled();
     },
-    // Mounting 1000 real rows (each with several Shoelace icon-buttons) in
-    // happy-dom is inherently slower than the default 5s test timeout —
-    // this is DOM/custom-element upgrade cost in the test environment, not
-    // the formatter behavior under test.
-    20_000
+    REPRESENTATIVE_ROW_COUNT_TIMEOUT_MS
   );
 });

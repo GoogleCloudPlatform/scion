@@ -535,6 +535,15 @@ function isDotFile(path: string): boolean {
  * the locale/options here never change, so build it once at module scope
  * rather than once per row on every render — CPU samples attributed
  * roughly 160-174ms to per-row formatter construction on a 1000-row listing.
+ *
+ * Trade-off (reviewed, accepted): this formatter resolves the environment's
+ * default IANA time zone once, at module load, instead of on every prior
+ * construction. If the OS time zone changes while a tab stays open — a rare
+ * user action — displayed times keep using the old zone until reload. This
+ * column has no visible zone/offset indicator either way, so the displayed
+ * text differs only in which zone's wall-clock time it reflects; declined
+ * fixing (e.g. re-resolving `resolvedOptions().timeZone` once per render
+ * and rebuilding on change) as unwarranted complexity for that edge case.
  */
 const FILE_DATE_FORMATTER = new Intl.DateTimeFormat('en', {
   month: 'short',
