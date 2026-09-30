@@ -36,6 +36,20 @@ const uatCeilingBackfillMarkerSection = "migration_uat_ceiling_backfill_v1"
 // race with any other test's migration running concurrently.
 const defaultUATCeilingBackfillPageSize = 500
 
+// uatCeilingBackfillPageSizeOrDefault resolves the effective page size for
+// BackfillUATCeilings: the store's configured value when positive, otherwise
+// defaultUATCeilingBackfillPageSize. Extracted into its own method so the
+// resolution itself — including the <= 0 fallback — is directly testable,
+// independent of any particular row count exercising the backfill's
+// pagination loop (a small row count processed in a single page cannot
+// distinguish a shrunk field from the default being used regardless).
+func (c *CompositeStore) uatCeilingBackfillPageSizeOrDefault() int {
+	if c.uatCeilingBackfillPageSize > 0 {
+		return c.uatCeilingBackfillPageSize
+	}
+	return defaultUATCeilingBackfillPageSize
+}
+
 // BackfillUATCeilings persists a normalized permission ceiling for every
 // existing user_access_tokens row in scope: ceiling_version = 0
 // (unversioned) AND ceiling_permission_ids IS NULL — "never backfilled".
@@ -58,10 +72,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		return err
 	}
 
-	pageSize := c.uatCeilingBackfillPageSize
-	if pageSize <= 0 {
-		pageSize = defaultUATCeilingBackfillPageSize
-	}
+	pageSize := c.uatCeilingBackfillPageSizeOrDefault()
 
 	var lastID *ent.UserAccessToken
 	var updated int
@@ -97,7 +108,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 			ids := permissions.NormalizeLegacyUATScopes(scopes)
 			value, ok := persistedCeilingColumnValue(ids)
 			if !ok {
-				slog.Error("user access token ceiling backfill: normalization returned no permission list, skipping row",
+				slog.Error("user access token ceiling backfill: normalization returned no permission list (nil), skipping row",
 					"token_id", row.ID)
 				continue
 			}
