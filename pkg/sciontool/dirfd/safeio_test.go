@@ -504,6 +504,55 @@ func TestWriteFileNoFollow_TruncateInPlaceOrCreate_RefusesSymlink(t *testing.T) 
 	}
 }
 
+// TestWriteFileNoFollow_TruncateInPlaceOrCreate_RefusesHardlinkedLeaf proves
+// a leaf that is a regular file but has more than one hard link — a
+// workload can plant this by hard-linking to an unrelated (possibly
+// root-owned) file it does not itself own — is refused before anything is
+// truncated or written, exactly like a symlinked leaf: the victim inode's
+// content, owner, and mode must all be unchanged, and the error must name
+// the link count.
+func TestWriteFileNoFollow_TruncateInPlaceOrCreate_RefusesHardlinkedLeaf(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	wantInfo, err := os.Stat(victim)
+	if err != nil {
+		t.Fatalf("stat victim: %v", err)
+	}
+	path := filepath.Join(dir, "leaf")
+	if err := os.Link(victim, path); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	err = WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, TruncateInPlaceOrCreate)
+	if err == nil {
+		t.Fatal("expected a hardlinked leaf to be refused")
+	}
+	if !strings.Contains(err.Error(), "link count") {
+		t.Errorf("error = %v, want it to name the link count", err)
+	}
+
+	victimData, rerr := os.ReadFile(victim)
+	if rerr != nil {
+		t.Fatalf("read victim: %v", rerr)
+	}
+	if string(victimData) != "do-not-touch" {
+		t.Fatalf("victim was modified through the hardlink: %q", victimData)
+	}
+	gotInfo, serr := os.Stat(victim)
+	if serr != nil {
+		t.Fatalf("stat victim: %v", serr)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if gotInfo.Sys().(*syscall.Stat_t).Uid != wantInfo.Sys().(*syscall.Stat_t).Uid {
+		t.Error("victim owner changed")
+	}
+}
+
 // ---------------- ReadUnderRootNoFollow ----------------
 
 func TestReadUnderRootNoFollow_NormalRead(t *testing.T) {

@@ -326,22 +326,46 @@ func existingLeafIsRegularAt(dirFd int, leaf string) (isRegular bool, err error)
 	return true, nil
 }
 
-// writeInPlaceAt implements TruncateInPlaceOrCreate's own path: leaf, already
-// confirmed a regular file by existingLeafIsRegularAt, is reopened
-// O_WRONLY|O_TRUNC|O_NOFOLLOW relative to dirFd — still refusing to follow a
-// symlink if one was swapped in since that check — truncated, rewritten,
-// chmod'd/chown'd via the same open fd (never a path-based call), and
-// fsync'd. There is no rename: the leaf's directory entry, and the inode it
-// names, are exactly what they were before this call, just as required for a
-// bind-mounted target where a rename over the entry would fail EBUSY.
+// writeInPlaceAt implements TruncateInPlaceOrCreate's own path: leaf is
+// reopened O_WRONLY|O_NOFOLLOW|O_NONBLOCK relative to dirFd — deliberately
+// WITHOUT O_TRUNC, so nothing is touched before this function has verified
+// the fd it just opened — then fstat'd on that SAME fd, never a second
+// open, so there is no window between checking and truncating for a
+// symlink-or-hardlink swap to land in the way existingLeafIsRegularAt's own
+// separate, earlier check could not by itself prevent. A non-regular entry,
+// or a regular file with more than one hard link — a workload can always
+// pre-plant a hard link to an unrelated (possibly root-owned) file it does
+// not itself own, the same threat ReadAtNoFollow's own Nlink check and
+// hub.ChownTokenFile guard against — is refused, naming the link count,
+// before anything is truncated. Only then is the file truncated
+// (Ftruncate), rewritten, chmod'd/chown'd via the same fd, and fsync'd.
+// O_NONBLOCK also means a FIFO swapped in at the leaf can never hang this
+// open waiting for a reader/writer to connect, the same reasoning
+// RefuseSymlinkOrNonRegularAt and ReadAtNoFollow already use (O_NONBLOCK is
+// a no-op for an ordinary regular file, so it changes nothing for the
+// common case). There is no rename: the leaf's directory entry, and the
+// inode it names, are exactly what they were before this call, just as
+// required for a bind-mounted target where a rename over the entry would
+// fail EBUSY.
 func writeInPlaceAt(dirFd int, leaf, path string, data []byte, mode os.FileMode, uid, gid int, chown func(fd, uid, gid int) error) (err error) {
-	fd, operr := unix.Openat(dirFd, leaf, syscall.O_WRONLY|syscall.O_TRUNC|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	fd, operr := unix.Openat(dirFd, leaf, syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if operr != nil {
 		return fmt.Errorf("dirfd: open %s for in-place write: %w", path, operr)
 	}
 	f := os.NewFile(uintptr(fd), leaf)
 	defer func() { _ = f.Close() }()
 
+	var st syscall.Stat_t
+	if serr := syscall.Fstat(int(f.Fd()), &st); serr != nil {
+		return fmt.Errorf("dirfd: stat %s for in-place write: %w", path, serr)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		return fmt.Errorf("dirfd: refusing in-place write to %s: not a single-link regular file (mode=%#o, link count=%d)", path, st.Mode&syscall.S_IFMT, st.Nlink)
+	}
+
+	if terr := unix.Ftruncate(int(f.Fd()), 0); terr != nil {
+		return fmt.Errorf("dirfd: truncate %s for in-place write: %w", path, terr)
+	}
 	if _, werr := f.Write(data); werr != nil {
 		return fmt.Errorf("dirfd: write %s: %w", path, werr)
 	}
