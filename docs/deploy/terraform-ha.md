@@ -1,7 +1,7 @@
 # Multi-Hub HA: Terraform
 
-A minimalist how-to for an operator applying the Terraform module set under
-[`deploy/terraform/`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/terraform/README.md).
+A short how-to for an operator applying the Terraform module set under
+[`deploy/terraform/`](../../deploy/terraform/README.md).
 For an AI agent running this end to end, see the
 [agent runbook](agent-runbook-terraform-ha.md) instead. For full detail on
 every module, variable, and edge case, see
@@ -39,18 +39,14 @@ below.
 
 ## Apply: shared infra once, then a hub once per hub
 
+Apply order is: shared-infra once per project, then build and push the hub
+image into the AR repo shared-infra just created (out of scope for this
+Terraform), then a hub once per hub. See the README's "Bootstrap sequence"
+for the exact commands, backend-config flags, and why `state_prefix` must
+be passed and must match `-backend-config prefix` exactly. If one command
+sample is useful here, it's the hub pair:
+
 ```bash
-# 1. Shared infra, once per project.
-terraform -chdir=deploy/terraform/configurations/shared-infra init \
-  -backend-config="bucket=<project>-<prefix>-tfstate" \
-  -backend-config="prefix=<prefix>/shared"
-terraform -chdir=deploy/terraform/configurations/shared-infra apply \
-  -var-file=terraform.tfvars
-
-# 2. Build and push the hub image into the AR repo shared-infra just created
-#    (out of scope for this Terraform).
-
-# 3. One hub.
 terraform -chdir=deploy/terraform/configurations/hub init \
   -backend-config="bucket=<project>-<prefix>-tfstate" \
   -backend-config="prefix=<prefix>/hubs/<hub_name>"
@@ -59,21 +55,17 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
   -var-file=<hub_name>.tfvars
 ```
 
-`state_prefix` must always be passed and must equal the `-backend-config
-prefix` used at `init` — a variable `validation` block enforces this so a
-mistake fails the plan loudly instead of silently applying one hub's
-variables onto another hub's state.
-
-The shared-infra apply is dominated by the GKE cluster create (several
-minutes); expect the whole apply to take roughly 10 minutes. A first hub apply
-can hit a 403 on its own secrets shortly after creation — that's IAM
-propagation, not a wrong condition; re-apply rather than widening anything.
+— see the README for the shared-infra pair, expected timing (the GKE
+cluster create dominates; roughly 10 minutes total), and the first-hub-apply
+403-on-secrets note (IAM propagation; re-apply rather than widening
+anything).
 
 ## Verify
 
-1. **Health endpoints.** The hub exposes `/readyz` (gates traffic; what "up"
-   means here) and `/healthz` (always 200, but does unbounded DB/NFS work —
-   don't wire it up as a liveness check).
+1. **Health endpoints.** See the README's "Health endpoints" section —
+   `/readyz` gates traffic and is what "up" means here; `/healthz` is
+   aliased as `/health` on Cloud Run (the literal path 404s there) and
+   should not be used as a readiness or liveness signal.
 2. **A second `plan` on every root exits 0 ("No changes").** This is the
    acceptance bar. A refresh-only note (bucket lifecycle condition defaults,
    an IAM `etag` moving) is benign; an actual add/change/destroy on a plan you
@@ -88,34 +80,26 @@ propagation, not a wrong condition; re-apply rather than widening anything.
 
 ## Post-apply hub env
 
-Before an agent can start on a fresh hub, set two hub-scope environment
-values (a manual, per-hub, post-apply step — Terraform cannot do this, see
-the README's "Post-apply step" section for why):
-
-```bash
-scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
-scion hub env set --scope hub --always GOOGLE_CLOUD_REGION=<region>
-```
-
-Also see the README's "GCP identity for agents" section — an agent's GCP
-identity defaults to **Block**, which leaves it unauthenticated to Vertex
-even with Workload Identity fully wired. Set it to **Passthrough**.
+Before an agent can start on a fresh hub, an admin must set two hub-scope
+environment values — a manual, per-hub, post-apply step Terraform cannot do
+for you. See the README's "Post-apply step" section for the commands and
+why, and its "GCP identity for agents" subsection for the separate step of
+setting a new agent's GCP identity to **Passthrough** (it defaults to
+**Block**, which leaves it unauthenticated to Vertex even with Workload
+Identity fully wired).
 
 ## Adding a second hub
 
-Repeat step 3 above with a new `hub_name` and a matching `-backend-config
-prefix`/`state_prefix`. The shared layer is untouched; a fresh hub coexists
-with existing ones and destroying one hub never touches the others.
+Repeat the hub `init`/`apply` pair above with a new `hub_name` and a
+matching `-backend-config prefix`/`state_prefix`. The shared layer is
+untouched; a fresh hub coexists with existing ones and destroying one hub
+never touches the others.
 
 ## Teardown order (destroy guard)
 
-**Every hub root first, then shared — never the reverse.** The shared root's
-`destroy_guard` precondition fails the apply that turns off deletion
-protection while any hub database still exists. Read the README's "Destroy
-runbook" section in full before tearing anything down: it also covers why the
-guard alone isn't sufficient (`terraform destroy` skips preconditions
-entirely) and what a compliant teardown looks like, step by step.
-
-Never run `terraform destroy -var deletion_protection=false` against
-`shared-infra` outside that documented sequence, and never combine `-target`
-with `deletion_protection` on `shared-infra`.
+**Every hub root first, then shared — never the reverse.** Read the
+README's "Destroy runbook" section in full before tearing anything down —
+it is the only source for the compliant step-by-step sequence, the
+prohibited commands, and why the `destroy_guard` precondition alone isn't
+sufficient. Do not improvise from the outline above; follow that section
+exactly.

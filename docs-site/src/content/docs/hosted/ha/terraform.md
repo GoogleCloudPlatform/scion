@@ -39,8 +39,10 @@ Choose this over the manual GCP setup guide when you want:
 
 Stay with the manual guide, or a single-hub tier, if you only need one hub
 and prefer not to introduce a Terraform apply workflow. See
-[Choosing a Mode](/scion/choosing-a-mode/) for how this tier compares to
-Single-Node VM, Cloud Run Instance, and Developer Hub.
+[Choosing a Mode](/scion/choosing-a-mode/) for where HA hosted sits among
+Scion's run modes; for a full tier comparison including this one, see
+[`docs/deploy/choosing-a-mode.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/choosing-a-mode.md)
+in the repository.
 
 ## Getting started
 
@@ -58,8 +60,8 @@ teardown — lives in the repository, not duplicated here:
   including the plan-review gates required before every apply or destroy.
 
 After a hub is up, the [hosted user guide](/scion/hosted/user/hosted-user/)
-covers connecting to it, and the rest of this Admin Guide (
-[Runtime Brokers & Profiles](/scion/hosted/ha/runtime-broker/),
+covers connecting to it, and the rest of this Admin Guide
+([Runtime Brokers & Profiles](/scion/hosted/ha/runtime-broker/),
 [Kubernetes Runtime](/scion/hosted/ha/kubernetes/),
 [Identity & Access (RBAC)](/scion/hosted/ha/permissions/)) covers operating
 it day to day.

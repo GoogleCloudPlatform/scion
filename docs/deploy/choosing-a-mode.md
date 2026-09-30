@@ -11,7 +11,7 @@ compares them to help you pick the right one.
 
 ## Deployment Comparison
 
-| | Single-Node VM | Cloud Run Instance | Developer Hub | Multi-hub HA (Terraform) |
+| | Single-Node VM | Cloud Run Instance | Developer Hub | Multi-Hub HA (Terraform) |
 |---|---|---|---|---|
 | **What it is** | GCE VM running released binaries with IAP auth | Cloud Run Instance with sandbox-based agents and IAP auth | GCE VM that builds from source with GCS + Secret Manager | Several Cloud Run hubs behind IAP, sharing one project's Cloud SQL, Filestore, and GKE Autopilot |
 | **Scripts** | `scripts/single-node-vm/` | `scripts/single-node/` | `scripts/starter-hub/` | `deploy/terraform/` |
@@ -100,7 +100,7 @@ Good for development, testing, and contributing to Scion.
 
 See: [`scripts/starter-hub/README.md`](../../scripts/starter-hub/README.md)
 
-## Multi-hub HA (Terraform)
+## Multi-Hub HA (Terraform)
 
 A declarative Terraform module set that runs several namespaced hubs in one
 GCP project, sharing the expensive, fixed-cost infrastructure (Cloud SQL,
@@ -130,6 +130,10 @@ sequence of manual `gcloud` commands.
   development
 - Requires a Terraform apply workflow rather than a single provisioning
   script
+- Hub `min_instances` stays at 1, and multi-instance (`max_instances > 1`)
+  operation needs a hub image built from a recent-enough commit (see the
+  module README's "Scaling" section); a Cloud SQL failover drill has not
+  been run against this module set
 
 See: [Multi-Hub HA: Terraform](terraform-ha.md),
 [`deploy/terraform/README.md`](../../deploy/terraform/README.md)
@@ -146,6 +150,10 @@ See: [Multi-Hub HA: Terraform](terraform-ha.md),
   Full source checkout, GCS storage, custom domain, and Secret Manager.
 
 - **"I need high availability, or more than one hub sharing infrastructure"**
-  — **Multi-hub HA (Terraform)**. Declarative, reviewable, and the only tier
+  — **Multi-Hub HA (Terraform)**. Declarative, reviewable, and the only tier
   here that supports several hubs sharing one project's Cloud SQL,
   Filestore, and GKE Autopilot cluster.
+  - For a **single** HA hub without adopting a Terraform apply workflow,
+    see [`scripts/cloudrun/`](../../scripts/cloudrun/) / the docs-site
+    [Deploy on GCP](https://scion-ai.dev/scion/hosted/ha/setup-gcp/) guide
+    instead.
