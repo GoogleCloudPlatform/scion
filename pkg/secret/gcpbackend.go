@@ -162,8 +162,12 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 // call, not a per-item failure.
 //
 // Unlike Get, it never falls back to a Secret Manager lookup by computed
-// name when the Hub database record is missing: a missing or mismatched
-// record is reported as store.ErrNotFound for that item.
+// name when the Hub database record is missing entirely: a missing or
+// mismatched record is reported as store.ErrNotFound for that item. A record
+// that does exist but has no stored ref yet (not yet touched by
+// `migrate-names` or hub-boot copy-forward) resolves the same way Get does
+// in that case: by the hub-prefixed computed name, falling back to the
+// legacy pre-prefix name with a WARN log (ptone/scion#2152).
 //
 // store.SecretStore has no primary-key lookup (see LocalBackend.FetchValues
 // for the reasoning this mirrors), so each record is located by its
@@ -199,14 +203,19 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 	if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
 		value, err = b.AccessSecretValueByRef(ctx, smPath)
 	} else {
-		smName := b.gcpSecretName(s.Key, s.Scope, s.ScopeID)
-		value, err = b.accessLatestVersion(ctx, smName)
+		// No stored ref: mirror Get's DB-less recovery path (tries the
+		// hub-prefixed name, then falls back to the legacy pre-prefix name
+		// with a WARN log) rather than looking up the prefixed name alone,
+		// so a record that predates ref-tracking and hasn't yet been
+		// touched by `migrate-names` or hub-boot copy-forward still
+		// resolves (ptone/scion#2152/#2085 interaction).
+		value, _, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
 	}
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
-		if permErr := wrapGCPError(err, "access secret"); permErr != nil {
+		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
 			return FetchResult{Err: permErr}
 		}
 		return FetchResult{Err: err}
