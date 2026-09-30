@@ -650,6 +650,18 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 			},
 			wantDeny: "principal id does not match identity",
 		},
+		{
+			// Both the supplied Kind and the supplied ID mismatch the
+			// identity's own derivation. The kind check must run before the
+			// ID check, so this denies for the kind reason, not the ID one.
+			name: "interactive user with both a supplied principal kind and ID that do not match",
+			request: AuthzRequest{
+				Principal: PrincipalContext{Kind: PrincipalKindAgent, ID: "some-other-id", Identity: interactiveUser},
+				Resource:  Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:    ActionRead,
+			},
+			wantDeny: "principal kind does not match identity",
+		},
 	}
 
 	for _, tc := range cases {
