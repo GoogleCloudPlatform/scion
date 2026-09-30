@@ -1121,6 +1121,28 @@ func TestQuotaAPI_UpdateLimitDefinition_EmptyUnitFromCreateStillEditable(t *test
 // TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit is the round-5
 // F4 test: a non-system PUT with padding whitespace around resource_type and
 // unit must persist the trimmed values, not the raw ones.
+// TestQuotaAPI_CreateLimitDefinition_TrimsUnit is a regression test for
+// ptone/scion#2307: the create path did not trim whitespace from unit, while
+// the update path (see TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit)
+// already did.
+func TestQuotaAPI_CreateLimitDefinition_TrimsUnit(t *testing.T) {
+	srv, _ := testServer(t)
+
+	def := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name:         "trim_create_limit",
+		ResourceType: "agent",
+		Unit:         "  count  ",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, "count", def.Unit)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+def.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var stored store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&stored))
+	assert.Equal(t, "count", stored.Unit)
+}
+
 func TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit(t *testing.T) {
 	srv, _ := testServer(t)
 
