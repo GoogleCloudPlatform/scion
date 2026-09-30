@@ -464,3 +464,48 @@ describe('cyclic-ancestry root promotion (#2388 review N-B)', () => {
     expect(posById(forward)).toEqual(posById(reversed));
   });
 });
+
+describe('cycle with a non-cycle descendant (#2388 review round-3 F1)', () => {
+  // x and y form a 2-cycle; child is a legitimate descendant of x, not
+  // itself part of the cycle. child's id ('child') sorts before both cycle
+  // members' ids ('x', 'y') — exactly the ordering that, before this fix,
+  // promoted every unvisited node in plain id order rather than only actual
+  // cycle members: child got promoted as its own isolated root first, and
+  // the real x->child edge was silently dropped when x was promoted
+  // afterward and `visit` filtered out the already-visited child.
+  const x = agent('x', 'x', ['u', 'y']);
+  const y = agent('y', 'y', ['u', 'x']);
+  const child = agent('child', 'child', ['u', 'x']);
+
+  function edgesOf(agents: Agent[]): string[] {
+    const layout = layoutForest(buildLineageForest(agents));
+    return layout.edges.map((e) => `${e.parentId}>${e.childId}`).sort();
+  }
+
+  it('keeps the real x->child edge for every input order', () => {
+    const permutations = [
+      [x, y, child],
+      [x, child, y],
+      [y, x, child],
+      [y, child, x],
+      [child, x, y],
+      [child, y, x],
+    ];
+    for (const agents of permutations) {
+      expect(edgesOf(agents)).toContain('x>child');
+
+      const roots = buildLineageForest(agents);
+      expect(roots).toHaveLength(1); // every agent reachable from one root
+      expect(['x', 'y']).toContain(roots[0].agent.id); // never the descendant
+    }
+  });
+
+  it('produces the same forest (root and edges) regardless of input order', () => {
+    // child sorts first: the exact ordering that reproduced the bug pre-fix.
+    const descendantFirst = edgesOf([child, x, y]);
+    const cycleFirst = edgesOf([y, x, child]);
+
+    expect(descendantFirst).toEqual(cycleFirst);
+    expect(descendantFirst).toEqual(['x>child', 'x>y']); // x wins the id tie-break
+  });
+});

@@ -106,6 +106,11 @@ export function rootUserOf(agent: Agent): string | undefined {
   return chain && chain.length > 0 ? chain[0] : undefined;
 }
 
+/** Deterministic string ordering, used everywhere an id needs a stable tie-break. */
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
  * A signature that changes iff a layout input the forest/layout functions
  * actually read would change: membership (add/remove), direct-parent
@@ -135,7 +140,7 @@ export function topologySignature(
 ): string {
   const rows = agents
     .map((a) => [a.id, parentIdOf(a) ?? '', rootUserOf(a) ?? '', a.name] as const)
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    .sort((a, b) => compareIds(a[0], b[0]));
   const collapsed = [...collapsedIds].sort();
   return JSON.stringify({ rows, collapsed, showUsers, orientation });
 }
@@ -170,8 +175,7 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
   // (topologySignature): the signature is order-independent, so the layout
   // it keys must be too, or a cache hit can draw a stale ordering for ties.
   const byName = (a: LineageNode, b: LineageNode) =>
-    a.agent.name.localeCompare(b.agent.name) ||
-    (a.agent.id < b.agent.id ? -1 : a.agent.id > b.agent.id ? 1 : 0);
+    a.agent.name.localeCompare(b.agent.name) || compareIds(a.agent.id, b.agent.id);
   for (const node of byId.values()) {
     node.children.sort(byName);
   }
@@ -190,18 +194,45 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     for (const child of node.children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
-  // Cycle-member promotion order must not depend on the input array's order
-  // (byId's iteration order is insertion order, i.e. the input array's): a
-  // pure function of id makes which member becomes the root deterministic,
-  // so the layout stays a pure function of topologySignature's (order-
-  // independent) inputs even for this malformed-data edge case.
-  const byIdAscending = [...byId.values()].sort((a, b) =>
-    a.agent.id < b.agent.id ? -1 : a.agent.id > b.agent.id ? 1 : 0
-  );
-  for (const node of byIdAscending) {
-    if (!visited.has(node.agent.id)) {
-      roots.push(node);
-      visit(node, 0);
+  // Anything still unvisited is unreachable from a legitimate root, which
+  // only happens via a cycle in the (malformed) ancestry data: every
+  // unvisited node's parent exists and is itself unvisited (a node reachable
+  // from a root, or a root itself, would already be visited above), so
+  // following parent pointers from any unvisited node cannot terminate — it
+  // must eventually repeat, and that repeat is a cycle.
+  //
+  // Promoting *every* unvisited node in id order (as opposed to only actual
+  // cycle members) is wrong: a node whose only path to a root runs through a
+  // cycle (a real descendant of a cycle member, not part of the cycle
+  // itself) would be promoted as its own isolated root if its id happens to
+  // sort first, silently dropping its real parent edge. Instead, for each
+  // unvisited starting point, walk up to find the cycle it hangs off, then
+  // promote only that cycle's lowest-id member and let `visit` walk back
+  // down through it — reaching every real descendant, cycle member or not,
+  // via their already-correct `children` entries. Sorted by id — not input
+  // array order — so which member gets promoted is deterministic and stays
+  // a pure function of topologySignature's (order-independent) inputs.
+  const unvisitedAscending = [...byId.values()]
+    .filter((n) => !visited.has(n.agent.id))
+    .sort((a, b) => compareIds(a.agent.id, b.agent.id));
+  for (const node of unvisitedAscending) {
+    if (visited.has(node.agent.id)) continue; // reached by an earlier promotion in this loop
+    const path: LineageNode[] = [];
+    const pathIndexById = new Map<string, number>();
+    let cur = node;
+    while (!pathIndexById.has(cur.agent.id)) {
+      pathIndexById.set(cur.agent.id, path.length);
+      path.push(cur);
+      // cur's parent is guaranteed to exist and be unvisited: see comment above.
+      cur = byId.get(parentIdOf(cur.agent)!)!;
+    }
+    const cycle = path.slice(pathIndexById.get(cur.agent.id)!);
+    const cycleRoot = cycle.reduce((min, n) =>
+      compareIds(n.agent.id, min.agent.id) < 0 ? n : min
+    );
+    if (!visited.has(cycleRoot.agent.id)) {
+      roots.push(cycleRoot);
+      visit(cycleRoot, 0);
     }
   }
 
