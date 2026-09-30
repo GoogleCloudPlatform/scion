@@ -279,7 +279,13 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w, http.MethodPost)
+			// .../update/{id} also accepts GET (status lookup, handled above);
+			// only the no-actionSub form is POST-only.
+			if actionSub != "" {
+				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+			} else {
+				MethodNotAllowed(w, http.MethodPost)
+			}
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)
