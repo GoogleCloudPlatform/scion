@@ -6,6 +6,7 @@ package commands
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -208,6 +211,77 @@ func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
 	}
 }
 
+// TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild pins the
+// L-A gap: init.go's stagedsecrets.Write failure branch is a hard error
+// today (return 1), not a swallow-and-continue. A planted symlink at
+// <agentHome>/.scion/secrets.json (e.g. left over from a persisted home,
+// simulating a restart) makes stagedsecrets.Write refuse — this proves
+// RunInit surfaces that refusal as a non-zero exit, reports the error phase,
+// leaves the symlink's target completely untouched, and never reaches the
+// point where it would exec the child command at all (the child argv here,
+// "definitely-not-a-real-binary-xyz", would itself fail loudly if exec were
+// ever attempted, but RunInit must never get that far in the first place).
+func TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild(t *testing.T) {
+	scrubHubEnv(t)
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_HOST_GID", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(tmpHome, "victim")
+	if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(scionDir, "secrets.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	staged := stagedsecrets.Staged{VariableSecrets: map[string]string{"token": "abc123"}}
+	data, err := json.Marshal(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
+
+	got := RunInit([]string{"definitely-not-a-real-binary-xyz"}, InitRunOptions{DisableTermSignalForwarding: true})
+	if got == 0 {
+		t.Fatal("RunInit() = 0, want non-zero when stagedsecrets.Write refuses a symlinked secrets.json")
+	}
+
+	link, err := os.Readlink(filepath.Join(scionDir, "secrets.json"))
+	if err != nil {
+		t.Fatalf("secrets.json is no longer a symlink after the refused write: %v", err)
+	}
+	if link != victim {
+		t.Errorf("secrets.json symlink target = %q, want %q (unchanged)", link, victim)
+	}
+	content, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(content) != "untouched" {
+		t.Errorf("victim content = %q, want %q (unchanged — the refused write must never reach it)", content, "untouched")
+	}
+
+	raw, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("expected agent-info.json to be written: %v", err)
+	}
+	var info struct {
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
+	}
+}
+
 // -----------------------------------------------------------------------
 // adjustScionUser's requirePrivilegeDrop-gated fail-closed checks.
 // -----------------------------------------------------------------------
@@ -221,7 +295,7 @@ func withScionUserLookup(t *testing.T, f func(string) (*user.User, error)) {
 }
 
 // withRunDirectSetUID temporarily overrides the runDirectSetUID package var.
-func withRunDirectSetUID(t *testing.T, f func(string, string, string) error) {
+func withRunDirectSetUID(t *testing.T, f func(string, string, string, bool) error) {
 	t.Helper()
 	orig := runDirectSetUID
 	runDirectSetUID = f
@@ -233,7 +307,7 @@ func TestAdjustScionUser_AlreadyCorrect_ShortCircuitsRegardlessOfFlag(t *testing
 		return &user.User{Uid: "1000", Gid: "1000"}, nil
 	})
 	var directCalled bool
-	withRunDirectSetUID(t, func(string, string, string) error {
+	withRunDirectSetUID(t, func(string, string, string, bool) error {
 		directCalled = true
 		return nil
 	})
@@ -262,7 +336,7 @@ func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 
 	t.Run("RequirePrivilegeDrop=true fails closed", func(t *testing.T) {
 		var calls int
-		withRunDirectSetUID(t, func(string, string, string) error {
+		withRunDirectSetUID(t, func(string, string, string, bool) error {
 			calls++
 			return nil
 		})
@@ -279,7 +353,7 @@ func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 	})
 
 	t.Run("RequirePrivilegeDrop=false is unchanged", func(t *testing.T) {
-		withRunDirectSetUID(t, func(string, string, string) error { return nil })
+		withRunDirectSetUID(t, func(string, string, string, bool) error { return nil })
 		uid, gid, rootless := adjustScionUser(1000, 1000, "1000", "1000", false)
 		if uid != 1000 || gid != 1000 || rootless != false {
 			t.Errorf("adjustScionUser(..., false) = (%d,%d,%v), want (1000,1000,false) — unenforced callers must stay byte-identical", uid, gid, rootless)
@@ -295,7 +369,7 @@ func TestAdjustScionUser_DirectSetUIDRewroteNothing(t *testing.T) {
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: "2000", Gid: "2000"}, nil
 	})
-	withRunDirectSetUID(t, func(string, string, string) error {
+	withRunDirectSetUID(t, func(string, string, string, bool) error {
 		return wrapPasswdEntryNotRewritten(errPasswdEntryNotRewritten)
 	})
 	t.Setenv("SCION_ALT_USERMOD", "1")
@@ -324,7 +398,7 @@ func TestAdjustScionUser_DirectSetUIDOtherError_AlwaysFailsClosed(t *testing.T) 
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: "2000", Gid: "2000"}, nil
 	})
-	withRunDirectSetUID(t, func(string, string, string) error {
+	withRunDirectSetUID(t, func(string, string, string, bool) error {
 		return errors.New("sed /etc/group: exit status 1 (output: sed: -e expression #1, char 1: unknown option to `s')")
 	})
 	t.Setenv("SCION_ALT_USERMOD", "1")
@@ -350,7 +424,7 @@ func TestAdjustScionUser_PostAdjustVerifyMismatch(t *testing.T) {
 		// usermod step silently did not take effect.
 		return &user.User{Uid: "2000", Gid: "2000"}, nil
 	})
-	withRunDirectSetUID(t, func(string, string, string) error { return nil })
+	withRunDirectSetUID(t, func(string, string, string, bool) error { return nil })
 	t.Setenv("SCION_ALT_USERMOD", "1")
 
 	t.Run("RequirePrivilegeDrop=true fails closed", func(t *testing.T) {
@@ -402,7 +476,7 @@ func TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError(t *testing.T) {
 	// checking for.
 	self := strconv.Itoa(os.Getuid())
 	selfGID := strconv.Itoa(os.Getgid())
-	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir)
+	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, false)
 	if !errors.Is(err, errPasswdEntryNotRewritten) {
 		t.Fatalf("directSetUIDAt() = %v, want an error wrapping errPasswdEntryNotRewritten", err)
 	}
@@ -417,7 +491,7 @@ func TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError(t *testing.T) {
 
 	// But the home chown must still have happened — see the doc comment
 	// above.
-	assertHomeChowned(t, *chowns, homeDir)
+	assertHomeChowned(t, *chowns)
 }
 
 // TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsError
@@ -446,7 +520,7 @@ func TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsErr
 
 	self := strconv.Itoa(os.Getuid())
 	selfGID := strconv.Itoa(os.Getgid())
-	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir)
+	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, false)
 	if !errors.Is(err, errPasswdEntryNotRewritten) {
 		t.Fatalf("directSetUIDAt() = %v, want an error wrapping errPasswdEntryNotRewritten (a \"scion:*:\" line is not a rewritable entry)", err)
 	}
@@ -456,37 +530,176 @@ func TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsErr
 		t.Errorf("passwd file was modified despite no \":x:\" entry to match: %q", passwdContent)
 	}
 
-	assertHomeChowned(t, *chowns, homeDir)
+	assertHomeChowned(t, *chowns)
 }
 
-// recordDirectSetUIDAtChowns overrides directSetUIDAtChown for the rest of
-// the test and returns the paths it's called with, in order — the portable,
+// directSetUIDAtChownCall records one directSetUIDAtChownAt invocation: name
+// is the directory entry it chowned (empty string, with AT_EMPTY_PATH, means
+// the home directory fd itself — see directSetUIDAtChownAt's own doc
+// comment).
+type directSetUIDAtChownCall struct {
+	name  string
+	flags int
+}
+
+// recordDirectSetUIDAtChowns overrides directSetUIDAtChownAt for the rest of
+// the test and returns the calls it's made with, in order — the portable,
 // deterministic replacement for a filesystem-ctime-based chown detector
-// (see directSetUIDAtChown's own doc comment for why ctime doesn't work
-// here). The recorded fake still calls through to the real os.Chown, so
+// (see directSetUIDAtChownAt's own doc comment for why ctime doesn't work
+// here). The recorded fake still calls through to the real unix.Fchownat, so
 // these tests keep exercising the real syscall, not just the recording.
-func recordDirectSetUIDAtChowns(t *testing.T) *[]string {
+func recordDirectSetUIDAtChowns(t *testing.T) *[]directSetUIDAtChownCall {
 	t.Helper()
-	orig := directSetUIDAtChown
-	var calls []string
-	directSetUIDAtChown = func(path string, uid, gid int) error {
-		calls = append(calls, path)
-		return orig(path, uid, gid)
+	orig := directSetUIDAtChownAt
+	var calls []directSetUIDAtChownCall
+	directSetUIDAtChownAt = func(dirFd int, name string, uid, gid, flags int) error {
+		calls = append(calls, directSetUIDAtChownCall{name: name, flags: flags})
+		return orig(dirFd, name, uid, gid, flags)
 	}
-	t.Cleanup(func() { directSetUIDAtChown = orig })
+	t.Cleanup(func() { directSetUIDAtChownAt = orig })
 	return &calls
 }
 
 // assertHomeChowned fails the test unless calls (as recorded by
-// recordDirectSetUIDAtChowns) includes homeDir.
-func assertHomeChowned(t *testing.T, calls []string, homeDir string) {
+// recordDirectSetUIDAtChowns) includes the home directory fd's own chown
+// (name == "", AT_EMPTY_PATH).
+func assertHomeChowned(t *testing.T, calls []directSetUIDAtChownCall) {
 	t.Helper()
 	for _, c := range calls {
-		if c == homeDir {
+		if c.name == "" && c.flags == unix.AT_EMPTY_PATH {
 			return
 		}
 	}
-	t.Errorf("directSetUIDAtChown was never called with %s — the home chown must run even when there's no passwd entry to rewrite (calls: %v)", homeDir, calls)
+	t.Errorf("directSetUIDAtChownAt was never called for the home directory fd itself — the home chown must run even when there's no passwd entry to rewrite (calls: %v)", calls)
+}
+
+// TestDirectSetUIDAt_SymlinkedHomeDir_EnforcedRefusesUnenforcedSkips proves
+// the H-17 fix: when homeDir itself is a symlink (planted ahead of a
+// restart on a persisted home), directSetUIDAt never follows it — under
+// requirePrivilegeDrop it refuses outright before touching anything, and
+// otherwise it logs and simply skips the chown pass, in both cases leaving
+// the symlink's target completely untouched.
+func TestDirectSetUIDAt_SymlinkedHomeDir_EnforcedRefusesUnenforcedSkips(t *testing.T) {
+	for _, requirePrivilegeDrop := range []bool{true, false} {
+		t.Run(fmt.Sprintf("requirePrivilegeDrop=%v", requirePrivilegeDrop), func(t *testing.T) {
+			dir := t.TempDir()
+			groupPath := filepath.Join(dir, "group")
+			passwdPath := filepath.Join(dir, "passwd")
+			if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(passwdPath, []byte("scion:x:2000:2000:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			victim := t.TempDir()
+			if err := os.Chmod(victim, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			wantInfo, err := os.Lstat(victim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			homeDir := filepath.Join(dir, "home")
+			if err := os.Symlink(victim, homeDir); err != nil {
+				t.Fatal(err)
+			}
+
+			err = directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir, requirePrivilegeDrop)
+			if requirePrivilegeDrop && err == nil {
+				t.Fatal("directSetUIDAt() = nil error, want a refusal for a symlinked home directory under requirePrivilegeDrop")
+			}
+			if !requirePrivilegeDrop && err != nil {
+				t.Errorf("directSetUIDAt() = %v, want nil (unenforced mode logs and skips the chown pass, but the passwd/group rewrite still succeeds)", err)
+			}
+
+			gotInfo, err := os.Lstat(victim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotInfo.Mode() != wantInfo.Mode() {
+				t.Errorf("victim mode changed: got %v, want %v (home symlink must never be followed)", gotInfo.Mode(), wantInfo.Mode())
+			}
+			link, err := os.Readlink(homeDir)
+			if err != nil {
+				t.Fatalf("homeDir is no longer a symlink: %v", err)
+			}
+			if link != victim {
+				t.Errorf("homeDir symlink target = %q, want %q (unchanged)", link, victim)
+			}
+		})
+	}
+}
+
+// TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget proves the other
+// half of H-17: a symlinked ENTRY inside homeDir (homeDir itself a real
+// directory) is chowned via AT_SYMLINK_NOFOLLOW — the link itself, never
+// whatever it points at — while a normal, non-symlink entry is still
+// chowned as usual.
+func TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget(t *testing.T) {
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:x:2000:2000:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(homeDir, "x")); err != nil {
+		t.Fatal(err)
+	}
+	// A normal, non-symlink entry alongside the planted symlink, so the
+	// fix's "normal entries are still chowned" half is pinned too.
+	normalEntry := filepath.Join(homeDir, "normal")
+	if err := os.WriteFile(normalEntry, []byte("skel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chowns := recordDirectSetUIDAtChowns(t)
+
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	if err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, true); err != nil {
+		t.Fatalf("directSetUIDAt() = %v, want nil", err)
+	}
+
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v (symlink target must never be chowned)", gotInfo.Mode(), wantInfo.Mode())
+	}
+
+	var sawLink, sawNormal bool
+	for _, c := range *chowns {
+		if c.name == "x" {
+			sawLink = true
+			if c.flags&unix.AT_SYMLINK_NOFOLLOW == 0 {
+				t.Errorf("symlink entry %q chowned without AT_SYMLINK_NOFOLLOW (flags=%#x)", c.name, c.flags)
+			}
+		}
+		if c.name == "normal" {
+			sawNormal = true
+		}
+	}
+	if !sawLink {
+		t.Error("the symlinked entry \"x\" was never a chown target")
+	}
+	if !sawNormal {
+		t.Error("the normal entry \"normal\" was never a chown target")
+	}
 }
 
 func TestDirectSetUIDAt_RewritesExistingEntry(t *testing.T) {
@@ -504,7 +717,7 @@ func TestDirectSetUIDAt_RewritesExistingEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir); err != nil {
+	if err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir, false); err != nil {
 		t.Fatalf("directSetUIDAt() = %v, want nil", err)
 	}
 
@@ -547,7 +760,7 @@ func TestDirectSetUIDAt_PasswdEntryNoMatchingGroupLine_GroupIsBestEffort(t *test
 		t.Fatal(err)
 	}
 
-	if err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir); err != nil {
+	if err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir, false); err != nil {
 		t.Fatalf("directSetUIDAt() = %v, want nil — a group sed matching nothing must not be an error", err)
 	}
 

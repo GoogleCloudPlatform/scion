@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -334,7 +335,7 @@ func newLifecycleManager(agentHome string, targetUID, targetGID int, requirePriv
 // seams onto newLifecycleManager and hub.EnforceTokenFileOwnerChecks: a test
 // substitutes both to pin the exact arguments RunInit's call site passes —
 // agentHome, targetUID, targetGID, and opts.RequirePrivilegeDrop into the
-// former, and the LATTER's OWN SECOND RETURN VALUE (not a separately
+// former, and the FORMER's OWN SECOND RETURN VALUE (not a separately
 // re-derived RequirePrivilegeDrop) into the latter — without needing a real
 // enforced-mode call site's own argument-threading with a non-root test
 // process. Production code always leaves both at their default; only a test
@@ -2014,7 +2015,7 @@ func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop
 
 	if useDirectPasswdEdit() {
 		log.Info("Using direct /etc/passwd edit (avoiding slow usermod on this runtime)")
-		if err := runDirectSetUID("scion", hostUID, hostGID); err != nil {
+		if err := runDirectSetUID("scion", hostUID, hostGID, requirePrivilegeDrop); err != nil {
 			log.Error("Direct passwd/group edit failed: %v", err)
 			if requirePrivilegeDrop || !errors.Is(err, errPasswdEntryNotRewritten) {
 				return 0, 0, false
@@ -2037,7 +2038,7 @@ func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop
 			// because it tries a recursive chown that the filesystem rejects.
 			// Fall back to direct /etc/passwd editing which skips recursive chown.
 			log.Info("usermod failed (exit: %v), falling back to direct passwd edit", err)
-			if err := runDirectSetUID("scion", hostUID, hostGID); err != nil {
+			if err := runDirectSetUID("scion", hostUID, hostGID, requirePrivilegeDrop); err != nil {
 				log.Error("Direct passwd/group fallback also failed: %v", err)
 				if requirePrivilegeDrop || !errors.Is(err, errPasswdEntryNotRewritten) {
 					return 0, 0, false
@@ -2104,25 +2105,36 @@ var errPasswdEntryNotRewritten = errors.New("no matching entry found to rewrite"
 // chowns the user's home directory and its immediate contents so ownership is
 // correct. The home directory should only contain skeleton files from useradd,
 // so this is fast even on fuse-overlayfs.
-func directSetUID(username, newUID, newGID string) error {
-	return directSetUIDAt(username, newUID, newGID, "/etc/group", "/etc/passwd", fmt.Sprintf("/home/%s", username))
+func directSetUID(username, newUID, newGID string, requirePrivilegeDrop bool) error {
+	return directSetUIDAt(username, newUID, newGID, "/etc/group", "/etc/passwd", fmt.Sprintf("/home/%s", username), requirePrivilegeDrop)
 }
 
-// directSetUIDAtChown performs directSetUIDAt's home-directory chown.
-// Indirected through a package var, not called as os.Chown directly, so a
-// test can record whether and how it was called instead of inferring it
+// directSetUIDAtChownAt performs directSetUIDAt's per-entry chown via
+// Fchownat(dirFd, name, uid, gid, flags) — chowning the directory entry
+// itself relative to an already-open, already-verified no-follow directory
+// fd, never a symlink's target (AT_SYMLINK_NOFOLLOW for every entry; the
+// directory fd itself is chowned via name="" and AT_EMPTY_PATH, which is
+// inherently symlink-safe since fd already names a concrete inode).
+// Indirected through a package var, not called as unix.Fchownat directly, so
+// a test can record whether and how it was called instead of inferring it
 // from a filesystem timestamp: ctime's field name is platform-specific
 // (Ctim on linux, Ctimespec on darwin), and its coarse, tick-based
 // granularity means a self-chown run immediately after mkdir often leaves
 // it unchanged even on linux, so a ctime-based detector is both
-// non-portable and flaky. The default value is os.Chown itself, so
-// production behaviour is unchanged.
-var directSetUIDAtChown = os.Chown
+// non-portable and flaky. The default value is unix.Fchownat itself, so
+// production behaviour is a real fd-relative, no-follow chown.
+var directSetUIDAtChownAt = unix.Fchownat
 
 // directSetUIDAt is directSetUID with its file paths as parameters, so a
 // test can exercise the "no entry to rewrite" detection against a temp file
 // instead of the real /etc/group and /etc/passwd.
-func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string) error {
+//
+// requirePrivilegeDrop gates what happens when homeDir itself cannot be
+// opened as a plain, non-symlink directory (O_DIRECTORY|O_NOFOLLOW): under
+// enforcement this refuses outright, before touching anything; otherwise it
+// logs and simply skips the chown pass, matching this function's existing
+// best-effort (log-and-continue) treatment of every other chown failure here.
+func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string, requirePrivilegeDrop bool) error {
 	// Recorded up front but only acted on at the end: every side effect
 	// below runs unconditionally, regardless of whether username has a
 	// passwd entry to rewrite.
@@ -2152,17 +2164,36 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	// — including when hasEntry is false. Not a recursive walk: the home
 	// dir should only hold skeleton files from /etc/skel at this point, so
 	// a shallow chown is enough and stays fast on fuse-overlayfs.
+	//
+	// homeDir itself is opened O_DIRECTORY|O_NOFOLLOW first: a symlink
+	// planted there (or anything that isn't a plain directory) is refused
+	// rather than followed, which a path-based os.Chown/os.ReadDir pair
+	// would otherwise do — chowning whatever the symlink points at (e.g.
+	// "/etc") to the workload's own uid before this process has dropped
+	// privilege. Every entry inside is then chowned by NAME relative to
+	// that fd with AT_SYMLINK_NOFOLLOW, so a symlink among the (expected to
+	// be skeleton-only) entries has its own link chowned, never its target.
 	uid := mustAtoi(newUID)
 	gid := mustAtoi(newGID)
-	if err := directSetUIDAtChown(homeDir, uid, gid); err != nil {
-		log.Debug("Failed to chown home directory %s: %v", homeDir, err)
-	}
-	entries, err := os.ReadDir(homeDir)
-	if err == nil {
-		for _, e := range entries {
-			p := filepath.Join(homeDir, e.Name())
-			if err := directSetUIDAtChown(p, uid, gid); err != nil {
-				log.Debug("Failed to chown %s: %v", p, err)
+	homeFd, homeErr := unix.Open(homeDir, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	switch {
+	case homeErr != nil && requirePrivilegeDrop:
+		return fmt.Errorf("%s: refusing to chown (not a plain directory, or a symlink): %w", homeDir, homeErr)
+	case homeErr != nil:
+		log.Warn("%s is a symlink or not a plain directory; skipping ownership chown pass: %v", homeDir, homeErr)
+	default:
+		homeDirFile := os.NewFile(uintptr(homeFd), homeDir)
+		defer func() { _ = homeDirFile.Close() }()
+
+		if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), "", uid, gid, unix.AT_EMPTY_PATH); err != nil {
+			log.Debug("Failed to chown home directory %s: %v", homeDir, err)
+		}
+		names, err := homeDirFile.Readdirnames(-1)
+		if err == nil {
+			for _, name := range names {
+				if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+					log.Debug("Failed to chown %s: %v", filepath.Join(homeDir, name), err)
+				}
 			}
 		}
 	}
