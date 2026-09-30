@@ -226,7 +226,14 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
       // cur's parent is guaranteed to exist and be unvisited: see comment above.
       cur = byId.get(parentIdOf(cur.agent)!)!;
     }
-    const cycle = path.slice(pathIndexById.get(cur.agent.id)!);
+    // (Assigning to an explicitly-typed local, rather than passing the `!`-
+    // asserted value straight to `.slice()`, because `.slice()`'s parameter
+    // is optional and so already accepts `number | undefined` — the
+    // assertion would be a silent no-op there, flagged by
+    // no-unnecessary-type-assertion, even though `undefined` here would
+    // silently slice from 0 instead of the cycle's actual start.)
+    const cycleStartIndex: number = pathIndexById.get(cur.agent.id)!;
+    const cycle = path.slice(cycleStartIndex);
     const cycleRoot = cycle.reduce((min, n) =>
       compareIds(n.agent.id, min.agent.id) < 0 ? n : min
     );
