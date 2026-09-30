@@ -79,24 +79,27 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                               "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
 	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                           "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                    "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                          "handleSecretByKey (handlers_env_secrets.go) treats the rest of the path as part of the secret key rather than rejecting it; with no secret backend configured in testServer this reaches a pre-dispatch 500 either way, not a 404/405",
-	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                         "same as secret.read above",
-	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                      "same as secret.read above",
-	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                 "handleGitHubAppInstallationByIDWrite (handlers_github_app.go) parses only a leading integer installation ID from the path and ignores everything after it",
+	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                          "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
+	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                         "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
+	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                      "extractID truncates the suffix the same way as secret.read above; deleteSecret then panics on a nil secret backend the same way getSecret does, recovered as a 500",
+	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                 "parseInstallationIDFromPath (handlers_github_app.go) runs strconv.ParseInt on the entire remainder of the path, not just a leading segment, so a suffix makes parsing fail; the handler answers 400 \"invalid installation ID\", rejecting the suffix rather than ignoring it",
 	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/installations/{id}"}:              "same as the PUT installations/{id} entry above",
 	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations/{id}"}:                   "same as the PUT installations/{id} entry above",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                 "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which takes everything after the last known prefix segment, so a trailing suffix becomes part of the ID rather than a distinct route",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                               "same as the GET entitlements/{id} entry above",
-	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                            "same as the GET entitlements/{id} entry above",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                       "handleAdminLimitByID (handlers_quota.go:136-148) extracts limitID as the first '/'-delimited segment and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, not rejected",
-	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                     "handleAdminLimitByID discards the suffix the same way as quota.read above; updateLimitDefinition (handlers_quota.go:335-346) then 400s on this test's generic empty PATCH body (\"name is required\") before the (correctly extracted) ID is even used — the same 400 happens on the bare path",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                 "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the real, un-suffixed ID and returns the entitlement (200) exactly as if the suffix were absent",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                               "same truncation as the GET entitlements/{id} entry above; this test's generic empty PUT body then fails updateEntitlement's validation with 400 before the (correctly extracted) ID is used for anything — the same 400 the bare path gets",
+	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                            "same truncation as the GET entitlements/{id} entry above; deleteEntitlement then deletes the real, un-suffixed entitlement (204) exactly as if the suffix were absent",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                       "handleAdminLimitByID (handlers_quota.go) splits on the first '/' and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, and the request proceeds on the real, un-suffixed ID",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                     "handleAdminLimitByID discards the suffix the same way as quota.read above; with a valid update body (see bodyOverrides) updateLimitDefinition succeeds on the real, un-suffixed ID and returns 200 exactly as if the suffix were absent",
 	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/limits/{id}"}:                                  "handleAdminLimitByID discards the suffix the same way as quota.read above; deleteLimitDefinition then fails deleting a limit this test's fixture entitlement still references, mapped to 400 — the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                     "handleAdminUsageByLimit (handlers_quota.go:234-245) extracts limitID with extractID (server.go:5249-5257), which discards everything after the first path segment by design",
+	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets"}:                                                "the by-key route \"/api/v1/secrets/\" registers as a prefix, so a suffix on this bare collection route falls through to handleSecretByKey with the suffix as the key; getSecret then panics on a nil secret backend, recovered as a 500",
+	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks"}:                      "the by-ID route \"/api/v1/admin/lifecycle-hooks/\" registers as a prefix, so a suffix on this bare collection route falls through to handleAdminLifecycleHookByID with the suffix as the ID; getLifecycleHook then 400s failing to parse it as a UUID",
+	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations"}:                        "the by-ID route \"/api/v1/github-app/installations/\" registers as a prefix, so a suffix on this bare collection route falls through to handleGitHubAppInstallationByIDRead with the suffix as the ID; parseInstallationIDFromPath then 400s \"invalid installation ID\" failing to parse it as an integer",
+	{OperationID: "agent.stopall", Method: "POST", Pattern: "/api/v1/agents/stop-all"}:                                     "handleAgentByID checks id == \"stop-all\" before it looks at anything after that segment, so a suffix is silently ignored and stop-all runs exactly as it would on the bare path",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                     "handleAdminUsageByLimit (handlers_quota.go) extracts limitID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
 	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
-	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                 "handleEnvVarByKey (handlers_env_secrets.go:263-264) extracts the key with extractID (server.go:5249-5257), which discards everything after the first path segment by design, so the suffix never reaches the lookup",
-	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                 "getLifecycleHook (handlers_lifecycle_hooks.go:105) extracts the ID with extractID (server.go:5249-5257), which discards everything after the first path segment by design, so the suffix never reaches the lookup",
-	{OperationID: "project.membership.update", Method: "PATCH", Pattern: "/api/v1/projects/{id}/members/{memberId}"}:       "updateProjectMemberRole (handlers_project_members.go:367-371) 400s on this test's generic empty PATCH body (\"roleDefinitionId is required\") before bindingID is used for anything; the same 400 happens on the bare path, independent of the suffix",
-	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}: "handleGroupMemberByID (handlers_groups.go:797-807) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
+	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                 "handleEnvVarByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
+	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                 "handleAdminLifecycleHookByID (handlers_lifecycle_hooks.go) extracts the ID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches getLifecycleHook's lookup",
+	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}: "handleGroupMemberByID (handlers_groups.go) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
 	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:             "handleAdminServerConfigSectionReset (admin_settings.go:222-235) requires Postgres mode and 400s \"Section reset is only available in postgres mode\" before it ever parses the section name from the path; testServer runs SQLite, so the same 400 happens on the bare path, independent of the suffix",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:     "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
 	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                    "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
@@ -152,6 +155,8 @@ type idFixtures struct {
 	roleDefinitionDel       string
 	roleBindingDel          string
 	projectMembership       string
+	projectMembershipUpdate string
+	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
 	maintenanceMigrationKey string
@@ -315,6 +320,15 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	pm, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.member, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
 	require.NoError(t, err)
 	f.projectMembership = pm.ID
+	f.projectMemberRoleID = projectMemberRole.ID
+	// A separate binding for project.membership.update: UpdateMemberRole
+	// (project_membership_service.go) replaces the binding atomically
+	// (create new, delete old) even when the role doesn't change, so
+	// probing update with a real body must not use the same binding
+	// project.membership.remove still needs.
+	pmUpdate, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userDel, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
+	require.NoError(t, err)
+	f.projectMembershipUpdate = pmUpdate.ID
 
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
@@ -394,21 +408,22 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                     {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                 {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                               {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                           {"id": f.userDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                               {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                         {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:              {"id": f.harnessConfigDel},
-		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:          {"id": f.gcpSADel},
-		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                {"id": f.roleDefinitionDel},
-		{"quota.update", "/api/v1/admin/limits/{id}"}:                         {"id": f.limitUD},
-		{"quota.delete", "/api/v1/admin/limits/{id}"}:                         {"id": f.limitUD},
-		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                   {"id": f.entitlementUD},
-		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                   {"id": f.entitlementUD},
-		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}: {"id": f.accessConstraintUD},
-		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}: {"id": f.accessConstraintUD},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
+		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
+		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
+		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
+		{"quota.delete", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
+		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
+		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
+		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
+		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
+		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
 	}
 }
 
@@ -535,6 +550,27 @@ func queryOverrides(f idFixtures) map[string]string {
 	}
 }
 
+// bodyOverrides holds a real request body for a (operation, pattern) pair
+// whose handler validates the body before using the path's ID for anything,
+// so this test's default generic body (an empty JSON object) would 400
+// before the suffix or control check could observe path- or method-related
+// behavior at all. An entry not listed here uses the empty object.
+func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
+	return map[overrideKey]map[string]interface{}{
+		// updateProjectMemberRole (handlers_project_members.go) 400s
+		// "roleDefinitionId is required" on an empty body before the
+		// binding ID is used for anything; with a real role ID, the
+		// handler actually looks up the binding, which is what both the
+		// control and the suffix check need to observe.
+		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"roleDefinitionId": f.projectMemberRoleID},
+		// updateLimitDefinition (handlers_quota.go) 400s "name is
+		// required" on an empty body before the (correctly extracted) ID
+		// is used for anything; with a real name, the suffix check
+		// observes that the suffix is discarded and the update succeeds.
+		{"quota.update", "/api/v1/admin/limits/{id}"}: {"name": "li-limit-ud-updated", "defaultValue": 10},
+	}
+}
+
 // substituteLiveInventoryParams replaces every "{name}" placeholder in an
 // authzop EntryPoint pattern with a caller-supplied override for that name,
 // or a fixed, syntactically valid generic placeholder otherwise, so the
@@ -593,8 +629,9 @@ func catalogHTTPEntryPoints() []struct {
 }
 
 // bogusMethod is an HTTP method no route in this codebase declares or
-// accepts, used as the R2 control: if a route dispatches on method the way
-// its handler is supposed to, this method must be rejected with 405.
+// accepts, used as the control check (check 2 below): if a route dispatches
+// on method the way its handler is supposed to, this method must be
+// rejected with 405.
 const bogusMethod = "PROPFIND"
 
 // bogusSegment is a path segment no catalog pattern declares, appended
@@ -620,10 +657,10 @@ const bogusSegment = "live-inventory-bogus-suffix"
 //     must return 404 or 405. This catches a pattern that is missing a
 //     trailing segment a live route actually requires (declared too short),
 //     as opposed to declaring the wrong segment (caught by check 1, since a
-//     substituted-but-wrong segment reaches a different, real 404). It does
-//     not apply to a pattern with no "{param}" at all — see the skip
-//     condition at its call site for why appending a segment to a fully
-//     static path is not a meaningful probe of that path.
+//     substituted-but-wrong segment reaches a different, real 404). It runs
+//     for every entry, parameterised or not: a static collection route can
+//     share a mux prefix with a by-ID route, so a missing segment is just as
+//     meaningful a question for it.
 //
 // What these three checks together prove: for an entry not excluded from
 // any of them, the catalog's declared method is the one the live route
@@ -657,6 +694,7 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 	opOverrides := opPatternOverrides(f)
 	patternFallback := patternOverrides(f)
 	queryFor := queryOverrides(f)
+	bodyFor := bodyOverrides(f)
 
 	tested, controlChecked, suffixChecked := 0, 0, 0
 	for _, entry := range catalogHTTPEntryPoints() {
@@ -676,7 +714,11 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 		var body interface{}
 		switch ep.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch:
-			body = map[string]interface{}{}
+			if override, ok := bodyFor[overrideKey{entry.OperationID, ep.Pattern}]; ok {
+				body = override
+			} else {
+				body = map[string]interface{}{}
+			}
 		}
 
 		// Control check runs before the positive check: for a single-use
@@ -698,18 +740,14 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 		}
 
 		// Suffix check also runs before the positive check, for the same
-		// destructive-entry reason as the control check above. It is
-		// skipped entirely — not via the reasoned exclusion map — for a
-		// pattern with no "{param}" at all: "is this pattern missing a
-		// trailing segment" is not a meaningful question for a fully static
-		// path, and appending one routes into a different, legitimately
-		// separate handler under the same mux prefix (e.g. a bare
-		// collection route like "/api/v1/secrets" sits under the same
-		// "/api/v1/secrets/" prefix as the by-key route, so a suffix on the
-		// former is indistinguishable from a real request to the latter).
-		if !strings.Contains(ep.Pattern, "{") {
-			t.Logf("suffix check does not apply to %s %s (operation %s): pattern has no path parameter", ep.Method, path, entry.OperationID)
-		} else if reason, excluded := suffixCheckExclusions[key]; excluded {
+		// destructive-entry reason as the control check above. It applies
+		// to every entry, parameterised or not: a static collection route
+		// can sit under the same mux prefix as a by-ID route (e.g.
+		// "/api/v1/secrets" and "/api/v1/secrets/{key}" both register under
+		// "/api/v1/secrets/"), so an undeclared suffix on the static route
+		// can fall through to that other handler exactly the way a missing
+		// segment on a parameterised route would.
+		if reason, excluded := suffixCheckExclusions[key]; excluded {
 			t.Logf("suffix check skipped for %s %s (operation %s): %s", ep.Method, path, entry.OperationID, reason)
 		} else {
 			suffixPath := path
