@@ -2152,6 +2152,10 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}", Method: "GET"},
+			// ptone/scion#2061 P2, ptone/scion#2177: per-broker settings GET
+			// (design.md §5.4) is dispatched inside handleRuntimeBrokerRoutes,
+			// not a separate mux pattern; broker.read gates the read.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/settings", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -2329,6 +2333,11 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "PUT"},
+			// ptone/scion#2061 P2, ptone/scion#2177: writing a per-broker
+			// setting (design.md §5.3/§5.4) requires the key's declared
+			// permission; maxAgents (pkg/hub/brokersettings) declares
+			// quota.update, same as every other quota admin write.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/settings", Method: "PUT"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},

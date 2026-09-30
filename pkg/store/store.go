@@ -199,6 +199,9 @@ type Store interface {
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
 
+	// BrokerSetting operations (ptone/scion#2061 P2, ptone/scion#2177)
+	BrokerSettingStore
+
 	// SkillInjection operations (Injected-Skills List)
 	SkillInjectionStore
 
@@ -1872,6 +1875,28 @@ type HubSettingStore interface {
 	// the origin field. Rows with updated_by="seed" get origin="seeded";
 	// all other non-_meta rows get origin="managed". Idempotent.
 	BackfillOrigin(ctx context.Context) error
+}
+
+// BrokerSettingStore defines persistence operations for general per-broker
+// settings (ptone/scion#2061 P2, ptone/scion#2177). One row per broker holds
+// a BrokerSettings document; see pkg/hub/brokersettings for the key
+// registry that validates and authorizes writes to individual keys.
+type BrokerSettingStore interface {
+	// GetBrokerSettings retrieves brokerID's settings document.
+	// Returns ErrNotFound if the broker has no settings row.
+	GetBrokerSettings(ctx context.Context, brokerID string) (*BrokerSettingsRecord, error)
+
+	// PutBrokerSettings replaces brokerID's settings document with CAS
+	// semantics.
+	//   expectedRevision == 0: create-only; returns ErrRevisionConflict if a row already exists.
+	//   expectedRevision > 0:  CAS update; returns ErrRevisionConflict if the current revision differs.
+	PutBrokerSettings(ctx context.Context, brokerID string, settings BrokerSettings,
+		expectedRevision int64, updatedBy string) (*BrokerSettingsRecord, error)
+
+	// DeleteBrokerSettings removes brokerID's settings row, if any. It is a
+	// no-op (not an error) when no row exists, so it is safe to call
+	// unconditionally from DeleteRuntimeBroker.
+	DeleteBrokerSettings(ctx context.Context, brokerID string) error
 }
 
 // =============================================================================

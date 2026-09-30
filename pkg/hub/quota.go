@@ -24,6 +24,19 @@ type QuotaService struct {
 	store  store.Store
 	logger *slog.Logger
 
+	// limitOverride, if set, is consulted by Reserve before
+	// ResolveEffectiveLimit, implementing the "most specific wins"
+	// precedence for per-broker settings (ptone/scion#2061 P2, design.md
+	// §5.2): wired in server.go to brokerSettingLimitOverride, which returns
+	// ok=true when limitName == store.LimitMaxAgentsPerBroker,
+	// scopeType == store.QuotaScopeBroker, and the broker has its own
+	// settings.maxAgents. ok=false means "no override — fall through to the
+	// entitlement engine", which is also what effectiveBrokerLimit
+	// (broker_capacity.go) does on the read side, so Reserve and every read
+	// path agree (AC-P2-10). nil (the zero value) disables the hook
+	// entirely, which is what every QuotaService built before P2 gets.
+	limitOverride func(ctx context.Context, limitName, scopeType, scopeID string) (value int64, ok bool, err error)
+
 	scopeLocksMu sync.Mutex
 	scopeLocks   map[string]*sync.Mutex
 
@@ -100,8 +113,9 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, nil
 	}
 
-	// 2. Resolve effective limit for the subject.
-	effectiveLimit, err := qs.ResolveEffectiveLimit(ctx, limitDef.ID, subjectID, scopeType, scopeID)
+	// 2. Resolve effective limit for the subject, consulting limitOverride
+	// first (design.md §5.2 precedence).
+	effectiveLimit, err := qs.effectiveLimitForReserve(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
 	if err != nil {
 		return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
 	}
@@ -205,18 +219,48 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 	return true, nil
 }
 
+// effectiveLimitForReserve resolves the limit Reserve should enforce for
+// (limitName, scopeType, scopeID): limitOverride, if set, gets first say;
+// ok=false from it (or a nil hook) falls through to ResolveEffectiveLimit.
+// This is the enforcement-side half of the P2-D2 precedence (design.md
+// §5.2); effectiveBrokerLimit (broker_capacity.go) is the read-side half,
+// consulting the same override hook so both sides agree (AC-P2-10).
+func (qs *QuotaService) effectiveLimitForReserve(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
+	if qs.limitOverride != nil {
+		value, ok, err := qs.limitOverride(ctx, limitName, scopeType, scopeID)
+		if err != nil {
+			return 0, fmt.Errorf("limit override: %w", err)
+		}
+		if ok {
+			return value, nil
+		}
+	}
+	return qs.ResolveEffectiveLimit(ctx, limitDefID, subjectID, scopeType, scopeID)
+}
+
 // ResolveEffectiveLimit determines the effective limit using the merge rule:
 // most generous (maximum value) wins across all matching bindings.
 // Value <= 0 means "unlimited" — if ANY binding grants unlimited, the result
 // is unlimited (0) because that is the most generous possible limit.
 func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID string, subjectID string, scopeType string, scopeID string) (int64, error) {
+	value, _, err := qs.resolveEffectiveLimitWithSource(ctx, limitDefID, subjectID, scopeType, scopeID)
+	return value, err
+}
+
+// resolveEffectiveLimitWithSource is ResolveEffectiveLimit, plus whether the
+// value came from a matching entitlement binding (fromBinding=true) rather
+// than the limit definition's hub-wide default (fromBinding=false). Used by
+// effectiveBrokerLimit (broker_capacity.go) to report a "source" alongside
+// the value (design.md §5.9); ResolveEffectiveLimit itself, and every
+// existing caller, is unchanged.
+func (qs *QuotaService) resolveEffectiveLimitWithSource(ctx context.Context, limitDefID string, subjectID string, scopeType string, scopeID string) (value int64, fromBinding bool, err error) {
 	// Collect all matching bindings from every source.
 	var matchingBindings []*store.EntitlementBinding
 
 	// 1. Collect user-specific bindings.
 	userBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
 	if err != nil {
-		return 0, fmt.Errorf("list user bindings: %w", err)
+		return 0, false, fmt.Errorf("list user bindings: %w", err)
 	}
 	for _, b := range userBindings {
 		if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
@@ -262,20 +306,20 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 	if len(matchingBindings) == 0 {
 		limitDef, err := qs.store.GetLimitDefinition(ctx, limitDefID)
 		if err != nil {
-			return 0, fmt.Errorf("get limit definition: %w", err)
+			return 0, false, fmt.Errorf("get limit definition: %w", err)
 		}
 		// DefaultValue <= 0 means unlimited (return 0).
 		if limitDef.DefaultValue <= 0 {
-			return 0, nil
+			return 0, false, nil
 		}
-		return limitDef.DefaultValue, nil
+		return limitDef.DefaultValue, false, nil
 	}
 
 	// 5. Apply merge rule: if ANY binding grants unlimited (Value <= 0),
 	// the result is unlimited — that's the most generous possible limit.
 	for _, b := range matchingBindings {
 		if b.Value <= 0 {
-			return 0, nil // unlimited
+			return 0, true, nil // unlimited, but still an explicit entitlement grant
 		}
 	}
 
@@ -287,7 +331,7 @@ func (qs *QuotaService) ResolveEffectiveLimit(ctx context.Context, limitDefID st
 		}
 	}
 
-	return maxValue, nil
+	return maxValue, true, nil
 }
 
 // Release marks resourceID's active reservation for limitName as released

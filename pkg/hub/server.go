@@ -1281,12 +1281,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
+	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
+	// override (design.md §5.2): see brokerSettingLimitOverride.
 	srv.quotaService = &QuotaService{
 		store:  s,
 		logger: slog.Default().With("component", "quota"),
 		enforced: func(limitName string) bool {
 			return limitName != store.LimitMaxAgentsPerBroker || srv.brokerQuotasEnforced()
 		},
+		limitOverride: srv.brokerSettingLimitOverride,
 	}
 
 	// Per-sender chat send rate limiter (#1054).
