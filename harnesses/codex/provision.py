@@ -492,7 +492,8 @@ def _write_mcp_to_config(ctx: scion_harness.ProvisionContext, servers: dict[str,
     content = content.rstrip("\n\t ") + "\n\n" + appended
     content = content.strip() + "\n"
     scion_harness.write_toml_if_preserves(
-        ctx, config_path, original, content, managed_keys={"mcp_servers"}
+        ctx, config_path, original, content,
+        managed_keys={"mcp_servers"}, what="MCP server registration",
     )
 
 

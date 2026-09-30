@@ -590,6 +590,110 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(data["profiles"]["fast"]["model"], "gpt-user-profile")
         self.assertEqual(data["profiles"]["fast"]["model_reasoning_effort"], "low")
 
+    # --- ptone/scion#2427 review round 1 (R1): unbalanced bracket in a
+    # *multi-line* string, using the reviewer's own repro content, on the
+    # real shipped image-home config.toml. Unlike the single-line preamble
+    # tests above (which the old code already handled correctly — masking
+    # was line-scoped, so a single-line string's brackets never leaked),
+    # this bracket sits inside a multi-line string that the old
+    # toml_entering_array_depths had no way to know it was still inside,
+    # permanently corrupting depth for every later line — including the
+    # shipped seed's real [otel] section, breaking both telemetry states.
+
+    def test_reconcile_codex_toml_reconciles_otel_past_unbalanced_bracket_in_multiline_string_telemetry_disabled(
+        self,
+    ) -> None:
+        real_config_path = os.path.join(os.path.dirname(__file__), "home", ".codex", "config.toml")
+        with open(real_config_path, "r", encoding="utf-8") as f:
+            real_config = f.read()
+
+        content = (
+            'developer_instructions = """\n'
+            "Prefix tasks with [TODO or [WIP when unfinished.\n"
+            '"""\n'
+            + real_config
+        )
+        self.assertIsNotNone(tomllib.loads(content), "sanity: content must be valid TOML")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                ctx = _test_ctx()
+                warnings: list[str] = []
+                ctx.info = warnings.append  # type: ignore[method-assign]
+                provision._reconcile_codex_toml(ctx, None, None, model="gpt-6.1-sol", reasoning_effort="high")
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+
+        self.assertEqual(data["model"], "gpt-6.1-sol")
+        self.assertEqual(data["model_reasoning_effort"], "high")
+        self.assertEqual(
+            data["developer_instructions"],
+            "Prefix tasks with [TODO or [WIP when unfinished.\n",
+        )
+        self.assertEqual(data["otel"]["exporter"], "none")
+        self.assertEqual(data["otel"]["metrics_exporter"], "none")
+        self.assertEqual(data["otel"]["trace_exporter"], "none")
+        self.assertNotIn("statsig", str(data["otel"]))
+        # The rest of the shipped seed (untouched by this script) must
+        # survive past the multi-line string and the real [otel] section.
+        self.assertEqual(data["projects"]["/workspace"]["trust_level"], "trusted")
+        self.assertEqual(data["notice"]["model_migrations"]["gpt-5.2"], "gpt-5.5")
+        self.assertEqual(warnings, [], f"expected no fallback warning, got: {warnings}")
+
+    def test_reconcile_codex_toml_reconciles_otel_past_unbalanced_bracket_in_multiline_string_telemetry_enabled(
+        self,
+    ) -> None:
+        real_config_path = os.path.join(os.path.dirname(__file__), "home", ".codex", "config.toml")
+        with open(real_config_path, "r", encoding="utf-8") as f:
+            real_config = f.read()
+
+        content = (
+            'developer_instructions = """\n'
+            "Prefix tasks with [TODO or [WIP when unfinished.\n"
+            '"""\n'
+            + real_config
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+                ctx = _test_ctx()
+                warnings: list[str] = []
+                ctx.info = warnings.append  # type: ignore[method-assign]
+                provision._reconcile_codex_toml(
+                    ctx,
+                    {"enabled": True},
+                    {"SCION_OTEL_GRPC_PORT": "14317"},
+                    model="gpt-6.1-sol",
+                    reasoning_effort="high",
+                )
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+
+        self.assertEqual(data["model"], "gpt-6.1-sol")
+        self.assertEqual(data["model_reasoning_effort"], "high")
+        self.assertEqual(
+            data["developer_instructions"],
+            "Prefix tasks with [TODO or [WIP when unfinished.\n",
+        )
+        self.assertEqual(data["otel"]["exporter"]["otlp-grpc"]["endpoint"], "http://127.0.0.1:14317")
+        self.assertNotIn("statsig", str(data["otel"]))
+        self.assertEqual(data["projects"]["/workspace"]["trust_level"], "trusted")
+        self.assertEqual(warnings, [], f"expected no fallback warning, got: {warnings}")
+
     def _reconcile_and_capture(
         self, original: str, **kwargs: Any
     ) -> tuple[str, list[str]]:
@@ -615,20 +719,29 @@ class CodexProvisionTest(unittest.TestCase):
 
     def test_reconcile_codex_toml_applies_otel_but_not_model_when_string_is_corrupted(self) -> None:
         # Backstop test for ptone/scion#2365 review round 4 (N1): when the
-        # model/model_reasoning_effort edit doesn't preserve the file (here,
-        # a top-level multi-line string whose body contains a header-shaped
-        # line, so the inserted `model` lands inside the string text
-        # instead of at the real top level), _reconcile_codex_toml must
-        # still apply the telemetry (otel) reconciliation on a fallback pass
-        # that never touches the string — telemetry-disabled enforcement
-        # must not silently no-op just because the model couldn't be
-        # written. codex still gets an explicit model via SCION_MODEL/
-        # --model argv regardless of what config.toml says.
+        # model/model_reasoning_effort edit doesn't preserve the file,
+        # _reconcile_codex_toml must still apply the telemetry (otel)
+        # reconciliation on a fallback pass that never touches the string —
+        # telemetry-disabled enforcement must not silently no-op just
+        # because the model couldn't be written. codex still gets an
+        # explicit model via SCION_MODEL/--model argv regardless of what
+        # config.toml says.
+        #
+        # Originally used a header-shaped line ("[IMPORTANT]") inside the
+        # string to trigger the corruption; ptone/scion#2427 review round 1
+        # (R1) added multi-line-string tracking to
+        # scion_harness.toml_entering_array_depths, which fixed that
+        # specific case (insert_toml_top_level_line now correctly finds the
+        # real header past the string instead of splicing into it — see
+        # scion_harness_test.py's repro-3 tests). This uses a prose line
+        # that merely starts with "model" instead: _is_toml_key_line (a
+        # different, still-present mechanism — see
+        # test_reconcile_codex_toml_rejects_model_and_effort_lines_stripped_from_multiline_string)
+        # matches it as a stray top-level key line regardless of the string
+        # it's actually inside, and strips it from the string's body.
         original = (
             'developer_instructions = """\n'
-            "Header lines look like this:\n"
-            "[IMPORTANT]\n"
-            "Explanation text.\n"
+            "model choice affects everything here.\n"
             '"""\n'
             "[features]\n"
             "hooks = true\n"
@@ -642,7 +755,7 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertNotIn("model", data, "model must not be written when the edit doesn't preserve content")
         self.assertEqual(
             data["developer_instructions"],
-            "Header lines look like this:\n[IMPORTANT]\nExplanation text.\n",
+            "model choice affects everything here.\n",
         )
         self.assertEqual(data["otel"]["exporter"], "none", "telemetry must still be reconciled to disabled")
         self.assertTrue(
@@ -650,15 +763,17 @@ class CodexProvisionTest(unittest.TestCase):
             f"expected a warning naming both telemetry and model, got: {warnings}",
         )
 
-    def test_reconcile_codex_toml_rejects_effort_spliced_into_multiline_string(self) -> None:
-        # Regression test for ptone/scion#2365 review round 4 (R1), repro
-        # (a): with SCION_MODEL empty (model=None) and a thinking level set,
-        # the old backstop (round 3) only checked the top-level `model` —
-        # which this path never even touches — so it had nothing to catch
-        # `model_reasoning_effort` getting spliced into a top-level
-        # multi-line string's body. The new backstop must check that the
-        # effort value round-trips too, and that the string's content is
-        # otherwise unchanged.
+    def test_reconcile_codex_toml_writes_effort_past_header_shaped_line_in_multiline_string(self) -> None:
+        # Originally a regression test for ptone/scion#2365 review round 4
+        # (R1), repro (a): a header-shaped line ("[IMPORTANT]") inside a
+        # top-level multi-line string used to fool insert_toml_top_level_line
+        # into splicing model_reasoning_effort into the string's body
+        # instead of at the real top level (past the string, before
+        # [features]). ptone/scion#2427 review round 1 fixed this directly —
+        # scion_harness.toml_entering_array_depths now tracks multi-line
+        # strings, so is_toml_table_header correctly excludes "[IMPORTANT]"
+        # here — so this is now a positive test: the effort is written
+        # correctly and the string is untouched, with no fallback needed.
         original = (
             'developer_instructions = """\n'
             "Headers look like:\n"
@@ -672,9 +787,9 @@ class CodexProvisionTest(unittest.TestCase):
         after, warnings = self._reconcile_and_capture(original, model=None, reasoning_effort="high")
         data = tomllib.loads(after)
 
-        self.assertNotIn("model_reasoning_effort", data)
+        self.assertEqual(data["model_reasoning_effort"], "high")
         self.assertEqual(data["developer_instructions"], "Headers look like:\n[IMPORTANT]\ntext\n")
-        self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
+        self.assertEqual(warnings, [], f"expected no fallback warning, got: {warnings}")
 
     def test_reconcile_codex_toml_rejects_model_and_effort_lines_stripped_from_multiline_string(self) -> None:
         # Regression test for ptone/scion#2365 review round 4 (R1), repro
@@ -709,22 +824,34 @@ class CodexProvisionTest(unittest.TestCase):
 
     def test_reconcile_codex_toml_leaves_file_completely_untouched_when_otel_fallback_also_fails(self) -> None:
         # Defense-in-depth test: if even the telemetry-only fallback edit
-        # doesn't preserve the file's content (here, a fake "[otel...]"
-        # -shaped line inside a top-level multi-line string confuses
-        # scion_harness.strip_toml_sections' own naive header matching into
-        # deleting part of the string, including its closing delimiter),
-        # _reconcile_codex_toml must give up entirely rather than write
-        # anything — no model, no effort, no telemetry change.
+        # doesn't preserve the file's content, _reconcile_codex_toml must
+        # give up entirely rather than write anything — no model, no
+        # effort, no telemetry change.
+        #
+        # Originally used a fake "[otel...]"-shaped line inside a top-level
+        # multi-line string to trigger this; ptone/scion#2427 review round 1
+        # (R1) fixed that specific input (the fake header is now correctly
+        # recognized as string content, so the fallback succeeds cleanly —
+        # see test_reconcile_codex_toml_applies_otel_but_not_model_when_string_is_corrupted
+        # for the equivalent still-valid otel-fallback-succeeds case). This
+        # uses the narrower residual gap that remains after R1 instead: an
+        # escaped closing-delimiter sequence inside a multi-line *basic*
+        # string closes it early (see scion_harness._toml_code_and_ml_state),
+        # which cascades into every later header in the file — including
+        # the real otel one — being missed by both the full edit and the
+        # otel-only fallback.
         original = (
             'developer_instructions = """\n'
-            "Telemetry config looks like:\n"
-            '[otel.exporter."otlp-grpc"]\n'
-            'endpoint = "override-me"\n'
-            "end of docs\n"
+            'Header lines look like this: \\"""\n'
+            "[IMPORTANT]\n"
+            "Explanation text.\n"
             '"""\n'
             "[features]\n"
             "hooks = true\n"
+            '[otel.exporter."otlp-grpc"]\n'
+            'endpoint = "https://ext.invalid"\n'
         )
+        self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
 
         after, warnings = self._reconcile_and_capture(original, model="gpt-6.1-sol")
 
@@ -734,18 +861,25 @@ class CodexProvisionTest(unittest.TestCase):
             f"expected a warning naming the failed fallback, got: {warnings}",
         )
 
-    def test_reconcile_codex_toml_preserves_nested_table_when_full_edit_is_rejected(self) -> None:
-        # Regression test for ptone/scion#2365 review round 5 (N1): the
-        # round-4 fix (_toml_edit_preserves comparing the whole parsed
-        # document, not just top-level scalars) has no test pinning its
-        # actual point — that a *nested* table like a user's own
-        # [profiles.fast] is protected too, not just top-level keys. A
-        # "shallow" mutant that only compares top-level scalar values (or
-        # skips dict-valued keys) would pass every other test in this file
-        # while silently dropping profiles.fast's contents on exactly this
-        # input, since the unbalanced "[" in the multi-line string hides
-        # the real [profiles.fast] header from the line-oriented editor the
-        # same way the round-3/round-4 repros hid other headers.
+    def test_reconcile_codex_toml_preserves_nested_table_with_unbalanced_bracket_in_multiline_string(self) -> None:
+        # Originally a regression test for ptone/scion#2365 review round 5
+        # (N1), using an unbalanced "[" inside a top-level multi-line string
+        # to hide the real [profiles.fast] header and force the full edit
+        # to be rejected, so it could pin _toml_edit_preserves comparing the
+        # whole parsed document (not just top-level scalars) — a "shallow"
+        # mutant would pass every other test while silently dropping
+        # profiles.fast's contents on this exact input.
+        #
+        # ptone/scion#2427 review round 1 (R1) fixed the unbalanced-bracket
+        # class directly (scion_harness.toml_entering_array_depths now
+        # tracks multi-line strings, so the bracket inside the string no
+        # longer corrupts depth for [profiles.fast]) — so the full edit now
+        # succeeds cleanly instead of needing the fallback, and this is a
+        # positive test. The deep-vs-shallow-compare mutation coverage this
+        # test originally existed for now lives directly on
+        # scion_harness.toml_edit_preserves — see scion_harness_test.py's
+        # TestTomlEditPreserves.test_ignores_nested_contents_of_a_managed_key
+        # and the key-path sibling-subtable tests.
         original = (
             'developer_instructions = """\n'
             "use [ brackets\n"
@@ -762,7 +896,7 @@ class CodexProvisionTest(unittest.TestCase):
             data["profiles"]["fast"],
             {"model": "fast-model", "model_reasoning_effort": "low"},
         )
-        self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
+        self.assertEqual(warnings, [], f"expected no fallback warning, got: {warnings}")
 
     def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives_full_edit_path(self) -> None:
         # Regression test for ptone/scion#2365 review round 5 (N3), full
@@ -773,14 +907,27 @@ class CodexProvisionTest(unittest.TestCase):
         # (model=None), nothing replaces that stale value, so codex runs on
         # it with no --model argv either — this is observability only (a
         # warning), not a behavior change: the file content is unaffected.
+        #
+        # Originally used a plain header-shaped line ("[foo]") with balanced
+        # brackets; ptone/scion#2427 review round 1 (R1) fixed that case
+        # directly (the line is now correctly recognized as string content,
+        # so the real header search isn't fooled, and the stale `model` is
+        # correctly stripped — no longer a bug). This uses the narrower
+        # residual gap that remains after R1 instead: an escaped
+        # closing-delimiter sequence closes the string early, so "[foo]" is
+        # (wrongly, but still) treated as marking the start of the
+        # table-header region, hiding the real top-level `model` line that
+        # follows before the true first header ([features]).
         original = (
             'developer_instructions = """\n'
+            'literal: \\"""\n'
             "[foo]\n"
             '"""\n'
             'model = "gpt-5.5"\n'
             "[features]\n"
             "hooks = true\n"
         )
+        self.assertEqual(tomllib.loads(original)["model"], "gpt-5.5", "sanity: original must be valid TOML")
 
         after, warnings = self._reconcile_and_capture(original, model=None)
         data = tomllib.loads(after)
@@ -941,6 +1088,26 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertIn("[mcp_servers.foo]", content)
         self.assertIn('command = "a"', content)
 
+    def test_write_mcp_to_config_preserves_overlay_table(self) -> None:
+        # ptone/scion#2427 review round 1 ("Optional", do it): pins the
+        # upper bound of managed_keys={"mcp_servers"} — an unrelated
+        # overlay table must survive untouched.
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('[profiles.fast]\nmodel = "gpt-user-profile"\n')
+
+                ctx = _test_ctx()
+                provision._write_mcp_to_config(ctx, {"foo": '[mcp_servers.foo]\ncommand = "a"\n'})
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["profiles"]["fast"]["model"], "gpt-user-profile")
+        self.assertEqual(data["mcp_servers"]["foo"]["command"], "a")
+
     def test_write_mcp_to_config_strips_old_sections_including_commented_header(self) -> None:
         # Repro case 1 from generalization-findings.md: a header with a
         # trailing comment must be recognized so re-writing the same table
@@ -961,18 +1128,24 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(data["mcp_servers"]["foo"]["command"], "b")
 
     def test_write_mcp_to_config_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
-        # A header-shaped line inside a top-level multi-line string is the
-        # documented residual gap of the line-oriented strip_toml_sections;
-        # write_toml_if_preserves must catch it via the tomllib backstop and
-        # leave the file untouched rather than write invalid TOML.
+        # An escaped closing-delimiter sequence inside a multi-line basic
+        # string is the narrow residual gap remaining after ptone/scion#2427
+        # review round 1 (a plain header-shaped line inside a well-formed
+        # multi-line string is now correctly handled — see
+        # test_write_mcp_to_config_strips_old_sections_including_commented_header
+        # and scion_harness_test.py's repro-3 tests). write_toml_if_preserves
+        # must still catch this via the tomllib backstop and leave the file
+        # untouched rather than write invalid TOML.
         original = (
             'developer_instructions = """\n'
+            'literal triple quote: \\"""\n'
             "[mcp_servers.fake]\n"
             'command = "not real"\n'
             '"""\n'
             "[features]\n"
             "hooks = true\n"
         )
+        self.assertEqual(tomllib.loads(original)["features"]["hooks"], True, "sanity: original must be valid TOML")
         with tempfile.TemporaryDirectory() as tmp:
             with temporary_home(tmp):
                 codex_dir = os.path.join(tmp, ".codex")
