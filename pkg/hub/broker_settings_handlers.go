@@ -120,12 +120,7 @@ func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	resp, err := s.buildBrokerSettingsResponse(r, brokerID, rec)
-	if err != nil {
-		RuntimeError(w, "Failed to resolve effective broker settings")
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, s.buildBrokerSettingsResponse(r, brokerID, rec))
 }
 
 // handlePutBrokerSettings replaces brokerID's settings document. Each
@@ -192,15 +187,10 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 				RuntimeError(w, "Failed to load current broker settings")
 				return
 			}
-			currentResp, buildErr := s.buildBrokerSettingsResponse(r, brokerID, current)
-			if buildErr != nil {
-				RuntimeError(w, "Failed to resolve effective broker settings")
-				return
-			}
 			writeJSON(w, http.StatusConflict, map[string]interface{}{
 				"error":   ErrCodeRevisionConflict,
 				"message": "Broker settings were modified concurrently. Refresh and retry.",
-				"current": currentResp,
+				"current": s.buildBrokerSettingsResponse(r, brokerID, current),
 			})
 			return
 		}
@@ -214,12 +204,7 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		TargetID:     brokerID,
 	})
 
-	resp, err := s.buildBrokerSettingsResponse(r, brokerID, rec)
-	if err != nil {
-		RuntimeError(w, "Failed to resolve effective broker settings")
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, s.buildBrokerSettingsResponse(r, brokerID, rec))
 }
 
 // canWriteBrokerSettingKey reports whether identity holds def's declared
@@ -260,7 +245,12 @@ func (s *Server) authorizeBrokerSettingWrite(w http.ResponseWriter, r *http.Requ
 
 // buildBrokerSettingsResponse assembles the GET/PUT response for brokerID.
 // rec is nil when the broker has no settings row (settings={}, revision=0).
-func (s *Server) buildBrokerSettingsResponse(r *http.Request, brokerID string, rec *store.BrokerSettingsRecord) (BrokerSettingsResponse, error) {
+// The effective value comes from brokerCapacity (broker_capacity.go), the
+// same read model the providers listing and Reserve use (AC-P2-10); this
+// never fails the request outright — a resolution failure just leaves
+// Effective.MaxAgents.Value unset, matching how resolveBrokerCapacity treats
+// per-provider failures in the providers listing.
+func (s *Server) buildBrokerSettingsResponse(r *http.Request, brokerID string, rec *store.BrokerSettingsRecord) BrokerSettingsResponse {
 	ctx := r.Context()
 
 	resp := BrokerSettingsResponse{BrokerID: brokerID}
@@ -272,13 +262,20 @@ func (s *Server) buildBrokerSettingsResponse(r *http.Request, brokerID string, r
 	}
 
 	limitDef := s.lookupAgentLimitDefinition(ctx)
-	value, source, err := s.effectiveBrokerLimit(ctx, brokerID, limitDef)
-	if err != nil {
-		return BrokerSettingsResponse{}, err
+	bc := s.brokerCapacity(ctx, brokerID, limitDef)
+	resp.Effective.MaxAgents = EffectiveSetting{Source: bc.Source}
+	if bc.Source != "" {
+		// bc.Limit is nil to mean unlimited (providers-listing convention);
+		// the settings API instead always shows a concrete number when
+		// resolution succeeded, with 0 meaning unlimited (design.md §5.4).
+		value := int64(0)
+		if bc.Limit != nil {
+			value = *bc.Limit
+		}
+		resp.Effective.MaxAgents.Value = &value
 	}
-	resp.Effective.MaxAgents = EffectiveSetting{Value: &value, Source: source}
 
 	resp.Capabilities.Update = s.canWriteBrokerSettingKey(ctx, GetIdentityFromContext(ctx), brokersettings.MaxAgents)
 
-	return resp, nil
+	return resp
 }
