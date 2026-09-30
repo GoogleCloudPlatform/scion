@@ -94,6 +94,11 @@ var decorationGuardAllowed = map[string]bool{
 	"audit_actor.go:auditActorFromContext":    true,
 	"audit_authz.go:BuildDecisionAuditRecord": true,
 	"audit.go:credentialLogAttr":              true,
+
+	// E.2b (ptone/scion#2127, plan §3.5): same rule as the E.2a group above —
+	// this renders a bounded, sanitized snapshot of decoration for the
+	// initiator_credential_snapshot column, it never decides anything.
+	"scheduled_initiator.go:initiatorCredentialSnapshotJSON": true,
 }
 
 // decorationHit is one reference to credential decoration found by

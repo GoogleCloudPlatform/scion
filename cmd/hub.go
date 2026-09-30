@@ -1314,6 +1314,11 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
+		// Note: this top-level "agentCount" is the project's own agent
+		// count. It is a different quantity from "agentCount" inside each
+		// entry of "providers" below, which is the broker-wide active
+		// reservation count (ptone/scion#2161; see
+		// hubclient.ProjectProvider.AgentCount).
 		output := map[string]interface{}{
 			"id":         project.ID,
 			"name":       project.Name,
@@ -1372,10 +1377,11 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 			if p.BrokerID == project.DefaultRuntimeBrokerID {
 				defaultIndicator = " (default)"
 			}
+			capacityIndicator := providerCapacityIndicator(p)
 			if p.LocalPath != "" {
-				fmt.Printf("  - %s %s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, p.LocalPath)
+				fmt.Printf("  - %s %s%s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator, p.LocalPath)
 			} else {
-				fmt.Printf("  - %s %s%s\n", p.BrokerName, statusIndicator, defaultIndicator)
+				fmt.Printf("  - %s %s%s%s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator)
 			}
 		}
 	} else {
@@ -1384,6 +1390,35 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// formatProviderCapacity renders a provider's broker capacity as
+// "count/limit" (e.g. "12/12"), just the count when the broker is unlimited
+// (e.g. "5"), or "-" when the hub reports no capacity for this provider (no
+// quota enforcement or limit definition, resolution failed, or an older hub
+// that does not send the fields) (ptone/scion#2161). AgentCount nil means
+// capacity resolution failed or was unavailable; AgentLimit nil (with
+// AgentCount set) means the broker has no effective agent limit. AgentCount
+// here is broker-wide (see hubclient.ProjectProvider.AgentCount) and, on an
+// unlimited broker, may lag up to the reconcile interval — it is not the
+// project's own agent count.
+func formatProviderCapacity(p hubclient.ProjectProvider) string {
+	if p.AgentCount == nil {
+		return "-"
+	}
+	if p.AgentLimit != nil {
+		return fmt.Sprintf("%d/%d", *p.AgentCount, *p.AgentLimit)
+	}
+	return fmt.Sprintf("%d", *p.AgentCount)
+}
+
+// providerCapacityIndicator renders the parenthesized, labeled suffix shown
+// after a provider's status in `scion hub projects info` text output, e.g.
+// " (agents: 12/12)". Labeled so the number isn't mistaken for something
+// else next to the status and default indicators (ptone/scion#2161): a bare
+// "(12/12)" or "(-)" doesn't say what it measures.
+func providerCapacityIndicator(p hubclient.ProjectProvider) string {
+	return fmt.Sprintf(" (agents: %s)", formatProviderCapacity(p))
 }
 
 func runHubProjectsDelete(cmd *cobra.Command, args []string) error {

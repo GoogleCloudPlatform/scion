@@ -28,6 +28,10 @@ files in the PR that adds the feature.
   that specifically wants to simulate jq being absent (see
   `test_nat_reuse.sh`'s `_dir_without_jq`) does so for a single
   subprocess invocation, not for the suite as a whole.
+- **Go** — a Go toolchain, with the repository's `github.com/knadh/koanf`
+  module available in the module cache (fetched on first use), for the
+  `settings.yaml` parse checks (`tests/lib/settings-yaml-to-json.go`, run
+  with `go run`).
 
 ## Running the suite
 

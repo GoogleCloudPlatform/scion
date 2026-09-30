@@ -2143,6 +2143,39 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// projectProviderView decorates a project's provider record with read-only
+// broker capacity fields for the providers list response (ptone/scion#2161).
+// AgentLimit and AgentCount are computed at request time from the same
+// quota primitives checkAndReserveBrokerQuota uses to admit or reject agent
+// starts (pkg/hub/broker_quota.go) — they report that decision's inputs,
+// they do not make one: nothing here creates, modifies, or releases a
+// reservation. Unexported: only pkg/hub constructs this view; clients see
+// the wire shape through hubclient.ProjectProvider.
+type projectProviderView struct {
+	store.ProjectProvider
+	// AgentLimit is the effective max_agents_per_broker ceiling for this
+	// broker. Unset (nil) when the hub has no quota enforcement configured,
+	// no max_agents_per_broker definition exists, resolution failed for
+	// this provider, or the broker is unlimited. The field is never 0: a
+	// non-positive effective limit means unlimited and is omitted. Older
+	// clients that don't know this field are unaffected.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// held by agents in a counted phase (see isBrokerQuotaCountedPhase),
+	// from any project on this broker. It is exact when the broker has a
+	// limit, since every admission and release goes through
+	// QuotaService.Reserve/Release synchronously. When the broker is
+	// unlimited, Reserve returns before creating a reservation (quota.go),
+	// so newly started agents are only reflected here once the periodic
+	// broker-quota-reconcile job backfills them; the value may lag by up to
+	// that reconcile interval. This is broker-wide and distinct from the
+	// project-level agentCount reported elsewhere (e.g. Project.AgentCount).
+	// Unset (nil) when the hub has no quota enforcement configured, no
+	// max_agents_per_broker definition exists, or resolution failed for
+	// this provider — a zero count is reported as 0, not omitted.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+}
+
 // listProjectProviders returns all providers for a project.
 func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
@@ -2153,9 +2186,89 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
+	// Looked up once and reused for every provider: the limit definition
+	// row is the same for all of them, so this turns what would otherwise
+	// be one lookup (and, on failure, one warning) per provider into one
+	// for the whole listing.
+	limitDef := s.lookupAgentLimitDefinition(ctx)
+
+	views := make([]projectProviderView, len(providers))
+	for i, p := range providers {
+		views[i] = projectProviderView{ProjectProvider: p}
+		views[i].AgentLimit, views[i].AgentCount = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"providers": providers,
+		"providers": views,
 	})
+}
+
+// lookupAgentLimitDefinition fetches the max_agents_per_broker limit
+// definition once for reuse across all providers in a single listing
+// request. Returns nil when no quota service is configured or when no such
+// limit definition exists (store.ErrNotFound), matching how
+// QuotaService.Reserve treats a missing definition as "no limit — no
+// enforcement" (quota.go). Other lookup errors are logged.
+func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDefinition {
+	if s.quotaService == nil {
+		return nil
+	}
+
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "providers: failed to look up max_agents_per_broker limit definition", "error", err)
+		}
+		return nil
+	}
+	return limitDef
+}
+
+// resolveBrokerCapacity computes the effective max_agents_per_broker limit
+// and current active-reservation count for brokerID, mirroring exactly the
+// primitives checkAndReserveBrokerQuota uses to admit or reject an agent
+// start (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself), and the same
+// "effectiveLimit <= 0 means unlimited" convention as
+// QuotaService.Reserve. This is a read: it never creates, updates, or
+// releases a reservation.
+//
+// limitDef is looked up once by the caller (lookupAgentLimitDefinition) and
+// shared across every provider in a listing. A nil limitDef means "no limit
+// defined — no enforcement", the same convention QuotaService.Reserve uses
+// (quota.go).
+//
+// Returns (nil, nil) whenever either value can't be determined — no quota
+// service configured, no limit definition, or a store error — so that a
+// failure for one provider never fails the whole providers listing (per
+// ptone/scion#2161). Failures other than "no limit configured" are logged.
+//
+// This is the single capacity helper for the providers listing; keep it
+// that way — other work builds on it.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64) {
+	if s.quotaService == nil || limitDef == nil {
+		return nil, nil
+	}
+
+	effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
+	if err != nil {
+		slog.WarnContext(ctx, "providers: failed to resolve effective agent limit",
+			"broker_id", brokerID, "error", err)
+		return nil, nil
+	}
+
+	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
+	if err != nil {
+		slog.WarnContext(ctx, "providers: failed to count active reservations",
+			"broker_id", brokerID, "error", err)
+		return nil, nil
+	}
+
+	agentCount = &count
+	if effectiveLimit > 0 {
+		agentLimit = &effectiveLimit
+	}
+	return agentLimit, agentCount
 }
 
 // addProjectProvider adds a broker as a provider to a project.
