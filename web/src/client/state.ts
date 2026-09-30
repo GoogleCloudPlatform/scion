@@ -27,10 +27,47 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
-import type { Agent, ExposedPort, Project, RuntimeBroker } from '../shared/types.js';
+import type { Agent, AgentDetail, ExposedPort, Project, RuntimeBroker } from '../shared/types.js';
 
 /** Activities that should not be overwritten by working/empty transitions */
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
+
+/**
+ * Two agent objects are shallow-equal iff every field matches by reference,
+ * except `detail`, which is freshly reconstructed on every merge and so is
+ * compared by value instead (§7).
+ */
+function agentsShallowEqual(a: Agent, b: Agent): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  const ar = a as unknown as Record<string, unknown>;
+  const br = b as unknown as Record<string, unknown>;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    if (key === 'detail') {
+      if (!agentDetailEqual(a.detail, b.detail)) return false;
+      continue;
+    }
+    if (ar[key] !== br[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Value comparison for `AgentDetail`, whose fields are all scalars. */
+function agentDetailEqual(a: AgentDetail | undefined, b: AgentDetail | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a) as (keyof AgentDetail)[];
+  const bKeys = Object.keys(b) as (keyof AgentDetail)[];
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}
 
 /** Subscription scope matches view context */
 export type ViewScope =
@@ -76,6 +113,8 @@ export interface AppState {
 /** Events dispatched by StateManager */
 export type StateEventType =
   | 'agents-updated'
+  | 'agents-changed'
+  | 'agents-resync'
   | 'projects-updated'
   | 'brokers-updated'
   | 'connected'
@@ -92,6 +131,28 @@ export type StateEventType =
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
   | 'agent-created';
+
+/**
+ * Per-ID summary of a delta for an agent not yet known to `state.agents`
+ * (§7). Carries only the fields a member index or off-page chip needs;
+ * `pendingAgentDeltas` holds the full buffered delta separately.
+ */
+export interface UnknownAgentDelta {
+  phase?: string;
+  activity?: string;
+  lastActivityEvent?: string;
+}
+
+/** Payload of the coalesced `agents-changed` event (§7). */
+export interface AgentsChangedDetail {
+  upserted: string[];
+  deleted: string[];
+  unknown: Map<string, UnknownAgentDelta>;
+  generation: number;
+}
+
+/** Opaque token returned by `beginSeedEpoch`, passed to `seedAgents`/`endSeedEpoch`. */
+export type SeedEpochToken = symbol;
 
 export class StateManager extends EventTarget {
   private state: AppState = {
@@ -114,6 +175,68 @@ export class StateManager extends EventTarget {
    */
   private pendingAgentDeltas = new Map<string, Partial<Agent>>();
 
+  /** Timers that drop a `pendingAgentDeltas` entry 30s after it was last touched (§7). */
+  private pendingAgentDeltaTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** How long an unclaimed buffered delta survives before it is dropped. */
+  private static readonly PENDING_DELTA_TTL_MS = 30_000;
+
+  /**
+   * Coalescing state accumulated since the last flush (§7). `setScope`
+   * discards this outright on an actual scope change; it is never drained
+   * into a final flush first.
+   */
+  private dirty: {
+    upserted: Set<string>;
+    deleted: Set<string>;
+    unknown: Map<string, UnknownAgentDelta>;
+  } = {
+    upserted: new Set(),
+    deleted: new Set(),
+    unknown: new Map(),
+  };
+
+  /** IDs that received a `created` event since the last flush (§7). */
+  private pendingCreatedIds = new Set<string>();
+
+  private flushScheduled = false;
+  private flushRafHandle: number | null = null;
+  private flushTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Bumped by `setScope` on an actual scope change. Distinguishes deltas,
+   * in-flight flush timers and SSE waits that belong to the current scope
+   * from ones left over from a previous one (§7, §8).
+   */
+  private generation = 0;
+
+  /** Whether a `disconnected` has been seen since the last `connected` in this generation (§7 N4). */
+  private sawDisconnectThisGeneration = false;
+
+  private sseConnectWaiters: Array<{
+    generation: number;
+    resolve: () => void;
+    reject: (err: Error) => void;
+  }> = [];
+
+  /** Open seed epochs, keyed by the token handed to the caller (§7, §8). */
+  private seedEpochs = new Map<SeedEpochToken, { deltas: Map<string, Partial<Agent>> }>();
+
+  /**
+   * "State holds the complete dashboard-scope membership" (§6.3, R2-B3, R3-B4).
+   *
+   * `full` also promises full `Agent` objects; `compact` promises only
+   * membership (and whatever fields the compact projection carries). A
+   * consumer that reads full fields from state must check
+   * `isAgentSetComplete('full')` specifically — `isAgentSetComplete('compact')`
+   * is also true when the flag is `full`, but a `compact` flag alone never
+   * promises full fields (R10).
+   *
+   * Only `setScope` clears this, and only on an actual scope change. Resync,
+   * label commits and partial seeds never clear it.
+   */
+  private completeFlag: 'full' | 'compact' | null = null;
+
   private sseClient = new SSEClient();
 
   /**
@@ -135,11 +258,22 @@ export class StateManager extends EventTarget {
 
     this.sseClient.addEventListener('connected', () => {
       this.state.connected = true;
+      this.resolveSseConnectWaiters();
+      // agents-resync (§7 N4): one per outage, even though `connected` can
+      // fire twice per connection (onopen, then the server's own event) and
+      // even though setScope's own reconnect goes through this same handler.
+      // The first connect after setScope never sets sawDisconnectThisGeneration,
+      // so it is not mistaken for a resync.
+      if (this.sawDisconnectThisGeneration) {
+        this.sawDisconnectThisGeneration = false;
+        this.notify('agents-resync');
+      }
       this.notify('connected');
     });
 
     this.sseClient.addEventListener('disconnected', () => {
       this.state.connected = false;
+      this.sawDisconnectThisGeneration = true;
       this.notify('disconnected');
     });
   }
@@ -223,7 +357,25 @@ export class StateManager extends EventTarget {
     this.state.deletedProjectIds.clear();
     this.state.deletedAgentIds.clear();
     this.state.scopeCapabilities.clear();
+    for (const timer of this.pendingAgentDeltaTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingAgentDeltaTimers.clear();
     this.pendingAgentDeltas.clear();
+
+    // §7: an actual scope change discards the dirty set outright (no final
+    // flush), bumps the generation, invalidates seed-epoch tokens and clears
+    // the completeness flag. Nothing here is drained first.
+    this.cancelScheduledFlush();
+    this.dirty.upserted.clear();
+    this.dirty.deleted.clear();
+    this.dirty.unknown.clear();
+    this.pendingCreatedIds.clear();
+    this.seedEpochs.clear();
+    this.completeFlag = null;
+    this.generation++;
+    this.sawDisconnectThisGeneration = false;
+    this.rejectStaleSseConnectWaiters();
 
     const subjects = this.subjectsForScope(scope);
     if (subjects.length > 0) {
@@ -438,86 +590,163 @@ export class StateManager extends EventTarget {
     if (eventType === 'deleted') {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
-      this.pendingAgentDeltas.delete(agentId);
-    } else if (eventType === 'ports') {
+      this.clearPendingAgentDelta(agentId);
+      this.dirty.upserted.delete(agentId);
+      this.dirty.unknown.delete(agentId);
+      this.pendingCreatedIds.delete(agentId);
+      this.dirty.deleted.add(agentId);
+      this.scheduleFlush();
+      return;
+    }
+
+    if (eventType === 'ports') {
+      // Ports carry only exposedPorts, and there is nothing sensible to
+      // buffer for an agent state does not know about yet — unlike a status
+      // delta, a stale port list is never a race worth preserving.
       const portsData = data as { ports: ExposedPort[] };
       const existing = this.state.agents.get(agentId);
-      if (existing) {
-        const updated = { ...existing, exposedPorts: portsData.ports ?? [] };
-        this.state.agents.set(agentId, updated as Agent);
-      }
-      this.notify('agents-updated');
-      return;
-    } else {
-      const existing = this.state.agents.get(agentId);
-      if (!existing && eventType !== 'created') {
-        // Agent not yet in state. Buffer the delta so it can be applied
-        // when the "created" event arrives. This handles the race where
-        // a status update (e.g. clone error) arrives before the "created"
-        // event due to concurrent SSE publishing.
-        const delta = data as Partial<Agent>;
-        const prev = this.pendingAgentDeltas.get(agentId);
-        this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...delta } : delta);
+      if (!existing) {
         return;
       }
-      const base = existing || ({} as Agent);
+      const exposedPorts = portsData.ports ?? [];
+      const updated = { ...existing, exposedPorts } as Agent;
+      if (agentsShallowEqual(existing, updated)) {
+        return;
+      }
+      this.state.agents.set(agentId, updated);
+      this.recordSeedEpochDelta(agentId, { exposedPorts });
+      this.dirty.upserted.add(agentId);
+      this.scheduleFlush();
+      return;
+    }
 
-      // For "created" events, apply any buffered deltas that arrived early.
-      // The buffered delta is applied AFTER the created snapshot so that
-      // status updates (like phase=error) take precedence.
-      let delta = data as Partial<Agent>;
-      if (eventType === 'created') {
-        const pending = this.pendingAgentDeltas.get(agentId);
-        if (pending) {
-          delta = { ...delta, ...pending };
-          this.pendingAgentDeltas.delete(agentId);
-        }
-      }
+    const existing = this.state.agents.get(agentId);
+    if (!existing && eventType !== 'created') {
+      // Agent not yet in state. Buffer the delta so it can be applied when
+      // the "created" event arrives (a status update, e.g. clone error, can
+      // arrive before "created" due to concurrent SSE publishing), and
+      // record it in dirty.unknown so it surfaces at the next flush (§7).
+      const delta = data as Partial<Agent>;
+      this.bufferAgentDelta(agentId, delta);
+      this.recordUnknownDirty(agentId, delta);
+      this.scheduleFlush();
+      return;
+    }
+    const base = existing || ({} as Agent);
 
-      // Preserve sticky activities: if the incoming activity is working/empty
-      // but the existing activity is sticky, keep the existing value.
-      const incomingActivity = delta.activity as string | undefined;
-      if (
-        incomingActivity !== undefined &&
-        (incomingActivity === 'working' || incomingActivity === '') &&
-        base.activity &&
-        STICKY_ACTIVITIES.has(base.activity)
-      ) {
-        delete delta.activity;
+    // For "created" events, apply any buffered deltas that arrived early.
+    // The buffered delta is applied AFTER the created snapshot so that
+    // status updates (like phase=error) take precedence.
+    let delta = data as Partial<Agent>;
+    if (eventType === 'created') {
+      const pending = this.pendingAgentDeltas.get(agentId);
+      if (pending) {
+        delta = { ...delta, ...pending };
       }
-      // Promote detail fields from SSE detail to top-level agent
-      const detail = delta.detail as import('../shared/types.js').AgentDetail;
-      if (detail) {
-        if (detail.message) {
-          (delta as Record<string, unknown>).message = detail.message;
-        }
-        if (detail.currentTurns !== undefined) {
-          (delta as Record<string, unknown>).currentTurns = detail.currentTurns;
-        }
-        if (detail.currentModelCalls !== undefined) {
-          (delta as Record<string, unknown>).currentModelCalls = detail.currentModelCalls;
-        }
-        if (detail.startedAt) {
-          (delta as Record<string, unknown>).startedAt = detail.startedAt;
-        }
+      this.clearPendingAgentDelta(agentId);
+    }
+
+    // Preserve sticky activities: if the incoming activity is working/empty
+    // but the existing activity is sticky, keep the existing value.
+    const incomingActivity = delta.activity as string | undefined;
+    if (
+      incomingActivity !== undefined &&
+      (incomingActivity === 'working' || incomingActivity === '') &&
+      base.activity &&
+      STICKY_ACTIVITIES.has(base.activity)
+    ) {
+      delete delta.activity;
+    }
+    // Promote detail fields from SSE detail to top-level agent
+    const detail = delta.detail as AgentDetail;
+    if (detail) {
+      if (detail.message) {
+        (delta as Record<string, unknown>).message = detail.message;
       }
-      // Ensure id is always set
-      const updated = { ...base, ...delta, id: agentId };
-      // Preserve _capabilities from existing state when the delta doesn't
-      // provide valid capabilities (SSE status deltas typically omit them).
-      if (!delta._capabilities && base._capabilities) {
-        updated._capabilities = base._capabilities;
+      if (detail.currentTurns !== undefined) {
+        (delta as Record<string, unknown>).currentTurns = detail.currentTurns;
       }
-      this.state.agents.set(agentId, updated as Agent);
-      if (eventType === 'created') {
-        // A legitimate SSE creation for this ID. Signal it separately from
-        // the generic agents-updated notify so consumers that suppress
-        // re-adding a server-omitted agent (see chat.ts loop guard) know
-        // the suppression no longer applies to this ID.
-        this.notifyWithData('agent-created', { agentId });
+      if (detail.currentModelCalls !== undefined) {
+        (delta as Record<string, unknown>).currentModelCalls = detail.currentModelCalls;
+      }
+      if (detail.startedAt) {
+        (delta as Record<string, unknown>).startedAt = detail.startedAt;
       }
     }
-    this.notify('agents-updated');
+    // Ensure id is always set
+    const updated = { ...base, ...delta, id: agentId } as Agent;
+    // Preserve _capabilities from existing state when the delta doesn't
+    // provide valid capabilities (SSE status deltas typically omit them).
+    if (!delta._capabilities && base._capabilities) {
+      updated._capabilities = base._capabilities;
+    }
+
+    // §7: a merge that changes nothing (by value; `detail` is compared
+    // field-by-field) is a no-op — no mutation, no dirty entry, no flush.
+    // A "created" event still signals agent-created below even when its
+    // content happens to match what state already holds.
+    const changed = !existing || !agentsShallowEqual(existing, updated);
+    if (changed) {
+      this.state.agents.set(agentId, updated);
+      this.recordSeedEpochDelta(agentId, delta);
+      this.dirty.upserted.add(agentId);
+      this.dirty.unknown.delete(agentId);
+    }
+    if (eventType === 'created') {
+      // A legitimate SSE creation for this ID. Signalled separately from
+      // agents-changed so consumers that suppress re-adding a
+      // server-omitted agent (see chat.ts loop guard) know the suppression
+      // no longer applies to this ID.
+      this.pendingCreatedIds.add(agentId);
+    }
+    if (changed || eventType === 'created') {
+      this.scheduleFlush();
+    }
+  }
+
+  /** Buffer a delta for an agent not yet known to state, refreshing its 30s TTL (§7). */
+  private bufferAgentDelta(agentId: string, delta: Partial<Agent>): void {
+    const prev = this.pendingAgentDeltas.get(agentId);
+    this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...delta } : delta);
+
+    const prevTimer = this.pendingAgentDeltaTimers.get(agentId);
+    if (prevTimer !== undefined) {
+      clearTimeout(prevTimer);
+    }
+    const timer = setTimeout(() => {
+      this.pendingAgentDeltas.delete(agentId);
+      this.pendingAgentDeltaTimers.delete(agentId);
+    }, StateManager.PENDING_DELTA_TTL_MS);
+    this.pendingAgentDeltaTimers.set(agentId, timer);
+  }
+
+  /** Drop a buffered delta and its expiry timer, e.g. once "created" or "deleted" resolves it. */
+  private clearPendingAgentDelta(agentId: string): void {
+    this.pendingAgentDeltas.delete(agentId);
+    const timer = this.pendingAgentDeltaTimers.get(agentId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.pendingAgentDeltaTimers.delete(agentId);
+    }
+  }
+
+  /** Record (last-value-wins, per field) the delta for an ID still unknown to state.agents. */
+  private recordUnknownDirty(agentId: string, delta: Partial<Agent>): void {
+    const existing = this.dirty.unknown.get(agentId) ?? {};
+    const next: UnknownAgentDelta = { ...existing };
+    if (delta.phase !== undefined) next.phase = delta.phase;
+    if (delta.activity !== undefined) next.activity = delta.activity as string;
+    if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
+    this.dirty.unknown.set(agentId, next);
+  }
+
+  /** Record a delta applied to a known agent into every open seed epoch (§7, §8). */
+  private recordSeedEpochDelta(agentId: string, delta: Partial<Agent>): void {
+    if (this.seedEpochs.size === 0) return;
+    for (const epoch of this.seedEpochs.values()) {
+      const prev = epoch.deltas.get(agentId);
+      epoch.deltas.set(agentId, prev ? { ...prev, ...delta } : delta);
+    }
   }
 
   private handleProjectEvent(projectId: string, eventType: string, data: unknown): void {
@@ -573,14 +802,200 @@ export class StateManager extends EventTarget {
   }
 
   /**
-   * Seed the agents map with full objects from a REST API response.
-   * Called after initial data fetch so that SSE delta merging has
-   * complete baseline data. Does not trigger notifications — the
-   * calling component already holds the data from its own fetch.
+   * Schedule a coalesced flush: one per `requestAnimationFrame`, or after
+   * 100ms if no frame arrives (a hidden tab throttles rAF) (§7). Whichever
+   * fires first performs the flush and cancels the other.
    */
-  seedAgents(agents: Agent[]): void {
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+
+    if (typeof requestAnimationFrame === 'function') {
+      this.flushRafHandle = requestAnimationFrame(() => this.flush());
+    }
+    this.flushTimeoutHandle = setTimeout(() => this.flush(), 100);
+  }
+
+  /** Cancel any pending flush timers without running the flush (used by setScope). */
+  private cancelScheduledFlush(): void {
+    this.flushScheduled = false;
+    if (this.flushRafHandle !== null) {
+      if (typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(this.flushRafHandle);
+      }
+      this.flushRafHandle = null;
+    }
+    if (this.flushTimeoutHandle !== null) {
+      clearTimeout(this.flushTimeoutHandle);
+      this.flushTimeoutHandle = null;
+    }
+  }
+
+  /**
+   * Emit the coalesced notifications for everything dirtied since the last
+   * flush, in order: `agent-created` per created ID, `agents-changed`, then
+   * the legacy `agents-updated` once for the whole flush (§7).
+   */
+  private flush(): void {
+    if (!this.flushScheduled) return;
+    this.cancelScheduledFlush();
+
+    const createdIds = Array.from(this.pendingCreatedIds);
+    const upserted = Array.from(this.dirty.upserted);
+    const deleted = Array.from(this.dirty.deleted);
+    const unknown = new Map(this.dirty.unknown);
+
+    this.pendingCreatedIds.clear();
+    this.dirty.upserted.clear();
+    this.dirty.deleted.clear();
+    this.dirty.unknown.clear();
+
+    for (const agentId of createdIds) {
+      this.notifyWithData('agent-created', { agentId });
+    }
+
+    const changed: AgentsChangedDetail = {
+      upserted,
+      deleted,
+      unknown,
+      generation: this.generation,
+    };
+    this.notifyWithData('agents-changed', changed);
+
+    this.notify('agents-updated');
+  }
+
+  /**
+   * Seed the agents map with objects from a REST API response. Called after
+   * a fetch so that SSE delta merging has baseline data. Does not trigger
+   * notifications — the calling component already holds the data from its
+   * own fetch.
+   *
+   * `token`, from `beginSeedEpoch`, re-applies the merged deltas recorded
+   * for each ID while the epoch was open, so a delta that landed after this
+   * REST snapshot was taken is not clobbered by it (§7, §8). A token
+   * invalidated by a scope change (or never opened, or already ended) makes
+   * this call a complete no-op: the snapshot may belong to a scope state no
+   * longer holds.
+   *
+   * `partial: true` merges each object into the existing one instead of
+   * replacing it, so a compact-view seed cannot strip full fields a fuller
+   * seed already recorded (§6.3).
+   *
+   * Every seed skips tombstoned IDs (`deletedAgentIds`): a `deleted` event
+   * is always fresher than a REST snapshot that still lists the agent.
+   */
+  seedAgents(agents: Agent[], options?: { token?: SeedEpochToken; partial?: boolean }): void {
+    const token = options?.token;
+    if (token !== undefined && !this.seedEpochs.has(token)) {
+      return;
+    }
+    const recordedDeltas = token !== undefined ? this.seedEpochs.get(token)?.deltas : undefined;
+    const partial = options?.partial ?? false;
+
     for (const agent of agents) {
-      this.state.agents.set(agent.id, agent);
+      if (this.state.deletedAgentIds.has(agent.id)) {
+        continue;
+      }
+      let toStore: Agent = agent;
+      if (partial) {
+        const existing = this.state.agents.get(agent.id);
+        toStore = existing ? ({ ...existing, ...agent, id: agent.id } as Agent) : agent;
+      }
+      const recorded = recordedDeltas?.get(agent.id);
+      if (recorded) {
+        toStore = { ...toStore, ...recorded, id: agent.id } as Agent;
+      }
+      this.state.agents.set(agent.id, toStore);
+    }
+  }
+
+  /**
+   * Start recording per-ID merged deltas applied while a REST fetch is in
+   * flight, so `seedAgents` can re-apply anything fresher than the response
+   * it is about to seed (§7, §8). Returns a token to pass to `seedAgents`
+   * and `endSeedEpoch`.
+   */
+  beginSeedEpoch(): SeedEpochToken {
+    const token: SeedEpochToken = Symbol('seed-epoch');
+    this.seedEpochs.set(token, { deltas: new Map() });
+    return token;
+  }
+
+  /**
+   * Close a seed epoch. Idempotent, and a no-op for a token already
+   * invalidated by a scope change.
+   */
+  endSeedEpoch(token: SeedEpochToken): void {
+    this.seedEpochs.delete(token);
+  }
+
+  /**
+   * Mark that state holds the complete dashboard-scope membership. Upgrades
+   * `compact` to `full`; never downgrades `full` to `compact` (§6.3).
+   */
+  markAgentSetComplete(view: 'full' | 'compact'): void {
+    if (view === 'full') {
+      this.completeFlag = 'full';
+    } else if (this.completeFlag !== 'full') {
+      this.completeFlag = 'compact';
+    }
+  }
+
+  /**
+   * True iff the completeness flag is set and satisfies `need`: `compact` is
+   * satisfied by either flag value, `full` only by a `full` flag (§6.3, R10).
+   */
+  isAgentSetComplete(need: 'full' | 'compact'): boolean {
+    if (this.completeFlag === null) return false;
+    return need === 'compact' || this.completeFlag === 'full';
+  }
+
+  /** The scope generation, bumped by `setScope` on every actual scope change (§7, §8). */
+  get scopeGeneration(): number {
+    return this.generation;
+  }
+
+  /**
+   * Resolves once the SSE connection is live in scope generation
+   * `generation`: at once if it already is, otherwise on the next
+   * `connected` of that generation. Rejects immediately if `generation` is
+   * already stale, and rejects if the generation changes while waiting
+   * (§7, §8).
+   */
+  sseConnected(generation: number): Promise<void> {
+    if (generation !== this.generation) {
+      return Promise.reject(new Error('scope generation changed'));
+    }
+    if (this.state.connected) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.sseConnectWaiters.push({ generation, resolve, reject });
+    });
+  }
+
+  /** Resolve every waiter registered for the current generation. */
+  private resolveSseConnectWaiters(): void {
+    const gen = this.generation;
+    const waiters = this.sseConnectWaiters;
+    this.sseConnectWaiters = waiters.filter((w) => w.generation !== gen);
+    for (const w of waiters) {
+      if (w.generation === gen) {
+        w.resolve();
+      }
+    }
+  }
+
+  /** Reject every waiter whose generation no longer matches the current one. */
+  private rejectStaleSseConnectWaiters(): void {
+    const gen = this.generation;
+    const waiters = this.sseConnectWaiters;
+    this.sseConnectWaiters = waiters.filter((w) => w.generation === gen);
+    for (const w of waiters) {
+      if (w.generation !== gen) {
+        w.reject(new Error('scope generation changed'));
+      }
     }
   }
 
