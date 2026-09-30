@@ -225,6 +225,42 @@ changed web files (still the `main` baseline, 6 errors/44 warnings, 0 new), `gol
 ./pkg/hub/...` (same 11 pre-existing issues, none in changed files), `hack/check-authz-guards.sh`
 (clean), bare-#N grep on commits (empty).
 
+## Review round 3: APPROVE
+
+Full report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-3.md`
+(reviewed at `743bdfd6`). No Critical or Required findings; round 2's F1 and F2 both independently
+re-verified as resolved, with the fix delta confirmed to be comments/template only (no logic change).
+Disposition of the remaining, non-blocking findings:
+
+- **F1 (Optional, addressed):** the PR body had gone stale relative to the shipped diff — it didn't
+  mention the `getUsageSummary` `activeCount` fix (always-0 → the cross-broker sum for
+  `max_agents_per_broker`, a wire-visible behavior change the EM asked for after the initial submission),
+  the matching admin-quotas summary-row rendering change (round-1 F1), or the three tests added for
+  those (`TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`,
+  `TestGetUsageSummary_NonBrokerLimit_Unaffected`, `TestListRuntimeBrokers_AgentCountAgreesWithReserve`).
+  It also said the UI renders "-" when capacity fields are absent; the code renders an em dash "—".
+  Refreshed the PR body's Summary and Test plan to match the PR as it now stands.
+- **F2 (Nit, fixed):** the `BrokerAgentLimitSource` doc comment (`handlers_quota.go`) gave the wrong
+  reason for a correct conclusion — it said `"unlimited"` is unreachable here because `brokerCapacity`
+  "returns before counting", but skipping the count has nothing to do with reachability (this view
+  ignores `Count` entirely). Reworded to the actual reason: `"unlimited"` needs a nil `limitDef` or a
+  nil `quotaService` in `effectiveBrokerLimit`, and neither can occur in `getUsageByLimit`/
+  `getUsageSummary` (`def` is always this request's non-nil limit definition, and `s.quotaService` is
+  always constructed in `NewServer`, `server.go`).
+- **F4 (FYI, cheap fix applied):** `BrokerAgentLimit`'s doc comment listed "unlimited" and "not a broker
+  row" as its nil cases but not "resolution failed" (`BrokerCapacity{}` on an outright error). Added.
+- **F3 (FYI):** the brokers-list table cell now renders at `font-weight: 500` (via the unscoped
+  `.stat-value` class picked up by the F2-round-2 dedup) instead of the default 400; size and color are
+  unchanged, and this was already analyzed and accepted as a cosmetic, non-regression side effect of the
+  round-2 dedup. No action.
+- **F5 (FYI):** confirms there is no separately named "Verify Web Types" CI check on this head — it
+  runs inside "Build & Test", which is green — and that the two reporting-only failures remain the same
+  pre-existing, unrelated ones already reported after round 1 (`internal/fixturegen`
+  `TestFixtureCoverage`, and the 405-Allow-header lint). No action.
+
+Re-verified after F2/F4: `go build ./pkg/hub/...` and `go vet ./pkg/hub/...`. F1 (the PR body refresh)
+needs no code verification.
+
 ## Note on the upstream-main rebase step
 
 `dev-common-rules.md` asks every branch to rebase onto `GoogleCloudPlatform/scion` `main` before
