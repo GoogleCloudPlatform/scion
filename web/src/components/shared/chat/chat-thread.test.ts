@@ -5013,8 +5013,38 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
       expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
     });
 
-    it('hides both items when the message also carries no senderProjectId', async () => {
+    it('hides both items when the message also carries no senderProjectId and the thread has no project either', async () => {
       const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+    });
+
+    it('falls back to the thread\'s own project id for "Open in graph" in a project-scoped (non-DM) thread', async () => {
+      // Neither senderProjectId nor a roster entry is available (the author
+      // has left and the message predates #1913), but this is a
+      // project-scoped thread, so its own projectId is a correct, safe
+      // fallback — unlike a DM's projectId (see the next test).
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+      el.projectId = 'proj-thread';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-thread', 'agent-1'));
+    });
+
+    it('does not fall back to the thread projectId in a DM — it is only the inherited, unrelated project', async () => {
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+      el.isDM = true;
+      el.projectId = 'proj-inherited';
 
       rightClick(bubbles[0]);
       await el.updateComplete;

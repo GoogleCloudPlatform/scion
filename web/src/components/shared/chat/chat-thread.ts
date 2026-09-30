@@ -3221,11 +3221,20 @@ export class ScionChatThread extends LitElement {
    * roster entirely), falling back to the roster's per-agent `projectId` for
    * messages that predate that field. Empty when `senderId` is empty — there
    * is no agent to focus the graph on.
+   *
+   * If both of those are missing — a historical message from before #1913,
+   * whose author has since left the roster — a project-scoped (non-DM)
+   * thread's own `projectId` is still a correct, defensive fallback: unlike
+   * a DM's `projectId` (see `resolvePathLinkProjectId`, which is only
+   * `inheritedProjectId()` and unrelated to the conversation), a group
+   * thread's `projectId` is the project the conversation itself belongs to.
+   * Falling back to it here keeps "Open in graph" available and scoped
+   * correctly instead of hiding it outright.
    */
   private resolveAgentActionProjectId(msg: Message): string {
     if (!msg.senderId) return '';
     const member = this.agentMembers.find((m) => m.id === msg.senderId);
-    return msg.senderProjectId || member?.projectId || '';
+    return msg.senderProjectId || member?.projectId || (!this.isDM ? this.projectId : '');
   }
 
   /** Handle right-click on a message to show context menu. */
