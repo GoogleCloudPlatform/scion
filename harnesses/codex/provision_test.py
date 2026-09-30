@@ -472,65 +472,13 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(data["model"], "gpt-6-astra")
         self.assertEqual(data["model_reasoning_effort"], "medium")
 
-    def test_insert_toml_top_level_line_appends_when_no_table_header(self) -> None:
-        result = provision._insert_toml_top_level_line('other_key = "value"\n', 'model = "x"')
-        self.assertEqual(result, 'other_key = "value"\n\nmodel = "x"')
-
-    def test_insert_toml_top_level_line_lands_before_first_table_header(self) -> None:
-        content = 'other_key = "value"\n[features]\nhooks = true\n'
-        result = provision._insert_toml_top_level_line(content, 'model = "x"')
-        lines = result.split("\n")
-        model_idx = lines.index('model = "x"')
-        section_idx = lines.index("[features]")
-        self.assertLess(model_idx, section_idx)
-
-    def test_insert_toml_top_level_line_ignores_nested_array_line_with_trailing_comma(self) -> None:
-        # Regression test for ptone/scion#2365 review round 2 (N2): a
-        # top-level multi-line array whose element is itself an array on its
-        # own line (e.g. `["x"],`) is syntactically indistinguishable by
-        # shape alone from a quoted-key table header (`["x"]`). Without
-        # bracket-depth tracking, this line was misidentified as a header
-        # and the inserted key landed inside the array, breaking the file.
-        #
-        # Asserting with tomllib (round 3 review R2 fix): a plain line-index
-        # comparison is satisfied even when the key is spliced *inside* the
-        # array (which is invalid TOML) as long as some `[features]` line
-        # still sorts after it, so it can't tell "inserted before the array"
-        # apart from "inserted inside the array, before its closing bracket
-        # line". Parsing with tomllib and checking the actual value structure
-        # can't be fooled that way: it fails immediately if the mechanism
-        # under test regresses.
-        content = 'notify = [\n  "sh",\n  ["x"],\n]\n[features]\nhooks = true\n'
-        result = provision._insert_toml_top_level_line(content, 'model = "y"')
-        data = tomllib.loads(result)
-        self.assertEqual(data["model"], "y")
-        self.assertEqual(data["notify"], ["sh", ["x"]])
-        self.assertEqual(data["features"], {"hooks": True})
-
-    def test_insert_toml_top_level_line_ignores_nested_array_line_without_trailing_comma(self) -> None:
-        # Same as above, but the nested-array line is the array's last
-        # element (no trailing comma) — the shape most easily confused with
-        # a real `["x"]` table header, since only bracket depth (not a
-        # regex on the line's own shape) distinguishes the two.
-        content = 'notify = [\n  "sh",\n  ["x"]\n]\n[features]\nhooks = true\n'
-        result = provision._insert_toml_top_level_line(content, 'model = "y"')
-        data = tomllib.loads(result)
-        self.assertEqual(data["model"], "y")
-        self.assertEqual(data["notify"], ["sh", ["x"]])
-        self.assertEqual(data["features"], {"hooks": True})
-
-    def test_strip_toml_top_level_key_ignores_nested_array_line(self) -> None:
-        # Mirrors the _insert_toml_top_level_line regression above: a
-        # top-level key placed after a multi-line array (but before any
-        # real table header) must still be recognized and stripped, not
-        # treated as already "in a section" because of the array's nested
-        # bracketed element. Also checks the array and table are untouched.
-        content = 'notify = [\n  "sh",\n  ["x"],\n]\nmodel = "stale"\n[features]\nhooks = true\n'
-        result = provision._strip_toml_top_level_key(content, "model")
-        data = tomllib.loads(result)
-        self.assertNotIn("model", data)
-        self.assertEqual(data["notify"], ["sh", ["x"]])
-        self.assertEqual(data["features"], {"hooks": True})
+    # Unit tests for insert_toml_top_level_line / strip_toml_top_level_key /
+    # is_toml_table_header themselves now live in scion_harness_test.py
+    # (TestInsertTomlTopLevelLine, TestStripTomlTopLevelKey,
+    # TestIsTomlTableHeader) — those helpers moved to the shared lib
+    # (ptone/scion#2426) since grok-build needs the same hardening. The
+    # end-to-end tests below still exercise this module's own
+    # _reconcile_codex_toml pipeline, which now delegates to them.
 
     def test_reconcile_codex_toml_handles_nested_array_in_notify_with_trailing_comma(self) -> None:
         # End-to-end version of the N2 regression: a config.toml whose
@@ -641,18 +589,6 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(data["model_reasoning_effort"], "high")
         self.assertEqual(data["profiles"]["fast"]["model"], "gpt-user-profile")
         self.assertEqual(data["profiles"]["fast"]["model_reasoning_effort"], "low")
-
-    def test_toml_table_header_accepts_quoted_key_containing_equals_and_bracket(self) -> None:
-        # Regression test for ptone/scion#2365 review round 3 (N1): a
-        # quoted table-header key may itself contain `=` or `]` (e.g. a
-        # filesystem path used as a projects key). The header regex used to
-        # reject this shape entirely, treating the table's contents as
-        # top-level.
-        content = '[projects."/a=b]c"]\nmodel = "should-stay-here"\n'
-        result = provision._insert_toml_top_level_line(content, 'model = "top-level"')
-        data = tomllib.loads(result)
-        self.assertEqual(data["model"], "top-level")
-        self.assertEqual(data["projects"]["/a=b]c"]["model"], "should-stay-here")
 
     def _reconcile_and_capture(
         self, original: str, **kwargs: Any
@@ -986,16 +922,74 @@ class CodexProvisionTest(unittest.TestCase):
     def test_toml_edit_preserves_true_when_original_unparseable(self) -> None:
         self.assertTrue(provision._toml_edit_preserves("not [valid toml", 'model = "x"\n', "x", None))
 
-    def test_strip_toml_top_level_key_section_safety(self) -> None:
-        content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
-        result = provision._strip_toml_top_level_key(content, "reasoning_effort")
-        self.assertIn('reasoning_effort = "low"', result)
+    # --- _write_mcp_to_config: validate-before-write ------------------------
+    # Regression coverage for ptone/scion#2426 (generalization-findings.md
+    # G1): this writer used to call scion_harness.atomic_write_text directly
+    # with no tomllib preserve-check at all — "The MCP writer has no tomllib
+    # preserve-check" per the findings note. It now goes through
+    # scion_harness.write_toml_if_preserves, the same as grok-build's MCP
+    # writer.
 
-    def test_strip_toml_top_level_key_does_not_match_prefixed_keys(self) -> None:
-        content = 'reasoning_effort = "low"\nreasoning_effort_extended = "yes"\n'
-        result = provision._strip_toml_top_level_key(content, "reasoning_effort")
-        self.assertNotIn('reasoning_effort = "low"', result)
-        self.assertIn('reasoning_effort_extended = "yes"', result)
+    def test_write_mcp_to_config_creates_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                ctx = _test_ctx()
+                provision._write_mcp_to_config(ctx, {"foo": '[mcp_servers.foo]\ncommand = "a"\n'})
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, encoding="utf-8") as f:
+                    content = f.read()
+        self.assertIn("[mcp_servers.foo]", content)
+        self.assertIn('command = "a"', content)
+
+    def test_write_mcp_to_config_strips_old_sections_including_commented_header(self) -> None:
+        # Repro case 1 from generalization-findings.md: a header with a
+        # trailing comment must be recognized so re-writing the same table
+        # doesn't produce a duplicate ('Cannot declare... twice').
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('[mcp_servers.foo] # added by user\ncommand = "a"\n')
+
+                ctx = _test_ctx()
+                provision._write_mcp_to_config(ctx, {"foo": '[mcp_servers.foo]\ncommand = "b"\n'})
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["mcp_servers"]["foo"]["command"], "b")
+
+    def test_write_mcp_to_config_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
+        # A header-shaped line inside a top-level multi-line string is the
+        # documented residual gap of the line-oriented strip_toml_sections;
+        # write_toml_if_preserves must catch it via the tomllib backstop and
+        # leave the file untouched rather than write invalid TOML.
+        original = (
+            'developer_instructions = """\n'
+            "[mcp_servers.fake]\n"
+            'command = "not real"\n'
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(original)
+
+                ctx = _test_ctx()
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                provision._write_mcp_to_config(ctx, {"real": '[mcp_servers.real]\ncommand = "x"\n'})
+
+                with open(config_path, encoding="utf-8") as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
+        self.assertEqual(len(warnings), 1)
 
 
 if __name__ == "__main__":
