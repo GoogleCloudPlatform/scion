@@ -1186,6 +1186,51 @@ func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
 	}
 }
 
+// Review finding N3 (ptone/scion#2270 round 2): an explicit end-to-end test
+// that PUT {"quotas":{}} in DB mode — not just DELETE /sections/quotas —
+// resets the live brokerQuotasEnforced() value back to enforced. The section
+// row remains (unlike a DELETE), but its document is now {}, so the next
+// Snapshot() sees no quotas.enforce_broker_quotas key, which is exactly the
+// "unset -> enforced" case F3 fixed.
+func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn enforcement off.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false after the first PUT")
+	}
+
+	// PUT the section back to {} (no explicit value) — this is what the
+	// generic server-config PUT produces for a quotas object with no
+	// enforce_broker_quotas field, distinct from deleting the section
+	// entirely via the "reset to bootstrap" endpoint.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the quotas row to still exist after PUT {} (replace, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored quotas doc to be {}, got %s", row.Value)
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after PUT {\"quotas\":{}} (fail-safe default), not fail-open")
+	}
+}
+
 // Test 7 (design 4.7 P1b): a non-boolean enforce_broker_quotas is rejected.
 func TestPutServerConfigDB_Quotas_NonBooleanRejected(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)

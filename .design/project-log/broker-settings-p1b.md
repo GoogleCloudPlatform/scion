@@ -1,7 +1,10 @@
 # broker-settings P1b: broker-quota enforcement toggle (ptone/scion#2061)
 
-Base: upstream `GoogleCloudPlatform/scion` main `e1f682eac7d774414cdc50a7f1fa9009f3968596`.
-PR: ptone/scion#2270, branch `scion/broker-settings-p1b`, head `7dacb868912f5628b772d20beb12a82d376eca93`.
+PR: ptone/scion#2270, branch `scion/broker-settings-p1b`.
+Base (as of the round-2 fixes below): upstream `GoogleCloudPlatform/scion` main
+`1526431232616f0b50d21d42db499e27710ccf5d` (rebased twice during review to pick
+up GoogleCloudPlatform/scion#2101 and #2103; see "Review rounds" below for the
+history of heads).
 Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md` §4.4, 4.5, 4.7 (P1b), 4.8 (AC4, AC5).
 
 ## What this adds
@@ -101,19 +104,94 @@ and `pkg/config/hub_config_test.go`.
 
 ## Verification
 
-- `go build ./...`, `go vet ./...`: clean.
-- `golangci-lint run --new-from-rev=main ./...`: 0 issues.
-- `make test-hub-sqlite`: full `pkg/hub` suite passes (828s solo run). A first
-  concurrent run (alongside `test-fast` and `golangci-lint` in the same
-  sandbox) showed one `pkg/hub` failure; a clean rerun in isolation passed,
-  consistent with resource-contention flakiness from three heavy suites
-  running at once rather than a real regression — not reproduced.
-- `make test-fast` (no_sqlite): one pre-existing, unrelated failure,
-  `TestNativeTelemetryPolicyEffectiveChildEnv` in `pkg/sciontool/supervisor`
-  (an env-var conflict with this sandbox's `CLAUDE_CODE_ENABLE_TELEMETRY`),
-  reproduced identically by stashing this branch's changes and rerunning
-  against the unmodified base — not caused by this change.
+As of the round-2 fixes (base `1526431232616f0b`):
+
+- `go build ./...`, `go vet ./...`, `go vet -tags no_sqlite ./...`: clean.
+- `golangci-lint run --new-from-rev=<base> ./...`: 0 issues.
+- `go test -race ./pkg/hub/ -run 'TestBrokerQuotaSwitch|TestBrokerQuotasEnforced|Quotas|EnforceBrokerQuotas|TestResetSection|TestExtractKoanfKeys'`:
+  all pass, race-clean.
+- `make test-hub-sqlite`: `pkg/hub` itself passes cleanly (no `-skip` needed
+  for anything in this feature). The only failure anywhere in the module is
+  `pkg/hub/authzop.TestMutationClassificationBidirectional`, pre-existing on
+  the base and tracked upstream as GoogleCloudPlatform/scion#2105 — not
+  caused by this change, confirmed by reproducing it with this branch's
+  changes stashed out.
+- `make test-fast` (no_sqlite): same authzop failure as above; with a
+  scrubbed environment (`env -i PATH HOME GO*`) no other package fails —
+  ambient `SCION_*`/`CLAUDE_*` env vars in this sandbox cause unrelated
+  failures in unscrubbed runs (`pkg/config`, `pkg/sciontool/supervisor`,
+  etc.), not this PR.
 - `npx tsc --noEmit` (`web/`): clean.
+
+Two intermediate CI blockers surfaced and were resolved by rebasing during
+review, both pre-existing on upstream main and unrelated to this PR's diff:
+`roundTripFunc` undefined under `no_sqlite` (fixed by
+GoogleCloudPlatform/scion#2101) and a stale test premise in
+`TestEvaluateSAAssignment_CeilingDelegatorLacksPermission` (fixed by
+GoogleCloudPlatform/scion#2103).
+
+## Review rounds
+
+**Round 1** (reviewer `broker-settings-rev-p1b-1`, head `b0e59348`, base upstream
+`e1f682ea`): REQUEST CHANGES. Findings F1-F5, all addressed at head
+`6e0a8017` (base rebased onto upstream `1526431232616f0b`, which brought in
+GoogleCloudPlatform/scion#2101 and #2103, both needed to unblock CI on
+unrelated pre-existing breaks):
+
+- **F1 (required, data race).** `brokerQuotasEnforced()` read
+  `s.config.EnforceBrokerQuotas` with no lock while `ApplySnapshot` writes it
+  under `s.mu.Lock()`. Fixed by reading under `s.mu.RLock()`, matching the
+  project convention (`defaultProjectSharedDirs`, `hubAutoExposeDefault`).
+  Added a concurrent regression test that fails under `-race` without the fix.
+- **F2 (required, auto-close).** The PR body's "Closes ptone/scion#2061"
+  would have auto-closed the tracking issue on merge, while P1a and P2 are
+  still open. Changed to "Part of ptone/scion#2061".
+- **F3 (required, fail-open on clear).** `ApplySnapshot` skipped the
+  assignment when the snapshot's `EnforceBrokerQuotas` was nil, treating nil
+  as "no change" like every sibling `*bool` field. But for this key nil is a
+  real, meaningful value — the fail-safe "enforced" default — so DELETE
+  `/sections/quotas` or `PUT {"quotas":{}}` left the live hub fail-open
+  (still `false` in memory) while GET and the UI both reported "enforced".
+  Fixed by assigning unconditionally, with a `boolPtrEqual` helper for
+  correct applied-change tracking. This is the one place in this feature
+  where nil isn't "leave it alone" — worth remembering if a future *bool
+  Layer-1 setting needs the same fail-safe-on-clear semantics.
+- **F4 (optional).** The DB-mode test asserted only the snapshot/GET, not
+  the live `brokerQuotasEnforced()` value, because `ops.server` was never
+  wired in the test harness (so `Update()`'s self-apply was a no-op). Wired
+  it and asserted the live value; added a simulated cross-replica test (two
+  `OperationalSettings` sharing one fake store, one calling
+  `refreshAndApply` — the same call the LISTEN/NOTIFY subscription and the
+  60s poll backstop make) since no live Postgres was available to test AC5
+  directly.
+- **F5 (optional).** Added an end-to-end lock-contention variant through
+  the real server wiring (`srv.quotaService`, the real
+  `store.LimitMaxAgentsPerBroker` limit, a real HTTP create), alongside the
+  original direct `QuotaService` unit test.
+
+**Round 2** (reviewer `broker-settings-rev-p1b-2`, fresh/independent, head
+`6e0a8017`): APPROVE. Verified F1-F5 by mutation-testing each fix (reverting
+it and confirming the corresponding regression test fails) — all five held.
+Three optional nits, all addressed:
+
+- **N1.** The PR body's CI paragraph blamed the wrong (already-fixed) test.
+  Updated to name the actual current red check
+  (`authzop.TestMutationClassificationBidirectional`, pre-existing on
+  upstream main, tracked as GoogleCloudPlatform/scion#2105) instead of the
+  SA-assignment-ceiling test that GoogleCloudPlatform/scion#2103 had already
+  fixed by that point.
+- **N2.** This project log (you're reading the fix).
+- **N3.** Added an explicit DB-mode end-to-end test for
+  `PUT {"quotas":{}}` (as opposed to DELETE `/sections/quotas`) resetting
+  the live `brokerQuotasEnforced()` value back to `true` —
+  `TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue`.
+
+Both reviews independently confirmed: `pkg/hub` itself is green in
+`make test-hub-sqlite`; every CI failure encountered throughout review
+(`roundTripFunc` under `no_sqlite`, the SA-assignment-ceiling test, and
+`authzop.TestMutationClassificationBidirectional`) was a pre-existing break
+on `GoogleCloudPlatform/scion main` / `ptone/scion main`, unrelated to this
+PR's diff, and reproduced identically with this branch's changes stashed out.
 
 ## Scope discipline
 
