@@ -427,3 +427,40 @@ describe('name-tie ordering (#2388 review N1)', () => {
     expect(idsByX(forward.nodes)).toEqual(['a1', 'a2']);
   });
 });
+
+describe('cyclic-ancestry root promotion (#2388 review N-B)', () => {
+  // Malformed cyclic ancestry: a's parent is b and b's parent is a, so
+  // neither reaches a legitimate root. buildLineageForest must still
+  // terminate and promote exactly one of them to a root — and which one
+  // must not depend on the input array's order. topologySignature is
+  // order-independent (sorted by id), so if promotion order depended on
+  // input order, a cache hit could reuse a stale choice of root/layout for
+  // input that produces the same signature.
+  const a = agent('a', 'a', ['u', 'b']);
+  const b = agent('b', 'b', ['u', 'a']);
+
+  it('promotes the same node to root regardless of input array order', () => {
+    const forwardRootIds = buildLineageForest([a, b]).map((n) => n.agent.id);
+    const reversedRootIds = buildLineageForest([b, a]).map((n) => n.agent.id);
+
+    expect(forwardRootIds).toEqual(reversedRootIds);
+    expect(forwardRootIds).toEqual(['a']); // deterministic: lowest id wins
+  });
+
+  it('keeps layout identical for cyclic input regardless of array order (matches the order-independent signature)', () => {
+    const noCollapse = new Set<string>();
+    // The signature was already order-independent before this fix; this
+    // pins that it stays true, so the two layout computations below are a
+    // valid same-signature comparison.
+    expect(topologySignature([a, b], noCollapse, false, 'vertical')).toBe(
+      topologySignature([b, a], noCollapse, false, 'vertical')
+    );
+
+    const forward = layoutForest(buildLineageForest([a, b]));
+    const reversed = layoutForest(buildLineageForest([b, a]));
+    const posById = (layout: typeof forward) =>
+      new Map(layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+
+    expect(posById(forward)).toEqual(posById(reversed));
+  });
+});

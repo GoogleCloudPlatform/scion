@@ -259,9 +259,11 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
   /** The status-badge `label` for the node whose card links to /agents/<id>. */
   function statusLabel(agentId: string): string | null {
-    return el.shadowRoot!
-      .querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
-      ?.getAttribute('label') ?? null;
+    return (
+      el
+        .shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
+        ?.getAttribute('label') ?? null
+    );
   }
 
   it('renders the current status on a cache hit, not the stale cached node object (#2388 review B1)', async () => {
@@ -342,10 +344,31 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   });
 
   it('does not reset auto-fit when the same project scope reorders or gets a status-only update', async () => {
+    el.agents = [{ ...el.agents[1], phase: 'stopped' }, { ...el.agents[0] }]; // reordered, one status changed, same projectId set {p1}
+    await el.updateComplete;
+    expect(didAutoFit()).toBe(true);
+  });
+
+  it('does not reset auto-fit when a multi-project scope reorders (#2388 review N-A)', async () => {
+    // The whole point of comparing the projectId *set* instead of agents[0]
+    // is a global view where a status sort can put a different project's
+    // agent first without the scope (which projects are represented)
+    // actually changing. An order-sensitive comparison — e.g. comparing
+    // joined projectId arrays instead of sets — passes the single-project
+    // reorder test above but fails this one, because reversing a
+    // multi-project list changes the joined string even though the set of
+    // projects is unchanged.
     el.agents = [
-      { ...el.agents[1], phase: 'stopped' },
+      { ...agent('r1', 'root-1', ['user-1']), projectId: 'p1' } as Agent,
+      { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent,
+    ];
+    await el.updateComplete;
+    setDidAutoFit(true);
+
+    el.agents = [
+      { ...el.agents[1], phase: 'stopped' }, // p2's agent now first, status changed
       { ...el.agents[0] },
-    ]; // reordered, one status changed, same projectId set {p1}
+    ]; // reordered, same projectId set {p1, p2}
     await el.updateComplete;
     expect(didAutoFit()).toBe(true);
   });
@@ -363,10 +386,7 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   });
 
   it('resets auto-fit when a project drops out of the scope', async () => {
-    el.agents = [
-      ...el.agents,
-      { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent,
-    ];
+    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
     await el.updateComplete;
     setDidAutoFit(true);
     el.agents = el.agents.filter((a) => a.projectId !== 'p2');

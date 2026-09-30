@@ -190,7 +190,15 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     for (const child of node.children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
-  for (const node of byId.values()) {
+  // Cycle-member promotion order must not depend on the input array's order
+  // (byId's iteration order is insertion order, i.e. the input array's): a
+  // pure function of id makes which member becomes the root deterministic,
+  // so the layout stays a pure function of topologySignature's (order-
+  // independent) inputs even for this malformed-data edge case.
+  const byIdAscending = [...byId.values()].sort((a, b) =>
+    a.agent.id < b.agent.id ? -1 : a.agent.id > b.agent.id ? 1 : 0
+  );
+  for (const node of byIdAscending) {
     if (!visited.has(node.agent.id)) {
       roots.push(node);
       visit(node, 0);
