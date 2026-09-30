@@ -93,6 +93,10 @@ func assertReservedStripped(t *testing.T, msg *messages.StructuredMessage) {
 	assert.False(t, hasSHA, "client-supplied body_sha256 must be stripped")
 	assert.Equal(t, "kept", md["harmless"], "non-reserved client metadata is unaffected")
 
+	// r3 finding 1: require.NotEmpty here so this check cannot silently go
+	// vacuous again — assert.NotContains("", x) always passes, which is
+	// exactly how r2's version of this check went undetected until r3.
+	require.NotEmpty(t, msg.DeliveryText, "test setup must enable the envelope switch so this check exercises real rendered content")
 	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
 	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
 
@@ -112,6 +116,11 @@ func assertReservedStripped(t *testing.T, msg *messages.StructuredMessage) {
 func TestU5a_HandleGroupMessage_StripsReservedMetadata(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
+	// r3 finding 1: without the envelope switch on, DeliveryText is never
+	// rendered, and the NotContains checks in assertReservedStripped run
+	// against an empty string (vacuously true). Turn it on so those checks
+	// actually exercise the rendered envelope.
+	enableOffload(t, srv, 0, true)
 
 	project := &store.Project{ID: tid("u5a-group-project"), Name: "u5a-group", Slug: "u5a-group"}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -156,6 +165,8 @@ func TestU5a_HandleGroupMessage_StripsReservedMetadata(t *testing.T) {
 func TestU5a_BroadcastDirect_StripsReservedMetadata(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
+	// r3 finding 1: see the identical comment in TestU5a_HandleGroupMessage.
+	enableOffload(t, srv, 0, true)
 
 	project := &store.Project{ID: tid("u5a-bcast-project"), Name: "u5a-bcast", Slug: "u5a-bcast"}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -200,6 +211,8 @@ func TestU5a_BroadcastDirect_StripsReservedMetadata(t *testing.T) {
 func TestU5a_HandleBrokerInbound_StripsReservedMetadata(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
+	// r3 finding 1: see the identical comment in TestU5a_HandleGroupMessage.
+	enableOffload(t, srv, 0, true)
 
 	broker := &store.RuntimeBroker{ID: tid("u5a-inbound-broker"), Name: "b", Slug: "b", Status: store.BrokerStatusOnline}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
@@ -299,6 +312,12 @@ func TestU5a_DeliverToAgent_StripsReservedMetadata(t *testing.T) {
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(fanout, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	// r3 finding 1: this proxy is built by hand and never receives the
+	// writeDenyEnabled hook server.go:3084 wires up in production, so
+	// DeliveryText would never render here even with enableOffload. Set it
+	// directly, matching delivery_text_system_test.go's pattern for the
+	// notification dispatcher.
+	proxy.writeDenyEnabled = func() bool { return true }
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
@@ -328,6 +347,8 @@ func TestU5a_DeliverToAgent_StripsReservedMetadata(t *testing.T) {
 func TestU5a_ChatV2SendAgentRouted_StripsReservedMetadata(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
+	// r3 finding 1: see the identical comment in TestU5a_HandleGroupMessage.
+	enableOffload(t, srv, 0, true)
 
 	agent := &store.Agent{
 		ID: tid("u5a-chatv2-agent"), ProjectID: proj.ID, Name: "Helper", Slug: "helper",
@@ -370,6 +391,8 @@ func TestU5a_ChatV2SendAgentRouted_StripsReservedMetadata(t *testing.T) {
 
 	// r2 finding 2: also check the rendered output, not just the metadata
 	// map (see assertReservedStripped's doc comment for why).
+	// r3 finding 1: require.NotEmpty first — see assertReservedStripped.
+	require.NotEmpty(t, msg.DeliveryText, "test setup must enable the envelope switch so this check exercises real rendered content")
 	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
 	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
 	legacy := messages.FormatForDelivery(msg)
@@ -385,6 +408,8 @@ func TestU5a_ChatV2SendAgentRouted_StripsReservedMetadata(t *testing.T) {
 func TestU5a_ProcessMentions_StripsReservedMetadata(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
+	// r3 finding 1: see the identical comment in TestU5a_HandleGroupMessage.
+	enableOffload(t, srv, 0, true)
 
 	project := &store.Project{ID: tid("u5a-mentions-project"), Name: "u5a-mentions", Slug: "u5a-mentions"}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -434,6 +459,8 @@ func TestU5a_ProcessMentions_StripsReservedMetadata(t *testing.T) {
 
 	// r2 finding 2: also check the rendered output, not just the metadata
 	// map (see assertReservedStripped's doc comment for why).
+	// r3 finding 1: require.NotEmpty first — see assertReservedStripped.
+	require.NotEmpty(t, msg.DeliveryText, "test setup must enable the envelope switch so this check exercises real rendered content")
 	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
 	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
 	legacy := messages.FormatForDelivery(msg)
