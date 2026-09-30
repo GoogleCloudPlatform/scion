@@ -2658,32 +2658,34 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	<-disp.entered // worker has written the stopping and provisioning steps
 	defer close(disp.release)
 
-	// The `go runReincarnationWorker` the handler started above has no
-	// synchronization with the ListAgentReincarnations call that captured
-	// `initial`: under scheduler load the worker can win that race and have
-	// already written the provisioning step by the time `initial` is read,
-	// making `initial` and the read below the very same write. So this
-	// polls for the concrete state change the worker makes instead of
-	// sleeping a fixed duration and hoping it landed, and only asserts
-	// updated_at is non-decreasing (not strictly later) below, since on
-	// that race the two reads are legitimately equal, not ordered.
-	var cur *store.AgentReincarnation
-	require.Eventually(t, func() bool {
-		c, err := s.GetAgentReincarnation(context.Background(), initial.ID)
-		if err != nil || c.State != store.AgentReincarnationStateProvisioning {
-			return false
-		}
-		cur = c
-		return true
-	}, 2*time.Second, 10*time.Millisecond,
+	// tryAdvanceReincarnation's provisioning write, and the agent row's
+	// ReincarnationUpdatedAt write in updateReincarnationStep, both finish
+	// synchronously before DispatchAgentReprovision is called, so once
+	// <-disp.entered returns above, the provisioning write has already
+	// landed. A single read is enough here; no poll is needed.
+	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
 		"the record's own state must track the worker's progress, not stay pending")
 
+	// initial is not a safe baseline for the updated_at comparison below:
+	// the `go runReincarnationWorker` the handler started above has no
+	// synchronization with the ListAgentReincarnations call that captured
+	// `initial`, so under scheduler load the worker can win that race and
+	// have already written the provisioning step by the time `initial` is
+	// read, making `initial` and `cur` the very same write. The agent row's
+	// ReincarnationUpdatedAt is the provisioning step's own stamp instead:
+	// tryAdvanceReincarnation pins the record's updated_at and
+	// updateReincarnationStep pins ReincarnationUpdatedAt to that same
+	// instant for this step, so comparing against it is race-free proof
+	// that the record's updated_at cannot predate the step that set it.
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	t.Logf("agent reincarnation_state=%q; record state=%q updated_at initial=%v now=%v",
-		a.ReincarnationState, cur.State, initial.UpdatedAt, cur.UpdatedAt)
-	assert.False(t, cur.UpdatedAt.Before(initial.UpdatedAt),
-		"worker has passed the stopping and provisioning steps but the record's updated_at went backwards")
+	require.NotNil(t, a.ReincarnationUpdatedAt, "the provisioning step must have set ReincarnationUpdatedAt")
+	t.Logf("agent reincarnation_state=%q; record state=%q reincarnation_updated_at=%v record_updated_at=%v",
+		a.ReincarnationState, cur.State, *a.ReincarnationUpdatedAt, cur.UpdatedAt)
+	assert.False(t, cur.UpdatedAt.Before(*a.ReincarnationUpdatedAt),
+		"the worker's provisioning step must have bumped the record's updated_at, so it cannot predate that step")
 }
 
 // TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep exercises the same
