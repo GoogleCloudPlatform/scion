@@ -74,13 +74,20 @@ exclusions — verified with a `-v` run showing the four requests
 - `make test-hub-sqlite` (full `pkg/hub` suite): a first run failed in `pkg/hub`, but the failing
   test's name was lost to truncation in the captured log (the capture kept only the last ~100
   lines of a very verbose run). Re-ran `go test -count=1 -timeout 25m -v -skip '...'  ./pkg/hub/`
-  with output redirected to a file to identify it; per the EM, the suspected cause is the known
-  order-dependent flake `TestHandleAgentMessage_LogCapture_RawContentRedacted` (fails on bare
-  upstream main too, passes in isolation). PR was opened before this full run finished, on the
-  EM's explicit instruction not to hold an XS-priority CI fix for it, with the result to be
-  reported as a follow-up once confirmed.
-- `go test -p 2 ./pkg/hub/...`: requested by the EM as an additional gate; to be run and reported
-  alongside the full-suite confirmation above.
+  with output redirected to a file to identify it: the sole failure is
+  `TestHandleAgentMessage_LogCapture_RawContentRedacted`, confirmed by the EM as a known
+  order-dependent flake. It passes cleanly in isolation
+  (`go test -run TestHandleAgentMessage_LogCapture_RawContentRedacted -count=1`, both subtests
+  green). PR was opened before this confirmation finished, on the EM's explicit instruction not to
+  hold an XS-priority CI fix for it.
+- `go test -p 2 -count=1 ./pkg/hub/...` (requested by the EM as an additional gate): same single
+  failure, `TestHandleAgentMessage_LogCapture_RawContentRedacted`; every other `pkg/hub/*`
+  subpackage `ok`.
+- **Bare-`upstream-main` baseline**, run in a separate `git worktree` at `upstream-main` (`e6b9ba29`,
+  pre-fix) with the identical command: two failures —
+  `TestCatalogHTTPEntryPoints_LiveMethodCheck` (the bug this PR fixes; absent on this branch) and
+  `TestHandleAgentMessage_LogCapture_RawContentRedacted` (present here too, confirming the flake
+  predates this fix and is not introduced or exposed by it). Everything else `ok`.
 
 ## Deliverables
 
