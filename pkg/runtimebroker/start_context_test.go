@@ -2180,6 +2180,92 @@ func TestBuildStartContext_HubEndpoint(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly proves
+// StartOptions.TrustedHubEndpoint is populated only from an
+// operator-derived tier (the broker's own configured HubEndpoint here; the
+// request HubEndpoint and the hub connection endpoint rank above it but are
+// exercised at the hubenv_test.go unit level), while the DELIVERED
+// SCION_HUB_ENDPOINT env value still follows the full resolution chain
+// regardless of which tier supplied it. A tenant-controllable resolved-env
+// value and a project-settings-only value both reach the agent's own env,
+// but neither ever reaches TrustedHubEndpoint.
+func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
+	const tenantEndpoint = "http://169.254.169.254"
+
+	t.Run("resolved-env-only value is delivered but not trusted", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			Operation:   opCreate,
+			ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": tenantEndpoint},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Existence control: the value really does reach the agent's own
+		// env, so the TrustedHubEndpoint assertion below is not vacuously
+		// passing because nothing was resolved at all.
+		if sc.Opts.Env["SCION_HUB_ENDPOINT"] != tenantEndpoint {
+			t.Fatalf("existence control failed: SCION_HUB_ENDPOINT = %q, want %q", sc.Opts.Env["SCION_HUB_ENDPOINT"], tenantEndpoint)
+		}
+		if sc.Opts.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (a resolved-env-only value must never be trusted for egress)", sc.Opts.TrustedHubEndpoint)
+		}
+	})
+
+	t.Run("broker config endpoint is trusted even with a resolved-env value present", func(t *testing.T) {
+		const operatorEndpoint = "https://hub.operator.example"
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		cfg.HubEndpoint = operatorEndpoint
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-2",
+			Operation:   opCreate,
+			ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": tenantEndpoint},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.TrustedHubEndpoint != operatorEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the operator-configured broker endpoint)", sc.Opts.TrustedHubEndpoint, operatorEndpoint)
+		}
+	})
+
+	// This is also the fix for a related gap: project settings is itself a
+	// hub-resolved file for a hub-managed project, the same tenant-reachable
+	// precondition the resolved-env tier is already excluded for.
+	t.Run("project-settings-only value is delivered but not trusted", func(t *testing.T) {
+		const settingsEndpoint = "https://settings.example.com"
+		projectDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: "+settingsEndpoint+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-3",
+			Operation:   opCreate,
+			ProjectPath: projectDir,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.Env["SCION_HUB_ENDPOINT"] != settingsEndpoint {
+			t.Fatalf("existence control failed: SCION_HUB_ENDPOINT = %q, want %q", sc.Opts.Env["SCION_HUB_ENDPOINT"], settingsEndpoint)
+		}
+		if sc.Opts.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (a project-settings-only value must never be trusted for egress)", sc.Opts.TrustedHubEndpoint)
+		}
+	})
+}
+
 func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

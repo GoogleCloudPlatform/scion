@@ -182,6 +182,12 @@ actually be reachable must list that host — or a wildcard covering it — in
 `egress_allow` themselves; an uncovered host is silently dropped (logged,
 never added) rather than granted by default.
 
+**The hub host added to an actor's egress allowlist comes from broker or
+operator configuration only** — the request-level hub endpoint, the hub
+connection endpoint, or this broker's own configured hub endpoint — never
+from project settings or any other tenant-controllable source; when none of
+those operator sources is available, no hub host is added to egress at all.
+
 ### `egress_trust_bundle`: only needed under sdsmint
 
 Substrate's plain `atenet-egress` only enforces `egress_allow` for TLS
@@ -426,9 +432,10 @@ Independent of the `POST /scion/v1/bootstrap` delivery above, `sciontool
 init` also decodes and writes any `SCION_STAGED_SECRETS` payload directly
 inside the actor (`pkg/stagedsecrets`) — the mechanism every runtime, not
 just substrate, uses to stage file and variable secrets without bind-mounting
-them from the host. On this path too, a staged secret's path under the
-agent home must not traverse a symlink at any component: init refuses the
-write rather than following one.
+them from the host. On this path too, a staged secret's parent directory is
+resolved with a no-follow walk from the filesystem root; any symlinked path
+component is refused, for every target — not only targets under the agent
+home — and init refuses the write rather than following one.
 
 ## Verification commands (once applied to a real cluster)
 
