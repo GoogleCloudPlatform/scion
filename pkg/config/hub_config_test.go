@@ -1370,3 +1370,194 @@ func TestResolveHubIDFromEnvReadOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestServerConfigSources_OmitsMissingFiles(t *testing.T) {
+	// Neither the global dir nor "." has a server.yaml/yml: nothing should
+	// be reported, matching settingsHierarchySources' "omit missing files"
+	// behavior. Round-2 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 0 {
+		t.Errorf("serverConfigSources(\"\") with no files present = %v, want empty", got)
+	}
+}
+
+func TestServerConfigSources_ResolvesGlobalDirFile(t *testing.T) {
+	// A real server.yaml in the global dir must be reported as that exact
+	// file path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources("")
+	if len(got) != 1 || got[0] != globalServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathDirFile(t *testing.T) {
+	// configPath naming a directory with a server.yaml resolves to that
+	// file's absolute path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	localDir := t.TempDir()
+	localServerYAML := filepath.Join(localDir, "server.yaml")
+	if err := os.WriteFile(localServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(localDir)
+	if len(got) != 1 || got[0] != localServerYAML {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", localDir, got, localServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathFileDirectly(t *testing.T) {
+	// configPath naming a file directly (not a directory) is reported as its
+	// absolute path, mirroring loadGlobalConfigLegacy loading it as-is.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := t.TempDir()
+	explicitFile := filepath.Join(localDir, "my-server-config.yaml")
+	if err := os.WriteFile(explicitFile, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(explicitFile)
+	if len(got) != 1 || got[0] != explicitFile {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", explicitFile, got, explicitFile)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathFileToAbsolute(t *testing.T) {
+	// A relative, file-valued configPath goes through its own filepath.Abs
+	// call, separate from the directory/cwd branch's. Every other
+	// file-valued-configPath test passes an already-absolute t.TempDir()
+	// path, so removing just this branch's Abs call would otherwise leave
+	// the suite green. Round-4 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relFile := "my-server.yaml"
+	if err := os.WriteFile(filepath.Join(cwd, relFile), []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(cwd, relFile)
+	got := serverConfigSources(relFile)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relFile, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relFile, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relFile, got, want)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathDirToAbsolute(t *testing.T) {
+	// A relative, directory-valued configPath (distinct from both the
+	// file-valued case above and the configPath=="" default) also resolves
+	// through the dir/cwd branch's filepath.Abs call.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relDir := "cfg"
+	if err := os.MkdirAll(filepath.Join(cwd, relDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cwd, relDir, "server.yaml")
+	if err := os.WriteFile(want, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(relDir)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relDir, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relDir, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relDir, got, want)
+	}
+}
+
+func TestServerConfigSources_DedupesWhenLocalLocationIsGlobalDir(t *testing.T) {
+	// When configPath resolves to the same server.yaml as the global dir
+	// (either passed explicitly, or via an empty configPath whose cwd
+	// default happens to be the global dir), the file must be listed once,
+	// not twice. Round-3 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("configPath is the global dir", func(t *testing.T) {
+		got := serverConfigSources(globalDir)
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(%q) = %v, want [%q]", globalDir, got, globalServerYAML)
+		}
+	})
+
+	t.Run("configPath is empty and cwd is the global dir", func(t *testing.T) {
+		t.Chdir(globalDir)
+		got := serverConfigSources("")
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+		}
+	})
+}
+
+func TestServerConfigSources_ResolvesRelativeCwdToAbsolute(t *testing.T) {
+	// configPath == "" (the default relative ".") resolves the cwd's
+	// server.yaml to an absolute path. Round-3 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	cwdServerYAML := filepath.Join(cwd, "server.yaml")
+	if err := os.WriteFile(cwdServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(\"\") = %v, want exactly one path", got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(\"\") = %v, want an absolute path", got)
+	}
+	if got[0] != cwdServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, cwdServerYAML)
+	}
+}
