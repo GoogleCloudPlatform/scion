@@ -523,6 +523,70 @@ func TestApplySnapshot_UserAccessModeCleared(t *testing.T) {
 	}
 }
 
+// Regression test for review finding F3 (ptone/scion#2270 round 1): for
+// EnforceBrokerQuotas, nil is a meaningful value (the fail-safe "enforced"
+// default), not "leave whatever is currently in memory alone". A snapshot
+// that clears the switch (DELETE the section, or PUT {}) must flip a
+// previously-set false back to enforced, not leave the hub silently
+// fail-open while every read surface (GET, the UI) reports "enforced".
+func TestApplySnapshot_EnforceBrokerQuotasClearedResetsToEnforced(t *testing.T) {
+	off := false
+	srv := &Server{
+		config:      ServerConfig{EnforceBrokerQuotas: &off},
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before applying the cleared snapshot")
+	}
+
+	// A snapshot with EnforceBrokerQuotas==nil represents the section being
+	// absent (deleted, reset to bootstrap, or PUT as {}) — not "unchanged".
+	ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: nil})
+
+	if srv.config.EnforceBrokerQuotas != nil {
+		t.Errorf("want EnforceBrokerQuotas=nil after applying a cleared snapshot, got %v", *srv.config.EnforceBrokerQuotas)
+	}
+	if !srv.brokerQuotasEnforced() {
+		t.Error("want brokerQuotasEnforced()=true after applying a cleared snapshot (fail-safe default)")
+	}
+}
+
+// TestApplySnapshot_EnforceBrokerQuotasAppliedTracking asserts that the
+// "applied" list correctly reports a change both when the value flips
+// between concrete booleans and when it clears to nil, but not when the
+// snapshot repeats the same value (idempotent re-apply, e.g. from a
+// duplicate propagation event).
+func TestApplySnapshot_EnforceBrokerQuotasAppliedTracking(t *testing.T) {
+	on := true
+	off := false
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	result := ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
+	applied, _ := result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("nil -> false should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
+	applied, _ = result["applied"].([]string)
+	if containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("false -> false (idempotent re-apply) should not be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &on})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("false -> true should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: nil})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("true -> nil (cleared) should be reported as applied, got %v", applied)
+	}
+}
+
 func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	telEnabled := true
 	gc := &config.GlobalConfig{

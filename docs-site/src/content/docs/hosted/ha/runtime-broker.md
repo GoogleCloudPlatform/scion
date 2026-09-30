@@ -100,9 +100,17 @@ When you register your machine as a broker:
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.
 
+## Broker Registration Permission
+
+Registering a broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded-broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register brokers. Users with the **viewer** hub role cannot.
+
+:::caution[Breaking change]
+Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.
+:::
+
 ## Broker Ownership
 
-The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC), or a system super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+The user who registers a broker becomes its owner. Re-registering an existing broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded broker's registration path. These actions are allowed only for the broker's owner, the broker itself (authenticated via HMAC), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
 ## Broker Health Monitoring
 

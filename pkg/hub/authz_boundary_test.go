@@ -2218,20 +2218,31 @@ func TestValidRealProjectScopeKinds_MatchesReviewedScopeKindResourceTypes(t *tes
 	}
 }
 
-// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered
-// pins the documented status of the three pre-registered material-delivery
-// rows: registryResourceType returns "" for a permission ID that does not
-// exist in Registry, so no permission today can produce a class whose
-// ResourceType equals "secret"/"env_var"/"skill_injection" — these rows
-// cannot be reached through validateRealProjectClass until F.2 adds the
-// corresponding Registry permission rows.
-func TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered(t *testing.T) {
-	for _, rt := range []string{"secret", "env_var", "skill_injection"} {
+// TestValidRealProjectScopeKinds_MaterialRowsNowLive pins that the three
+// material resource types resolve to live Registry permissions, so
+// validateRealProjectClass accepts a registered scope kind for them and
+// still rejects a mismatched resource type. A real material permission
+// paired with one of its registered ScopeKind values validates; a class
+// whose ResourceType does not match the permission's own resource type is
+// rejected.
+func TestValidRealProjectScopeKinds_MaterialRowsNowLive(t *testing.T) {
+	for _, rt := range []string{permissions.ResourceSecret, permissions.ResourceEnvVar, permissions.ResourceSkillInjection} {
+		found := false
 		for _, p := range permissions.Registry {
 			if p.Resource == rt {
-				t.Errorf("resource type %q now has a live Registry permission (%q) — validRealProjectScopeKinds's comment describing it as inert is stale and must be updated", rt, p.ID)
+				found = true
+				break
 			}
 		}
+		if !found {
+			t.Errorf("resource type %q has no live Registry permission", rt)
+		}
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject}); err != nil {
+		t.Errorf("secret.deliver with a registered scope kind should validate: %v", err)
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceEnvVar, ScopeKind: store.ScopeProject}); err == nil {
+		t.Error("a class resource type mismatched with the permission's own resource type must still be rejected")
 	}
 }
 

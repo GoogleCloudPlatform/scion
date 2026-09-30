@@ -131,6 +131,17 @@ Alternatively, you can configure these settings via environment variables at sta
 If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
 :::
 
+### Verified Email Requirement
+
+Google, GitHub and external OIDC sign-in accept only an email address that the provider marks as verified. The Hub never falls back to an unverified address.
+
+- **Google and OIDC**: the provider's verified-email claim must be true.
+- **GitHub**: the Hub always reads the account's full email list (the `user:email` scope) rather than trusting the public profile email. It uses the profile email if the list marks it verified, otherwise the primary verified email, otherwise any verified email.
+
+:::caution[Breaking change]
+Users whose only email address is unverified at their provider can no longer sign in. They must verify an address with the provider (for GitHub, under **Settings > Emails**) and sign in again.
+:::
+
 ## Domain Authorization
 
 You can restrict authentication to specific email domains using the `SCION_AUTHORIZED_DOMAINS` setting. This provides an additional layer of access control beyond OAuth authentication.

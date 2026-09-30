@@ -2467,6 +2467,31 @@ type HubSetting struct {
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
+// =============================================================================
+// Broker Settings (ptone/scion#2061 P2, ptone/scion#2177)
+// =============================================================================
+
+// BrokerSettings is the typed document stored per runtime broker. It is a
+// general per-broker settings mechanism (design.md §5.1): each field is one
+// key in the pkg/hub/brokersettings registry. maxAgents is the first key: a
+// per-broker override of the max_agents_per_broker quota. nil means
+// "inherit" (fall through to the entitlement engine / hub-wide default); 0
+// means unlimited; a positive value is the cap, and may be lower than the
+// hub-wide default or any system-scoped entitlement binding.
+type BrokerSettings struct {
+	MaxAgents *int64 `json:"maxAgents,omitempty"`
+}
+
+// BrokerSettingsRecord is a BrokerSettings document plus the metadata needed
+// for optimistic concurrency and attribution.
+type BrokerSettingsRecord struct {
+	BrokerID  string         `json:"brokerId"`
+	Settings  BrokerSettings `json:"settings"`
+	Revision  int64          `json:"revision"`
+	UpdatedBy string         `json:"updatedBy,omitempty"`
+	Updated   time.Time      `json:"updated"`
+}
+
 // SkillRegistryType constants
 const (
 	SkillRegistryTypeHub = "hub"
@@ -2892,7 +2917,7 @@ type LimitDefinition struct {
 	Unit         string    `json:"unit"`         // e.g. "count"
 	Description  string    `json:"description"`
 	DefaultValue int64     `json:"defaultValue"` // 0 = unlimited
-	System       bool      `json:"system"`       // true = seeded, not user-modifiable
+	System       bool      `json:"system"`       // true = seeded; only default_value/description are editable, cannot be deleted
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }

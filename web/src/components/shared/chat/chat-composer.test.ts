@@ -26,6 +26,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -394,5 +395,78 @@ describe('composer — paste-to-attachment', () => {
     expect(event.defaultPrevented).toBe(false);
     expect(apiFetch).not.toHaveBeenCalled();
     expect(showToast).not.toHaveBeenCalled();
+  });
+});
+
+// ── Caret-end focus hardening (reply target set before sl-textarea upgrades) ──
+
+/**
+ * `focusTextareaCaretEnd()` (triggered by a `replyTo` change) reaches into
+ * `<sl-textarea>`'s shadow DOM for the native `<textarea>`. If that lookup
+ * runs before `<sl-textarea>` has finished its own first render, the shadow
+ * DOM is still empty and the lookup returns null, silently dropping focus.
+ * No code path sets `replyTo` that early today (see chat-thread.test.ts's
+ * reply-focus suite for the real flow), but the composer hardens against it:
+ * retry once after the child's own `updateComplete`, and fall back to
+ * focusing the `<sl-textarea>` host if the inner textarea still can't be
+ * found.
+ */
+describe('composer — caret-end focus hardening when sl-textarea is not yet upgraded', () => {
+  async function mountBare(): Promise<any> {
+    const el = document.createElement('scion-chat-composer') as any;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const slTextarea = el.shadowRoot.querySelector('sl-textarea');
+    await slTextarea.updateComplete;
+    return { el, slTextarea };
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('retries after the child upgrades instead of dropping focus, keeping the caret at the end', async () => {
+    const { el, slTextarea } = await mountBare();
+    const textarea = slTextarea.shadowRoot.querySelector('textarea') as HTMLTextAreaElement;
+
+    // Simulate an in-progress draft the user already typed, caret left at
+    // the start — a real input event so `el.text` matches the DOM value and
+    // Lit's `live()` binding won't itself reset the caret on the next render.
+    textarea.value = 'draft so far';
+    textarea.selectionStart = textarea.selectionEnd = 0;
+    textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    const realGetTextareaElement = el.getTextareaElement.bind(el);
+    let calls = 0;
+    // First lookup simulates <sl-textarea> not having rendered its shadow
+    // DOM yet; later lookups behave normally.
+    el.getTextareaElement = (): HTMLTextAreaElement | null => {
+      calls++;
+      return calls === 1 ? null : realGetTextareaElement();
+    };
+
+    el.replyTo = { messageId: 'm1', senderName: 'Ann', content: 'hi' };
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
+      expect(textarea.selectionStart).toBe('draft so far'.length);
+      expect(textarea.selectionEnd).toBe('draft so far'.length);
+    });
+    // Confirms the retry branch, not just the first-try success path, ran.
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('falls back to focusing the sl-textarea host if the inner textarea never appears', async () => {
+    const { el, slTextarea } = await mountBare();
+    el.getTextareaElement = (): null => null;
+
+    el.replyTo = { messageId: 'm1', senderName: 'Ann', content: 'hi' };
+    await el.updateComplete;
+
+    await vi.waitFor(() => {
+      expect(el.shadowRoot.activeElement).toBe(slTextarea);
+    });
   });
 });

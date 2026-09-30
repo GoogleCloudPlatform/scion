@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -676,6 +677,183 @@ func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: ptone/scion#2061 P1a / ptone/scion#2063 — system limit definitions
+// allow changing default_value and description, but not name/resource_type/
+// unit.
+// ---------------------------------------------------------------------------
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_DefaultValueAllowed verifies
+// that a PUT changing only default_value (and description) on a system limit
+// succeeds and persists. This is the supported admin path for the hub-wide
+// max_agents_per_broker value (design.md §4.3, P1-D3).
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_DefaultValueAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_default_value_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		Description:  "original description",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		Description:  "updated description",
+		DefaultValue: 16,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, int64(16), updated.DefaultValue)
+	assert.Equal(t, "updated description", updated.Description)
+	assert.Equal(t, systemDef.Name, updated.Name)
+
+	// Verify it persisted.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, int64(16), def.DefaultValue)
+	assert.Equal(t, "updated description", def.Description)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_NameChangeForbidden verifies
+// that a PUT changing name on a system limit is rejected with 403 and the
+// documented message, and leaves the row untouched.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_NameChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_name_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         "renamed",
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "only default_value and description can be changed")
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&def))
+	assert.Equal(t, "system_name_change_test", def.Name)
+	assert.Equal(t, int64(100), def.DefaultValue)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_ResourceTypeChangeForbidden
+// verifies the same 403 for a resource_type change.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_ResourceTypeChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_rt_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "project",
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden verifies
+// the same 403 for a unit change.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_unit_change_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         "instances",
+		DefaultValue: 16,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_Forbidden_NonAdmin verifies
+// that a caller without quota.update cannot PUT a system limit definition
+// (or any limit definition).
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_Forbidden_NonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_nonadmin_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	memberU := &store.User{
+		ID: tid("quota-nonadmin-put"), Email: "qa-nonadmin-put@example.com",
+		DisplayName: "Member", Role: "member", Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, memberU))
+	handler := srv.guarded("/api/v1/admin/limits/", srv.handleAdminLimitByID)
+
+	body, err := json.Marshal(updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		DefaultValue: 16,
+	})
+	require.NoError(t, err)
+
+	member := NewAuthenticatedUser(tid("quota-nonadmin-put"), "qa-nonadmin-put@example.com", "Member", "member", "cli")
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, bytes.NewReader(body))
+	req = req.WithContext(contextWithIdentity(ctx, member))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Verify it was not modified.
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, int64(100), def.DefaultValue)
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Fix M2 — Negative value validation
 // ---------------------------------------------------------------------------
 
@@ -853,6 +1031,158 @@ func TestQuotaAPI_UpdateLimitDefinition_WhitespaceOnlyName(t *testing.T) {
 		DefaultValue: 5,
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Tests: upstream review (GoogleCloudPlatform/scion#2114, gemini-code-assist),
+// round 5 (broker-settings-rev-p1a-5). gemini flagged that PUT on a
+// non-system limit definition with an empty or whitespace-only resource_type
+// silently corrupted the row. Round 5 found the matching create-side hole
+// (resource_type) and a regression the round-4 fix introduced (requiring
+// unit on update, when create never required it, made existing empty-unit
+// rows permanently uneditable). Final rule: resource_type is trimmed and
+// required on both create and update for non-system rows; unit is trimmed
+// but never required, on either path.
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_CreateLimitDefinition_EmptyResourceType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits", createLimitDefinitionRequest{
+		Name:         "empty_rt_create_limit",
+		ResourceType: "",
+		Unit:         "count",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_CreateLimitDefinition_WhitespaceResourceType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits", createLimitDefinitionRequest{
+		Name:         "ws_rt_create_limit",
+		ResourceType: "   ",
+		Unit:         "count",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestQuotaAPI_UpdateLimitDefinition_EmptyResourceType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "empty_rt_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         created.Name,
+		ResourceType: "   ",
+		Unit:         created.Unit,
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, "agent", def.ResourceType, "rejected update must not corrupt the stored resource type")
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_EmptyUnitFromCreateStillEditable is the
+// round-5 F1 regression test: createLimitDefinition has never required unit
+// (the admin UI treats it as optional), so a row created with an empty unit
+// must remain editable. A PUT that only changes default_value on such a row
+// must succeed, not fail with "unit is required".
+func TestQuotaAPI_UpdateLimitDefinition_EmptyUnitFromCreateStillEditable(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "empty_unit_from_create_limit", ResourceType: "agent", Unit: "", DefaultValue: 5,
+	})
+	require.Equal(t, "", created.Unit)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         created.Name,
+		ResourceType: created.ResourceType,
+		Unit:         created.Unit,
+		DefaultValue: 7,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, int64(7), updated.DefaultValue)
+	assert.Equal(t, "", updated.Unit)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit is the round-5
+// F4 test: a non-system PUT with padding whitespace around resource_type and
+// unit must persist the trimmed values, not the raw ones.
+func TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "trim_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         created.Name,
+		ResourceType: "  project  ",
+		Unit:         "  members  ",
+		DefaultValue: 5,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, "project", updated.ResourceType)
+	assert.Equal(t, "members", updated.Unit)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, "project", def.ResourceType)
+	assert.Equal(t, "members", def.Unit)
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_EmptyResourceTypeAndUnitForbidden
+// is the round-5 F3 fix: a system row's resource_type/unit are identity
+// fields, not editable content, so sending an empty or whitespace-only value
+// for either must take the existing identity-mismatch path (403), not the
+// non-system empty-value validation (400). The new non-system-only checks
+// never run for a system row.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_EmptyResourceTypeAndUnitForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_empty_identity_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "   ",
+		Unit:         "",
+		DefaultValue: 42,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "empty resource_type/unit on a system row is an identity change, not a validation error")
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+systemDef.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, "agent", def.ResourceType)
+	assert.Equal(t, "count", def.Unit)
+	assert.Equal(t, int64(100), def.DefaultValue, "the rejected PUT must not have changed default_value either")
 }
 
 // ---------------------------------------------------------------------------

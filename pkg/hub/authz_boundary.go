@@ -767,20 +767,17 @@ func validateRealProjectClass(permissionID string, class ProjectTargetClass) err
 // ScopeKind values each resource type may carry for a REAL (not
 // contemplated) project-target class. A resource type absent from this map
 // has NO reviewed scope-kind semantics at all: its class.ScopeKind must be
-// exactly empty — never an arbitrary accepted string. Material-delivery
-// resource types (secret/env_var/skill_injection) are pre-registered here
-// with their reviewed allowed values ahead of the Registry permission rows
-// that will use them: registryResourceType returns "" for a permission ID
-// that does not exist yet, so these three rows are inert (unreachable
-// through validateRealProjectClass) until those rows land — see
-// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered.
+// exactly empty — never an arbitrary accepted string. Material resource
+// types (secret/env_var/skill_injection) carry the reviewed scope kinds of
+// their stored scope; their Registry rows are live, pinned by
+// TestValidRealProjectScopeKinds_MaterialRowsNowLive.
 var validRealProjectScopeKinds = map[string][]string{
-	permissions.ResourceSkill:         {store.SkillScopeProject},
-	permissions.ResourceTemplate:      {store.TemplateScopeProject},
-	permissions.ResourceHarnessConfig: {store.HarnessConfigScopeProject},
-	"secret":                          {"project", "hub", "user", "runtime_broker"},
-	"env_var":                         {"project", "hub", "user", "runtime_broker"},
-	"skill_injection":                 {"project", "hub", "user", "runtime_broker"},
+	permissions.ResourceSkill:          {store.SkillScopeProject},
+	permissions.ResourceTemplate:       {store.TemplateScopeProject},
+	permissions.ResourceHarnessConfig:  {store.HarnessConfigScopeProject},
+	permissions.ResourceSecret:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
+	permissions.ResourceEnvVar:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
+	permissions.ResourceSkillInjection: {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
 }
 
 func registryResourceType(permissionID string) string {

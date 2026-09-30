@@ -29,6 +29,7 @@ Used when a human drives the CLI through an AI coding assistant (Claude Code, Ge
 | `hub auth login` | Interactive browser-based OAuth flow |
 | `hub auth logout` | Session management — use web UI or direct terminal |
 | `hub token` (all subcommands) | Token lifecycle management — security-sensitive, use web UI |
+| `hub secret migrate-names` | GCP Secret Manager name migration (ptone/scion#2152) — a maintenance operation with IAM/rollback implications, use direct terminal |
 | `grove reconnect` | Infrastructure recovery — use direct terminal |
 | `config migrate` | Configuration migration — use direct terminal |
 | `config cd-config` | Shell-level directory change — not useful from an AI assistant |
@@ -208,6 +209,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub auth` (all) | Y | - | - |
 | `hub token` (all) | Y | - | - |
 | `hub secret` (all) | Y | Y | - |
+| `hub secret migrate-names` | Y | - | - |
 | `hub env` (all) | Y | Y | - |
 | `hub notifications` | Y | Y | - |
 | `init` | Y | Y | - |

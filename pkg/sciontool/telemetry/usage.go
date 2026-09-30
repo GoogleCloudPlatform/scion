@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -27,6 +28,7 @@ import (
 	otelmetric "go.opentelemetry.io/otel/metric"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
 // usageDeriverFlushTimeout bounds how long ProcessResourceLogs waits for the
@@ -44,8 +46,16 @@ const (
 type usageIncrement struct {
 	Model  string
 	Status string           // telemetrycontract.StatusSuccess | StatusError
-	Calls  int64            // 0 or 1 for event rules
+	Calls  int64            // 0 or 1 for event rules; a delta count for metric rules
 	Tokens map[string]int64 // token_type -> n (n > 0)
+
+	// dedupeKey identifies the source data point for a metric-sourced
+	// increment (design §3.3's "interval-fingerprint idea", the same one
+	// metricStreams.remember uses): the metric name plus intervalKey's
+	// canonicalized (start, end, point) triple. Empty for a log-sourced
+	// increment, which dedupes on the log record itself (see
+	// UsageDeriver.fingerprint) instead.
+	dedupeKey string
 }
 
 // usageRule matches one per-request native event to a usageIncrement. Rules
@@ -272,17 +282,107 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 	return increment, true, malformed
 }
 
-// usageRuleRegistry lists every rule this build knows about. rulesForHarness
-// filters it to the active harness, so an unrelated harness (or none) gets
-// an empty, no-op deriver.
-var usageRuleRegistry = []usageRule{claudeUsageRule{}, codexUsageRule{}}
+// copilotCallsMetric is the histogram whose delta observation count stands
+// in for calls (design §5 copilot row): each observation is one model call.
+// A real capture confirms this is exactly one observation per model call
+// (its count matches the number of chat spans, and
+// gen_ai.invoke_agent.inference_calls' delta sum independently agrees).
+const copilotCallsMetric = "gen_ai.client.inference.operation.input_tokens"
+
+// copilotTokenCounters maps Copilot's per-type token usage counters to
+// canonical token_type values (design §3.2). This is the post-CLI-1.0.45
+// GenAI-semconv shape confirmed by `copilot help monitoring` on CLI 1.0.88
+// and 1.0.89, and by a real capture on 1.0.89 (design §5 copilot row): the
+// pre-1.0.45 gen_ai.client.token.usage histogram with a gen_ai.token.type
+// attribute does not exist in any of them and is not supported here.
+//
+// reasoning.output_tokens maps to the informational "reasoning" token_type
+// (§3.2: "never added to totals"): output_tokens is already the total,
+// inclusive of reasoning, by the same naming convention the capture proves
+// for cache_read.input_tokens/cache_write.input_tokens (both confirmed
+// subsets of the raw input_tokens counter -- see
+// copilotUsageRule.canonicalizeTokenGroups). input_tokens itself is NOT
+// exclusive of cached tokens -- see canonicalizeTokenGroups for the
+// subtraction this requires.
+var copilotTokenCounters = map[string]string{
+	"gen_ai.client.inference.usage.input_tokens":             telemetrycontract.TokenTypeInput,
+	"gen_ai.client.inference.usage.output_tokens":            telemetrycontract.TokenTypeOutput,
+	"gen_ai.client.inference.usage.cache_read.input_tokens":  telemetrycontract.TokenTypeCacheRead,
+	"gen_ai.client.inference.usage.cache_write.input_tokens": telemetrycontract.TokenTypeCacheWrite,
+	"gen_ai.client.inference.usage.reasoning.output_tokens":  telemetrycontract.TokenTypeReasoning,
+}
+
+// copilotUsageRule implements the copilot row of design §5 (revised): the
+// only metric-sourced rule in this project (design §3.3), and the only rule
+// that implements metricBatchDeriver (usage_copilot_metrics.go). It never
+// matches a log record (Copilot's usage signal is metrics, not native log
+// events).
+//
+// Unlike claudeUsageRule/codexUsageRule (stateless value types shared
+// through usageRuleFactories), copilotUsageRule carries per-process state --
+// converter, for cumulative-to-delta conversion, and the clamp diagnostics
+// below -- so it must be constructed fresh per UsageDeriver via
+// newCopilotUsageRule, never reused as a shared zero value.
+type copilotUsageRule struct {
+	converter     *cumulativeToDeltaConverter
+	clampedInput  atomic.Int64
+	clampWarnOnce sync.Once
+}
+
+// newCopilotUsageRule constructs a copilotUsageRule with a fresh converter
+// state, anchored to the current time: only a stream whose Copilot-reported
+// start_time is at or after this moment is trusted on first sighting (design
+// decision, restart baseline; see cumulativeToDeltaConverter).
+func newCopilotUsageRule() *copilotUsageRule {
+	return &copilotUsageRule{
+		converter: newCumulativeToDeltaConverter(uint64(time.Now().UnixNano()), copilotCumulativeStateCapacity),
+	}
+}
+
+func (*copilotUsageRule) Harness() string { return "copilot" }
+
+func (*copilotUsageRule) MatchLog(string, string, *logspb.LogRecord) (usageIncrement, bool, error) {
+	return usageIncrement{}, false, nil
+}
+
+// copilotPointModel resolves the model for one Copilot metric point. A real
+// capture confirms gen_ai.request.model/gen_ai.response.model are always on
+// the point itself, never only on the resource; the resource fallback below
+// is kept as a defensive no-op (design §3.2 names both attributes without
+// specifying placement), not because any observed payload has needed it.
+func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
+	for _, attrs := range [][]*commonpb.KeyValue{pointAttrs, resourceAttrs} {
+		if model := logAttrString(attrs, "gen_ai.request.model"); model != "" {
+			return model
+		}
+		if model := logAttrString(attrs, "gen_ai.response.model"); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+// usageRuleFactories lists a constructor for every rule this build knows
+// about. rulesForHarness calls each factory fresh and filters to the active
+// harness, so an unrelated harness (or none) gets an empty, no-op deriver.
+// A factory, rather than a shared prototype value, is required because
+// copilotUsageRule carries per-process state (usage_copilot_metrics.go's
+// converter): a package-level copilotUsageRule{} shared across every
+// UsageDeriver in the process (or across tests in the same binary) would
+// leak cumulative-to-delta state between otherwise-independent derivers.
+var usageRuleFactories = []func() usageRule{
+	func() usageRule { return claudeUsageRule{} },
+	func() usageRule { return codexUsageRule{} },
+	func() usageRule { return newCopilotUsageRule() },
+}
 
 func rulesForHarness(harness string) []usageRule {
 	if harness == "" {
 		return nil
 	}
 	var out []usageRule
-	for _, rule := range usageRuleRegistry {
+	for _, factory := range usageRuleFactories {
+		rule := factory()
 		if rule.Harness() == harness {
 			out = append(out, rule)
 		}
@@ -309,9 +409,25 @@ type UsageDeriver struct {
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
 // alongside the pipeline's other signal diagnostics (design §3.3
-// "Diagnostics").
+// "Diagnostics"). ClampedInput, StaleBackwards and BaselinedAfterCap are
+// populated only by a rule that tracks them (usageRuleDiagnostics; today
+// only copilotUsageRule, for its cumulative-to-delta conversion) and stay 0
+// for every other harness.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
+	ClampedInput                  int64
+	StaleBackwards                int64
+	BaselinedAfterCap             int64
+}
+
+// usageRuleDiagnostics is implemented by a rule that tracks additional,
+// rule-specific data-quality counters beyond the deriver's own
+// derived/duplicate/malformed counts. Checked as an optional capability, the
+// same way metricBatchDeriver is.
+type usageRuleDiagnostics interface {
+	clampedInputCount() int64
+	staleBackwardsCount() int64
+	baselinedAfterCapCount() int64
 }
 
 // NewUsageDeriver constructs the deriver for the current process's
@@ -412,6 +528,115 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 	if err := d.providers.MeterProvider.ForceFlush(flushCtx); err != nil {
 		log.Debug("Usage deriver flush failed: %v", err)
 	}
+}
+
+// ProcessResourceMetrics derives usage from native metrics matched by a
+// metric-sourced usage rule (design §3.3, "Consume semantics for
+// metric-sourced rules"; Copilot only in this project, via metricBatchDeriver)
+// and reports which metric names were matched, keyed by name alone (matching
+// is name-based, not scope- or shape-qualified). The caller uses the
+// returned set to apply the design's consume semantics itself: on GCP, strip
+// matched metrics from the request before metricStreams.add; on generic
+// OTLP, leave the request untouched. This method never mutates
+// resourceMetrics.
+//
+// Called from Pipeline.handleMetrics on the raw, pre-policy input (like
+// ProcessResourceLogs), so point attributes the deriver reads (for example
+// the model) are never distorted by the policy's redactor — there is no
+// metric-level event filter to route around here (processMetrics has none),
+// but reading raw keeps both signal types' derivation on the same footing.
+//
+// Returns nil (a no-op) whenever no active rule implements metricBatchDeriver
+// -- today that means every harness except copilot never even builds a
+// resourceAttrs/scope/metric walk over the batch, since claude and codex
+// have no metric-sourced rule at all.
+func (d *UsageDeriver) ProcessResourceMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) map[string]bool {
+	if d == nil || len(d.rules) == 0 {
+		return nil
+	}
+	var batchRules []metricBatchDeriver
+	for _, rule := range d.rules {
+		if br, ok := rule.(metricBatchDeriver); ok {
+			batchRules = append(batchRules, br)
+		}
+	}
+	if len(batchRules) == 0 {
+		return nil
+	}
+
+	matched := make(map[string]bool)
+	recorded := false
+	for _, rm := range resourceMetrics {
+		if rm == nil {
+			continue
+		}
+		for _, br := range batchRules {
+			if d.observeMetricBatch(ctx, br, rm, matched) {
+				recorded = true
+			}
+		}
+	}
+	if !recorded {
+		return matched
+	}
+	// See ProcessResourceLogs: forces the derived points to reach
+	// metricStreams now rather than waiting for the periodic reader.
+	flushCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+	defer cancel()
+	if err := d.providers.MeterProvider.ForceFlush(flushCtx); err != nil {
+		log.Debug("Usage deriver flush failed: %v", err)
+	}
+	return matched
+}
+
+// observeMetricBatch is ProcessResourceMetrics' path for a rule that
+// implements metricBatchDeriver: called once per ResourceMetrics, since the
+// correlation copilotUsageRule needs (input minus its cache siblings)
+// requires seeing every sibling counter in the same export together. rule's
+// own DeriveBatch already returns fully-qualified dedupeKeys (its stream/
+// correlation keys already fold in the resource attributes and scope), so
+// this passes an empty scope to metricFingerprint rather than double-keying
+// on scope.
+func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchDeriver, rm *metricpb.ResourceMetrics, matched map[string]bool) bool {
+	increments, names, err := rule.DeriveBatch(rm)
+	for name := range names {
+		matched[name] = true
+	}
+	if err != nil {
+		d.malformed.Add(1)
+		d.malformedWarnOnce.Do(func() {
+			slog.Warn("usage deriver observed a malformed native usage metric; the affected data points were dropped")
+		})
+	}
+	recorded := false
+	for _, increment := range increments {
+		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			continue
+		}
+		fingerprint := d.metricFingerprint("", increment.dedupeKey)
+		if d.seen.SeenBefore(fingerprint) {
+			d.duplicate.Add(1)
+			continue
+		}
+		d.record(ctx, increment)
+		d.derived.Add(1)
+		recorded = true
+	}
+	return recorded
+}
+
+// metricFingerprint implements the dedupe key for a metric-sourced increment
+// (design §3.3: "the same interval-fingerprint idea as metricStreams.remember"):
+// resource identity and scope (as fingerprint does for logs) plus the data
+// point's own dedupeKey (metric name and its canonicalized interval).
+func (d *UsageDeriver) metricFingerprint(scopeName, dedupeKey string) string {
+	h := sha256.New()
+	h.Write([]byte(d.resourceIdentity))
+	h.Write([]byte{0})
+	h.Write([]byte(scopeName))
+	h.Write([]byte{0})
+	h.Write([]byte(dedupeKey))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // observe matches one record against every rule and records at most one
@@ -538,11 +763,36 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 	if d == nil {
 		return UsageDiagnostics{}
 	}
-	return UsageDiagnostics{
+	diag := UsageDiagnostics{
 		Derived:   d.derived.Load(),
 		Duplicate: d.duplicate.Load(),
 		Malformed: d.malformed.Load(),
 	}
+	for _, rule := range d.rules {
+		if rd, ok := rule.(usageRuleDiagnostics); ok {
+			diag.ClampedInput += rd.clampedInputCount()
+			diag.StaleBackwards += rd.staleBackwardsCount()
+			diag.BaselinedAfterCap += rd.baselinedAfterCapCount()
+		}
+	}
+	return diag
+}
+
+// HasMetricRule reports whether the deriver has at least one rule that
+// derives from metrics (metricBatchDeriver) -- today, that means the active
+// harness is copilot. Pipeline.handleMetrics gates its extra validateMetrics
+// pass and the whole ProcessResourceMetrics walk on this, so claude/codex
+// (and every harness with no usage rule at all) pay neither cost.
+func (d *UsageDeriver) HasMetricRule() bool {
+	if d == nil {
+		return false
+	}
+	for _, rule := range d.rules {
+		if _, ok := rule.(metricBatchDeriver); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Shutdown releases the deriver's loopback providers, if any were created.
@@ -634,6 +884,75 @@ func logAttrInt(attrs []*commonpb.KeyValue, key string) (int64, error) {
 		}
 	}
 	return 0, nil
+}
+
+// metricPointInt64 reads a NumberDataPoint's value as a non-negative int64,
+// the same tolerance logAttrInt applies to log attributes: an integral
+// double is accepted, a negative or non-integral value is malformed. Unlike
+// logAttrInt, absence has no meaning here (a data point always carries a
+// value), so there is no zero-value "not present" case to special-case.
+func metricPointInt64(point *metricpb.NumberDataPoint) (int64, error) {
+	switch v := point.GetValue().(type) {
+	case *metricpb.NumberDataPoint_AsInt:
+		if v.AsInt < 0 {
+			return 0, errors.New("value is negative")
+		}
+		return v.AsInt, nil
+	case *metricpb.NumberDataPoint_AsDouble:
+		if v.AsDouble < 0 {
+			return 0, errors.New("value is negative")
+		}
+		if math.Trunc(v.AsDouble) != v.AsDouble {
+			return 0, errors.New("value is not an integer")
+		}
+		return int64(v.AsDouble), nil
+	default:
+		return 0, errors.New("value is not numeric")
+	}
+}
+
+// stripMatchedUsageMetrics returns a copy of resourceMetrics with every
+// metric whose name is in matched removed (design §3.3 "Consume semantics
+// for metric-sourced rules", GCP only). resourceMetrics is assumed to
+// already be a policy-owned clone (Pipeline.handleMetrics calls this on
+// decision.Data), so mutating its ScopeMetrics/Metrics slices in place is
+// safe. A ScopeMetrics or ResourceMetrics left with nothing else in it is
+// dropped, consistent with how an already-empty batch is handled elsewhere
+// in this pipeline.
+func stripMatchedUsageMetrics(resourceMetrics []*metricpb.ResourceMetrics, matched map[string]bool) []*metricpb.ResourceMetrics {
+	if len(matched) == 0 {
+		return resourceMetrics
+	}
+	result := make([]*metricpb.ResourceMetrics, 0, len(resourceMetrics))
+	for _, rm := range resourceMetrics {
+		if rm == nil {
+			continue
+		}
+		keptScopes := rm.ScopeMetrics[:0]
+		for _, sm := range rm.ScopeMetrics {
+			if sm == nil {
+				continue
+			}
+			keptMetrics := sm.Metrics[:0]
+			for _, m := range sm.Metrics {
+				if m == nil || matched[m.Name] {
+					continue
+				}
+				keptMetrics = append(keptMetrics, m)
+			}
+			if len(keptMetrics) == 0 {
+				continue
+			}
+			sm.Metrics = keptMetrics
+			keptScopes = append(keptScopes, sm)
+		}
+		if len(keptScopes) == 0 {
+			continue
+		}
+		rm.ScopeMetrics = keptScopes
+		result = append(result, rm)
+	}
+	return result
 }
 
 // boundedLRU is a fixed-capacity, time-windowed "seen before" set used for
