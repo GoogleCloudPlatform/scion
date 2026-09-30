@@ -66,6 +66,27 @@ func errorsHelperRecordAtLevel(t *testing.T, buf *bytes.Buffer, level string) ma
 	return nil
 }
 
+// errorsHelperCountRecords returns the number of JSON log records in buf
+// whose msg starts with "API ", across all levels.
+func errorsHelperCountRecords(t *testing.T, buf *bytes.Buffer) int {
+	t.Helper()
+	n := 0
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		if strings.HasPrefix(msg, "API ") {
+			n++
+		}
+	}
+	return n
+}
+
 func TestWriteErrorFromErr_PermissionError(t *testing.T) {
 	// Simulate a PermissionDenied error from GCP Secret Manager
 	grpcErr := status.Errorf(codes.PermissionDenied, "caller does not have permission")
@@ -187,15 +208,18 @@ func TestWriteError_LogLevel(t *testing.T) {
 			if rec == nil {
 				t.Fatalf("expected a %s record for status %d, got none", tt.level, tt.status)
 			}
+			if n := errorsHelperCountRecords(t, buf); n != 1 {
+				t.Errorf("expected exactly one API log record for status %d, got %d", tt.status, n)
+			}
 		})
 	}
 }
 
 // TestWriteErrorFromErr_LogLevel covers the same rule for writeErrorFromErr,
 // mapped to the store sentinels that actually drive its status mapping.
-// It also covers the R1 regression: on the elevated path, the INFO line must
-// carry only the public message while the raw underlying error remains
-// available at DEBUG, exactly as it did before this PR.
+// It also asserts that on the elevated path the INFO line carries only
+// the public message, while the raw underlying error is still logged
+// at DEBUG.
 func TestWriteErrorFromErr_LogLevel(t *testing.T) {
 	tests := []struct {
 		name     string
