@@ -58,12 +58,20 @@ func TestMaterialResources_TypeStringsMatchRegistry(t *testing.T) {
 			t.Errorf("scopeToResourceType(%q) = %q, want %q", c.scope, got, c.want)
 		}
 	}
-	// Literal-pinning: the broker case is a rename (scope "runtime_broker"
-	// maps to resource type "broker"), so it is pinned against the raw wire
-	// string, not permissions.ResourceBroker -- a rename of that constant
-	// must not silently change the wire value this test guards.
-	if scopeToResourceType(store.ScopeRuntimeBroker) != "broker" {
-		t.Errorf("scopeToResourceType(%q) must equal the literal wire value %q",
-			store.ScopeRuntimeBroker, "broker")
+	// Literal-pinning: the table above uses the same constants the function
+	// returns, so it wouldn't catch a constant's value changing. Pin all four
+	// scopes against their raw wire strings instead: a value change must not
+	// silently change the wire value this test guards.
+	literalCases := []struct{ scope, want string }{
+		{store.ScopeRuntimeBroker, "broker"},
+		{store.ScopeProject, "project"},
+		{store.ScopeHub, "hub"},
+		{store.ScopeUser, "user"},
+	}
+	for _, c := range literalCases {
+		if got := scopeToResourceType(c.scope); got != c.want {
+			t.Errorf("scopeToResourceType(%q) must equal the literal wire value %q, got %q",
+				c.scope, c.want, got)
+		}
 	}
 }
