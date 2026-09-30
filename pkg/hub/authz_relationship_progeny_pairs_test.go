@@ -44,6 +44,43 @@ func progenyPairAgent(subject, projectID string, ancestry []string, scopes []Age
 	}}
 }
 
+// seedProgenyPairAgent stores agentID as a real agent row in projectID (so
+// Stage 2b's agent lookup and project match succeed), and sets a stub
+// ExecutionSourceResolver (a.sourceResolver = stubSourceResolver{user:
+// sourceUserID's live store.User}) so Stage 2b resolves a live, admitted
+// source without a real delegation edge. With no edge recorded, Decide Step
+// 10 (the delegation ceiling) runs on its own pre-backfill allowance and
+// passes every principal through unconditionally (a no-op), exactly as it
+// did before Stage 2b's admission check existed.
+//
+// A real edge (as seedExecutionAgent creates) carries a role, e.g.
+// AgentRoleFull, through Step 10, which checks the edge's role- or
+// relationship-derived authority for the exact permission. secret.use and
+// the other progeny-exact-pair permissions are granted only through the
+// progeny relationship (opt-in sharing), never through a role or through a
+// plain user's ownership relationship, so a real edge makes Step 10 deny
+// them regardless of the progeny grant these tests exercise.
+//
+// TestProgenyPair_DelegationCeilingFailsClosed uses this helper once, to
+// reach the ceiling exactly like every other test here, then injects its own
+// edge faults on top through a fresh AuthzService and the same stub.
+// TestProgenyPair_SecretUseWithRecordedEdgeDeniedAtCeiling does not use it
+// at all: it needs the real ExecutionSourceResolver and a real recorded
+// edge end to end, so it seeds the agent (via seedExecutionAgent) and the
+// edge directly, with no stub.
+func seedProgenyPairAgent(t *testing.T, f *goldenFixture, a *AuthzService, agentID, projectID, sourceUserID string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "pp-" + agentID[:8], Name: "pp-" + agentID[:8],
+		ProjectID: projectID, Phase: "running",
+		OwnerID: sourceUserID, CreatedBy: sourceUserID, Ancestry: []string{sourceUserID},
+	}))
+	source, err := f.store.GetUser(ctx, sourceUserID)
+	require.NoError(t, err)
+	a.sourceResolver = stubSourceResolver{user: source}
+}
+
 // createAlwaysEnvVar stores an opted-in user-scope env var with the always
 // injection mode, the mode ListProgenyEnvVars serves.
 func createAlwaysEnvVar(t *testing.T, s store.Store, id, ownerID string) {
@@ -59,7 +96,13 @@ func createAlwaysEnvVar(t *testing.T, s store.Store, id, ownerID string) {
 // opted-in user-scope secret.
 func TestProgenyPair_SecretUseAdmitted(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := progenyPairAgent(tid("pp-use-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	agentID := tid("pp-use-agent")
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	// Stage 2b (execution-project admission) requires a real stored agent
+	// whose authoritative source user holds live admission to the agent's
+	// own project; projectAlpha is the project f.projectOwnerID actually
+	// owns (see TestExecutionProject_ProgenyParity).
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 	res := Resource{Type: "secret", ID: f.secretID}
 
 	d := decidePerm(f.authz, agent, res, ActionUse, "secret.use", true)
@@ -77,7 +120,9 @@ func TestProgenyPair_SecretUseAdmitted(t *testing.T) {
 // admitting the same progeny read.
 func TestProgenyPair_CompatibilityReadAdmitted(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := progenyPairAgent(tid("pp-compat-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	agentID := tid("pp-compat-agent")
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 	d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, false)
 	assert.True(t, d.Allowed, "reason %q", d.Reason)
 	assert.Equal(t, "relationship grant: progeny_secret_read", d.Reason)
@@ -90,7 +135,9 @@ func TestProgenyPair_CompatibilityReadAdmitted(t *testing.T) {
 // restriction denies them: a deliver permission has no agent JWT scope.
 func TestProgenyPair_DeliverUnreachableForAgentToken(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := progenyPairAgent(tid("pp-deliver-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	agentID := tid("pp-deliver-agent")
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 	envID := tid("pp-deliver-env")
 	createAlwaysEnvVar(t, f.store, envID, f.projectOwnerID)
 	cases := []struct {
@@ -144,7 +191,9 @@ func TestProgenyPair_DeliverUnreachableForAgentToken(t *testing.T) {
 // in progenyActionAdmitted is the stage that rejects them.
 func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := progenyPairAgent(tid("pp-unreviewed-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	agentID := tid("pp-unreviewed-agent")
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, allRegisteredAgentScopes())
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 	secret := Resource{Type: "secret", ID: f.secretID}
 	skill := Resource{Type: "skill_injection", ID: f.skillInjectionID}
 	cases := []struct {
@@ -222,14 +271,24 @@ func TestProgenyPair_SecretUseRequiresProgeny(t *testing.T) {
 	scopes := []AgentTokenScope{scopeProjectSecretRead}
 
 	t.Run("unrelated ancestry", func(t *testing.T) {
-		agent := progenyPairAgent(tid("pp-norel-agent"), f.projectBeta.ID, []string{f.memberNoneID}, scopes)
+		agentID := tid("pp-norel-agent")
+		agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.memberNoneID}, scopes)
+		// Stage 2b's execution source comes from the stub below
+		// (f.projectOwnerID, admitted to projectAlpha), independent of the
+		// JWT's Ancestry claim (f.memberNoneID) above: that Ancestry is
+		// what the fact stage checks against the secret's opted-in
+		// ancestry, and is deliberately unrelated so this case reaches
+		// (and is rejected by) the fact stage it is named for.
+		seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 		d := decidePerm(f.authz, agent, res, ActionUse, "secret.use", true)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		assert.Equal(t, RelationshipRejectFact, relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 	})
 
 	t.Run("missing token scope", func(t *testing.T) {
-		agent := progenyPairAgent(tid("pp-noscope-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, []AgentTokenScope{"project:read"})
+		agentID := tid("pp-noscope-agent")
+		agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []AgentTokenScope{"project:read"})
+		seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 		d := decidePerm(f.authz, agent, res, ActionUse, "secret.use", true)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		assert.Equal(t, "credential_scope", relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
@@ -249,20 +308,48 @@ func TestProgenyPair_SecretUseRequiresProgeny(t *testing.T) {
 		require.NoError(t, f.store.CreateSecret(ctx, &store.Secret{
 			ID: notOpted, Key: "pp-not-opted", Scope: "user", ScopeID: f.projectOwnerID, CreatedBy: f.projectOwnerID,
 		}))
-		agent := progenyPairAgent(tid("pp-notopted-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, scopes)
+		agentID := tid("pp-notopted-agent")
+		agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, scopes)
+		seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
 		d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: notOpted}, ActionUse, "secret.use", true)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		assert.Equal(t, RelationshipRejectFact, relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 	})
 
 	t.Run("inactive source owner", func(t *testing.T) {
-		agent := progenyPairAgent(tid("pp-inactive-agent"), f.projectBeta.ID, []string{f.projectOwnerID}, scopes)
+		agentID := tid("pp-inactive-agent")
+		agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, scopes)
+		// The fact stage's SharingSource owner (f.projectOwnerID, the
+		// secret's creator) is the user being suspended below. Stage 2b's
+		// execution source must resolve to someone else admitted to
+		// projectAlpha, or it would also deny on inactivity
+		// (executionProjectAdmission: "execution source user is not
+		// active") before the fact stage's own inactive-owner check runs.
+		// f.projectAdminID (alpha's project admin) stays active throughout.
+		seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectAdminID)
 		setUserStatus(t, f.store, f.projectOwnerID, "suspended")
 		t.Cleanup(func() { setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusActive) })
 		d := decidePerm(f.authz, agent, res, ActionUse, "secret.use", true)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		assert.Equal(t, RelationshipRejectSourceInactive, relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 	})
+}
+
+// The same admitted fixture as TestProgenyPair_SecretUseAdmitted, except the
+// agent is stored in projectBeta: f.projectOwnerID (the resolved execution
+// source) holds no role there (only projectAlpha, see
+// TestExecutionProject_ProgenyParity), so Stage 2b (execution-project
+// admission) denies before the fact stage that admits the pair in the
+// projectAlpha case is ever reached.
+func TestProgenyPair_SecretUseRequiresExecutionProjectAdmission(t *testing.T) {
+	f := newGoldenFixture(t)
+	agentID := tid("pp-noadmission-agent")
+	agent := progenyPairAgent(agentID, f.projectBeta.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectBeta.ID, f.projectOwnerID)
+
+	d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: f.secretID}, ActionUse, "secret.use", true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, "execution_project", relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 }
 
 // ActionUse and ActionDeliver are not read-only operations, so the
@@ -277,13 +364,31 @@ func TestProgenyPair_UseAndDeliverNotReadOnly(t *testing.T) {
 // A valid progeny secret.use reaches the delegation ceiling, which denies a
 // delegated agent on an edge lookup error, a missing edge after the
 // backfill, duplicate active edges, and a delegator lacking the permission.
-// The compatibility read passes the same lookup error and missing edge,
-// which pins the difference to the action's read-only classification.
+// The compatibility read is denied by the same lookup error and missing
+// edge too: Step 10 fails closed on a ceiling lookup error for every
+// action (no read exemption), and "secret" is excluded from the missing-edge
+// read allowance (sensitiveReadResourceTypes, authz_delegation_ceiling.go) —
+// read-only classification buys secret.use's compatibility pair nothing
+// here.
 func TestProgenyPair_DelegationCeilingFailsClosed(t *testing.T) {
 	f := newGoldenFixture(t)
 	res := Resource{Type: "secret", ID: f.secretID}
 	agentID := tid("pp-ceiling-agent")
-	agent := progenyPairAgent(agentID, f.projectBeta.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+
+	// Stage 2b (execution-project admission) and the delegation-ceiling walk
+	// below (Step 10) both resolve delegation edges through the same store
+	// call, GetDelegationEdgesForDelegate: the edge faults these subtests
+	// inject to exercise the ceiling would also fail Stage 2b for the same
+	// reason, before the ceiling ever runs. seedProgenyPairAgent's stub
+	// source resolver decouples them — it gives Stage 2b a fixed, real,
+	// admitted user without calling the store — so only the ceiling's own
+	// walk below exercises each injected fault. f.authz is exclusive to
+	// this test (a fresh newGoldenFixture), so mutating its sourceResolver
+	// here is safe.
+	seedProgenyPairAgent(t, f, f.authz, agentID, f.projectAlpha.ID, f.projectOwnerID)
+	owner, err := f.store.GetUser(context.Background(), f.projectOwnerID)
+	require.NoError(t, err)
 
 	decideWith := func(a *AuthzService, action Action, perm string) Decision {
 		return decidePerm(a, agent, res, action, perm, true)
@@ -298,12 +403,14 @@ func TestProgenyPair_DelegationCeilingFailsClosed(t *testing.T) {
 	t.Run("edge lookup error", func(t *testing.T) {
 		fs := &materialFailingStore{Store: f.store, getDelegationEdgesForDelegateErr: errors.New("edge store unavailable")}
 		a := NewAuthzService(fs, slog.Default())
+		a.sourceResolver = stubSourceResolver{user: owner}
 		d := decideWith(a, ActionUse, "secret.use")
 		assertReachedCeiling(t, d)
 		assert.Contains(t, d.Reason, "delegation ceiling check failed (fail-closed)")
 
 		d = decideWith(a, ActionRead, permissionProjectSecretRead)
-		assert.True(t, d.Allowed, "compatibility read on a lookup error: reason %q", d.Reason)
+		assertReachedCeiling(t, d)
+		assert.Contains(t, d.Reason, "delegation ceiling check failed (fail-closed)")
 	})
 
 	t.Run("duplicate active edges", func(t *testing.T) {
@@ -311,11 +418,12 @@ func TestProgenyPair_DelegationCeilingFailsClosed(t *testing.T) {
 			return &store.DelegationEdge{
 				ID: id, DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.projectOwnerID,
 				DelegateType: store.DelegationPrincipalAgent, DelegateID: agentID,
-				ScopeType: store.RoleScopeProject, ScopeID: f.projectBeta.ID, Role: string(AgentRoleFull), Active: true,
+				ScopeType: store.RoleScopeProject, ScopeID: f.projectAlpha.ID, Role: string(AgentRoleFull), Active: true,
 			}
 		}
 		fs := &materialFailingStore{Store: f.store, delegationEdgesOverride: []*store.DelegationEdge{edge(tid("pp-e1")), edge(tid("pp-e2"))}}
 		a := NewAuthzService(fs, slog.Default())
+		a.sourceResolver = stubSourceResolver{user: owner}
 		d := decideWith(a, ActionUse, "secret.use")
 		assertReachedCeiling(t, d)
 		assert.Contains(t, d.Reason, "multiple active delegation edges")
@@ -328,16 +436,44 @@ func TestProgenyPair_DelegationCeilingFailsClosed(t *testing.T) {
 		assert.Contains(t, d.Reason, "no delegation edge")
 
 		d = decideWith(f.authz, ActionRead, permissionProjectSecretRead)
-		assert.True(t, d.Allowed, "compatibility read without an edge: reason %q", d.Reason)
+		assertReachedCeiling(t, d)
+		assert.Contains(t, d.Reason, "no delegation edge for agent:"+agentID, "secret is excluded from the read allowance (sensitiveReadResourceTypes)")
 	})
 
 	t.Run("delegator lacks the permission", func(t *testing.T) {
 		createDCEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID, store.DelegationPrincipalAgent, agentID,
-			store.RoleScopeProject, f.projectBeta.ID, string(AgentRoleFull))
+			store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
 		d := decideWith(f.authz, ActionUse, "secret.use")
 		assertReachedCeiling(t, d)
-		assert.Contains(t, d.Reason, "holds secret.use")
+		assert.Contains(t, d.Reason, "does not hold secret.use")
 	})
+}
+
+// TestProgenyPair_SecretUseWithRecordedEdgeDeniedAtCeiling characterizes the
+// real (non-stub) end-to-end interaction TestProgenyPair_DelegationCeilingFailsClosed's
+// stub resolver exists to isolate: with a genuine recorded delegation edge
+// (seedExecutionAgent, real ExecutionSourceResolver, no stub), the delegator
+// (f.projectOwnerID) holds the edge's role (AgentRoleFull) but not
+// secret.use itself — no role and no relationship grants it to a plain
+// user, and the ceiling's delegator-authority check
+// (evaluateUserDelegatorAuthority) does not consult the progeny relationship
+// grant that admitted the pair above it. The progeny relationship still
+// admits the pair (Accepted is true), but Decide Step 10 (the delegation
+// ceiling) denies it anyway, because the recorded edge's authority does not
+// cover this specific permission. A per-relationship deliver/use ceiling
+// that would admit this case is out of scope here; it comes with the
+// recorded-provenance work in ptone/scion#2121 (B.3). Step 10 is unchanged.
+func TestProgenyPair_SecretUseWithRecordedEdgeDeniedAtCeiling(t *testing.T) {
+	f := newGoldenFixture(t)
+	agentID := tid("pp-recorded-edge-agent")
+	agent := progenyPairAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []AgentTokenScope{scopeProjectSecretRead})
+	seedExecutionAgent(t, f.store, agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
+
+	d := decidePerm(f.authz, agent, Resource{Type: "secret", ID: f.secretID}, ActionUse, "secret.use", true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.True(t, r.Accepted, "the progeny relationship admits the pair before the ceiling")
+	assert.Contains(t, d.Reason, "delegator "+f.projectOwnerID+" does not hold secret.use")
 }
 
 // "env_var" is served by the built-in env var adapter: the direct
