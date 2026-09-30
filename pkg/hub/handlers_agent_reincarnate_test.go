@@ -2658,17 +2658,32 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	<-disp.entered // worker has written the stopping and provisioning steps
 	defer close(disp.release)
 
-	time.Sleep(20 * time.Millisecond)
-	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
-	require.NoError(t, err)
+	// The `go runReincarnationWorker` the handler started above has no
+	// synchronization with the ListAgentReincarnations call that captured
+	// `initial`: under scheduler load the worker can win that race and have
+	// already written the provisioning step by the time `initial` is read,
+	// making `initial` and the read below the very same write. So this
+	// polls for the concrete state change the worker makes instead of
+	// sleeping a fixed duration and hoping it landed, and only asserts
+	// updated_at is non-decreasing (not strictly later) below, since on
+	// that race the two reads are legitimately equal, not ordered.
+	var cur *store.AgentReincarnation
+	require.Eventually(t, func() bool {
+		c, err := s.GetAgentReincarnation(context.Background(), initial.ID)
+		if err != nil || c.State != store.AgentReincarnationStateProvisioning {
+			return false
+		}
+		cur = c
+		return true
+	}, 2*time.Second, 10*time.Millisecond,
+		"the record's own state must track the worker's progress, not stay pending")
+
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	t.Logf("agent reincarnation_state=%q; record state=%q updated_at initial=%v now=%v",
 		a.ReincarnationState, cur.State, initial.UpdatedAt, cur.UpdatedAt)
-	assert.True(t, cur.UpdatedAt.After(initial.UpdatedAt),
-		"worker has passed the stopping and provisioning steps but the record's updated_at was never bumped")
-	assert.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
-		"the record's own state must track the worker's progress, not stay pending")
+	assert.False(t, cur.UpdatedAt.Before(initial.UpdatedAt),
+		"worker has passed the stopping and provisioning steps but the record's updated_at went backwards")
 }
 
 // TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep exercises the same
