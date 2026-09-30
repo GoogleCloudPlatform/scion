@@ -221,7 +221,10 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 // the new field, with Enabled omitted, would wrongly delete the section.
 // applySettingsUpdates now uses isZeroStruct (the same helper already used
 // for the quotas section) so the decision is section-generic: it looks at
-// every field, not one hardcoded name.
+// every field, not one hardcoded name. This is directly exercised by
+// isZeroStruct's own tests (TestIsZeroStruct) for the current single-field
+// AutoExposePortsSettings; this test locks in the equivalent behavior through
+// the actual applySettingsUpdates entry point.
 func TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck(t *testing.T) {
 	// A struct with every field nil/zero must delete the section, regardless
 	// of which field(s) AutoExposePortsSettings has.
