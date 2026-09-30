@@ -105,12 +105,13 @@ describe('scion-file-browser — shared date formatter', () => {
 
   it('formats a valid date exactly as the pre-fix per-row formatter did', async () => {
     const modTime = '2026-03-14T09:41:00Z';
-    // Computed with a fresh, independently-constructed formatter using the
-    // exact same locale/options formatDate() used before this change — this
-    // is what the old per-row `new Intl.DateTimeFormat(...).format(date)`
-    // call would have produced, so a change to the options (dropping the
-    // hour/minute, changing the locale, etc.) would fail this test even if
-    // it happened to still contain "Mar 14, 2026".
+    // `expected` is a second, independent Intl.DateTimeFormat instance built
+    // with the exact same locale/options formatDate() uses — not a spy or a
+    // mock of anything, just a plain reference value to compare against.
+    // Asserting exact equality against it (rather than a loose substring
+    // match) means a change to the options — dropping hour/minute, changing
+    // the locale, etc. — fails this test even if the output happened to
+    // still contain "Mar 14, 2026".
     const expected = new Intl.DateTimeFormat('en', {
       month: 'short',
       day: 'numeric',
