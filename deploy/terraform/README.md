@@ -75,7 +75,9 @@ terraform -chdir=deploy/terraform/configurations/shared-infra apply \
   -var-file=terraform.tfvars
 
 # 2. Build and push hub_image using the repo shared-infra just created
-#    (out of scope for this Terraform — see the image pipeline).
+#    (out of scope for this Terraform — see the agent runbook's step 5,
+#    "Build and Push Images": immutable tags only, :latest moves only on
+#    explicit ack, and the hub image is built for linux/amd64).
 
 # 3. One hub.
 terraform -chdir=deploy/terraform/configurations/hub init \

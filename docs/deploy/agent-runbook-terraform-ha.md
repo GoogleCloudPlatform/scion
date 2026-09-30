@@ -24,7 +24,7 @@ If you are not already in a local clone of the Scion repository, clone it:
 
 ```bash
 git clone --depth 1 https://github.com/GoogleCloudPlatform/scion.git /tmp/scion-repo
-cd /tmp/scion-repo
+cd /tmp/scion-repo || exit 1
 ```
 
 > **Important for AI agents:** clone the repository locally rather than
@@ -322,7 +322,67 @@ build-arg, and `cloudbuild-harnesses.yaml`'s
 step). `--target harnesses` only builds the harnesses themselves, and
 `--target scion-base` only builds `scion-base` — neither builds its parent
 — so the chain must be built **in order, under the same tag**, one stage at
-a time:
+a time.
+
+**Before asking for the build ack, show the user the exact list of images
+and tags the three stages will push.** `--builder cloud-build`'s
+`--dry-run` only prints the `gcloud builds submit` command and its
+`_TAG`/`_REGISTRY` substitutions — unlike the per-image builders, it prints
+no `BASE_IMAGE=` line and no per-image tag list, because the whole target is
+handed off to a static YAML. Read the pushed tags from that YAML instead
+(image-build's README "Cloud Build Configs" table names the file per
+target):
+- `core-base` → `cloudbuild-core-base.yaml` pushes
+  `core-base:<immutable-tag>` and `core-base:<short-sha>`.
+- `scion-base` → `cloudbuild-scion-base.yaml` pushes
+  `scion-base:<immutable-tag>` and `scion-base:<short-sha>`.
+- `harnesses` → `cloudbuild-harnesses.yaml` pushes
+  `scion-<harness>:<immutable-tag>` and `scion-<harness>:<short-sha>` for
+  each harness **it** hardcodes — currently 8, **not** the 9-image catalog
+  (it omits `scion-muse-code`; this is a pre-existing drift between the
+  static YAML and the harness catalog, out of scope for this runbook to
+  fix). Read the file itself for the current list.
+
+`<short-sha>` is the `(+ :<sha>)` value in the stage's `--dry-run` header
+(`Tag:      <immutable-tag> (+ :f6642c16)`), i.e. `git rev-parse --short
+HEAD` in this clone. Get it by running the target with `--dry-run` and the
+same `GCLOUD_PROJECT=<project>` prefix as the real command, before asking
+for the ack.
+
+"Immutable" is a naming convention here, not something the tool enforces —
+`--tag <immutable-tag>` will happily overwrite an existing tag of the same
+name, and the auto-added `:<short-sha>` can already exist too if another
+operator already built the same commit. Either re-points an existing tag,
+which is exactly what §10 requires an ack for. **Pre-check before asking,
+for every image in the push list above (`core-base`, `scion-base`, and each
+harness), not harnesses alone, checking both the immutable tag and the
+auto-added short-sha tag:**
+```bash
+gcloud artifacts docker tags list <registry>/<image> \
+  --filter='tag:<immutable-tag> OR tag:<short-sha>'
+```
+An empty result means both tags are new; any output means this push would
+re-point one of them.
+
+Then **ask the user**, and make the question state explicitly whether
+`:latest` will move **and for which image families** (harnesses,
+`core-base`, `scion-base` — the ack must cover each one the user is being
+asked about, since harnesses are what every hub actually resolves while
+`core-base`/`scion-base` `:latest` are only the defaults other build
+configs fall back to), e.g.: *"This pushes `core-base:<immutable-tag>` plus
+`core-base:<short-sha>`, `scion-base:<immutable-tag>` plus
+`scion-base:<short-sha>` (each new, or re-pointed if already present — see
+the pre-check above), and `scion-<harness>:<immutable-tag>` plus
+`:<short-sha>` (new, or re-pointed) for [list of harnesses from
+`cloudbuild-harnesses.yaml`] to `<registry>`. It will **not** move any of
+their `:latest` tags. Do you also want `:latest` moved for any of these —
+and if so, which ones?"* This applies equally to a first deployment into an
+empty registry — pushing the *initial* `:latest` establishes the tag every
+future hub on this registry inherits, so it is the same explicit ack, not
+something to do implicitly as part of "build and push."
+
+**Do not run any stage command below until the push list, pre-check and
+build ack above are done.**
 
 ```bash
 GCLOUD_PROJECT=<project> image-build/scripts/build-images.sh --builder cloud-build \
@@ -367,17 +427,38 @@ why every command above is prefixed with `GCLOUD_PROJECT=<project>` — never
 drop it.
 
 **The Cloud Build service account needs push access on the shared
-registry.** Cloud Build runs as
-`<project_number>@cloudbuild.gserviceaccount.com` and needs
-`roles/artifactregistry.writer` on the target repo
-(`image-build/scripts/setup-cloud-build.sh` grants exactly this;
+registry.** Don't assert which service account Cloud Build runs as — look
+it up, since it depends on the project's age:
+```bash
+gcloud builds get-default-service-account --project=<project>
+```
+This prints the service account email directly. On projects that predate
+the 2024 Cloud Build default-service-account change it's the legacy
+`<project_number>@cloudbuild.gserviceaccount.com`; on newer projects it's
+`<project_number>-compute@developer.gserviceaccount.com` (the Compute Engine
+default SA) instead. Grant `roles/artifactregistry.writer` on
+`<name_prefix>-scion` (the repo `modules/artifact-registry/main.tf` creates)
+to *whichever account the lookup above printed* —
 `cloudbuild.googleapis.com` itself is already enabled by
-`project-services`, so nothing else is needed there). On newer projects, or
-under an org policy that disables automatic default-SA grants, this is
-often missing. Stage 1's `verify-registry` step
+`project-services`, so nothing else is needed there. On newer projects, or
+under an org policy that disables automatic default-SA grants, this grant
+is often missing. Stage 1's `verify-registry` step
 (`image-build/scripts/verify-registry.sh`) fails fast in that case — that's
-safe. If it fails, **stop and ask the user** to grant push access (e.g. via
-`setup-cloud-build.sh`); do not grant it yourself.
+safe. If it fails, **stop and ask the user** to grant push access; do not
+grant it yourself.
+
+If you point the user at `image-build/scripts/setup-cloud-build.sh` as a
+convenience, give it every flag explicitly: `--project <project> --location
+<region> --repo <name_prefix>-scion` (`verify-registry.sh` itself prints
+these exact values on failure). **Never suggest running it bare:** with no
+arguments it falls back to `--repo scion --location us-central1` in
+whatever project the ambient `gcloud config` names, and it **creates** an
+Artifact Registry repo there — a stray repo outside Terraform, not the one
+this module set uses. It also only grants the legacy
+`<project_number>@cloudbuild.gserviceaccount.com`, not necessarily the
+account `get-default-service-account` named above, and it separately
+enables the Cloud Build and Artifact Registry APIs as a side effect. The
+agent still does not run this script itself.
 
 **Every submit is asynchronous.** `--builder cloud-build` always runs
 `gcloud builds submit --async` (`builders/cloud-build.sh`'s
@@ -436,7 +517,7 @@ done
 [[ "${STATUS}" == "SUCCESS" ]] || { echo "Build ${BUILD_ID} did not reach SUCCESS within ${MAX_WAIT}s. STOP. Do not resubmit the stage while it may still be QUEUED or WORKING -- check with a single gcloud builds describe call first." >&2; exit 1; }
 ```
 If your shell or harness enforces a per-command time limit shorter than
-`MAX_WAIT` (up to 3h40m for `core-base`), do not run this loop as one
+`MAX_WAIT` (up to 3h10m for `core-base`), do not run this loop as one
 foreground command that would be killed mid-wait: run it in the
 background, or poll with single `gcloud builds describe` calls spaced
 across separate tool invocations, and do not re-submit the stage while it
@@ -479,57 +560,6 @@ same failure mode (a single-arch local base under a multi-arch
 `cloudbuild-harnesses.yaml` harness build) and is likewise not documented
 here.
 
-**Before asking for the build ack, show the user the exact list of images
-and tags the three stages will push.** `--builder cloud-build`'s
-`--dry-run` only prints the `gcloud builds submit` command and its
-`_TAG`/`_REGISTRY` substitutions — unlike the per-image builders, it prints
-no `BASE_IMAGE=` line and no per-image tag list, because the whole target is
-handed off to a static YAML. Read the pushed tags from that YAML instead
-(image-build's README "Cloud Build Configs" table names the file per
-target):
-- `core-base` → `cloudbuild-core-base.yaml` pushes
-  `core-base:<immutable-tag>` and `core-base:<short-sha>`.
-- `scion-base` → `cloudbuild-scion-base.yaml` pushes
-  `scion-base:<immutable-tag>` and `scion-base:<short-sha>`.
-- `harnesses` → `cloudbuild-harnesses.yaml` pushes
-  `scion-<harness>:<immutable-tag>` and `scion-<harness>:<short-sha>` for
-  each harness **it** hardcodes — currently 8, **not** the 9-image catalog
-  (it omits `scion-muse-code`; this is a pre-existing drift between the
-  static YAML and the harness catalog, out of scope for this runbook to
-  fix). Read the file itself for the current list.
-
-"Immutable" is a naming convention here, not something the tool enforces —
-`--tag <immutable-tag>` will happily overwrite an existing tag of the same
-name, and the auto-added `:<short-sha>` can already exist too if another
-operator already built the same commit. Either re-points an existing tag,
-which is exactly what §10 requires an ack for. **Pre-check before asking,
-for every image in the push list above (`core-base`, `scion-base`, and each
-harness), not harnesses alone, checking both the immutable tag and the
-auto-added short-sha tag:**
-```bash
-gcloud artifacts docker tags list <registry>/<image> \
-  --filter='tag:<immutable-tag> OR tag:<short-sha>'
-```
-An empty result means both tags are new; any output means this push would
-re-point one of them.
-
-Then **ask the user**, and make the question state explicitly whether
-`:latest` will move **and for which image families** (harnesses,
-`core-base`, `scion-base` — the ack must cover each one the user is being
-asked about, since harnesses are what every hub actually resolves while
-`core-base`/`scion-base` `:latest` are only the defaults other build
-configs fall back to), e.g.: *"This pushes `core-base:<immutable-tag>` plus
-`core-base:<short-sha>`, `scion-base:<immutable-tag>` plus
-`scion-base:<short-sha>` (each new, or re-pointed if already present — see
-the pre-check above), and `scion-<harness>:<immutable-tag>` plus
-`:<short-sha>` (new, or re-pointed) for [list of harnesses from
-`cloudbuild-harnesses.yaml`] to `<registry>`. It will **not** move any of
-their `:latest` tags. Do you also want `:latest` moved for any of these —
-and if so, which ones?"* This applies equally to a first deployment into an
-empty registry — pushing the *initial* `:latest` establishes the tag every
-future hub on this registry inherits, so it is the same explicit ack, not
-something to do implicitly as part of "build and push."
-
 If the user declines moving `:latest`, the consequence differs by case —
 state the one that applies:
 
@@ -560,17 +590,21 @@ above, for **each image the user named in the ack**:
 gcloud artifacts docker tags add \
   <registry>/<image>:<immutable-tag> <registry>/<image>:latest
 ```
-Then verify the move landed on the digest that was actually approved, not
-one that changed underneath you between the ack and the retag:
+Then verify the retag landed on the `:<immutable-tag>` digest — this proves
+the `tags add` call took effect, not that the digest is unchanged since the
+ack (`tags add` always resolves `:<immutable-tag>` at retag time, and both
+calls below read the current state afterwards, so this cannot catch a
+digest that changed underneath you between the ack and the retag):
 ```bash
 gcloud artifacts docker images describe <registry>/<image>:latest \
   --format='value(image_summary.digest)'
 gcloud artifacts docker images describe <registry>/<image>:<immutable-tag> \
   --format='value(image_summary.digest)'
 ```
-The two digests must be equal — if they aren't, stop and ask again before
-proceeding. Do this once per image the user named; no rebuild, and never
-drop `--tag` from a stage command as a way to "move" `:latest` instead.
+The two digests must be equal — if they aren't, the retag didn't take and
+`:latest` still points elsewhere; stop and ask again before proceeding. Do
+this once per image the user named; no rebuild, and never drop `--tag` from
+a stage command as a way to "move" `:latest` instead.
 
 See "Image Rolls and Rollback" (§10) for how a `hub_image` roll differs
 from moving `:latest`.

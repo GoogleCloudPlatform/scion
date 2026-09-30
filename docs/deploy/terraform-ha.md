@@ -31,7 +31,10 @@ The module set is split into two Terraform roots:
 - A versioned GCS state bucket: `<project>-<prefix>-tfstate`.
 - A hub container image, built from the same commit as the agent images and
   pushed to the Artifact Registry repo `shared-infra` creates (build/push
-  happens between the two applies, not before either).
+  happens between the two applies, not before either) — see the [agent
+  runbook](agent-runbook-terraform-ha.md)'s step 5, "Build and Push Images":
+  immutable tags only, `:latest` moves only on explicit ack, and the hub
+  image is built for `linux/amd64`.
 - Terraform `>= 1.9`.
 
 An IAP OAuth client is **not** a prerequisite — see "Post-apply hub steps"
@@ -41,8 +44,11 @@ below.
 
 Apply order is: shared-infra once per project, then build and push the hub
 image into the AR repo shared-infra just created (out of scope for this
-Terraform), then a hub once per hub. See the README's "Bootstrap sequence"
-for the exact commands, backend-config flags, and why `state_prefix` must
+Terraform — see the [agent runbook](agent-runbook-terraform-ha.md)'s step 5,
+"Build and Push Images": immutable tags only, `:latest` moves only on
+explicit ack, and the hub image is built for `linux/amd64`), then a hub
+once per hub. See the README's "Bootstrap sequence" for the exact commands,
+backend-config flags, and why `state_prefix` must
 be passed and must match `-backend-config prefix` exactly. If one command
 sample is useful here, it's the hub pair:
 
