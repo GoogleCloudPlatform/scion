@@ -24,6 +24,19 @@
 # shellcheck disable=SC2034 # sourced by build-images.sh, which reads BUILDER_MODE
 BUILDER_MODE="target"
 
+# Single-harness targets (ptone/scion#2354) generate a throwaway Cloud Build
+# config per step ID, in ${TMPDIR:-/tmp}, rather than editing a static file
+# in-tree. cloud_build_config_for_target can be called more than once per
+# `build-images.sh` invocation (build-images.sh's own
+# warn_if_scion_base_not_in_run peeks at the config too), each call in its
+# own command-substitution subshell -- so an EXIT trap set inside a function
+# would only ever see its own subshell's copy. Register a single, real
+# process-wide EXIT trap here, at source time (before any target is
+# resolved), naming every file this run could produce by its "$$" (this
+# script's own PID, stable across subshells) instead of relying on each
+# call site to clean up after itself.
+trap 'rm -f "${TMPDIR:-/tmp}"/cloudbuild-single-harness-$$-*.yaml' EXIT
+
 builder_check() {
   if ! command -v gcloud >/dev/null 2>&1; then
     echo "Error: 'gcloud' not found in PATH."
@@ -36,11 +49,73 @@ builder_prepare() {
   :
 }
 
+# generate_single_harness_config <step_id>
+#
+# Writes a one-step Cloud Build config to a temp file for a single harness
+# image (e.g. "scion-claude") and echoes its path. Mirrors the per-harness
+# build step in cloudbuild-harnesses.yaml, minus the other harnesses --
+# this is what lets `--target scion-<name>` (ptone/scion#2354) rebuild one
+# harness via Cloud Build instead of the whole catalog. is_harness_step and
+# IMAGE_BUILD_DIR come from lib/targets.sh / build-images.sh, both sourced
+# into the same process before any builder runs.
+generate_single_harness_config() {
+  local step_id="$1"
+  local harness_name="${step_id#scion-}"
+  # Deterministic per-PID, per-step path (no mktemp): a second call for the
+  # same step_id in this process just overwrites identical content, and the
+  # EXIT trap above can name the file without the generator having reported
+  # its randomized name back.
+  local out="${TMPDIR:-/tmp}/cloudbuild-single-harness-$$-${step_id}.yaml"
+  cat >"${out}" <<EOF
+steps:
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'verify-registry'
+    entrypoint: 'bash'
+    args: ['image-build/scripts/verify-registry.sh', '\$_REGISTRY']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'setup-buildx'
+    args: ['buildx', 'create', '--name', 'mybuilder', '--use']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'bootstrap-buildx'
+    args: ['buildx', 'inspect', '--bootstrap']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-${step_id}'
+    dir: 'harnesses/${harness_name}'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+substitutions:
+  _REGISTRY: 'us-central1-docker.pkg.dev/\${PROJECT_ID}/public-docker'
+  _TAG: 'latest'
+options:
+  dynamicSubstitutions: true
+  machineType: 'E2_HIGHCPU_8'
+timeout: 1200s
+EOF
+  echo "${out}"
+}
+
 # cloud_build_config_for_target <target>
 # Echoes the absolute path to the cloudbuild-*.yaml that implements the
-# given target. Returns nonzero if no mapping exists.
+# given target, or (for an individual harness step ID such as
+# "scion-claude") the path to a config generated on the fly by
+# generate_single_harness_config. Returns nonzero if no mapping exists.
 cloud_build_config_for_target() {
   local target="$1"
+
+  if declare -F is_harness_step >/dev/null && is_harness_step "${target}"; then
+    generate_single_harness_config "${target}"
+    return 0
+  fi
+
   local file
   case "${target}" in
     common)     file="cloudbuild-common.yaml" ;;

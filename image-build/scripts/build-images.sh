@@ -61,7 +61,9 @@ Options:
   --builder <name>      Build backend (default: local-docker)
                           local-docker  - docker buildx, local
                           local-podman  - podman build, local (single-arch by default)
-                          cloud-build   - Google Cloud Build (submits a static cloudbuild-*.yaml)
+                          cloud-build   - Google Cloud Build (group targets submit a
+                                          static cloudbuild-*.yaml; an individual harness
+                                          step ID submits a config generated on the fly)
   --target <target>     Build target (default: common)
                         Group targets:
                           core-base   - just the core-base layer
@@ -79,8 +81,11 @@ Options:
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)
                         Individual image step IDs are also accepted (e.g.
-                        scion-claude, scion-hub, scion-codex). Use the group
-                        target "all" with --dry-run to list all valid step IDs.
+                        scion-claude, scion-hub, scion-codex) with every builder,
+                        including cloud-build (submits a generated single-step
+                        config instead of the group's static cloudbuild-*.yaml).
+                        Use the group target "all" with --dry-run to list all
+                        valid step IDs.
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
