@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Guard: every default harness in harnesses/<name>/Dockerfile must have a
-# build step in each "full catalog" Cloud Build config.
+# build step in each "full catalog" Cloud Build config, and that step must
+# push a matching scion-<name> image.
 #
 # ptone/scion#2357: harnesses/muse-code existed in the tree but was absent
 # from cloudbuild-harnesses.yaml, so a deployment that publishes only the
@@ -23,7 +24,14 @@
 # lib/targets.sh's discover_harness_names() walks harnesses/ at build time.
 # The cloudbuild-*.yaml files are static snapshots gcloud requires up front
 # (see image-build/README.md, "Cloud Build Configs"), so nothing forced them
-# to stay in sync with the catalog. This script is that sync check.
+# to stay in sync with the catalog. This script is that sync check, and it
+# is run in CI (.github/workflows/ci.yml, "Check Harness Coverage in Cloud
+# Build Configs") so it can't silently drift again.
+#
+# Beyond presence, a step's `dir: harnesses/<name>` alone does not guarantee
+# it builds the right image: a step copy-pasted from another harness could
+# keep the old harness's `-t ...scion-<name>:$_TAG` args. This script also
+# flags that mismatch (see the MISMATCH: handling below).
 #
 # Checked files ("full catalog" configs -- every default harness must
 # appear):
@@ -44,6 +52,13 @@
 # to override, same convention as scripts/single-node-vm/check-cloud-init.sh.
 
 set -euo pipefail
+# Pin collation for `sort` and `comm` below: one input list is sorted by this
+# script's own `sort`, under whatever locale the caller has set, while the
+# other comes from Python's `sorted()` (codepoint order). Under a locale like
+# en_US.UTF-8, hyphenated names (e.g. "gemini-cli" vs "grok-build") can sort
+# differently between the two, which makes `comm` warn about unsorted input
+# and can report false missing/extra entries.
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -92,7 +107,11 @@ for config_name in "${CHECKED_CONFIGS[@]}"; do
     exit 2
   fi
 
-  actual="$("${PYTHON}" -c "
+  # Lines are either a bare harness name (has a step whose `dir:` is
+  # harnesses/<name>) or "MISMATCH:<name>" -- that step exists, but none of
+  # its `-t` args push a scion-<name> image, e.g. a step copy-pasted from
+  # another harness that kept the old image name (N2).
+  raw="$("${PYTHON}" -c "
 import sys
 import yaml
 
@@ -100,15 +119,26 @@ with open(sys.argv[1]) as f:
     doc = yaml.safe_load(f)
 
 names = set()
+mismatched = []
+prefix = 'harnesses/'
 for step in doc.get('steps') or []:
     d = step.get('dir', '')
-    prefix = 'harnesses/'
-    if d.startswith(prefix):
-        names.add(d[len(prefix):])
+    if not d.startswith(prefix):
+        continue
+    name = d[len(prefix):]
+    names.add(name)
+    args = step.get('args') or []
+    if not any(a.endswith('/scion-' + name + ':\$_TAG') for a in args):
+        mismatched.append(name)
 
 for name in sorted(names):
     print(name)
+for name in sorted(mismatched):
+    print('MISMATCH:' + name)
 " "${config_path}")"
+
+  actual="$(printf '%s\n' "${raw}" | grep -v '^MISMATCH:' || true)"
+  image_mismatch="$(printf '%s\n' "${raw}" | grep '^MISMATCH:' | sed 's/^MISMATCH://' || true)"
 
   missing="$(comm -23 <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}"))"
   extra="$(comm -13 <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}"))"
@@ -121,6 +151,11 @@ for name in sorted(names):
   if [[ -n "${extra}" ]]; then
     echo "FAIL: ${config_name} builds a harness with no harnesses/<name>/Dockerfile:" >&2
     while IFS= read -r name; do echo "  - ${name}" >&2; done <<<"${extra}"
+    fail=1
+  fi
+  if [[ -n "${image_mismatch}" ]]; then
+    echo "FAIL: ${config_name} has a harnesses/<name> step that does not push a matching scion-<name> image (-t ...scion-<name>:\$_TAG):" >&2
+    while IFS= read -r name; do echo "  - ${name}" >&2; done <<<"${image_mismatch}"
     fail=1
   fi
 done
