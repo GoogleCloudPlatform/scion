@@ -401,10 +401,16 @@ func agentActionPermission(action string) Action {
 		// permission and its credential ceilings by a visible, auditable
 		// registration rather than by accidentally landing in this
 		// function's default branch. The route action itself is not a new
-		// independently granted permission. This case is reached only
-		// through the generic authz block (no action-dispatch switch has
-		// a case for api.AgentActionKeys yet, so dispatch still 404s — see
-		// that constant's doc comment in pkg/api/agent_actions.go).
+		// independently granted permission. Task 2.1 (ptone/scion#2195) gave
+		// this action its own early branch on both action-dispatch
+		// functions (handlers_agents_core.go's handleAgentAction,
+		// handlers_projects_core.go's handleProjectAgentAction), calling
+		// authorizeAgentKeys directly — so this case is no longer reached by
+		// any live HTTP request; TestAgentActionPermission_KeysMapsToAttach
+		// pins the mapped value directly instead. Neither switch has a
+		// dispatch case that calls a real keys handler yet (task 2.2 adds
+		// one), so an authorized call still 404s via each switch's own
+		// default branch, not because it was denied.
 		return ActionAttach
 	default:
 		return ActionAttach

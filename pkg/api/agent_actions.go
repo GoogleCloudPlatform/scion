@@ -50,12 +50,20 @@ const (
 	//
 	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
 	// the runtime broker's own dedicated keys handler
-	// (pkg/runtimebroker/handlers.go). The Hub-side action-dispatch switches
-	// (handlers_agents_core.go, handlers_projects_core.go) do not yet have a
-	// case for this constant — that is task 2.1/2.2's job — so a live public
-	// POST /api/v1/agents/{id}/keys request still 404s at the Hub today; only
-	// the internal Hub-to-broker route this constant also names is reachable
-	// once 1.2 implements a Dispatcher/BrokerClient that calls it.
+	// (pkg/runtimebroker/handlers.go), with the Hub-to-broker route reachable
+	// via the Dispatcher/BrokerClient task 1.2 added. On the Hub side, both
+	// action-dispatch functions (handlers_agents_core.go's
+	// handleAgentAction, handlers_projects_core.go's
+	// handleProjectAgentAction) route this action early, straight to
+	// authorizeAgentKeys, the same way they already do for message/
+	// reincarnate/set_message_mode — a live POST /api/v1/agents/{id}/keys
+	// request no longer falls through to the generic authz block that
+	// resolves agentActionPermission for other actions. Neither
+	// action-dispatch switch has a case that calls a real keys handler yet
+	// (task 2.2 adds one), so an authorized call still 404s, not because it
+	// was denied. This constant exists so every task that touches the keys
+	// route (1.1, 1.2, 2.1, 2.2) references a single frozen action name
+	// rather than each inventing their own string.
 	AgentActionKeys = "keys"
 )
 
