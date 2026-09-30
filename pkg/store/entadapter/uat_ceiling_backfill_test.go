@@ -447,15 +447,14 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 	// sets both columns together, so this shape means something else wrote
 	// the version without the list. It must deny both before AND after
 	// Migrate runs, and the backfill must not touch it — rewriting it to
-	// version 0 would turn a denying row into an allowing one (the bug this
-	// sub-test pins).
+	// version 0 would turn a denying row into an allowing one; this
+	// sub-test pins that the backfill leaves it unchanged.
 	//
 	// Each case uses its own client/store, not the outer cs: Migrate's
 	// completion marker is per-client, so sharing cs across cases would make
 	// every case after the first a no-op (the marker already set) rather
 	// than a real exercise of the backfill query.
 	for _, version := range []int32{int32(permissions.CeilingVersionV1), 9} {
-		version := version
 		t.Run(fmt.Sprintf("versioned row with NULL ids is left as is by Migrate, version %d", version), func(t *testing.T) {
 			caseClient := enttest.NewClient(t)
 			caseCS := NewCompositeStore(caseClient)

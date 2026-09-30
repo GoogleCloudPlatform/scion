@@ -259,9 +259,9 @@ func TestNormalizeLegacyUATScopes_TableShapes(t *testing.T) {
 			want:   []string{},
 		},
 		{
-			// agent:update is an ordinary Registry pair with no UATScope
-			// collision (unlike the three shared hub:* pairs), so it maps
-			// to its own single permission.
+			// agent:update is the Resource:Action pair of exactly one
+			// Registry permission, which has no UATScope, so it maps to
+			// that single permission.
 			name:   "registry pair without a UATScope maps to its single permission",
 			scopes: []string{"agent:update"},
 			want:   []string{"agent.update"},
