@@ -2185,6 +2185,8 @@ var (
 		{Name: "key_hash", Type: field.TypeString, Unique: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "scopes", Type: field.TypeString},
+		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
 		{Name: "revoked", Type: field.TypeBool, Default: false},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_used", Type: field.TypeTime, Nullable: true},

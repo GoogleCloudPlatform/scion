@@ -19,6 +19,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -107,40 +108,80 @@ type ScopedUserIdentity struct {
 	projectID    string
 	scopes       []string
 	credentialID string
+	ceiling      permissions.FrozenPermissionCeiling
 
-	// E.1 descriptive credential metadata: populated only by
+	// decoration holds descriptive credential metadata: populated only by
 	// UserAccessTokenService.ValidateToken from the server-validated token
 	// row, and never by any other caller. nil for identities not backed by
 	// a validated UAT row (e.g. constructed directly by older tests/callers).
 	decoration *CredentialDecoration
 }
 
-// NewScopedUserIdentity creates a ScopedUserIdentity.
+// NewScopedUserIdentity creates a ScopedUserIdentity. The ceiling is derived
+// from scopes via the frozen legacy normalization (permissions.
+// NormalizeLegacyUATScopes) — the same interpretation a real
+// CeilingVersionUnspecified token gets — so callers that construct an
+// identity directly from raw scope strings (most test fixtures) exercise
+// the same permission-ID-based restriction that production applies. A
+// caller minting a real token should use NewScopedUserIdentityWithCeiling
+// with the token's actual store.UserAccessToken.NormalizedCeiling() instead,
+// so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
 }
 
 // NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
 // its persisted credential ID available for authorization audit context.
+// See NewScopedUserIdentity for how the ceiling is derived.
 func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeiling(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	})
+}
+
+// NewScopedUserIdentityWithCeiling creates a UAT-backed identity carrying an
+// explicit, already-normalized FrozenPermissionCeiling — the production
+// path (UserAccessTokenService.ValidateToken) uses this so a stored token's
+// real ceiling (legacy-normalized or CeilingVersionV1+, per
+// store.UserAccessToken.NormalizedCeiling) drives authorization, not a
+// re-derivation from raw scopes.
+func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
 		credentialID: credentialID,
+		ceiling:      ceiling,
 	}
 }
 
 // NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
-// E.1's descriptive credential decoration alongside its credential ID. Only
-// UserAccessTokenService.ValidateToken should call this: it is the single
-// point that has the server-validated token row in hand.
+// descriptive credential decoration alongside its credential ID. The
+// ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithCredentialID derives it; see
+// NewScopedUserIdentityWithCeilingAndDecoration for a constructor that takes
+// an explicit, already-normalized ceiling instead.
 func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	}, decoration)
+}
+
+// NewScopedUserIdentityWithCeilingAndDecoration creates a UAT-backed identity
+// carrying both an explicit, already-normalized FrozenPermissionCeiling and
+// descriptive credential decoration. UserAccessTokenService.ValidateToken —
+// the single point that has the server-validated token row in hand — uses
+// this to attach both pieces of derived state in one call, so a
+// CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
 		credentialID: credentialID,
+		ceiling:      ceiling,
 		decoration:   decoration,
 	}
 }
@@ -182,6 +223,14 @@ func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
 func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
 	return ancestryProvenanceLocalUser
 }
+
+// Ceiling returns the normalized, frozen permission ceiling this identity's
+// credential carries. Every credential-scope restriction (Decide step 7a,
+// CanDelegate's intersectCredentialCaveats) reads this instead of
+// re-deriving permission IDs from raw scopes, so legacy and current-version
+// tokens are evaluated through the exact same "empty/malformed/unknown
+// denies" rule (FrozenPermissionCeiling.Allows).
+func (s *ScopedUserIdentity) Ceiling() permissions.FrozenPermissionCeiling { return s.ceiling }
 
 // IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
 // Scoped credentials must not use role-only administrative bypasses.

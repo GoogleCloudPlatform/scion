@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -538,17 +539,54 @@ func marshalScopes(scopes []string) string {
 	return string(b)
 }
 
+// marshalCeilingPermissionIDs serializes a FrozenPermissionCeiling's
+// PermissionIDs for the nillable ceiling_permission_ids column. A nil slice
+// (never backfilled / not yet resolved) serializes to a nil *string (SQL
+// NULL); an explicit, possibly-empty slice serializes to a JSON array
+// string, preserving the "NULL means not backfilled, [] means explicitly
+// denies" distinction end to end (see store.UserAccessToken.NormalizedCeiling).
+func marshalCeilingPermissionIDs(ids []string) *string {
+	if ids == nil {
+		return nil
+	}
+	b, _ := json.Marshal(ids)
+	s := string(b)
+	return &s
+}
+
+// unmarshalCeilingPermissionIDs is the inverse of
+// marshalCeilingPermissionIDs. A NULL column (raw == nil) returns nil —
+// "never backfilled." Malformed JSON in a non-NULL column returns a non-nil
+// empty slice rather than nil, so a corrupted value denies (via
+// FrozenPermissionCeiling.Allows on an explicit empty list) instead of being
+// mistaken for "never backfilled" and silently re-normalized from Scopes.
+func unmarshalCeilingPermissionIDs(raw *string) []string {
+	if raw == nil {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(*raw), &ids); err != nil {
+		return []string{}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids
+}
+
 // entUATToStore converts an Ent UserAccessToken to the store model.
 func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 	t := &store.UserAccessToken{
-		ID:        e.ID.String(),
-		UserID:    e.UserID.String(),
-		Name:      e.Name,
-		Prefix:    e.Prefix,
-		KeyHash:   e.KeyHash,
-		ProjectID: e.ProjectID.String(),
-		Revoked:   e.Revoked,
-		Created:   e.Created,
+		ID:                   e.ID.String(),
+		UserID:               e.UserID.String(),
+		Name:                 e.Name,
+		Prefix:               e.Prefix,
+		KeyHash:              e.KeyHash,
+		ProjectID:            e.ProjectID.String(),
+		Revoked:              e.Revoked,
+		Created:              e.Created,
+		CeilingVersion:       permissions.CeilingVersion(e.CeilingVersion),
+		CeilingPermissionIDs: unmarshalCeilingPermissionIDs(e.CeilingPermissionIds),
 	}
 	if e.Scopes != "" {
 		_ = json.Unmarshal([]byte(e.Scopes), &t.Scopes)
@@ -599,9 +637,13 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 		SetKeyHash(token.KeyHash).
 		SetProjectID(projectUID).
 		SetScopes(marshalScopes(token.Scopes)).
+		SetCeilingVersion(int32(token.CeilingVersion)).
 		SetRevoked(token.Revoked).
 		SetCreated(token.Created)
 
+	if ceilingIDs := marshalCeilingPermissionIDs(token.CeilingPermissionIDs); ceilingIDs != nil {
+		create.SetCeilingPermissionIds(*ceilingIDs)
+	}
 	if token.ExpiresAt != nil {
 		create.SetExpiresAt(*token.ExpiresAt)
 	}
