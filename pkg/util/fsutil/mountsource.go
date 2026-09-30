@@ -55,7 +55,7 @@ func CheckMountSource(root string) error {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return checkMountSourceReader(root, f)
 }
 

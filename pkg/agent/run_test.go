@@ -849,7 +849,21 @@ profiles:
 // verification correctly returns false) must still be rejected. This is
 // also the missing "Start() non-explicit source outside root" containment
 // reject case.
+//
+// StartOptions.SharedWorkspace is set to true below, which keeps
+// GetAgent's agentWorkspace empty throughout -- without it, GetAgent's
+// resume path self-heals a missing <agentDir>/workspace by recreating a
+// managed worktree there (the project directory here is a real git repo,
+// and the target branch already exists), regardless of the persisted
+// volume's own source, which would silently replace the very path this
+// test needs to stay in place: an environment where that recreation isn't
+// itself blocked (SCION_HOST_UID unset) would make Start() succeed with
+// the freshly recreated worktree, never exercising the containment check
+// this test exists to prove. See TestStart_RejectsStaleRecreatedWorktree
+// for the same pattern.
 func TestStart_RejectsNonWorktreeSourceOutsideRepoRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -905,9 +919,10 @@ profiles:
 
 	mgr := NewManager(mockRT)
 	_, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:        agentName,
-		ProjectPath: projectScionDir,
-		NoAuth:      true,
+		Name:            agentName,
+		ProjectPath:     projectScionDir,
+		NoAuth:          true,
+		SharedWorkspace: true,
 	})
 	if err == nil {
 		t.Fatal("expected Start to reject a non-worktree source outside the repo root")
