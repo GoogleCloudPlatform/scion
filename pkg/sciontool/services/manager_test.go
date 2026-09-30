@@ -16,14 +16,17 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 )
 
 func setupTestEnv(t *testing.T) (cleanup func()) {
@@ -398,5 +401,69 @@ func TestMergeEnv(t *testing.T) {
 	}
 	if found["CUSTOM"] != "value" {
 		t.Errorf("expected CUSTOM=value, got CUSTOM=%s", found["CUSTOM"])
+	}
+}
+
+var startProcreapReaperOnce sync.Once
+
+// TestManagedService_StartSurvivesReaperRace is the regression test for the
+// services-manager finding from code review: managedService.start() spawns
+// cmd.Wait() in a background goroutine, exactly like
+// supervisor.Supervisor.Run, so it needed the same gated Start()+Register
+// and Unregister-after-Wait treatment to avoid sciontool init's SIGCHLD
+// reaper racing that Wait call and corrupting the recorded exit code (the
+// race would surface here as a fast, successful "true" service getting
+// recorded with exitCode 1 instead of 0, since managedService.start's
+// Wait goroutine maps a non-ExitError Wait failure to exitCode=1).
+//
+// A real, live procreap reaper runs for the process for this to be a
+// faithful reproduction — a fake or absent reaper can't race anything.
+func TestManagedService_StartSurvivesReaperRace(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	startProcreapReaperOnce.Do(procreap.StartReaper)
+
+	logDir := t.TempDir()
+	const iterations = 100
+
+	var wg sync.WaitGroup
+	results := make([]int, iterations)
+	errs := make([]error, iterations)
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			svc := &managedService{
+				spec:   api.ServiceSpec{Name: fmt.Sprintf("svc-%d", i), Command: []string{"true"}},
+				logDir: logDir,
+				done:   make(chan struct{}),
+				env:    os.Environ(),
+			}
+			if err := svc.openLogs(); err != nil {
+				errs[i] = fmt.Errorf("openLogs: %w", err)
+				return
+			}
+			defer svc.closeLogs()
+			if err := svc.start(); err != nil {
+				errs[i] = fmt.Errorf("start: %w", err)
+				return
+			}
+			<-svc.snapshotDone()
+			results[i] = svc.snapshotExitCode()
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("service %d: %v", i, err)
+		}
+	}
+	for i, code := range results {
+		if code != 0 {
+			t.Errorf("service %d: exit code = %d, want 0 (a non-zero code here means the reaper stole "+
+				"this service's exit status)", i, code)
+		}
 	}
 }

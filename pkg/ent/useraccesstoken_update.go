@@ -113,6 +113,47 @@ func (_u *UserAccessTokenUpdate) SetNillableScopes(v *string) *UserAccessTokenUp
 	return _u
 }
 
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *UserAccessTokenUpdate) SetCeilingVersion(v int32) *UserAccessTokenUpdate {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *UserAccessTokenUpdate) SetNillableCeilingVersion(v *int32) *UserAccessTokenUpdate {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *UserAccessTokenUpdate) AddCeilingVersion(v int32) *UserAccessTokenUpdate {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdate) SetCeilingPermissionIds(v string) *UserAccessTokenUpdate {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *UserAccessTokenUpdate) SetNillableCeilingPermissionIds(v *string) *UserAccessTokenUpdate {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdate) ClearCeilingPermissionIds() *UserAccessTokenUpdate {
+	_u.mutation.ClearCeilingPermissionIds()
+	return _u
+}
+
 // SetRevoked sets the "revoked" field.
 func (_u *UserAccessTokenUpdate) SetRevoked(v bool) *UserAccessTokenUpdate {
 	_u.mutation.SetRevoked(v)
@@ -254,6 +295,18 @@ func (_u *UserAccessTokenUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString)
+	}
 	if value, ok := _u.mutation.Revoked(); ok {
 		_spec.SetField(useraccesstoken.FieldRevoked, field.TypeBool, value)
 	}
@@ -376,6 +429,47 @@ func (_u *UserAccessTokenUpdateOne) SetNillableScopes(v *string) *UserAccessToke
 	if v != nil {
 		_u.SetScopes(*v)
 	}
+	return _u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *UserAccessTokenUpdateOne) SetCeilingVersion(v int32) *UserAccessTokenUpdateOne {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *UserAccessTokenUpdateOne) SetNillableCeilingVersion(v *int32) *UserAccessTokenUpdateOne {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *UserAccessTokenUpdateOne) AddCeilingVersion(v int32) *UserAccessTokenUpdateOne {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdateOne) SetCeilingPermissionIds(v string) *UserAccessTokenUpdateOne {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *UserAccessTokenUpdateOne) SetNillableCeilingPermissionIds(v *string) *UserAccessTokenUpdateOne {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdateOne) ClearCeilingPermissionIds() *UserAccessTokenUpdateOne {
+	_u.mutation.ClearCeilingPermissionIds()
 	return _u
 }
 
@@ -549,6 +643,18 @@ func (_u *UserAccessTokenUpdateOne) sqlSave(ctx context.Context) (_node *UserAcc
 	}
 	if value, ok := _u.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString)
 	}
 	if value, ok := _u.mutation.Revoked(); ok {
 		_spec.SetField(useraccesstoken.FieldRevoked, field.TypeBool, value)

@@ -20,8 +20,9 @@ package permissions
 // reference the same rows here, so there is never a second, drifting
 // action allowlist for the same rule. At most two rows per (Relationship,
 // PrincipalKind, ResourceType), and only with disjoint PermissionIDs and
-// differing MintEligible (enforced by TestRelationshipPolicy_Consistency in
-// pkg/hub); ResourceType is always explicit, never a wildcard.
+// differing in MintEligible or ReadOnly (enforced by
+// TestRelationshipPolicy_Consistency in pkg/hub); ResourceType is always
+// explicit, never a wildcard.
 type RelationshipPolicy struct {
 	// Relationship is the canonical rule name: "owner", "ancestor",
 	// "progeny", "hub_member_sa_assign" — matching
@@ -204,6 +205,23 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   ResourceSkill,
 		PermissionIDs:  []string{"skill.read"},
 		ReadOnly:       true,
+	},
+	{
+		// progeny/agent/secret exact pairs (ptone/scion#2129): runtime use and
+		// launch delivery of an opted-in user-scope secret. Not read only;
+		// each ID is a reviewed exact pair in pkg/hub progenyExactPairs.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.use", "secret.deliver"},
+	},
+	{
+		// progeny/agent/env_var exact pair (ptone/scion#2129): launch delivery
+		// of an opted-in user-scope env var. Not read only.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
 	},
 }
 

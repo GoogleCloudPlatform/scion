@@ -816,7 +816,7 @@ func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
 	assert.False(t, d.Allowed, "reason %q", d.Reason)
 	r := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
-	assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+	assert.Equal(t, "permission is not served by the sharing-source adapter", r.Detail)
 	assert.False(t, other.authz.ProgenyListPredicate(ctx, principalContextForIdentity(otherAgent), "secret").Matches(secretSrc))
 }
 
@@ -879,7 +879,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		r := relationshipResult(t, d, RelationshipRuleProgeny)
 		assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
-		assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+		assert.Equal(t, "permission is not served by the sharing-source adapter", r.Detail)
 		assert.False(t, f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(agent), "secret").Matches(src))
 	})
 }

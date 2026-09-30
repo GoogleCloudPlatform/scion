@@ -123,8 +123,11 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
-	// Progeny read of an ancestor's opted-in user-scoped secret.
-	{"progeny", "agent", "secret"}: {"project.secret_read"},
+	// Progeny read of an ancestor's opted-in user-scoped secret, plus the
+	// reviewed exact pairs (reviewedProgenyExactPairs): runtime use and launch
+	// delivery of opted-in user-scope secrets and env vars.
+	{"progeny", "agent", "secret"}:  {"project.secret_read", "secret.use", "secret.deliver"},
+	{"progeny", "agent", "env_var"}: {"env_var.deliver"},
 
 	// Current hub members may assign hub-scoped service accounts.
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {"gcp_service_account.assign"},

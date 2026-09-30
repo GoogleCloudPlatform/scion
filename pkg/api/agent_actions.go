@@ -48,16 +48,22 @@ const (
 	// grantable authorization permission — see agentActionPermission in
 	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
 	//
-	// Deliberately NOT added to RuntimeBrokerAgentActionMethod below: the
-	// broker side never sees this action at all yet. A live
-	// POST /api/v1/agents/{id}/keys request does reach
-	// agentActionPermission("keys") on the Hub side, through the generic
-	// authz block every action passes through before dispatch — but no case
-	// for this constant exists yet in pkg/hub's action-dispatch switches
-	// (handlers_agents_core.go, handlers_projects_core.go), so dispatch
-	// still 404s regardless. This constant exists so later tasks (1.1, 1.2,
-	// 2.1, 2.2) can reference a single frozen action name while they wire
-	// the actual route, rather than each inventing their own string.
+	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
+	// the runtime broker's own dedicated keys handler
+	// (pkg/runtimebroker/handlers.go), with the Hub-to-broker route reachable
+	// via the Dispatcher/BrokerClient task 1.2 added. On the Hub side, both
+	// action-dispatch functions (handlers_agents_core.go's
+	// handleAgentAction, handlers_projects_core.go's
+	// handleProjectAgentAction) route this action early, straight to
+	// authorizeAgentKeys, the same way they already do for message/
+	// reincarnate/set_message_mode — a live POST /api/v1/agents/{id}/keys
+	// request no longer falls through to the generic authz block that
+	// resolves agentActionPermission for other actions. Neither
+	// action-dispatch switch has a case that calls a real keys handler yet
+	// (task 2.2 adds one), so an authorized call still 404s, not because it
+	// was denied. This constant exists so every task that touches the keys
+	// route (1.1, 1.2, 2.1, 2.2) references a single frozen action name
+	// rather than each inventing their own string.
 	AgentActionKeys = "keys"
 )
 
@@ -68,7 +74,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth, AgentActionKeys:
 		return http.MethodPost, true
 	default:
 		return "", false

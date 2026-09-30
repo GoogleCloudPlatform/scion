@@ -42,6 +42,7 @@ func TestKubernetesRuntime_List(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-agent",
 			Namespace: "default",
+			UID:       "test-agent-uid-1234",
 			Labels: map[string]string{
 				"scion.name":     "test-agent",
 				"scion.template": "test-template",
@@ -93,6 +94,13 @@ func TestKubernetesRuntime_List(t *testing.T) {
 
 	if agents[0].Image != "test-image" {
 		t.Errorf("expected image test-image, got %s", agents[0].Image)
+	}
+
+	if agents[0].Kubernetes == nil {
+		t.Fatal("expected a non-nil Kubernetes block")
+	}
+	if agents[0].Kubernetes.UID != string(pod.UID) {
+		t.Errorf("expected Kubernetes.UID %q, got %q", pod.UID, agents[0].Kubernetes.UID)
 	}
 }
 
