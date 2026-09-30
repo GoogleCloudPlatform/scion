@@ -102,7 +102,11 @@ does not exist. Ask them to verify the project ID and their permissions.
 `deploy.sh` enables every API it needs itself (Phase 2) — this preflight
 check exists only to fail fast on permissions before gathering deployment
 details from the user, not because the operator needs to enable anything
-manually.
+manually. `deploy.sh` itself lists what's already enabled first and only
+calls `services enable` for whatever's actually missing (never an
+unconditional call on every run, except that with the tier off it falls
+back to enabling the full API list if the enabled-API list cannot be
+read); if the hybrid tier is on, it also requires `container.googleapis.com`.
 
 Check each API. If any is missing, run the consolidated enable command below
 (`gcloud services enable` is idempotent and accepts multiple services, so
@@ -223,6 +227,7 @@ the user does not have a preference. Validate each answer before moving on.
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
 | 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
+| 11 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet); the Kubernetes namespace (default `scion-hub-<hub_name>`) and PersistentVolumeClaim name (default `scion-hub-<hub_name>-shared`) for the shared tree. The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. **Also requires `container_images.source: registry`** (Question 6) — GKE nodes cannot pull from the VM's local Docker store that `source: build` uses, and the node service account needs `roles/artifactregistry.reader` (or equivalent read access) on that registry. | `gke_target.name`, `gke_target.location`, `gke_target.project`, `gke_target.namespace`, `gke_target.pvc_name` |
 
 ---
 
@@ -249,7 +254,12 @@ Write the file to `/tmp/scion-deploy-config.json`.
   },
   "admin_email": "ADMIN_EMAIL",
   "update_policy": "UPDATE_POLICY",
-  "release_channel": "RELEASE_CHANNEL"
+  "release_channel": "RELEASE_CHANNEL",
+  "gke_target": {
+    "name": "GKE_NAME",
+    "location": "GKE_LOCATION",
+    "project": "GKE_PROJECT"
+  }
 }
 ```
 
@@ -268,6 +278,9 @@ Replace each placeholder with the gathered value:
 | `ADMIN_EMAIL` | Question 7 answer |
 | `UPDATE_POLICY` | Question 8 answer |
 | `RELEASE_CHANNEL` | Question 9 answer if the user explicitly chose a channel, otherwise `""` (defaults to nightly) |
+| `GKE_NAME` | Question 11 answer, or `""` if the hybrid tier was declined (omit the whole `gke_target` block in that case) |
+| `GKE_LOCATION` | Question 11 answer |
+| `GKE_PROJECT` | Question 11 answer, or `""` to default to `PROJECT_ID` |
 
 Write the file (substituting the gathered values into the template above,
 in place of `# (insert populated JSON here)`):
@@ -287,6 +300,421 @@ python3 -c "import json; json.load(open('/tmp/scion-deploy-config.json'))" && ec
 **If validation fails:** Fix the JSON syntax and retry.
 
 Show the user the generated config and ask them to confirm before proceeding.
+
+---
+
+## Hybrid Tier (Optional): GKE Attach and NFS Firewall Rules
+
+Most of this section applies only if the user answered yes to Question
+11. Otherwise, read "Some behaviour applies whether or not the tier is on"
+and "Teardown (`--delete`)" below, which also apply with the tier off.
+
+### What it does
+
+The hybrid tier attaches an **existing** GKE cluster as a second runtime
+alongside the VM, so agents can run in either place while sharing project
+scratchpads over NFS served from the hub VM. `deploy.sh` never creates or
+deletes the cluster itself — it is always a manual prerequisite the user
+sets up beforehand, in the same GCP project as the hub and on the hub VM's
+network (`default`, today). The NFS export is reachable only at the hub
+VM's internal IP inside that VPC, so any broker relying on this shared
+volume must also run on it.
+
+**Prerequisites:**
+- An existing GKE cluster (Standard or Autopilot) in the hub's own GCP
+  project, on the hub VM's network.
+- `container_images.source: registry` with a registry path the cluster's
+  node service account can read (`roles/artifactregistry.reader` or
+  equivalent) — GKE nodes cannot pull from the VM's local Docker image
+  store that `source: build` uses, so `build` is refused outright when the
+  tier is on.
+- The base required APIs, plus `container.googleapis.com`; see
+  [2.3 Required APIs](#23-required-apis).
+- `kubectl` and the `gke-gcloud-auth-plugin` (`gcloud components install
+  gke-gcloud-auth-plugin`, or your package manager's equivalent) on the
+  machine running `deploy.sh` — required for every Kubernetes object check
+  this tier makes, both on create and on `--delete`; their absence is
+  checked before the first `kubectl` call, with an actionable message
+  naming whichever is missing.
+
+Enabling the tier does six things, all additive:
+
+1. **Discovery.** After enabling any missing APIs and the IAP service
+   identity, and before creating anything else, the script confirms the
+   cluster exists, checks that its network matches the hub VM's, and
+   discovers the node tag GKE assigns, read from the cluster's GKE-managed firewall
+   rules — the same source and the same check for both a Standard and an
+   Autopilot cluster. It lists the firewall rules on the cluster's
+   network and looks for the one rule matching `gke-<suffix>-all`, with
+   direction INGRESS, whose source ranges include the cluster's own pod
+   CIDR (pod CIDRs are unique within a VPC, which is what ties the rule
+   to this cluster). That rule must carry exactly one target tag,
+   matching `gke-<suffix>-node`, and the matching `gke-<suffix>-vms` rule
+   must exist with the same single target tag. If no rule matches, more
+   than one does, the tag shape doesn't match, or the two rules disagree,
+   the script refuses to guess and fails, listing whatever it found and
+   naming this as something to fix on the cluster's own firewall rules,
+   not in `deploy.sh`. If the cluster can't be found or its network
+   doesn't match, it also fails at this point. The same
+   cluster description is also used to read the cluster's pod CIDR
+   (`clusterIpv4Cidr`, cross-checked against
+   `ipAllocationPolicy.clusterIpv4CidrBlock` — the script fails if the two
+   disagree or if the range is missing, broader than `/8`, or not valid
+   IPv4), which is what scopes the hub-deny firewall rule below to the
+   cluster's own pod traffic.
+2. **Firewall rules, VM tag, and a static internal IP.** Three firewall
+   rules are created, all scoped to this hub by an exact
+   `scion-deployment=<hub_name>` marker in their description and a
+   `scion-hub-<hub_name>-nfs` target tag, which the hub VM also receives
+   (at creation, or via an idempotent `add-tags` on an existing VM):
+   - `scion-hub-<hub_name>-nfs-allow` — allows tcp:2049 (NFS) from the
+     cluster's discovered node tag, priority 900.
+   - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
+     else (`0.0.0.0/0`), priority 950.
+   - `scion-hub-<hub_name>-hub-deny` — denies all protocols and ports
+     from the cluster's discovered pod CIDR, priority 950, the same
+     scheme as `nfs-deny` (so it beats a network's own
+     default-allow-internal rule). GKE agent pods reach the hub through
+     its existing public IAP URL, the same URL browser users use, not a
+     private VPC path; this rule denies direct traffic from the cluster's
+     pod range to the hub VM. NFS mounts are unaffected:
+     the kubelet mounts the volume from the node's own primary address,
+     which `nfs-allow` admits at priority 900, before either deny rule.
+     The rule covers the cluster's default pod range (`clusterIpv4Cidr`)
+     only. Pods on a node pool with its own pod range, or on an
+     additional pod range added to the cluster, are not covered, and
+     neither is pod traffic that leaves with the node's address
+     (host-network pods, or traffic source-NATed to the node). For a
+     cluster with more than one pod range, add an equivalent deny rule
+     for each additional range (same target tag, priority 950).
+     Deploy-time, before any of the three hybrid-tier rules is created, a
+     fail-closed check reads the Cloud Run IAP proxy's own egress subnet
+     and refuses to continue if that subnet's primary range would
+     overlap the discovered pod CIDR, since that would also block the
+     proxy's own traffic to the hub. See "Agent transport auth" below
+     for how agent pods actually authenticate over that public URL.
+
+   The two NFS rules are created deny first, then allow, so an
+   interrupted run can never leave the allow rule in place without its
+   paired deny; hub-deny is created alongside nfs-deny, since it has no
+   allow to protect.
+
+   If a firewall rule with one of these names already exists but doesn't
+   carry the exact marker, the script refuses to touch it and fails rather
+   than adopting a rule it doesn't recognize as its own. If it carries the
+   marker, the script additionally verifies its full security-relevant
+   spec (direction, action, every allow/deny entry, source tags, source
+   ranges, source/target service accounts, destination ranges, disabled,
+   target tags, priority, network) against what this tier expects, and
+   fails — listing exactly what differs, plus the commands to fix it —
+   rather than silently correcting a rule that has drifted from that spec
+   (for example, after the cluster was recreated with a new node tag or
+   pod CIDR). The fix-it commands include an in-place `update` only when
+   running it would converge to exactly the expected rule; otherwise only
+   a delete command is offered (deploy.sh recreates the rule correctly on
+   the next run).
+
+   The hub VM's internal IP is also reserved as a static address,
+   `scion-hub-<hub_name>-internal-ip`, marked with an exact
+   `scion-deployment=<hub_name>` description — the same token format the
+   firewall rules, router, and service account use for their own
+   markers. This marker is checked when an existing reservation is
+   adopted and during teardown: an address with this name that lacks it
+   is refused on create and blocks teardown, the same as an unmarked
+   firewall rule. On a fresh VM, a free
+   address is reserved first
+   and the VM is created with `--private-network-ip` pinned to it; on an
+   existing VM, its current internal IP is promoted into a reservation of
+   the same name (`gcloud compute addresses create ... --addresses
+   <current-ip>`), and the script re-reads the VM afterward to confirm the
+   IP didn't change. Either way the address stays reserved for this hub,
+   and a VM that `deploy.sh` creates later is pinned to it. A reserved
+   address with this name that doesn't carry the marker, or whose
+   reserved IP no longer matches the VM's actual IP, fails the run with
+   the mismatch and the remediation, exactly like a drifted firewall rule
+   — never auto-corrected. Reserving this address is what gives the
+   shared NFS PV's server field a stable target: without it, a VM
+   recreate could leave the PV pointing at a dead address.
+
+3. **Agent transport auth.** Agents dispatched to the GKE cluster reach
+   the hub through the same public IAP URL browser users use,
+   authenticating with a Google OIDC ID token minted by impersonating a
+   dedicated transport service account, marked with an exact
+   `scion-deployment=<hub_name>` description like the firewall rules and
+   the internal IP reservation (service accounts have no labels). Its id is
+   `scion-tp-<prefix>-<hash>`: the first 12 characters of the hub name
+   (trailing hyphens trimmed), then an 8-hex-digit checksum of the full
+   hub name. That keeps the id within the 30-character service account
+   limit for any hub name, distinct for hubs whose names share a long
+   prefix, and never equal to a hub's own `scion-hub-*` service account.
+   To print it for a hub:
+   `bash -c 'source scripts/single-node-vm/hybrid-tier.sh; hybrid_transport_sa_name HUB_NAME'`. Setup: the project's IAP OAuth client ID is read
+   (`gcloud iap settings get --resource-type=iap_web`) and used verbatim
+   as the transport token's audience; the hub's own runtime service
+   account is granted `roles/iam.serviceAccountOpenIdTokenCreator` on
+   the transport SA specifically (not project-wide, and not the broader
+   `serviceAccountTokenCreator`, which this never needs); once the Cloud
+   Run proxy exists, the transport SA is granted
+   `roles/iap.httpsResourceAccessor` on it, the same role and call the
+   human operator's own access uses. `server.auth.transport` in
+   `settings.yaml` records the audience and the transport SA email.
+   IAM changes can take on the order of a minute to propagate; the very
+   first agent dispatch right after a deploy may see a transient
+   authentication failure that a retry resolves. A redeploy does not
+   delete the transport SA or its grants, so turning the tier off on a
+   later redeploy of the same hub leaves the transport SA and its grants in place (the
+   settings no longer reference it); `--delete` removes them, tier on or
+   off (see Teardown below).
+
+4. **NFS server and export.** Discovery also reads the cluster's node
+   subnet's primary IP range (never the pod CIDR), refusing anything
+   `0.0.0.0/0` or broader than `/8`. Once the VM exists, a dedicated
+   `scion-nfs` system account (`nologin` shell, primary group `scion`, a
+   system-range uid distinct from both `scion`'s own uid and uid 0) is
+   created without a home directory for NFS's `all_squash` identity --
+   or, if it already existed from an earlier run, checked for that
+   shell, group and uid, refusing to continue if a pre-existing account
+   doesn't meet them.
+   `/srv/scion-shared` (the export root) is the root of its own
+   dedicated, size-capped ext4 filesystem (default 20G, configurable via
+   `gke_target.shared_dir_image_size_gb`), loop-mounted from a single
+   image file that itself lives on the VM's boot disk; the image's space
+   is reserved with `fallocate` (not a sparse `truncate`), failing
+   clearly and removing the partial file if the boot disk can't hold it,
+   and formatted only the first time -- never re-created on a later run.
+   A pre-existing `/etc/fstab` line for the export root
+   (`/srv/scion-shared`) with different
+   options is never silently trusted or replaced; the run fails with the
+   options it expected. The export is only ever written or activated
+   once the mount is confirmed, including a check that whatever is
+   mounted at the export root is actually the loop device backing this
+   image (via `findmnt`/`losetup`), not a stray leftover mount. A
+   `scion-hub.service` drop-in (tier-on only) adds
+   `RequiresMountsFor=/srv/scion-shared`, so the hub itself can never
+   start against an unmounted export and write shared-dir paths to the
+   boot disk's root filesystem instead. If a run is interrupted between
+   creating the image and finishing this mount setup, remove the image
+   file and re-run rather than trying to reuse a half-created one --
+   the create step's own guard refuses to reformat an image that already
+   exists, so a partial image is otherwise never retried automatically.
+   Growing the image later is a manual, documented operation (grow the
+   image file, then `resize2fs`) -- this script never shrinks it.
+   `nfs-kernel-server` is installed, NFSv2/v3/4.0 and UDP are disabled
+   and `rpcbind` is masked, with the mask verified rather
+   than assumed; the server is restarted when needed after
+   writing this config, since the package's own install already starts
+   it with the stock config beforehand. A per-hub file under
+   `/etc/exports.d/` exports the mounted root to just the node subnet,
+   squashing every client to the dedicated identity. There's no separate
+   teardown for the export or its backing image file: both are deleted
+   along with the VM's boot disk.
+5. **Kubernetes objects.** A cluster-scoped PersistentVolume
+   (`scion-hub-<hub_name>-shared`), a namespace (default
+   `scion-hub-<hub_name>`), and a PersistentVolumeClaim in that namespace
+   (default `scion-hub-<hub_name>-shared`, bound to the PV) are labeled
+   `scion-deployment=<hub_name>` when this script creates them. The
+   ownership checks run in two parts: everything that doesn't depend on the VM's IP -- kubectl/plugin
+   presence, credentials, whether an existing PV or PVC with the target
+   name carries this deployment's marker, and every identity field except
+   the PV's NFS server address -- runs right after discovery, before the
+   VM, NFS export, or firewall rules are created, and creates the
+   namespace at that point if it's missing (once the PV/PVC checks pass).
+   The PV and PVC themselves are created once the VM's IP is known,
+   later, since the PV's identity includes it. An existing PV or PVC with
+   the target name but no marker refuses the run, as early as the PV/PVC
+   marker check above can catch it; a marked one whose identity has
+   drifted (the NFS server IP after a VM recreate, for example) also
+   refuses, with the fields that differ and the remediation. An existing,
+   unmarked namespace is used as-is and never adopted or deleted.
+
+6. **settings.yaml.** Both writes (the initial dev-mode one and the later
+   proxy-mode update) add a `server.shared_dir_storage` block (backend
+   `nfs`, pointing at the VM's export and the PV the Kubernetes objects
+   above create) using the schema already defined for it in the runtime's
+   own settings package. The tier does not write the hub's `gke` runtime
+   or profile settings; configure the `gke` runtime separately. With the
+   hybrid tier enabled, the hub default GCP identity mode is `block`.
+   Configure a project-level mode (`assign` with a dedicated service
+   account) for projects that need GCP access. The hub-level
+   `passthrough` default applies to hubs deployed without the hybrid
+   tier. GKE agents reach the hub through its public IAP URL (item 3);
+   the internal IP reserved in item 2 is the NFS server address in the
+   PV and in `server.shared_dir_storage`, and the Cloud Run proxy's
+   backend address.
+
+   **Restricted user access.** With the tier on, both writes also set
+   `server.auth.user_access_mode`: `invite_only` by default, or
+   `domain_restricted` when the config file sets it, plus
+   `server.auth.authorized_domains` when the config file lists any. The
+   config keys are top-level and optional:
+
+   ```json
+   "user_access_mode": "domain_restricted",
+   "authorized_domains": ["example.com", "*.example.org"]
+   ```
+
+   They apply only with the tier on; with the tier off they are ignored,
+   with a warning, and the settings are unchanged. With the tier on,
+   `deploy.sh` refuses, before creating anything: an empty
+   `admin_email`; an `admin_email` that is a service account (ends in
+   `gserviceaccount.com`); any other mode, including `open` and an empty
+   value; `domain_restricted` with no domains; and any
+   `authorized_domains` entry that is not a domain name or `*.domain`
+   wildcard, or that matches service account addresses (a
+   `gserviceaccount.com` domain, or a wildcard such as `*.com` that
+   covers one). The `admin_email` account can sign in under either mode.
+   It invites other users from the web UI's admin Users page,
+   or with `scion hub invite create`.
+
+Re-running the deploy script with the tier on against an existing hub
+that predates the hybrid tier adds the hybrid firewall rules, the
+internal IP reservation (promoted from the VM's current IP), the NFS
+export, the Kubernetes objects, the `shared_dir_storage` settings and the
+VM tag.
+
+**Some behaviour applies whether or not the tier is on**, including:
+- **Base resource markers.** When this script creates these base
+  resources, it marks them `scion-deployment=<hub_name>`: a label on the
+  VM; a description on the VM and Cloud Run proxy service accounts and
+  the Cloud Router; and appended to the IAP SSH and proxy-to-VM rules'
+  own descriptions. The Cloud Run proxy gets the label on a create when a
+  lookup confirms the service is new. The Cloud NAT and the Artifact
+  Registry repository are created without a marker. This marker is
+  informational: it is not checked and does not affect adoption or
+  teardown of those resources.
+- **API enablement.** `deploy.sh` lists the APIs already enabled on the
+  project and passes only the missing ones to `services enable`. With the
+  tier off, if that list can't be read, it enables the full required set
+  (see [2.3 Required APIs](#23-required-apis)).
+- **Teardown.** `--delete` looks for the hybrid-tier firewall rules,
+  internal IP reservation and agent transport service account, and
+  removes the ones marked for this hub under the conditions described in
+  "Teardown (`--delete`)" below, which also covers how base-resource
+  deletes are reported.
+
+**Known limits.** See `docs/deploy/hybrid-tier.md`'s own Known limits
+section for `ptone/scion#1799` (image pinning: use `--image <digest>` at
+agent start, not a profile's `harness_overrides`, since a template's own
+image default wins over it for both Docker and GKE agents),
+`ptone/scion#1800`, and `ptone/scion#1801`. For hardening an NFS tree that
+was exported before a dedicated squash identity was in place, see that
+same page's manual fix-up recipe under "E2 hardening: dedicated squash
+identity + default ACL".
+
+### Teardown (`--delete`)
+
+Base-resource adoption is the same whether or not the tier is on.
+`--delete` checks for the three hybrid firewall rules and the static
+internal IP reservation, all by name, whether or not the current config
+has the tier enabled — teardown has no other way to know whether the
+tier was ever turned on for this hub. It also looks up the agent
+transport service account by name (see below). These lookups add a
+read-only `firewall-rules list` call, a read-only `addresses list` call
+and a `service-accounts describe` call to a `--delete` run and, rarely,
+can make it refuse to proceed (see below); they do not change which base
+resources are deleted.
+
+A base resource whose delete fails is reported on that step, as not
+found only when that is positively confirmed, and is otherwise kept; a
+kept base resource does not on its own make `--delete` exit non-zero.
+A hybrid-tier firewall rule, internal IP reservation, transport service
+account or its IAP access binding that is kept makes `--delete` exit
+non-zero. The teardown summary reports outcomes such as deleted, not
+found or kept.
+
+Before deleting anything, `--delete` looks up the three hybrid firewall
+rules and the internal IP reservation and prints a classification line
+for each one found: `  found (marked): <name>` for a resource carrying
+this hub's exact marker, or `  SKIPPED (unmarked): <name>` for a name
+match that doesn't. A `SKIPPED (unmarked)` line from these checks fails
+the whole teardown run before any resource is deleted (not just the
+hybrid ones), since a naming collision on one of these names means the
+hub name can no longer be trusted to identify only resources this
+deployment owns. The same applies if either check itself can't
+complete (a permissions error, for example): an unknown ownership state
+is treated as a failure, never as "nothing to protect."
+
+Marked firewall rules and the marked internal IP reservation are deleted
+only once the hub VM is confirmed gone: deleted successfully, or
+positively confirmed absent project-wide, not merely inferred from a
+delete or describe call that happened to fail (which could just as
+easily mean a wrong zone or a transient error) — never while the VM
+might still exist or its fate is unknown, so the deny rule stays in
+effect, and the reservation stays in place, for as long as the VM could
+still be reachable (the reservation is also still attached to the VM's
+network interface until the VM itself is gone, so deleting it earlier
+would fail regardless). If the VM fails to delete, or its absence can't
+be confirmed, all of the hybrid rules and the reservation are kept and
+the run reports the failure, naming the reservation as kept rather than
+omitting it silently. Firewall deletion order is the reverse of
+creation: `nfs-allow`, then `hub-deny`, then `nfs-deny`. Deletion stops
+at the first rule that isn't confirmed gone, so neither deny rule is
+deleted after the allow rule's delete failed. If a marked `nfs-deny`
+has drifted from its expected spec, the printed remediation deletes
+`nfs-allow` first, then `nfs-deny`, then re-runs deploy.sh, so it does
+not leave the allow rule in place without its deny. The GKE cluster
+itself is never deleted by this script, under any circumstance.
+
+If `gke_target.name` is set, `--delete` also tears down the Kubernetes
+objects first, before any base resource: the PVC, then the PV, then the
+namespace (only if it carries this deployment's marker -- an unmarked,
+reused namespace is never deleted). Before deleting a marked PVC, the
+teardown also refuses if any pod in its namespace still mounts it (the
+GKE agent pods this tier exists to run are exactly the pods that would):
+`kubectl delete pvc` blocks indefinitely under its own storage-protection
+finalizer while a pod references the claim, so this is caught up front
+with a "stop agents first" message rather than left to hang the whole
+teardown. Every delete also carries a bounded `--timeout`, so a delete
+that hangs for any other reason is treated as a failure rather than left
+to block indefinitely. The same found/SKIPPED classification and
+abort-before-any-delete rule applies to the PVC and PV; an unmarked
+namespace is only skipped, not an abort, matching the create-side rule
+that using an existing namespace is allowed. If the cluster itself is
+confirmed gone (a positive NOT_FOUND), its objects are assumed to have
+gone with it and nothing is checked; any other failure to reach the
+cluster aborts the teardown before any delete.
+
+A failure deleting any Kubernetes object stops the whole teardown right
+there: Cloud Run, the VM, and every other base resource are left
+untouched, and the run reports the failure and exits non-zero, since the
+Kubernetes objects are deleted first specifically so a failure here can
+still protect everything downstream. Running `--delete` interactively
+(no `--config`) has no way to know whether a hybrid tier was ever
+configured for the hub, since `gke_target.name` only exists in a config
+file; that case prints a note naming the default namespace/PVC/PV names
+and pointing at `--config` as the way to have them checked.
+
+`--delete` also looks up the agent transport service account by name,
+whether or not the current config has the tier on, after the Cloud Run
+proxy, VM, NAT, router and base service account deletes; a Kubernetes
+object delete failure stops teardown before this step. If it carries
+this hub's marker, teardown first removes its IAP access binding on the
+Cloud Run proxy (skipped once that service has been deleted, which
+removes the binding with it), then deletes the service account; if the
+binding removal fails, the service account is kept. A same-name service
+account without the marker is never touched. Only a positive not-found
+counts as absent: if the service account's state can't be read (a
+permissions error, for example), or it is unmarked, or the binding
+removal or the delete fails, it is reported as kept, with the reason,
+and the run exits non-zero. When teardown reaches this step, the summary
+prints `Deleted transport SA`, `Not found transport SA` or `Kept
+transport SA (<reason>)`, plus, for a marked service account, a line for
+its IAP access binding.
+
+The NFS export itself has no separate teardown step: it's a dedicated image
+file, an `/etc/fstab` entry loop-mounting it, and an `/etc/exports.d/` entry,
+all on the hub VM's own boot disk, so they're deleted along with the VM.
+
+### Testing this locally
+
+`scripts/single-node-vm/tests/run.sh` runs the hybrid-tier logic against a
+stubbed `gcloud` — no GCP project is contacted. Useful when validating a
+change to `hybrid-tier.sh` before a real deployment. It needs bash 4 or
+later, `python3`, and a Go toolchain: the `settings.yaml` parse tests run
+`go run` on `tests/lib/settings-yaml-to-json.go` from the repository
+root, which uses the repository's `github.com/knadh/koanf` YAML parser
+module (downloaded into the Go module cache on first use if it is not
+already there).
 
 ---
 
@@ -438,6 +866,10 @@ command to run by hand. This step never fails the deploy.
 
 ### 6.3b Agent GCP identity default (passthrough)
 
+With the hybrid tier enabled, `deploy.sh` writes `block` instead (see item 6
+under "Hybrid Tier (Optional)" above); the rest of this section describes the
+default single-node deployment.
+
 Both `settings.yaml` heredocs `deploy.sh` writes (the Phase 3 dev-auth one and
 the Phase 5 proxy/IAP one) set the top-level key
 `default_gcp_identity_mode: passthrough`. Combined with the VM service
@@ -541,6 +973,37 @@ gcloud iap web add-iam-policy-binding \
 
 **If the user gets a generic error page:** IAP may still be propagating. Wait
 60 seconds and retry.
+
+### 6.6 Hybrid tier: user access checks
+
+Only when the hybrid tier is on.
+
+1. **The admin can sign in.** Ask the user to open the access URL signed
+   in as the `admin_email` account. **Expected:** the Scion Hub UI loads,
+   and the admin Users page is available, from which other users are
+   invited.
+
+2. **A transport token alone is not a user session.** This access-control
+   check sends a request through IAP that carries only an ID token for the
+   agent transport service account, with no agent token. Minting that
+   token needs `roles/iam.serviceAccountOpenIdTokenCreator` on the
+   transport service account; if the operator lacks it, grant it for the
+   check and remove it afterward.
+
+   ```bash
+   CLIENT_ID="$(gcloud iap settings get --project=PROJECT_ID \
+     --resource-type=iap_web --format='value(accessSettings.oauthSettings.clientId)')"
+   TOKEN="$(gcloud auth print-identity-token \
+     --impersonate-service-account=TRANSPORT_SA_EMAIL \
+     --audiences="$CLIENT_ID" --include-email)"
+   curl -s -w '\n%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+     "https://scion-hub-HUB_NAME-iap-proxy-HASH-REGION.a.run.app/api/v1/auth/me"
+   ```
+
+   **Expected:** the hub refuses the request with a `401` or `403` (for
+   example `access denied: email not authorized`), not a `200` with user
+   details. A `200` means the hub accepted the service account as a user:
+   check `server.auth.user_access_mode` in `settings.yaml` on the VM.
 
 ---
 
@@ -756,6 +1219,10 @@ Or run without a config file (the script prompts for hub name and region):
 bash scripts/single-node-vm/deploy.sh --delete
 ```
 
+Even with the hybrid tier off, `--delete` lists the tier's firewall rules
+and looks up its internal IP reservation before deleting anything, and
+stops if either finds an unmarked resource or cannot complete.
+
 ### What gets deleted
 
 | Resource | Name pattern |
@@ -768,11 +1235,23 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
 | Proxy-to-VM firewall rule | `scion-hub-HUB_NAME-allow-proxy` (tcp:8080 only, scoped to the same `scion-hub-HUB_NAME` tag) |
+| *If marked for this hub (tier on now or previously):* NFS allow/deny, hub-deny firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny`, `scion-hub-HUB_NAME-hub-deny` |
+| *If marked for this hub (tier on now or previously):* static internal IP reservation | `scion-hub-HUB_NAME-internal-ip` |
+| *If marked for this hub (tier on now or previously):* agent transport service account | `scion-tp-PREFIX-HASH@PROJECT_ID.iam.gserviceaccount.com` (see "Agent transport auth" above for the id) |
+| *If the hybrid tier is on:* PersistentVolumeClaim, PersistentVolume | `gke_target.pvc_name` (default `scion-hub-HUB_NAME-shared`), `scion-hub-HUB_NAME-shared` |
+| *If the hybrid tier is on and this deployment created it:* Kubernetes namespace | `gke_target.namespace` (default `scion-hub-HUB_NAME`) |
 
 ### What is intentionally NOT deleted
 
 - **IAP tunnel role** (`roles/iap.tunnelResourceAccessor`) on the deployer
   account. This role may be used for SSH access to other VMs in the project.
+- **The GKE cluster itself**, under any circumstance — it's always an
+  existing, attach-only prerequisite.
+- **The Kubernetes namespace, if it existed before this deployment and
+  never carried this deployment's marker** — it's used as-is on create and
+  left alone on teardown, the same rule both ways.
+- **The NFS export's own data**, since it has no separate teardown: it's
+  deleted along with the VM's boot disk, not by an explicit step.
 
 To remove it manually:
 

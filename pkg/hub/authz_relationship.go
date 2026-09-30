@@ -40,6 +40,13 @@ const (
 
 	// RelProgenySkillInjectionRead grants read access to skill injections created by an ancestor.
 	RelProgenySkillInjectionRead RelationshipType = "progeny_skill_injection_read"
+
+	// RelProgenySkillRead grants an agent read access to its origin user's
+	// personal (user-scoped) skills, keyed on the skill's owning bucket
+	// (Resource.ScopeUserID) rather than a per-record creator field
+	// (ptone/scion#2128). Consolidates the former dedicated
+	// creator-user-skill grant into the common progeny evaluator.
+	RelProgenySkillRead RelationshipType = "progeny_skill_read"
 )
 
 // relationshipRoleName returns a synthetic role name for provenance output.
@@ -299,6 +306,8 @@ func relationshipTypeForResource(resourceType string) RelationshipType {
 		return RelProgenyEnvVarRead
 	case "skill_injection":
 		return RelProgenySkillInjectionRead
+	case "skill":
+		return RelProgenySkillRead
 	default:
 		return ""
 	}

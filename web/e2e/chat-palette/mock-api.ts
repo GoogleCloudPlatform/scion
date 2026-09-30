@@ -26,6 +26,72 @@ export const SELF_USER_ID = 'self-user';
 /** The agent a fixture terminal pane attaches to, for the real-xterm scenario. */
 export const TERMINAL_AGENT_ID = '11111111-1111-4111-8111-111111111111';
 
+// ===========================================================================
+// People and Threads fixtures.
+// ===========================================================================
+
+/** A person with an existing DM — mirrors AGENT_WITH_DM's shape for People. */
+export const USER_WITH_DM = {
+  id: 'user-with-dm',
+  displayName: 'Dana Person',
+  email: 'dana@example.com',
+};
+/**
+ * A person whose ID sorts *before* `SELF_USER_ID` ("self-user") — both
+ * `USER_WITH_DM`/`USER_WITHOUT_DM` sort after it, so neither alone proves the
+ * sorted-user DM key actually sorts (covers both ID orderings).
+ */
+export const USER_SORTS_BEFORE_SELF = {
+  id: 'a-user-early',
+  displayName: 'Amy Early',
+  email: 'amy@example.com',
+};
+/** A viable person with no DM yet. */
+export const USER_WITHOUT_DM = {
+  id: 'user-without-dm',
+  displayName: 'Eve Person',
+  email: 'eve@example.com',
+};
+/**
+ * A suspended user — must never appear as a candidate. The real backend's
+ * status enum is active/suspended/invited, with no literal "disabled"
+ * value; any non-"active" status is treated as not viable.
+ */
+export const USER_SUSPENDED = {
+  id: 'user-suspended',
+  displayName: 'Frank Suspended',
+  email: 'frank@example.com',
+  status: 'suspended',
+};
+
+/** Space Alpha: its slug is known. Thread in Alpha is the palette's starting context. */
+export const SPACE_ALPHA = {
+  projectId: 'project-alpha',
+  projectName: 'Alpha',
+  projectSlug: 'alpha',
+};
+export const THREAD_ALPHA = {
+  id: 'thread-alpha',
+  projectId: SPACE_ALPHA.projectId,
+  name: 'General',
+};
+/** Space Beta: a different project the palette must switch into without recreating the page. */
+export const SPACE_BETA = { projectId: 'project-beta', projectName: 'Beta', projectSlug: 'beta' };
+export const THREAD_BETA = { id: 'thread-beta', projectId: SPACE_BETA.projectId, name: 'Planning' };
+
+/** A distinguishing member per space, so a test can prove `loadV2Members` actually re-ran. */
+export const SPACE_MEMBERS: Record<
+  string,
+  { humans: Array<{ id: string; kind: 'user'; displayName: string }> }
+> = {
+  [SPACE_ALPHA.projectId]: {
+    humans: [{ id: 'alpha-member', kind: 'user', displayName: 'Alpha Member' }],
+  },
+  [SPACE_BETA.projectId]: {
+    humans: [{ id: 'beta-member', kind: 'user', displayName: 'Beta Member' }],
+  },
+};
+
 export interface TrackedRequest {
   method: string;
   url: string;
@@ -72,6 +138,24 @@ export async function stubMainClientModule(page: Page): Promise<void> {
 }
 
 /**
+ * Optional People/Threads fixture data. Every field defaults to empty, so a
+ * spec calling `setupApiMocks(page)` with no second argument gets 0 threads
+ * and 0 people; passing overrides opts a spec into real Threads/People rows.
+ */
+export interface PaletteFixtureOverrides {
+  spaces?: Array<{ projectId: string; projectName: string; projectSlug: string }>;
+  threadsByProjectId?: Record<
+    string,
+    Array<{ id: string; projectId: string; name: string; defaultAgent?: string }>
+  >;
+  users?: Array<{ id: string; displayName: string; email?: string; status?: string }>;
+  membersByProjectId?: Record<
+    string,
+    { humans: Array<{ id: string; kind: 'user'; displayName: string }> }
+  >;
+}
+
+/**
  * Endpoint-shaped request interception for the chat palette fixture: every
  * `/api/v1/**` request is intercepted (no live Hub), with the specific
  * shapes the palette slice and the real `scion-page-chat`/`scion-chat-thread`
@@ -79,7 +163,10 @@ export async function stubMainClientModule(page: Page): Promise<void> {
  * well-typed response so an unrelated fetch elsewhere in the real page never
  * throws — it is not a claim that the palette itself uses it.
  */
-export async function setupApiMocks(page: Page): Promise<TrackedRequest[]> {
+export async function setupApiMocks(
+  page: Page,
+  overrides: PaletteFixtureOverrides = {}
+): Promise<TrackedRequest[]> {
   const requests: TrackedRequest[] = [];
   await stubMainClientModule(page);
 
@@ -147,10 +234,50 @@ export async function setupApiMocks(page: Page): Promise<TrackedRequest[]> {
       });
     }
     if (path === '/api/v1/chat/spaces') {
-      return route.fulfill({ json: { spaces: [] } });
+      return route.fulfill({ json: { spaces: overrides.spaces ?? [] } });
+    }
+    if (path === '/api/v1/projects') {
+      // Cold-load slug resolution (chat.ts's resolveProjectBySlug) for a
+      // fixture navigated straight to /chat/{slug}/{topicId} before the
+      // rail's own /api/v1/chat/spaces response has populated the slug map.
+      const slug = url.searchParams.get('slug');
+      const match = overrides.spaces?.find((s) => s.projectSlug === slug);
+      return route.fulfill({
+        json: {
+          items: match
+            ? [{ id: match.projectId, slug: match.projectSlug, name: match.projectName }]
+            : [],
+        },
+      });
     }
     if (path === '/api/v1/users') {
-      return route.fulfill({ json: { users: [] } });
+      return route.fulfill({ json: { users: overrides.users ?? [] } });
+    }
+    const threadsMatch = path.match(/^\/api\/v1\/chat\/spaces\/([^/]+)\/threads$/);
+    if (threadsMatch) {
+      const projectId = decodeURIComponent(threadsMatch[1]);
+      return route.fulfill({
+        json: { threads: overrides.threadsByProjectId?.[projectId] ?? [] },
+      });
+    }
+    const membersMatch = path.match(/^\/api\/v1\/chat\/spaces\/([^/]+)\/members$/);
+    if (membersMatch) {
+      const projectId = decodeURIComponent(membersMatch[1]);
+      return route.fulfill({
+        json: overrides.membersByProjectId?.[projectId] ?? { humans: [], agents: [] },
+      });
+    }
+    const topicMatch = path.match(/^\/api\/v1\/chat\/topics\/([^/]+)$/);
+    if (topicMatch) {
+      // Cold-load/deep-link thread name+defaultAgent resolution
+      // (chat.ts's fetchThreadDetails) — the route alone only carries the
+      // topic ID.
+      const topicId = decodeURIComponent(topicMatch[1]);
+      const allThreads = Object.values(overrides.threadsByProjectId ?? {}).flat();
+      const thread = allThreads.find((t) => t.id === topicId);
+      return route.fulfill({
+        json: thread ? { name: thread.name, defaultAgent: thread.defaultAgent ?? '' } : {},
+      });
     }
     if (path.endsWith('/messages') && method === 'GET') {
       return route.fulfill({ json: { messages: [] } });

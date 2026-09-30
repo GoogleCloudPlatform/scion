@@ -12639,28 +12639,33 @@ func (m *ApiKeyMutation) ResetEdge(name string) error {
 // BrokerDispatchMutation represents an operation that mutates the BrokerDispatch nodes in the graph.
 type BrokerDispatchMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	broker_id     *uuid.UUID
-	agent_id      *uuid.UUID
-	agent_slug    *string
-	project_id    *uuid.UUID
-	_op           *string
-	args          *string
-	state         *string
-	result        *string
-	claimed_by    *string
-	attempts      *int
-	addattempts   *int
-	error         *string
-	created_at    *time.Time
-	updated_at    *time.Time
-	deadline_at   *time.Time
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*BrokerDispatch, error)
-	predicates    []predicate.BrokerDispatch
+	op                        Op
+	typ                       string
+	id                        *uuid.UUID
+	broker_id                 *uuid.UUID
+	agent_id                  *uuid.UUID
+	agent_slug                *string
+	project_id                *uuid.UUID
+	_op                       *string
+	args                      *string
+	state                     *string
+	result                    *string
+	claimed_by                *string
+	attempts                  *int
+	addattempts               *int
+	error                     *string
+	created_at                *time.Time
+	updated_at                *time.Time
+	deadline_at               *time.Time
+	initiator_principal_kind  *string
+	initiator_principal_id    *string
+	initiator_credential_kind *string
+	initiator_credential_id   *string
+	correlation_id            *string
+	clearedFields             map[string]struct{}
+	done                      bool
+	oldValue                  func(context.Context) (*BrokerDispatch, error)
+	predicates                []predicate.BrokerDispatch
 }
 
 var _ ent.Mutation = (*BrokerDispatchMutation)(nil)
@@ -13395,6 +13400,251 @@ func (m *BrokerDispatchMutation) ResetDeadlineAt() {
 	delete(m.clearedFields, brokerdispatch.FieldDeadlineAt)
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *BrokerDispatchMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *BrokerDispatchMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldInitiatorPrincipalKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (m *BrokerDispatchMutation) ClearInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	m.clearedFields[brokerdispatch.FieldInitiatorPrincipalKind] = struct{}{}
+}
+
+// InitiatorPrincipalKindCleared returns if the "initiator_principal_kind" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) InitiatorPrincipalKindCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldInitiatorPrincipalKind]
+	return ok
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *BrokerDispatchMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	delete(m.clearedFields, brokerdispatch.FieldInitiatorPrincipalKind)
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *BrokerDispatchMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *BrokerDispatchMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldInitiatorPrincipalID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (m *BrokerDispatchMutation) ClearInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	m.clearedFields[brokerdispatch.FieldInitiatorPrincipalID] = struct{}{}
+}
+
+// InitiatorPrincipalIDCleared returns if the "initiator_principal_id" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) InitiatorPrincipalIDCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldInitiatorPrincipalID]
+	return ok
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *BrokerDispatchMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	delete(m.clearedFields, brokerdispatch.FieldInitiatorPrincipalID)
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *BrokerDispatchMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *BrokerDispatchMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldInitiatorCredentialKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (m *BrokerDispatchMutation) ClearInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	m.clearedFields[brokerdispatch.FieldInitiatorCredentialKind] = struct{}{}
+}
+
+// InitiatorCredentialKindCleared returns if the "initiator_credential_kind" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) InitiatorCredentialKindCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldInitiatorCredentialKind]
+	return ok
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *BrokerDispatchMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	delete(m.clearedFields, brokerdispatch.FieldInitiatorCredentialKind)
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *BrokerDispatchMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *BrokerDispatchMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldInitiatorCredentialID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (m *BrokerDispatchMutation) ClearInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	m.clearedFields[brokerdispatch.FieldInitiatorCredentialID] = struct{}{}
+}
+
+// InitiatorCredentialIDCleared returns if the "initiator_credential_id" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) InitiatorCredentialIDCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldInitiatorCredentialID]
+	return ok
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *BrokerDispatchMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	delete(m.clearedFields, brokerdispatch.FieldInitiatorCredentialID)
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (m *BrokerDispatchMutation) SetCorrelationID(s string) {
+	m.correlation_id = &s
+}
+
+// CorrelationID returns the value of the "correlation_id" field in the mutation.
+func (m *BrokerDispatchMutation) CorrelationID() (r string, exists bool) {
+	v := m.correlation_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCorrelationID returns the old "correlation_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldCorrelationID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCorrelationID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCorrelationID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCorrelationID: %w", err)
+	}
+	return oldValue.CorrelationID, nil
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (m *BrokerDispatchMutation) ClearCorrelationID() {
+	m.correlation_id = nil
+	m.clearedFields[brokerdispatch.FieldCorrelationID] = struct{}{}
+}
+
+// CorrelationIDCleared returns if the "correlation_id" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) CorrelationIDCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldCorrelationID]
+	return ok
+}
+
+// ResetCorrelationID resets all changes to the "correlation_id" field.
+func (m *BrokerDispatchMutation) ResetCorrelationID() {
+	m.correlation_id = nil
+	delete(m.clearedFields, brokerdispatch.FieldCorrelationID)
+}
+
 // Where appends a list predicates to the BrokerDispatchMutation builder.
 func (m *BrokerDispatchMutation) Where(ps ...predicate.BrokerDispatch) {
 	m.predicates = append(m.predicates, ps...)
@@ -13429,7 +13679,7 @@ func (m *BrokerDispatchMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *BrokerDispatchMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 19)
 	if m.broker_id != nil {
 		fields = append(fields, brokerdispatch.FieldBrokerID)
 	}
@@ -13472,6 +13722,21 @@ func (m *BrokerDispatchMutation) Fields() []string {
 	if m.deadline_at != nil {
 		fields = append(fields, brokerdispatch.FieldDeadlineAt)
 	}
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, brokerdispatch.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, brokerdispatch.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, brokerdispatch.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, brokerdispatch.FieldInitiatorCredentialID)
+	}
+	if m.correlation_id != nil {
+		fields = append(fields, brokerdispatch.FieldCorrelationID)
+	}
 	return fields
 }
 
@@ -13508,6 +13773,16 @@ func (m *BrokerDispatchMutation) Field(name string) (ent.Value, bool) {
 		return m.UpdatedAt()
 	case brokerdispatch.FieldDeadlineAt:
 		return m.DeadlineAt()
+	case brokerdispatch.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case brokerdispatch.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case brokerdispatch.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case brokerdispatch.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case brokerdispatch.FieldCorrelationID:
+		return m.CorrelationID()
 	}
 	return nil, false
 }
@@ -13545,6 +13820,16 @@ func (m *BrokerDispatchMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldUpdatedAt(ctx)
 	case brokerdispatch.FieldDeadlineAt:
 		return m.OldDeadlineAt(ctx)
+	case brokerdispatch.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case brokerdispatch.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case brokerdispatch.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case brokerdispatch.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case brokerdispatch.FieldCorrelationID:
+		return m.OldCorrelationID(ctx)
 	}
 	return nil, fmt.Errorf("unknown BrokerDispatch field %s", name)
 }
@@ -13652,6 +13937,41 @@ func (m *BrokerDispatchMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDeadlineAt(v)
 		return nil
+	case brokerdispatch.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case brokerdispatch.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case brokerdispatch.FieldCorrelationID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCorrelationID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown BrokerDispatch field %s", name)
 }
@@ -13721,6 +14041,21 @@ func (m *BrokerDispatchMutation) ClearedFields() []string {
 	if m.FieldCleared(brokerdispatch.FieldDeadlineAt) {
 		fields = append(fields, brokerdispatch.FieldDeadlineAt)
 	}
+	if m.FieldCleared(brokerdispatch.FieldInitiatorPrincipalKind) {
+		fields = append(fields, brokerdispatch.FieldInitiatorPrincipalKind)
+	}
+	if m.FieldCleared(brokerdispatch.FieldInitiatorPrincipalID) {
+		fields = append(fields, brokerdispatch.FieldInitiatorPrincipalID)
+	}
+	if m.FieldCleared(brokerdispatch.FieldInitiatorCredentialKind) {
+		fields = append(fields, brokerdispatch.FieldInitiatorCredentialKind)
+	}
+	if m.FieldCleared(brokerdispatch.FieldInitiatorCredentialID) {
+		fields = append(fields, brokerdispatch.FieldInitiatorCredentialID)
+	}
+	if m.FieldCleared(brokerdispatch.FieldCorrelationID) {
+		fields = append(fields, brokerdispatch.FieldCorrelationID)
+	}
 	return fields
 }
 
@@ -13758,6 +14093,21 @@ func (m *BrokerDispatchMutation) ClearField(name string) error {
 		return nil
 	case brokerdispatch.FieldDeadlineAt:
 		m.ClearDeadlineAt()
+		return nil
+	case brokerdispatch.FieldInitiatorPrincipalKind:
+		m.ClearInitiatorPrincipalKind()
+		return nil
+	case brokerdispatch.FieldInitiatorPrincipalID:
+		m.ClearInitiatorPrincipalID()
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialKind:
+		m.ClearInitiatorCredentialKind()
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialID:
+		m.ClearInitiatorCredentialID()
+		return nil
+	case brokerdispatch.FieldCorrelationID:
+		m.ClearCorrelationID()
 		return nil
 	}
 	return fmt.Errorf("unknown BrokerDispatch nullable field %s", name)
@@ -13808,6 +14158,21 @@ func (m *BrokerDispatchMutation) ResetField(name string) error {
 		return nil
 	case brokerdispatch.FieldDeadlineAt:
 		m.ResetDeadlineAt()
+		return nil
+	case brokerdispatch.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case brokerdispatch.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case brokerdispatch.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case brokerdispatch.FieldCorrelationID:
+		m.ResetCorrelationID()
 		return nil
 	}
 	return fmt.Errorf("unknown BrokerDispatch field %s", name)
@@ -51012,30 +51377,39 @@ func (m *RuntimeBrokerMutation) ResetEdge(name string) error {
 // ScheduleMutation represents an operation that mutates the Schedule nodes in the graph.
 type ScheduleMutation struct {
 	config
-	op              Op
-	typ             string
-	id              *uuid.UUID
-	project_id      *uuid.UUID
-	name            *string
-	cron_expr       *string
-	event_type      *string
-	payload         *string
-	status          *string
-	next_run_at     *time.Time
-	last_run_at     *time.Time
-	last_run_status *string
-	last_run_error  *string
-	run_count       *int
-	addrun_count    *int
-	error_count     *int
-	adderror_count  *int
-	created_by      *string
-	created         *time.Time
-	updated         *time.Time
-	clearedFields   map[string]struct{}
-	done            bool
-	oldValue        func(context.Context) (*Schedule, error)
-	predicates      []predicate.Schedule
+	op                            Op
+	typ                           string
+	id                            *uuid.UUID
+	initiator_principal_kind      *string
+	initiator_principal_id        *string
+	initiator_credential_kind     *string
+	initiator_credential_id       *string
+	initiator_credential_snapshot *string
+	attribution_version           *int
+	addattribution_version        *int
+	authorization_revision        *int
+	addauthorization_revision     *int
+	project_id                    *uuid.UUID
+	name                          *string
+	cron_expr                     *string
+	event_type                    *string
+	payload                       *string
+	status                        *string
+	next_run_at                   *time.Time
+	last_run_at                   *time.Time
+	last_run_status               *string
+	last_run_error                *string
+	run_count                     *int
+	addrun_count                  *int
+	error_count                   *int
+	adderror_count                *int
+	created_by                    *string
+	created                       *time.Time
+	updated                       *time.Time
+	clearedFields                 map[string]struct{}
+	done                          bool
+	oldValue                      func(context.Context) (*Schedule, error)
+	predicates                    []predicate.Schedule
 }
 
 var _ ent.Mutation = (*ScheduleMutation)(nil)
@@ -51140,6 +51514,391 @@ func (m *ScheduleMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *ScheduleMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *ScheduleMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldInitiatorPrincipalKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (m *ScheduleMutation) ClearInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	m.clearedFields[schedule.FieldInitiatorPrincipalKind] = struct{}{}
+}
+
+// InitiatorPrincipalKindCleared returns if the "initiator_principal_kind" field was cleared in this mutation.
+func (m *ScheduleMutation) InitiatorPrincipalKindCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldInitiatorPrincipalKind]
+	return ok
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *ScheduleMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	delete(m.clearedFields, schedule.FieldInitiatorPrincipalKind)
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *ScheduleMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *ScheduleMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldInitiatorPrincipalID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (m *ScheduleMutation) ClearInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	m.clearedFields[schedule.FieldInitiatorPrincipalID] = struct{}{}
+}
+
+// InitiatorPrincipalIDCleared returns if the "initiator_principal_id" field was cleared in this mutation.
+func (m *ScheduleMutation) InitiatorPrincipalIDCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldInitiatorPrincipalID]
+	return ok
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *ScheduleMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	delete(m.clearedFields, schedule.FieldInitiatorPrincipalID)
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *ScheduleMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *ScheduleMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldInitiatorCredentialKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (m *ScheduleMutation) ClearInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	m.clearedFields[schedule.FieldInitiatorCredentialKind] = struct{}{}
+}
+
+// InitiatorCredentialKindCleared returns if the "initiator_credential_kind" field was cleared in this mutation.
+func (m *ScheduleMutation) InitiatorCredentialKindCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldInitiatorCredentialKind]
+	return ok
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *ScheduleMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	delete(m.clearedFields, schedule.FieldInitiatorCredentialKind)
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *ScheduleMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *ScheduleMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldInitiatorCredentialID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (m *ScheduleMutation) ClearInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	m.clearedFields[schedule.FieldInitiatorCredentialID] = struct{}{}
+}
+
+// InitiatorCredentialIDCleared returns if the "initiator_credential_id" field was cleared in this mutation.
+func (m *ScheduleMutation) InitiatorCredentialIDCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldInitiatorCredentialID]
+	return ok
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *ScheduleMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	delete(m.clearedFields, schedule.FieldInitiatorCredentialID)
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (m *ScheduleMutation) SetInitiatorCredentialSnapshot(s string) {
+	m.initiator_credential_snapshot = &s
+}
+
+// InitiatorCredentialSnapshot returns the value of the "initiator_credential_snapshot" field in the mutation.
+func (m *ScheduleMutation) InitiatorCredentialSnapshot() (r string, exists bool) {
+	v := m.initiator_credential_snapshot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialSnapshot returns the old "initiator_credential_snapshot" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldInitiatorCredentialSnapshot(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialSnapshot is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialSnapshot requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialSnapshot: %w", err)
+	}
+	return oldValue.InitiatorCredentialSnapshot, nil
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (m *ScheduleMutation) ClearInitiatorCredentialSnapshot() {
+	m.initiator_credential_snapshot = nil
+	m.clearedFields[schedule.FieldInitiatorCredentialSnapshot] = struct{}{}
+}
+
+// InitiatorCredentialSnapshotCleared returns if the "initiator_credential_snapshot" field was cleared in this mutation.
+func (m *ScheduleMutation) InitiatorCredentialSnapshotCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldInitiatorCredentialSnapshot]
+	return ok
+}
+
+// ResetInitiatorCredentialSnapshot resets all changes to the "initiator_credential_snapshot" field.
+func (m *ScheduleMutation) ResetInitiatorCredentialSnapshot() {
+	m.initiator_credential_snapshot = nil
+	delete(m.clearedFields, schedule.FieldInitiatorCredentialSnapshot)
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (m *ScheduleMutation) SetAttributionVersion(i int) {
+	m.attribution_version = &i
+	m.addattribution_version = nil
+}
+
+// AttributionVersion returns the value of the "attribution_version" field in the mutation.
+func (m *ScheduleMutation) AttributionVersion() (r int, exists bool) {
+	v := m.attribution_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributionVersion returns the old "attribution_version" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAttributionVersion(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributionVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributionVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributionVersion: %w", err)
+	}
+	return oldValue.AttributionVersion, nil
+}
+
+// AddAttributionVersion adds i to the "attribution_version" field.
+func (m *ScheduleMutation) AddAttributionVersion(i int) {
+	if m.addattribution_version != nil {
+		*m.addattribution_version += i
+	} else {
+		m.addattribution_version = &i
+	}
+}
+
+// AddedAttributionVersion returns the value that was added to the "attribution_version" field in this mutation.
+func (m *ScheduleMutation) AddedAttributionVersion() (r int, exists bool) {
+	v := m.addattribution_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (m *ScheduleMutation) ClearAttributionVersion() {
+	m.attribution_version = nil
+	m.addattribution_version = nil
+	m.clearedFields[schedule.FieldAttributionVersion] = struct{}{}
+}
+
+// AttributionVersionCleared returns if the "attribution_version" field was cleared in this mutation.
+func (m *ScheduleMutation) AttributionVersionCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldAttributionVersion]
+	return ok
+}
+
+// ResetAttributionVersion resets all changes to the "attribution_version" field.
+func (m *ScheduleMutation) ResetAttributionVersion() {
+	m.attribution_version = nil
+	m.addattribution_version = nil
+	delete(m.clearedFields, schedule.FieldAttributionVersion)
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (m *ScheduleMutation) SetAuthorizationRevision(i int) {
+	m.authorization_revision = &i
+	m.addauthorization_revision = nil
+}
+
+// AuthorizationRevision returns the value of the "authorization_revision" field in the mutation.
+func (m *ScheduleMutation) AuthorizationRevision() (r int, exists bool) {
+	v := m.authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorizationRevision returns the old "authorization_revision" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldAuthorizationRevision(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorizationRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorizationRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorizationRevision: %w", err)
+	}
+	return oldValue.AuthorizationRevision, nil
+}
+
+// AddAuthorizationRevision adds i to the "authorization_revision" field.
+func (m *ScheduleMutation) AddAuthorizationRevision(i int) {
+	if m.addauthorization_revision != nil {
+		*m.addauthorization_revision += i
+	} else {
+		m.addauthorization_revision = &i
+	}
+}
+
+// AddedAuthorizationRevision returns the value that was added to the "authorization_revision" field in this mutation.
+func (m *ScheduleMutation) AddedAuthorizationRevision() (r int, exists bool) {
+	v := m.addauthorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (m *ScheduleMutation) ClearAuthorizationRevision() {
+	m.authorization_revision = nil
+	m.addauthorization_revision = nil
+	m.clearedFields[schedule.FieldAuthorizationRevision] = struct{}{}
+}
+
+// AuthorizationRevisionCleared returns if the "authorization_revision" field was cleared in this mutation.
+func (m *ScheduleMutation) AuthorizationRevisionCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldAuthorizationRevision]
+	return ok
+}
+
+// ResetAuthorizationRevision resets all changes to the "authorization_revision" field.
+func (m *ScheduleMutation) ResetAuthorizationRevision() {
+	m.authorization_revision = nil
+	m.addauthorization_revision = nil
+	delete(m.clearedFields, schedule.FieldAuthorizationRevision)
 }
 
 // SetProjectID sets the "project_id" field.
@@ -51821,7 +52580,28 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 22)
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, schedule.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, schedule.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, schedule.FieldInitiatorCredentialID)
+	}
+	if m.initiator_credential_snapshot != nil {
+		fields = append(fields, schedule.FieldInitiatorCredentialSnapshot)
+	}
+	if m.attribution_version != nil {
+		fields = append(fields, schedule.FieldAttributionVersion)
+	}
+	if m.authorization_revision != nil {
+		fields = append(fields, schedule.FieldAuthorizationRevision)
+	}
 	if m.project_id != nil {
 		fields = append(fields, schedule.FieldProjectID)
 	}
@@ -51875,6 +52655,20 @@ func (m *ScheduleMutation) Fields() []string {
 // schema.
 func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case schedule.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case schedule.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case schedule.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case schedule.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case schedule.FieldInitiatorCredentialSnapshot:
+		return m.InitiatorCredentialSnapshot()
+	case schedule.FieldAttributionVersion:
+		return m.AttributionVersion()
+	case schedule.FieldAuthorizationRevision:
+		return m.AuthorizationRevision()
 	case schedule.FieldProjectID:
 		return m.ProjectID()
 	case schedule.FieldName:
@@ -51914,6 +52708,20 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case schedule.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case schedule.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case schedule.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case schedule.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case schedule.FieldInitiatorCredentialSnapshot:
+		return m.OldInitiatorCredentialSnapshot(ctx)
+	case schedule.FieldAttributionVersion:
+		return m.OldAttributionVersion(ctx)
+	case schedule.FieldAuthorizationRevision:
+		return m.OldAuthorizationRevision(ctx)
 	case schedule.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case schedule.FieldName:
@@ -51953,6 +52761,55 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 // type.
 func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case schedule.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case schedule.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case schedule.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case schedule.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case schedule.FieldInitiatorCredentialSnapshot:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialSnapshot(v)
+		return nil
+	case schedule.FieldAttributionVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributionVersion(v)
+		return nil
+	case schedule.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorizationRevision(v)
+		return nil
 	case schedule.FieldProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -52066,6 +52923,12 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *ScheduleMutation) AddedFields() []string {
 	var fields []string
+	if m.addattribution_version != nil {
+		fields = append(fields, schedule.FieldAttributionVersion)
+	}
+	if m.addauthorization_revision != nil {
+		fields = append(fields, schedule.FieldAuthorizationRevision)
+	}
 	if m.addrun_count != nil {
 		fields = append(fields, schedule.FieldRunCount)
 	}
@@ -52080,6 +52943,10 @@ func (m *ScheduleMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *ScheduleMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case schedule.FieldAttributionVersion:
+		return m.AddedAttributionVersion()
+	case schedule.FieldAuthorizationRevision:
+		return m.AddedAuthorizationRevision()
 	case schedule.FieldRunCount:
 		return m.AddedRunCount()
 	case schedule.FieldErrorCount:
@@ -52093,6 +52960,20 @@ func (m *ScheduleMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *ScheduleMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case schedule.FieldAttributionVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttributionVersion(v)
+		return nil
+	case schedule.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAuthorizationRevision(v)
+		return nil
 	case schedule.FieldRunCount:
 		v, ok := value.(int)
 		if !ok {
@@ -52115,6 +52996,27 @@ func (m *ScheduleMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *ScheduleMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(schedule.FieldInitiatorPrincipalKind) {
+		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
+	}
+	if m.FieldCleared(schedule.FieldInitiatorPrincipalID) {
+		fields = append(fields, schedule.FieldInitiatorPrincipalID)
+	}
+	if m.FieldCleared(schedule.FieldInitiatorCredentialKind) {
+		fields = append(fields, schedule.FieldInitiatorCredentialKind)
+	}
+	if m.FieldCleared(schedule.FieldInitiatorCredentialID) {
+		fields = append(fields, schedule.FieldInitiatorCredentialID)
+	}
+	if m.FieldCleared(schedule.FieldInitiatorCredentialSnapshot) {
+		fields = append(fields, schedule.FieldInitiatorCredentialSnapshot)
+	}
+	if m.FieldCleared(schedule.FieldAttributionVersion) {
+		fields = append(fields, schedule.FieldAttributionVersion)
+	}
+	if m.FieldCleared(schedule.FieldAuthorizationRevision) {
+		fields = append(fields, schedule.FieldAuthorizationRevision)
+	}
 	if m.FieldCleared(schedule.FieldNextRunAt) {
 		fields = append(fields, schedule.FieldNextRunAt)
 	}
@@ -52144,6 +53046,27 @@ func (m *ScheduleMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ScheduleMutation) ClearField(name string) error {
 	switch name {
+	case schedule.FieldInitiatorPrincipalKind:
+		m.ClearInitiatorPrincipalKind()
+		return nil
+	case schedule.FieldInitiatorPrincipalID:
+		m.ClearInitiatorPrincipalID()
+		return nil
+	case schedule.FieldInitiatorCredentialKind:
+		m.ClearInitiatorCredentialKind()
+		return nil
+	case schedule.FieldInitiatorCredentialID:
+		m.ClearInitiatorCredentialID()
+		return nil
+	case schedule.FieldInitiatorCredentialSnapshot:
+		m.ClearInitiatorCredentialSnapshot()
+		return nil
+	case schedule.FieldAttributionVersion:
+		m.ClearAttributionVersion()
+		return nil
+	case schedule.FieldAuthorizationRevision:
+		m.ClearAuthorizationRevision()
+		return nil
 	case schedule.FieldNextRunAt:
 		m.ClearNextRunAt()
 		return nil
@@ -52167,6 +53090,27 @@ func (m *ScheduleMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *ScheduleMutation) ResetField(name string) error {
 	switch name {
+	case schedule.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case schedule.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case schedule.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case schedule.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case schedule.FieldInitiatorCredentialSnapshot:
+		m.ResetInitiatorCredentialSnapshot()
+		return nil
+	case schedule.FieldAttributionVersion:
+		m.ResetAttributionVersion()
+		return nil
+	case schedule.FieldAuthorizationRevision:
+		m.ResetAuthorizationRevision()
+		return nil
 	case schedule.FieldProjectID:
 		m.ResetProjectID()
 		return nil
@@ -52267,23 +53211,32 @@ func (m *ScheduleMutation) ResetEdge(name string) error {
 // ScheduledEventMutation represents an operation that mutates the ScheduledEvent nodes in the graph.
 type ScheduledEventMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	project_id    *uuid.UUID
-	event_type    *string
-	fire_at       *time.Time
-	payload       *string
-	status        *string
-	created_by    *string
-	fired_at      *time.Time
-	error         *string
-	schedule_id   *string
-	created       *time.Time
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*ScheduledEvent, error)
-	predicates    []predicate.ScheduledEvent
+	op                            Op
+	typ                           string
+	id                            *uuid.UUID
+	initiator_principal_kind      *string
+	initiator_principal_id        *string
+	initiator_credential_kind     *string
+	initiator_credential_id       *string
+	initiator_credential_snapshot *string
+	attribution_version           *int
+	addattribution_version        *int
+	authorization_revision        *int
+	addauthorization_revision     *int
+	project_id                    *uuid.UUID
+	event_type                    *string
+	fire_at                       *time.Time
+	payload                       *string
+	status                        *string
+	created_by                    *string
+	fired_at                      *time.Time
+	error                         *string
+	schedule_id                   *string
+	created                       *time.Time
+	clearedFields                 map[string]struct{}
+	done                          bool
+	oldValue                      func(context.Context) (*ScheduledEvent, error)
+	predicates                    []predicate.ScheduledEvent
 }
 
 var _ ent.Mutation = (*ScheduledEventMutation)(nil)
@@ -52388,6 +53341,391 @@ func (m *ScheduledEventMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *ScheduledEventMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *ScheduledEventMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldInitiatorPrincipalKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (m *ScheduledEventMutation) ClearInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	m.clearedFields[scheduledevent.FieldInitiatorPrincipalKind] = struct{}{}
+}
+
+// InitiatorPrincipalKindCleared returns if the "initiator_principal_kind" field was cleared in this mutation.
+func (m *ScheduledEventMutation) InitiatorPrincipalKindCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldInitiatorPrincipalKind]
+	return ok
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *ScheduledEventMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+	delete(m.clearedFields, scheduledevent.FieldInitiatorPrincipalKind)
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *ScheduledEventMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *ScheduledEventMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldInitiatorPrincipalID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (m *ScheduledEventMutation) ClearInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	m.clearedFields[scheduledevent.FieldInitiatorPrincipalID] = struct{}{}
+}
+
+// InitiatorPrincipalIDCleared returns if the "initiator_principal_id" field was cleared in this mutation.
+func (m *ScheduledEventMutation) InitiatorPrincipalIDCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldInitiatorPrincipalID]
+	return ok
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *ScheduledEventMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+	delete(m.clearedFields, scheduledevent.FieldInitiatorPrincipalID)
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *ScheduledEventMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldInitiatorCredentialKind(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (m *ScheduledEventMutation) ClearInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	m.clearedFields[scheduledevent.FieldInitiatorCredentialKind] = struct{}{}
+}
+
+// InitiatorCredentialKindCleared returns if the "initiator_credential_kind" field was cleared in this mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialKindCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldInitiatorCredentialKind]
+	return ok
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *ScheduledEventMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+	delete(m.clearedFields, scheduledevent.FieldInitiatorCredentialKind)
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *ScheduledEventMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldInitiatorCredentialID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (m *ScheduledEventMutation) ClearInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	m.clearedFields[scheduledevent.FieldInitiatorCredentialID] = struct{}{}
+}
+
+// InitiatorCredentialIDCleared returns if the "initiator_credential_id" field was cleared in this mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialIDCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldInitiatorCredentialID]
+	return ok
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *ScheduledEventMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+	delete(m.clearedFields, scheduledevent.FieldInitiatorCredentialID)
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (m *ScheduledEventMutation) SetInitiatorCredentialSnapshot(s string) {
+	m.initiator_credential_snapshot = &s
+}
+
+// InitiatorCredentialSnapshot returns the value of the "initiator_credential_snapshot" field in the mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialSnapshot() (r string, exists bool) {
+	v := m.initiator_credential_snapshot
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialSnapshot returns the old "initiator_credential_snapshot" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldInitiatorCredentialSnapshot(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialSnapshot is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialSnapshot requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialSnapshot: %w", err)
+	}
+	return oldValue.InitiatorCredentialSnapshot, nil
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (m *ScheduledEventMutation) ClearInitiatorCredentialSnapshot() {
+	m.initiator_credential_snapshot = nil
+	m.clearedFields[scheduledevent.FieldInitiatorCredentialSnapshot] = struct{}{}
+}
+
+// InitiatorCredentialSnapshotCleared returns if the "initiator_credential_snapshot" field was cleared in this mutation.
+func (m *ScheduledEventMutation) InitiatorCredentialSnapshotCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldInitiatorCredentialSnapshot]
+	return ok
+}
+
+// ResetInitiatorCredentialSnapshot resets all changes to the "initiator_credential_snapshot" field.
+func (m *ScheduledEventMutation) ResetInitiatorCredentialSnapshot() {
+	m.initiator_credential_snapshot = nil
+	delete(m.clearedFields, scheduledevent.FieldInitiatorCredentialSnapshot)
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (m *ScheduledEventMutation) SetAttributionVersion(i int) {
+	m.attribution_version = &i
+	m.addattribution_version = nil
+}
+
+// AttributionVersion returns the value of the "attribution_version" field in the mutation.
+func (m *ScheduledEventMutation) AttributionVersion() (r int, exists bool) {
+	v := m.attribution_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributionVersion returns the old "attribution_version" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAttributionVersion(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributionVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributionVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributionVersion: %w", err)
+	}
+	return oldValue.AttributionVersion, nil
+}
+
+// AddAttributionVersion adds i to the "attribution_version" field.
+func (m *ScheduledEventMutation) AddAttributionVersion(i int) {
+	if m.addattribution_version != nil {
+		*m.addattribution_version += i
+	} else {
+		m.addattribution_version = &i
+	}
+}
+
+// AddedAttributionVersion returns the value that was added to the "attribution_version" field in this mutation.
+func (m *ScheduledEventMutation) AddedAttributionVersion() (r int, exists bool) {
+	v := m.addattribution_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (m *ScheduledEventMutation) ClearAttributionVersion() {
+	m.attribution_version = nil
+	m.addattribution_version = nil
+	m.clearedFields[scheduledevent.FieldAttributionVersion] = struct{}{}
+}
+
+// AttributionVersionCleared returns if the "attribution_version" field was cleared in this mutation.
+func (m *ScheduledEventMutation) AttributionVersionCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldAttributionVersion]
+	return ok
+}
+
+// ResetAttributionVersion resets all changes to the "attribution_version" field.
+func (m *ScheduledEventMutation) ResetAttributionVersion() {
+	m.attribution_version = nil
+	m.addattribution_version = nil
+	delete(m.clearedFields, scheduledevent.FieldAttributionVersion)
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (m *ScheduledEventMutation) SetAuthorizationRevision(i int) {
+	m.authorization_revision = &i
+	m.addauthorization_revision = nil
+}
+
+// AuthorizationRevision returns the value of the "authorization_revision" field in the mutation.
+func (m *ScheduledEventMutation) AuthorizationRevision() (r int, exists bool) {
+	v := m.authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorizationRevision returns the old "authorization_revision" field's value of the ScheduledEvent entity.
+// If the ScheduledEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledEventMutation) OldAuthorizationRevision(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorizationRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorizationRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorizationRevision: %w", err)
+	}
+	return oldValue.AuthorizationRevision, nil
+}
+
+// AddAuthorizationRevision adds i to the "authorization_revision" field.
+func (m *ScheduledEventMutation) AddAuthorizationRevision(i int) {
+	if m.addauthorization_revision != nil {
+		*m.addauthorization_revision += i
+	} else {
+		m.addauthorization_revision = &i
+	}
+}
+
+// AddedAuthorizationRevision returns the value that was added to the "authorization_revision" field in this mutation.
+func (m *ScheduledEventMutation) AddedAuthorizationRevision() (r int, exists bool) {
+	v := m.addauthorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (m *ScheduledEventMutation) ClearAuthorizationRevision() {
+	m.authorization_revision = nil
+	m.addauthorization_revision = nil
+	m.clearedFields[scheduledevent.FieldAuthorizationRevision] = struct{}{}
+}
+
+// AuthorizationRevisionCleared returns if the "authorization_revision" field was cleared in this mutation.
+func (m *ScheduledEventMutation) AuthorizationRevisionCleared() bool {
+	_, ok := m.clearedFields[scheduledevent.FieldAuthorizationRevision]
+	return ok
+}
+
+// ResetAuthorizationRevision resets all changes to the "authorization_revision" field.
+func (m *ScheduledEventMutation) ResetAuthorizationRevision() {
+	m.authorization_revision = nil
+	m.addauthorization_revision = nil
+	delete(m.clearedFields, scheduledevent.FieldAuthorizationRevision)
 }
 
 // SetProjectID sets the "project_id" field.
@@ -52836,7 +54174,28 @@ func (m *ScheduledEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledEventMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 17)
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, scheduledevent.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, scheduledevent.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialID)
+	}
+	if m.initiator_credential_snapshot != nil {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialSnapshot)
+	}
+	if m.attribution_version != nil {
+		fields = append(fields, scheduledevent.FieldAttributionVersion)
+	}
+	if m.authorization_revision != nil {
+		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
+	}
 	if m.project_id != nil {
 		fields = append(fields, scheduledevent.FieldProjectID)
 	}
@@ -52875,6 +54234,20 @@ func (m *ScheduledEventMutation) Fields() []string {
 // schema.
 func (m *ScheduledEventMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case scheduledevent.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case scheduledevent.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case scheduledevent.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case scheduledevent.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case scheduledevent.FieldInitiatorCredentialSnapshot:
+		return m.InitiatorCredentialSnapshot()
+	case scheduledevent.FieldAttributionVersion:
+		return m.AttributionVersion()
+	case scheduledevent.FieldAuthorizationRevision:
+		return m.AuthorizationRevision()
 	case scheduledevent.FieldProjectID:
 		return m.ProjectID()
 	case scheduledevent.FieldEventType:
@@ -52904,6 +54277,20 @@ func (m *ScheduledEventMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *ScheduledEventMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case scheduledevent.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case scheduledevent.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case scheduledevent.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case scheduledevent.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case scheduledevent.FieldInitiatorCredentialSnapshot:
+		return m.OldInitiatorCredentialSnapshot(ctx)
+	case scheduledevent.FieldAttributionVersion:
+		return m.OldAttributionVersion(ctx)
+	case scheduledevent.FieldAuthorizationRevision:
+		return m.OldAuthorizationRevision(ctx)
 	case scheduledevent.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case scheduledevent.FieldEventType:
@@ -52933,6 +54320,55 @@ func (m *ScheduledEventMutation) OldField(ctx context.Context, name string) (ent
 // type.
 func (m *ScheduledEventMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case scheduledevent.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case scheduledevent.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case scheduledevent.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case scheduledevent.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case scheduledevent.FieldInitiatorCredentialSnapshot:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialSnapshot(v)
+		return nil
+	case scheduledevent.FieldAttributionVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributionVersion(v)
+		return nil
+	case scheduledevent.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorizationRevision(v)
+		return nil
 	case scheduledevent.FieldProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -53010,13 +54446,26 @@ func (m *ScheduledEventMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *ScheduledEventMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addattribution_version != nil {
+		fields = append(fields, scheduledevent.FieldAttributionVersion)
+	}
+	if m.addauthorization_revision != nil {
+		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *ScheduledEventMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case scheduledevent.FieldAttributionVersion:
+		return m.AddedAttributionVersion()
+	case scheduledevent.FieldAuthorizationRevision:
+		return m.AddedAuthorizationRevision()
+	}
 	return nil, false
 }
 
@@ -53025,6 +54474,20 @@ func (m *ScheduledEventMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *ScheduledEventMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case scheduledevent.FieldAttributionVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttributionVersion(v)
+		return nil
+	case scheduledevent.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAuthorizationRevision(v)
+		return nil
 	}
 	return fmt.Errorf("unknown ScheduledEvent numeric field %s", name)
 }
@@ -53033,6 +54496,27 @@ func (m *ScheduledEventMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *ScheduledEventMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(scheduledevent.FieldInitiatorPrincipalKind) {
+		fields = append(fields, scheduledevent.FieldInitiatorPrincipalKind)
+	}
+	if m.FieldCleared(scheduledevent.FieldInitiatorPrincipalID) {
+		fields = append(fields, scheduledevent.FieldInitiatorPrincipalID)
+	}
+	if m.FieldCleared(scheduledevent.FieldInitiatorCredentialKind) {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialKind)
+	}
+	if m.FieldCleared(scheduledevent.FieldInitiatorCredentialID) {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialID)
+	}
+	if m.FieldCleared(scheduledevent.FieldInitiatorCredentialSnapshot) {
+		fields = append(fields, scheduledevent.FieldInitiatorCredentialSnapshot)
+	}
+	if m.FieldCleared(scheduledevent.FieldAttributionVersion) {
+		fields = append(fields, scheduledevent.FieldAttributionVersion)
+	}
+	if m.FieldCleared(scheduledevent.FieldAuthorizationRevision) {
+		fields = append(fields, scheduledevent.FieldAuthorizationRevision)
+	}
 	if m.FieldCleared(scheduledevent.FieldCreatedBy) {
 		fields = append(fields, scheduledevent.FieldCreatedBy)
 	}
@@ -53059,6 +54543,27 @@ func (m *ScheduledEventMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ScheduledEventMutation) ClearField(name string) error {
 	switch name {
+	case scheduledevent.FieldInitiatorPrincipalKind:
+		m.ClearInitiatorPrincipalKind()
+		return nil
+	case scheduledevent.FieldInitiatorPrincipalID:
+		m.ClearInitiatorPrincipalID()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialKind:
+		m.ClearInitiatorCredentialKind()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialID:
+		m.ClearInitiatorCredentialID()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialSnapshot:
+		m.ClearInitiatorCredentialSnapshot()
+		return nil
+	case scheduledevent.FieldAttributionVersion:
+		m.ClearAttributionVersion()
+		return nil
+	case scheduledevent.FieldAuthorizationRevision:
+		m.ClearAuthorizationRevision()
+		return nil
 	case scheduledevent.FieldCreatedBy:
 		m.ClearCreatedBy()
 		return nil
@@ -53079,6 +54584,27 @@ func (m *ScheduledEventMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *ScheduledEventMutation) ResetField(name string) error {
 	switch name {
+	case scheduledevent.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case scheduledevent.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case scheduledevent.FieldInitiatorCredentialSnapshot:
+		m.ResetInitiatorCredentialSnapshot()
+		return nil
+	case scheduledevent.FieldAttributionVersion:
+		m.ResetAttributionVersion()
+		return nil
+	case scheduledevent.FieldAuthorizationRevision:
+		m.ResetAuthorizationRevision()
+		return nil
 	case scheduledevent.FieldProjectID:
 		m.ResetProjectID()
 		return nil

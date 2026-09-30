@@ -109,9 +109,9 @@ type Resource struct {
 
 	// ScopeUserID is the owning user of a user-scoped skill
 	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
-	// by skillScopeResource/skillResource. It lets the agent creator
-	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
-	// same column the skill list predicate filters on. Empty otherwise.
+	// by skillScopeResource/skillResource. It lets the personal-skill progeny
+	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
+	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
 }
 
@@ -338,12 +338,25 @@ type AuthzService struct {
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
-	return &AuthzService{
+	svc := &AuthzService{
 		store:                   s,
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
 	}
+	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
+	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
+	// Registration only fails for a programming error, so a failure here is
+	// logged, not fatal. Without a registered adapter, progenyAdapter returns
+	// none for "skill" (it is not a built-in store-adapter kind), and the
+	// progeny candidate's fact stage rejects it ("no sharing-source adapter")
+	// — fail closed, never open.
+	if err := svc.RegisterProgenyAdapter(skillProgenyAdapter{}); err != nil {
+		if logger != nil {
+			logger.Error("failed to register skill progeny adapter", "error", err)
+		}
+	}
+	return svc
 }
 
 // SetDecisionAuditEmitter configures the decision audit emitter.
@@ -660,8 +673,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
 	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign, creator user skill) are evaluated as typed
-	// candidates through the common stages in authz_relationship_rules.go:
+	// hub-member assign) are evaluated as typed candidates through the
+	// common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
