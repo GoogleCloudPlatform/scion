@@ -1966,12 +1966,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 							Scopes:    scopes,
 						},
 					}
-					// Name the permission explicitly. Deriving it from
-					// (resource="secret", action="read") finds no registry entry -
-					// agent secret access is registered as project.secret_read on
-					// ResourceProject - so derivePermissionID falls through to its
-					// "<resource>.<action>" fallback and asks for "secret.read",
-					// which no role grants and which does not exist in the registry.
+					// Name the permission explicitly. (resource="secret",
+					// action="read") has no registry entry - agent secret access is
+					// registered as project.secret_read on ResourceProject - so
+					// resolveResourcePermission cannot resolve the pair on its own.
 					decision := d.authzService.Decide(ctx, AuthzRequest{
 						Principal:  principalContextForIdentity(ident),
 						Credential: credentialContextForIdentity(ident),
@@ -3066,12 +3064,10 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 						Scopes:    scopes,
 					},
 				}
-				// Name the permission explicitly. Deriving it from
-				// (resource="secret", action="read") finds no registry entry -
-				// agent secret access is registered as project.secret_read on
-				// ResourceProject - so derivePermissionID falls through to its
-				// "<resource>.<action>" fallback and asks for "secret.read",
-				// which no role grants and which does not exist in the registry.
+				// Name the permission explicitly. (resource="secret",
+				// action="read") has no registry entry - agent secret access is
+				// registered as project.secret_read on ResourceProject - so
+				// resolveResourcePermission cannot resolve the pair on its own.
 				decision := d.authzService.Decide(ctx, AuthzRequest{
 					Principal:  principalContextForIdentity(ident),
 					Credential: credentialContextForIdentity(ident),

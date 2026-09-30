@@ -137,11 +137,55 @@ type ResolveOpts struct {
 	AuthzCheck func(secret SecretMeta) bool
 }
 
+// FetchResult holds the outcome of fetching one secret's value by its
+// recorded metadata. Value is meaningful only when Err is nil; a failed item
+// always carries an empty Value, never a partially-successful one. It is
+// returned by LocalBackend.FetchValues and GCPBackend.FetchValues (see their
+// doc comments for the shared contract).
+type FetchResult struct {
+	Value string
+	Err   error
+}
+
 // SecretBackend defines the interface for secret storage operations.
 // Implementations include local (wrapping store.SecretStore) and GCP Secret Manager.
 type SecretBackend interface {
-	// Get retrieves a secret including its value.
+	// Get retrieves a secret including its value, keyed by name/scope/scopeId
+	// rather than a specific recorded metadata version. It exists for the
+	// fixed set of hub-internal callers that read a value directly, outside
+	// the material-selection flow: hub infrastructure secrets (signing keys,
+	// OIDC keys, telemetry credentials), hub-side git clone credentials that
+	// are never delivered to an agent, and the agent material paths that
+	// have not yet switched to FetchValues. On the GCP backend, when no Hub
+	// database record exists, Get still falls back to a Secret Manager
+	// lookup by a computed name, to recover from a database reset; that
+	// fallback is exactly what FetchValues does not do. Anything selected
+	// for delivery to an agent should use FetchValues, which resolves a
+	// specific recorded metadata version and never falls back by name.
+	//
+	// A new caller must be written using one of the receiver names
+	// TestSecretBackendGet_CallersAreHubInternal (backend_test.go) matches —
+	// secretBackend, sb or Backend — or that drift guard must be updated to
+	// see it; it is a name-based regex scan, not a type-aware one.
 	Get(ctx context.Context, name, scope, scopeID string) (*SecretWithValue, error)
+
+	// FetchValues returns values for exactly the given metadata records,
+	// matched by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed
+	// by each record's ID in the returned map. There is no name-based
+	// fallback: a record that is no longer in the store, or whose current
+	// ID, Version, AllowProgeny, CreatedBy or SecretType no longer matches
+	// the recorded metadata, is reported as store.ErrNotFound for that item.
+	// The extra AllowProgeny/CreatedBy/SecretType comparison catches a
+	// same-Version metadata race that ID+Version alone would miss, since
+	// UpdateSecretMeta is a read-modify-write with no version predicate (see
+	// recordGenerationChanged in backend.go). A decrypt or backend-access
+	// failure is also reported as a per-item error; a failed item's value is
+	// always empty, never delivered as an empty string in place of an
+	// error. Records whose current SecretType is internal are refused with
+	// store.ErrNotFound, since internal secrets are never candidates for
+	// delivery. The returned outer error reports only a failure of the
+	// whole call, not a per-item failure.
+	FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error)
 
 	// Set creates or updates a secret. Returns whether a new secret was created.
 	Set(ctx context.Context, input *SetSecretInput) (created bool, meta *SecretMeta, err error)

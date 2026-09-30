@@ -115,6 +115,41 @@ func CanDelegateReason(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldCanDelegateReason, v))
 }
 
+// CredentialName applies equality check predicate on the "credential_name" field. It's identical to CredentialNameEQ.
+func CredentialName(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialName, v))
+}
+
+// CredentialBoundaryKind applies equality check predicate on the "credential_boundary_kind" field. It's identical to CredentialBoundaryKindEQ.
+func CredentialBoundaryKind(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryProjectID applies equality check predicate on the "credential_boundary_project_id" field. It's identical to CredentialBoundaryProjectIDEQ.
+func CredentialBoundaryProjectID(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialLabels applies equality check predicate on the "credential_labels" field. It's identical to CredentialLabelsEQ.
+func CredentialLabels(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialLabels, v))
+}
+
+// CorrelationID applies equality check predicate on the "correlation_id" field. It's identical to CorrelationIDEQ.
+func CorrelationID(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCorrelationID, v))
+}
+
+// ExecutorKind applies equality check predicate on the "executor_kind" field. It's identical to ExecutorKindEQ.
+func ExecutorKind(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldExecutorKind, v))
+}
+
+// ExecutorID applies equality check predicate on the "executor_id" field. It's identical to ExecutorIDEQ.
+func ExecutorID(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldExecutorID, v))
+}
+
 // TimestampEQ applies the EQ predicate on the "timestamp" field.
 func TimestampEQ(v time.Time) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldTimestamp, v))
@@ -928,6 +963,531 @@ func CanDelegateReasonEqualFold(v string) predicate.MutationAudit {
 // CanDelegateReasonContainsFold applies the ContainsFold predicate on the "can_delegate_reason" field.
 func CanDelegateReasonContainsFold(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldContainsFold(FieldCanDelegateReason, v))
+}
+
+// CredentialNameEQ applies the EQ predicate on the "credential_name" field.
+func CredentialNameEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialName, v))
+}
+
+// CredentialNameNEQ applies the NEQ predicate on the "credential_name" field.
+func CredentialNameNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldCredentialName, v))
+}
+
+// CredentialNameIn applies the In predicate on the "credential_name" field.
+func CredentialNameIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldCredentialName, vs...))
+}
+
+// CredentialNameNotIn applies the NotIn predicate on the "credential_name" field.
+func CredentialNameNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldCredentialName, vs...))
+}
+
+// CredentialNameGT applies the GT predicate on the "credential_name" field.
+func CredentialNameGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldCredentialName, v))
+}
+
+// CredentialNameGTE applies the GTE predicate on the "credential_name" field.
+func CredentialNameGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldCredentialName, v))
+}
+
+// CredentialNameLT applies the LT predicate on the "credential_name" field.
+func CredentialNameLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldCredentialName, v))
+}
+
+// CredentialNameLTE applies the LTE predicate on the "credential_name" field.
+func CredentialNameLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldCredentialName, v))
+}
+
+// CredentialNameContains applies the Contains predicate on the "credential_name" field.
+func CredentialNameContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldCredentialName, v))
+}
+
+// CredentialNameHasPrefix applies the HasPrefix predicate on the "credential_name" field.
+func CredentialNameHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldCredentialName, v))
+}
+
+// CredentialNameHasSuffix applies the HasSuffix predicate on the "credential_name" field.
+func CredentialNameHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldCredentialName, v))
+}
+
+// CredentialNameIsNil applies the IsNil predicate on the "credential_name" field.
+func CredentialNameIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldCredentialName))
+}
+
+// CredentialNameNotNil applies the NotNil predicate on the "credential_name" field.
+func CredentialNameNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldCredentialName))
+}
+
+// CredentialNameEqualFold applies the EqualFold predicate on the "credential_name" field.
+func CredentialNameEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldCredentialName, v))
+}
+
+// CredentialNameContainsFold applies the ContainsFold predicate on the "credential_name" field.
+func CredentialNameContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldCredentialName, v))
+}
+
+// CredentialBoundaryKindEQ applies the EQ predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindNEQ applies the NEQ predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindIn applies the In predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldCredentialBoundaryKind, vs...))
+}
+
+// CredentialBoundaryKindNotIn applies the NotIn predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldCredentialBoundaryKind, vs...))
+}
+
+// CredentialBoundaryKindGT applies the GT predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindGTE applies the GTE predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindLT applies the LT predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindLTE applies the LTE predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindContains applies the Contains predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindHasPrefix applies the HasPrefix predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindHasSuffix applies the HasSuffix predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindIsNil applies the IsNil predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldCredentialBoundaryKind))
+}
+
+// CredentialBoundaryKindNotNil applies the NotNil predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldCredentialBoundaryKind))
+}
+
+// CredentialBoundaryKindEqualFold applies the EqualFold predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindContainsFold applies the ContainsFold predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryProjectIDEQ applies the EQ predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDNEQ applies the NEQ predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDIn applies the In predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldCredentialBoundaryProjectID, vs...))
+}
+
+// CredentialBoundaryProjectIDNotIn applies the NotIn predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldCredentialBoundaryProjectID, vs...))
+}
+
+// CredentialBoundaryProjectIDGT applies the GT predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDGTE applies the GTE predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDLT applies the LT predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDLTE applies the LTE predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDContains applies the Contains predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDHasPrefix applies the HasPrefix predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDHasSuffix applies the HasSuffix predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDIsNil applies the IsNil predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldCredentialBoundaryProjectID))
+}
+
+// CredentialBoundaryProjectIDNotNil applies the NotNil predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldCredentialBoundaryProjectID))
+}
+
+// CredentialBoundaryProjectIDEqualFold applies the EqualFold predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDContainsFold applies the ContainsFold predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialLabelsEQ applies the EQ predicate on the "credential_labels" field.
+func CredentialLabelsEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsNEQ applies the NEQ predicate on the "credential_labels" field.
+func CredentialLabelsNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsIn applies the In predicate on the "credential_labels" field.
+func CredentialLabelsIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldCredentialLabels, vs...))
+}
+
+// CredentialLabelsNotIn applies the NotIn predicate on the "credential_labels" field.
+func CredentialLabelsNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldCredentialLabels, vs...))
+}
+
+// CredentialLabelsGT applies the GT predicate on the "credential_labels" field.
+func CredentialLabelsGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsGTE applies the GTE predicate on the "credential_labels" field.
+func CredentialLabelsGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsLT applies the LT predicate on the "credential_labels" field.
+func CredentialLabelsLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsLTE applies the LTE predicate on the "credential_labels" field.
+func CredentialLabelsLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsContains applies the Contains predicate on the "credential_labels" field.
+func CredentialLabelsContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsHasPrefix applies the HasPrefix predicate on the "credential_labels" field.
+func CredentialLabelsHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsHasSuffix applies the HasSuffix predicate on the "credential_labels" field.
+func CredentialLabelsHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsIsNil applies the IsNil predicate on the "credential_labels" field.
+func CredentialLabelsIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldCredentialLabels))
+}
+
+// CredentialLabelsNotNil applies the NotNil predicate on the "credential_labels" field.
+func CredentialLabelsNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldCredentialLabels))
+}
+
+// CredentialLabelsEqualFold applies the EqualFold predicate on the "credential_labels" field.
+func CredentialLabelsEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsContainsFold applies the ContainsFold predicate on the "credential_labels" field.
+func CredentialLabelsContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldCredentialLabels, v))
+}
+
+// CorrelationIDEQ applies the EQ predicate on the "correlation_id" field.
+func CorrelationIDEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldCorrelationID, v))
+}
+
+// CorrelationIDNEQ applies the NEQ predicate on the "correlation_id" field.
+func CorrelationIDNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldCorrelationID, v))
+}
+
+// CorrelationIDIn applies the In predicate on the "correlation_id" field.
+func CorrelationIDIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldCorrelationID, vs...))
+}
+
+// CorrelationIDNotIn applies the NotIn predicate on the "correlation_id" field.
+func CorrelationIDNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldCorrelationID, vs...))
+}
+
+// CorrelationIDGT applies the GT predicate on the "correlation_id" field.
+func CorrelationIDGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldCorrelationID, v))
+}
+
+// CorrelationIDGTE applies the GTE predicate on the "correlation_id" field.
+func CorrelationIDGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldCorrelationID, v))
+}
+
+// CorrelationIDLT applies the LT predicate on the "correlation_id" field.
+func CorrelationIDLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldCorrelationID, v))
+}
+
+// CorrelationIDLTE applies the LTE predicate on the "correlation_id" field.
+func CorrelationIDLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldCorrelationID, v))
+}
+
+// CorrelationIDContains applies the Contains predicate on the "correlation_id" field.
+func CorrelationIDContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldCorrelationID, v))
+}
+
+// CorrelationIDHasPrefix applies the HasPrefix predicate on the "correlation_id" field.
+func CorrelationIDHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldCorrelationID, v))
+}
+
+// CorrelationIDHasSuffix applies the HasSuffix predicate on the "correlation_id" field.
+func CorrelationIDHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldCorrelationID, v))
+}
+
+// CorrelationIDIsNil applies the IsNil predicate on the "correlation_id" field.
+func CorrelationIDIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldCorrelationID))
+}
+
+// CorrelationIDNotNil applies the NotNil predicate on the "correlation_id" field.
+func CorrelationIDNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldCorrelationID))
+}
+
+// CorrelationIDEqualFold applies the EqualFold predicate on the "correlation_id" field.
+func CorrelationIDEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldCorrelationID, v))
+}
+
+// CorrelationIDContainsFold applies the ContainsFold predicate on the "correlation_id" field.
+func CorrelationIDContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldCorrelationID, v))
+}
+
+// ExecutorKindEQ applies the EQ predicate on the "executor_kind" field.
+func ExecutorKindEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldExecutorKind, v))
+}
+
+// ExecutorKindNEQ applies the NEQ predicate on the "executor_kind" field.
+func ExecutorKindNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldExecutorKind, v))
+}
+
+// ExecutorKindIn applies the In predicate on the "executor_kind" field.
+func ExecutorKindIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldExecutorKind, vs...))
+}
+
+// ExecutorKindNotIn applies the NotIn predicate on the "executor_kind" field.
+func ExecutorKindNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldExecutorKind, vs...))
+}
+
+// ExecutorKindGT applies the GT predicate on the "executor_kind" field.
+func ExecutorKindGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldExecutorKind, v))
+}
+
+// ExecutorKindGTE applies the GTE predicate on the "executor_kind" field.
+func ExecutorKindGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldExecutorKind, v))
+}
+
+// ExecutorKindLT applies the LT predicate on the "executor_kind" field.
+func ExecutorKindLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldExecutorKind, v))
+}
+
+// ExecutorKindLTE applies the LTE predicate on the "executor_kind" field.
+func ExecutorKindLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldExecutorKind, v))
+}
+
+// ExecutorKindContains applies the Contains predicate on the "executor_kind" field.
+func ExecutorKindContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldExecutorKind, v))
+}
+
+// ExecutorKindHasPrefix applies the HasPrefix predicate on the "executor_kind" field.
+func ExecutorKindHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldExecutorKind, v))
+}
+
+// ExecutorKindHasSuffix applies the HasSuffix predicate on the "executor_kind" field.
+func ExecutorKindHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldExecutorKind, v))
+}
+
+// ExecutorKindIsNil applies the IsNil predicate on the "executor_kind" field.
+func ExecutorKindIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldExecutorKind))
+}
+
+// ExecutorKindNotNil applies the NotNil predicate on the "executor_kind" field.
+func ExecutorKindNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldExecutorKind))
+}
+
+// ExecutorKindEqualFold applies the EqualFold predicate on the "executor_kind" field.
+func ExecutorKindEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldExecutorKind, v))
+}
+
+// ExecutorKindContainsFold applies the ContainsFold predicate on the "executor_kind" field.
+func ExecutorKindContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldExecutorKind, v))
+}
+
+// ExecutorIDEQ applies the EQ predicate on the "executor_id" field.
+func ExecutorIDEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldExecutorID, v))
+}
+
+// ExecutorIDNEQ applies the NEQ predicate on the "executor_id" field.
+func ExecutorIDNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldExecutorID, v))
+}
+
+// ExecutorIDIn applies the In predicate on the "executor_id" field.
+func ExecutorIDIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldExecutorID, vs...))
+}
+
+// ExecutorIDNotIn applies the NotIn predicate on the "executor_id" field.
+func ExecutorIDNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldExecutorID, vs...))
+}
+
+// ExecutorIDGT applies the GT predicate on the "executor_id" field.
+func ExecutorIDGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldExecutorID, v))
+}
+
+// ExecutorIDGTE applies the GTE predicate on the "executor_id" field.
+func ExecutorIDGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldExecutorID, v))
+}
+
+// ExecutorIDLT applies the LT predicate on the "executor_id" field.
+func ExecutorIDLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldExecutorID, v))
+}
+
+// ExecutorIDLTE applies the LTE predicate on the "executor_id" field.
+func ExecutorIDLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldExecutorID, v))
+}
+
+// ExecutorIDContains applies the Contains predicate on the "executor_id" field.
+func ExecutorIDContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldExecutorID, v))
+}
+
+// ExecutorIDHasPrefix applies the HasPrefix predicate on the "executor_id" field.
+func ExecutorIDHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldExecutorID, v))
+}
+
+// ExecutorIDHasSuffix applies the HasSuffix predicate on the "executor_id" field.
+func ExecutorIDHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldExecutorID, v))
+}
+
+// ExecutorIDIsNil applies the IsNil predicate on the "executor_id" field.
+func ExecutorIDIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldExecutorID))
+}
+
+// ExecutorIDNotNil applies the NotNil predicate on the "executor_id" field.
+func ExecutorIDNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldExecutorID))
+}
+
+// ExecutorIDEqualFold applies the EqualFold predicate on the "executor_id" field.
+func ExecutorIDEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldExecutorID, v))
+}
+
+// ExecutorIDContainsFold applies the ContainsFold predicate on the "executor_id" field.
+func ExecutorIDContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldExecutorID, v))
 }
 
 // And groups predicates with the AND operator between them.

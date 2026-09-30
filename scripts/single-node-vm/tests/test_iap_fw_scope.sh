@@ -391,9 +391,10 @@ test_iap_fw_scope_target_tags_describe_failure_does_not_narrow() {
 # only touches the fields a flag was given for: an update with no
 # --target-tags leaves the rule's existing tags alone, --target-tags=x,y
 # replaces them, and --target-tags= (present but empty) clears them.
-# Nothing in deploy.sh exercises the no-flag case today (deploy.sh:901
-# always passes --target-tags), so this guards the stub itself rather
-# than anything currently reachable through deploy.sh.
+# Nothing in deploy.sh exercises the no-flag case today (deploy.sh's
+# "IAP SSH firewall rule" section always passes --target-tags on its one
+# `compute firewall-rules update` call), so this guards the stub itself
+# rather than anything currently reachable through deploy.sh.
 
 test_iap_fw_scope_stub_update_leaves_tags_unchanged_without_target_tags_flag() {
   fresh_gcloud_state

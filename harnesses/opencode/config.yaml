@@ -55,7 +55,7 @@ command:
 capabilities:
   limits:
     max_turns: { support: "yes" }
-    max_model_calls: { support: "partial", reason: "Uses message.updated as proxy for model-end; no explicit model-start event" }
+    max_model_calls: { support: "partial", reason: "model-end per step-finish part; no explicit model-start event" }
     max_duration: { support: "yes" }
   telemetry:
     enabled: { support: "yes" }

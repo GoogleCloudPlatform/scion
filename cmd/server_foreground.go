@@ -2690,7 +2690,21 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 		effectiveID, regErr := registerGlobalProjectAndBroker(ctx, s, brokerID, brokerName, rhEndpoint, rt, serverAutoProvide, brokerSettings)
 		if regErr != nil {
-			log.Printf("Warning: failed to register global project: %v", regErr)
+			// ERROR, not a warning: the co-located broker is how this process
+			// runs agents. Losing it silently left the Hub reporting healthy
+			// with zero brokers while every agent create failed 422 (no
+			// runtime broker available). EmbeddedBrokerRegistrationFailed
+			// also feeds /healthz (GetHealthInfo) and the admin health
+			// summary (see Server.checkColocatedBrokerHealth) so this state
+			// is visible there too, not just in the boot log. /readyz is
+			// intentionally not affected — see checkColocatedBrokerHealth.
+			// There is no retry, so this does not self-heal: it persists
+			// until the broker configuration is fixed and the process is
+			// restarted.
+			// broker_id is already attached by the slog.SetDefault(...With(...))
+			// call above; do not pass it again here (duplicate key in JSON output).
+			slog.Error("Co-located broker registration failed; the Hub has no embedded broker and agent dispatch will fail until the broker configuration is fixed and the server is restarted",
+				"error", regErr)
 			hubSrv.EmbeddedBrokerRegistrationFailed(regErr)
 		} else {
 			colocatedBrokerRegistered = true
