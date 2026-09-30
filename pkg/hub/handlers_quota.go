@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -90,9 +92,29 @@ type usageSummaryResponse struct {
 
 // usageByLimitResponse wraps the admin usage-by-limit result.
 type usageByLimitResponse struct {
-	LimitDefinition *store.LimitDefinition    `json:"limitDefinition"`
-	Reservations    []*store.UsageReservation `json:"reservations"`
-	TotalActive     int                       `json:"totalActive"`
+	LimitDefinition *store.LimitDefinition `json:"limitDefinition"`
+	Reservations    []usageReservationView `json:"reservations"`
+	TotalActive     int                    `json:"totalActive"`
+}
+
+// usageReservationView extends store.UsageReservation with the effective
+// per-broker agent limit and its precedence source (ptone/scion#2061 P2.2,
+// design.md §5.9, AC-P2-10). Both are populated only for
+// max_agents_per_broker reservations at broker scope — every other
+// reservation (a different limit, or a system/project-scoped one) leaves
+// them unset. They come from the shared brokerCapacity read model, the same
+// one Reserve enforces and the providers listing / broker settings GET
+// report, so the usage page never shows the raw entitlement-binding value
+// or the hub-wide default in place of what create actually enforces.
+type usageReservationView struct {
+	*store.UsageReservation
+	// BrokerAgentLimit is nil when the broker is unlimited, or when this row
+	// isn't a max_agents_per_broker broker-scoped reservation.
+	BrokerAgentLimit *int64 `json:"brokerAgentLimit,omitempty"`
+	// BrokerAgentLimitSource is one of the BrokerLimitSource* constants
+	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
+	// "unlimited". Empty under the same conditions as BrokerAgentLimit.
+	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
 // myUsageEntry represents one limit's current/max for the current user.
@@ -637,7 +659,9 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID string) {
-	def, err := s.store.GetLimitDefinition(r.Context(), limitID)
+	ctx := r.Context()
+
+	def, err := s.store.GetLimitDefinition(ctx, limitID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Limit Definition")
@@ -647,20 +671,70 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		return
 	}
 
-	reservations, err := s.store.ListActiveReservations(r.Context(), limitID, store.QuotaScopeSystem, "")
+	// max_agents_per_broker reservations are stored at store.QuotaScopeBroker
+	// scoped to each individual broker (broker_quota.go), never at
+	// store.QuotaScopeSystem — so the generic system-scope query below would
+	// always return none for it. List across every broker instead, the same
+	// way ReconcileStaleBrokerQuotaReservations does.
+	var reservations []*store.UsageReservation
+	if def.Name == store.LimitMaxAgentsPerBroker {
+		reservations, err = s.listBrokerScopedActiveReservations(ctx, def.ID)
+	} else {
+		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
+	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if reservations == nil {
-		reservations = []*store.UsageReservation{}
+
+	// limitDef is looked up once and reused for every broker-scoped
+	// reservation below (design.md §5.9, AC-P2-10): def is already that one
+	// lookup, so no second query is needed.
+	brokerCapacityCache := make(map[string]BrokerCapacity)
+	views := make([]usageReservationView, len(reservations))
+	for i, res := range reservations {
+		views[i] = usageReservationView{UsageReservation: res}
+		if def.Name != store.LimitMaxAgentsPerBroker || res.ScopeType != store.QuotaScopeBroker {
+			continue
+		}
+		bc, ok := brokerCapacityCache[res.ScopeID]
+		if !ok {
+			bc = s.brokerCapacity(ctx, res.ScopeID, def)
+			brokerCapacityCache[res.ScopeID] = bc
+		}
+		views[i].BrokerAgentLimit = bc.Limit
+		views[i].BrokerAgentLimitSource = bc.Source
 	}
 
 	writeJSON(w, http.StatusOK, usageByLimitResponse{
 		LimitDefinition: def,
-		Reservations:    reservations,
+		Reservations:    views,
 		TotalActive:     len(reservations),
 	})
+}
+
+// listBrokerScopedActiveReservations aggregates active reservations for
+// limitDefinitionID across every runtime broker (ptone/scion#2061 P2.2).
+// max_agents_per_broker reservations are always scoped to a specific broker
+// (store.QuotaScopeBroker, scope_id=broker ID), so listing them requires
+// enumerating brokers first — store.Store.ListActiveReservations takes one
+// exact scope, not a wildcard. This mirrors
+// ReconcileStaleBrokerQuotaReservations's own broker loop (broker_quota.go).
+func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) ([]*store.UsageReservation, error) {
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, fmt.Errorf("list runtime brokers: %w", err)
+	}
+
+	var reservations []*store.UsageReservation
+	for _, broker := range brokers.Items {
+		brokerReservations, err := s.store.ListActiveReservations(ctx, limitDefinitionID, store.QuotaScopeBroker, broker.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list active reservations for broker %q: %w", broker.ID, err)
+		}
+		reservations = append(reservations, brokerReservations...)
+	}
+	return reservations, nil
 }
 
 func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {

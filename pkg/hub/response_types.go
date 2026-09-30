@@ -226,10 +226,31 @@ func (u *UserWithCapabilities) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// RuntimeBrokerWithCapabilities wraps a store.RuntimeBroker with capability annotations.
+// RuntimeBrokerWithCapabilities wraps a store.RuntimeBroker with capability
+// annotations and its effective agent capacity (ptone/scion#2061 P2.2,
+// design.md §5.6, §5.9). AgentLimit/AgentCount/AgentLimitSource mirror the
+// providers listing's projectProviderView fields exactly (same semantics:
+// nil limit = unlimited, handlers_env_secrets.go) — both are populated
+// through the shared resolveBrokerCapacity/brokerCapacity read model, never
+// a second one (AC-P2-10). They carry no additional visibility check beyond
+// the existing per-broker ActionRead capability filter in
+// listRuntimeBrokers: whoever can already see a broker row sees its
+// capacity fields too, the same rule the providers listing uses.
 type RuntimeBrokerWithCapabilities struct {
 	store.RuntimeBroker
 	Cap *Capabilities `json:"_capabilities,omitempty"`
+	// AgentLimit is the effective max_agents_per_broker ceiling for this
+	// broker. Unset (nil) when unlimited, or when resolution didn't run or
+	// failed — see resolveBrokerCapacity.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// held by this broker. Unset (nil) under the same conditions as
+	// AgentLimit; a zero count is reported as 0, not omitted.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource is one of the BrokerLimitSource* constants
+	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
+	// "unlimited". Omitted under the same conditions as AgentLimit/AgentCount.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.RuntimeBroker.
@@ -237,10 +258,16 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 	type BrokerAlias store.RuntimeBroker
 	return json.Marshal(&struct {
 		BrokerAlias
-		Cap *Capabilities `json:"_capabilities,omitempty"`
+		Cap              *Capabilities `json:"_capabilities,omitempty"`
+		AgentLimit       *int64        `json:"agentLimit,omitempty"`
+		AgentCount       *int64        `json:"agentCount,omitempty"`
+		AgentLimitSource string        `json:"agentLimitSource,omitempty"`
 	}{
-		BrokerAlias: BrokerAlias(b.RuntimeBroker),
-		Cap:         b.Cap,
+		BrokerAlias:      BrokerAlias(b.RuntimeBroker),
+		Cap:              b.Cap,
+		AgentLimit:       b.AgentLimit,
+		AgentCount:       b.AgentCount,
+		AgentLimitSource: b.AgentLimitSource,
 	})
 }
 
@@ -249,7 +276,10 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	type BrokerAlias store.RuntimeBroker
 	aux := &struct {
 		*BrokerAlias
-		Cap *Capabilities `json:"_capabilities,omitempty"`
+		Cap              *Capabilities `json:"_capabilities,omitempty"`
+		AgentLimit       *int64        `json:"agentLimit,omitempty"`
+		AgentCount       *int64        `json:"agentCount,omitempty"`
+		AgentLimitSource string        `json:"agentLimitSource,omitempty"`
 	}{
 		BrokerAlias: (*BrokerAlias)(&b.RuntimeBroker),
 	}
@@ -257,5 +287,8 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	b.Cap = aux.Cap
+	b.AgentLimit = aux.AgentLimit
+	b.AgentCount = aux.AgentCount
+	b.AgentLimitSource = aux.AgentLimitSource
 	return nil
 }
