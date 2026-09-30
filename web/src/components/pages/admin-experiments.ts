@@ -157,7 +157,10 @@ export class ScionAdminExperiments extends LitElement {
         return;
       }
       if (!res.ok) {
-        this.loadError = await extractApiError(res, `Failed to load experiments (HTTP ${res.status})`);
+        this.loadError = await extractApiError(
+          res,
+          `Failed to load experiments (HTTP ${res.status})`
+        );
         return;
       }
       const data = (await res.json()) as AdminExperimentsResponse;
@@ -200,7 +203,10 @@ export class ScionAdminExperiments extends LitElement {
       });
 
       if (res.status === 409) {
-        const info = await parseApiError(res, 'The experiment settings were modified concurrently.');
+        const info = await parseApiError(
+          res,
+          'The experiment settings were modified concurrently.'
+        );
         this.experiments = previous;
         this.writeError =
           info.code === 'experiments_malformed'
@@ -254,7 +260,7 @@ export class ScionAdminExperiments extends LitElement {
     }
   }
 
-  override render() {
+  override render(): ReturnType<typeof html> {
     if (this.forbidden) {
       return html`
         <sl-alert variant="warning" open>
@@ -273,9 +279,10 @@ export class ScionAdminExperiments extends LitElement {
     }
 
     return html`
-      ${this.renderAttribution()}
-      ${this.malformed ? this.renderMalformedBanner() : nothing}
-      ${this.writeError ? html`<sl-alert variant="danger" open>${this.writeError}</sl-alert>` : nothing}
+      ${this.renderAttribution()} ${this.malformed ? this.renderMalformedBanner() : nothing}
+      ${this.writeError
+        ? html`<sl-alert variant="danger" open>${this.writeError}</sl-alert>`
+        : nothing}
       ${this.renderUnknownOverridesNote()}
       <p class="note">
         Changes apply to all users of this hub. Users see them the next time they load or refresh
@@ -288,25 +295,24 @@ export class ScionAdminExperiments extends LitElement {
     `;
   }
 
-  private renderAttribution() {
+  private renderAttribution(): ReturnType<typeof html> | typeof nothing {
     if (!this.updatedAt) return nothing;
     return html`<p class="attribution">Last changed by ${this.updatedBy} at ${this.updatedAt}</p>`;
   }
 
-  private renderUnknownOverridesNote() {
+  private renderUnknownOverridesNote(): ReturnType<typeof html> | typeof nothing {
     const names = Object.keys(this.unknownOverrides);
     if (names.length === 0) return nothing;
     return html`
       <p class="note">
-        ${names.length} override${names.length === 1 ? '' : 's'} for experiment${names.length === 1
-          ? ''
-          : 's'}
-        not known to this hub version ${names.length === 1 ? 'is' : 'are'} kept: ${names.join(', ')}.
+        ${names.length} override${names.length === 1 ? '' : 's'} for
+        experiment${names.length === 1 ? '' : 's'} not known to this hub version
+        ${names.length === 1 ? 'is' : 'are'} kept: ${names.join(', ')}.
       </p>
     `;
   }
 
-  private renderMalformedBanner() {
+  private renderMalformedBanner(): ReturnType<typeof html> {
     return html`
       <sl-alert variant="danger" open>
         Stored experiment settings are unreadable. Server experiments are off and UI-only
@@ -315,7 +321,7 @@ export class ScionAdminExperiments extends LitElement {
       <sl-button
         variant="danger"
         ?disabled=${this.pending}
-        @click=${() => {
+        @click=${(): void => {
           this.showResetDialog = true;
         }}
       >
@@ -324,12 +330,12 @@ export class ScionAdminExperiments extends LitElement {
     `;
   }
 
-  private renderResetDialog() {
+  private renderResetDialog(): ReturnType<typeof html> {
     return html`
       <sl-dialog
         label="Reset all experiments"
         ?open=${this.showResetDialog}
-        @sl-hide=${() => {
+        @sl-hide=${(): void => {
           this.showResetDialog = false;
         }}
       >
@@ -341,7 +347,7 @@ export class ScionAdminExperiments extends LitElement {
           slot="footer"
           variant="danger"
           ?loading=${this.pending}
-          @click=${() => {
+          @click=${(): void => {
             void this.resetAllMalformed();
           }}
         >
@@ -349,7 +355,7 @@ export class ScionAdminExperiments extends LitElement {
         </sl-button>
         <sl-button
           slot="footer"
-          @click=${() => {
+          @click=${(): void => {
             this.showResetDialog = false;
           }}
         >
@@ -359,7 +365,7 @@ export class ScionAdminExperiments extends LitElement {
     `;
   }
 
-  private renderRow(exp: ExperimentEntry) {
+  private renderRow(exp: ExperimentEntry): ReturnType<typeof html> {
     const hasOverride = exp.override !== null;
     const url = issueUrl(exp.issue);
     return html`
@@ -374,13 +380,17 @@ export class ScionAdminExperiments extends LitElement {
         </div>
         <p class="description">${exp.description}</p>
         ${url
-          ? html`<p class="issue-link"><a href=${url} target="_blank" rel="noopener">${exp.issue}</a></p>`
+          ? html`
+              <p class="issue-link">
+                <a href=${url} target="_blank" rel="noopener">${exp.issue}</a>
+              </p>
+            `
           : nothing}
         <div class="row-controls">
           <sl-switch
             ?checked=${exp.enabled}
             ?disabled=${this.pending || this.malformed}
-            @sl-change=${() => {
+            @sl-change=${(): void => {
               void this.setOverride(exp.name, !exp.enabled);
             }}
           ></sl-switch>
@@ -392,7 +402,7 @@ export class ScionAdminExperiments extends LitElement {
                 <sl-button
                   size="small"
                   ?disabled=${this.pending}
-                  @click=${() => {
+                  @click=${(): void => {
                     void this.setOverride(exp.name, null);
                   }}
                 >

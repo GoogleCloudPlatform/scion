@@ -259,7 +259,7 @@ async function fetchCurrentUser(): Promise<User | null> {
 async function okJsonOrNull(res: Response): Promise<unknown> {
   if (!res.ok) return null;
   try {
-    return await res.json();
+    return (await res.json()) as unknown;
   } catch {
     return null;
   }
