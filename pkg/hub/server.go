@@ -5686,6 +5686,9 @@ func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string)
 		if err == nil {
 			brokerName = broker.Name
 		}
+		// Only reached when at least one row actually healed; a no-op broker
+		// hits the continue above without logging, keeping Info quiet.
+		slog.Info("Scheduler: broker provider self-heal restamped providers online", "brokerID", brokerID, "brokerName", brokerName, "count", len(healedProjectIDs))
 		s.events.PublishBrokerConnected(ctx, brokerID, brokerName, healedProjectIDs)
 	}
 }
