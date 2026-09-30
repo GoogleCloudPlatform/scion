@@ -1587,14 +1587,42 @@ export class ScionChatComposer extends LitElement {
   private focusTextareaCaretEnd(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {
-        const ta = this.getTextareaElement();
-        if (ta) {
-          const end = ta.value.length;
-          ta.setSelectionRange(end, end);
-          ta.focus();
-        }
+        void this.applyCaretEndFocus();
       });
     });
+  }
+
+  /**
+   * Does the actual work for `focusTextareaCaretEnd()`. If `<sl-textarea>`
+   * has not finished its own first render yet — e.g. `replyTo` is already
+   * set on initial mount, before the child element has upgraded —
+   * `getTextareaElement()` returns null because its shadow DOM doesn't exist
+   * yet. In that case, wait once for the child's own `updateComplete` (if it
+   * exposes one) and retry before giving up. If the inner textarea is still
+   * unavailable, fall back to focusing the `<sl-textarea>` host so focus is
+   * not silently dropped.
+   */
+  private async applyCaretEndFocus(): Promise<void> {
+    let ta = this.getTextareaElement();
+    if (!ta) {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+      const pendingUpdate = (slTextarea as { updateComplete?: Promise<unknown> } | null)
+        ?.updateComplete;
+      if (pendingUpdate) {
+        await pendingUpdate;
+      }
+      ta = this.getTextareaElement();
+    }
+    if (ta) {
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      ta.focus();
+      return;
+    }
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (slTextarea) {
+      (slTextarea as HTMLElement).focus();
+    }
   }
 
   /** Show the right-click send context menu. */
