@@ -646,17 +646,22 @@ func TestFanOutEventBus_HasSpokeAfterAddRemove(t *testing.T) {
 	}
 }
 
-// newSaturatedUserTopicInproc builds an InProcessEventBus whose single
-// subscriber's buffer is already full for a user-message topic, so the next
-// Publish is guaranteed to be dropped and reported.
-func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *messages.StructuredMessage) {
+// newSaturatedSubscriberInproc builds an InProcessEventBus with a single
+// subscriber on pattern whose buffer is already full for topic, so the next
+// Publish on topic is guaranteed to be dropped and reported. The caller
+// supplies pattern, topic and msg so the same saturation setup can be
+// reused for both user-message and non-user-message topics. Shared by
+// TestInProcessEventBus_UserTopicBufferFullReturnsError,
+// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget and the
+// fan-out tests below.
+func newSaturatedSubscriberInproc(t *testing.T, pattern, topic string, msg *messages.StructuredMessage) *InProcessEventBus {
 	t.Helper()
 	b := NewInProcessEventBus(slog.Default())
 	t.Cleanup(func() { _ = b.Close() })
 
 	block := make(chan struct{})
 	started := make(chan struct{}, 1)
-	_, err := b.Subscribe("scion.project.g1.user.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe(pattern, func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		select {
 		case started <- struct{}{}:
 		default:
@@ -668,13 +673,8 @@ func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *mes
 	}
 	t.Cleanup(func() { close(block) })
 
-	topic := "scion.project.g1.user.alice.messages"
-	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
-
 	// Prime the dispatch goroutine so it is blocked inside the handler,
-	// then fill the channel buffer behind it. Shared by
-	// TestInProcessEventBus_UserTopicBufferFullReturnsError and the
-	// fan-out tests below.
+	// then fill the channel buffer behind it.
 	if err := b.Publish(context.Background(), topic, msg); err != nil {
 		t.Fatalf("unexpected error priming dispatch goroutine: %v", err)
 	}
@@ -685,11 +685,11 @@ func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *mes
 			t.Fatalf("unexpected error filling buffer (iteration %d): %v", i, err)
 		}
 	}
-	return b, topic, msg
+	return b
 }
 
 // TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel is a regression
-// test for N1 in the ptone/scion#2325 review: FanOutEventBus must preserve
+// test for ptone/scion#2311: FanOutEventBus must preserve
 // errors.Is(err, ErrSubscriberBufferFull) from a saturated InProcessEventBus
 // spoke, on both the plain fan-out path (no msg.Channel, errors.Join over
 // unwrapped errors) and the channel-routing path (msg.Channel set, the
@@ -697,8 +697,12 @@ func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *mes
 // %v-wrapping or to dropping the join on either path would otherwise let the
 // sentinel silently stop propagating through the production bus topology.
 func TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel(t *testing.T) {
+	const pattern = "scion.project.g1.user.*.messages"
+	const topic = "scion.project.g1.user.alice.messages"
+
 	t.Run("without channel", func(t *testing.T) {
-		inproc, topic, msg := newSaturatedUserTopicInproc(t)
+		msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+		inproc := newSaturatedSubscriberInproc(t, pattern, topic, msg)
 		fan := NewFanOutEventBus([]NamedEventBus{
 			{Name: InProcessBusName, Bus: inproc},
 		}, slog.Default())
@@ -709,7 +713,8 @@ func TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel(t *testing.T) {
 	})
 
 	t.Run("with channel", func(t *testing.T) {
-		inproc, topic, msg := newSaturatedUserTopicInproc(t)
+		msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+		inproc := newSaturatedSubscriberInproc(t, pattern, topic, msg)
 		fan := NewFanOutEventBus([]NamedEventBus{
 			{Name: InProcessBusName, Bus: inproc},
 		}, slog.Default())

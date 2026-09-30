@@ -277,7 +277,9 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 // the matching subscriber's buffer is full must be reported to the caller
 // instead of silently dropped.
 func TestInProcessEventBus_UserTopicBufferFullReturnsError(t *testing.T) {
-	b, topic, msg := newSaturatedUserTopicInproc(t)
+	topic := "scion.project.g1.user.alice.messages"
+	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.user.*.messages", topic, msg)
 
 	// The buffer is now full: the next publish must be dropped and reported.
 	if err := b.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
@@ -290,36 +292,9 @@ func TestInProcessEventBus_UserTopicBufferFullReturnsError(t *testing.T) {
 // user-messages keeps the historical fire-and-forget behaviour — the drop is
 // logged but Publish still returns nil.
 func TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget(t *testing.T) {
-	b := newTestEventBus()
-	defer func() { _ = b.Close() }()
-
-	block := make(chan struct{})
-	started := make(chan struct{}, 1)
-	_, err := b.Subscribe("scion.project.g1.agent.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
-		select {
-		case started <- struct{}{}:
-		default:
-		}
-		<-block
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer close(block)
-
 	topic := "scion.project.g1.agent.myagent.messages"
 	msg := messages.NewInstruction("user:alice", "agent:myagent", "hi")
-
-	if err := b.Publish(context.Background(), topic, msg); err != nil {
-		t.Fatalf("unexpected error on first publish: %v", err)
-	}
-	<-started
-
-	for i := 0; i < defaultSubscriberBuffer; i++ {
-		if err := b.Publish(context.Background(), topic, msg); err != nil {
-			t.Fatalf("unexpected error while filling buffer (iteration %d): %v", i, err)
-		}
-	}
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.agent.*.messages", topic, msg)
 
 	if err := b.Publish(context.Background(), topic, msg); err != nil {
 		t.Fatalf("expected nil error for non-user-message topic drop (fire-and-forget unchanged), got %v", err)
