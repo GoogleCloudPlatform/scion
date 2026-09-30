@@ -35,8 +35,8 @@ import (
 //  1. a dm:-prefixed thread_id must match the conversation's own DM key
 //     (ptone/scion#2211);
 //  2. an explicit recipient must match the DM key's non-sender participant
-//     by kind AND id, not merely appear somewhere in the key
-//     (ptone/scion#2212).
+//     by ID, and by kind when the recipient carries one, not merely appear
+//     somewhere in the key (ptone/scion#2212).
 //
 // Every scenario below is exercised on both paths using postOutboundRequest
 // (conv_id_recipient_test.go), so the two can't silently drift apart.
@@ -262,8 +262,8 @@ func TestDirectConversation_EmptyThreadID_StillBackfilled_RawConvID(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// ptone/scion#2212: an explicit recipient must match the non-sender participant by kind
-// AND id.
+// ptone/scion#2212: an explicit recipient must match the non-sender participant by
+// ID, and by kind when the recipient carries one.
 // ---------------------------------------------------------------------------
 
 // TestDirectConversation_RecipientIsSender_Rejected_ConvRef and its raw
@@ -406,8 +406,8 @@ func TestDirectConversation_RecipientRightIDWrongKind_Rejected_RawConvID(t *test
 }
 
 // TestDirectConversation_CorrectNonSenderRecipient_Accepted_ConvRef and its
-// raw counterpart confirm the correct non-sender recipient (right kind AND
-// ID) is still accepted.
+// raw counterpart confirm the correct non-sender recipient (by ID, and by
+// kind when the recipient carries one) is still accepted.
 func TestDirectConversation_CorrectNonSenderRecipient_Accepted_ConvRef(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
