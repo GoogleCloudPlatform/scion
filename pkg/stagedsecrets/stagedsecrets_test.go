@@ -191,6 +191,168 @@ func TestWrite_RefusesSymlinkAtFileSecretTarget(t *testing.T) {
 	}
 }
 
+// TestWriteAs_SymlinkedScionDirRefusedBeforeChown proves that when
+// <homeDir>/.scion itself (not just secrets.json under it) is a symlink —
+// e.g. left over from a previous run on a persisted home, or planted ahead
+// of a restart — Write refuses before ever creating, writing, or chowning
+// anything through it, and the symlink's target directory (including its
+// own ownership and mode) is left exactly as it was.
+func TestWriteAs_SymlinkedScionDirRefusedBeforeChown(t *testing.T) {
+	homeDir := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(homeDir, ".scion")); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	staged := &Staged{VariableSecrets: map[string]string{"token": "abc123"}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a symlinked .scion directory")
+	}
+
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(victim, "secrets.json")); !os.IsNotExist(err) {
+		t.Errorf("secrets.json was written through the symlinked .scion directory")
+	}
+}
+
+// TestWriteAs_SymlinkedFileSecretParentRefusedBeforeChown proves the same for
+// a file secret's own parent directory: a symlink planted at the parent
+// itself (not just the leaf Target) is refused before any create/chown, and
+// the symlink's target directory is untouched.
+func TestWriteAs_SymlinkedFileSecretParentRefusedBeforeChown(t *testing.T) {
+	homeDir := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0750); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(homeDir, "secrets")
+	if err := os.Symlink(victim, parent); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "TLS_CERT", Target: filepath.Join(parent, "cert.pem"), Value: base64.StdEncoding.EncodeToString([]byte("cert-content"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a symlinked file-secret parent directory")
+	}
+
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(victim, "cert.pem")); !os.IsNotExist(err) {
+		t.Errorf("cert.pem was written through the symlinked parent directory")
+	}
+}
+
+// TestWriteAs_SymlinkedIntermediateComponentRefusedBeforeChown proves the
+// same one level further up the chain: a symlink at an INTERMEDIATE
+// component (not the immediate parent, and not the leaf) is refused before
+// any create/chown happens to anything beneath it.
+func TestWriteAs_SymlinkedIntermediateComponentRefusedBeforeChown(t *testing.T) {
+	homeDir := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0750); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(homeDir, "a")
+	if err := os.Symlink(victim, intermediate); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "TLS_CERT", Target: filepath.Join(intermediate, "b", "cert.pem"), Value: base64.StdEncoding.EncodeToString([]byte("cert-content"))},
+	}}
+	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("writeAs() = nil error, want a refusal for a symlinked intermediate component")
+	}
+
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(victim, "b")); !os.IsNotExist(err) {
+		t.Errorf("a new component was created through the symlinked intermediate directory")
+	}
+}
+
+// TestWriteAs_ChownsOnlyUnderHome proves the M-1 ruling: a file-secret
+// target UNDER homeDir is eligible to be chowned (its newly created parent
+// directory and its leaf both go through the chown path), while a target
+// OUTSIDE homeDir is written exactly as at base — created, but never chowned
+// to the workload uid/gid — with containment decided by the dirfd walk, not
+// a string-prefix check.
+//
+// Both subtests pass uid=1/gid=1, a uid the test process (unprivileged) can
+// never legitimately chown to. Under home, that makes the chown attempt
+// fail, proving the path really is reached. Outside home, the same uid/gid
+// causes no failure at all, proving the opposite: the path is skipped
+// entirely, not merely attempted-and-ignored.
+func TestWriteAs_ChownsOnlyUnderHome(t *testing.T) {
+	t.Run("under home directory is a chown target", func(t *testing.T) {
+		homeDir := t.TempDir()
+		target := filepath.Join(homeDir, "nested", "cert.pem")
+		staged := &Staged{FileSecrets: []FileSecret{
+			{Name: "TLS_CERT", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("cert-content"))},
+		}}
+		if err := writeAs(homeDir, staged, 1, 1); err == nil {
+			t.Fatal("writeAs() = nil error, want a chown failure proving the under-home directory is a chown target")
+		}
+	})
+
+	t.Run("outside home directory is created but never chowned", func(t *testing.T) {
+		homeDir := t.TempDir()
+		outsideDir := t.TempDir()
+		target := filepath.Join(outsideDir, "nested", "cert.pem")
+		staged := &Staged{FileSecrets: []FileSecret{
+			{Name: "TLS_CERT", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("cert-content"))},
+		}}
+		// uid 1 is never the current test uid; if writeAs tried to chown the
+		// outside-home directory or leaf to it, this would fail with EPERM
+		// for an unprivileged test process — proving the outside-home path
+		// really does skip the chown rather than merely succeeding to chown
+		// to a value that happens to match.
+		if err := writeAs(homeDir, staged, 1, 1); err != nil {
+			t.Fatalf("writeAs failed (outside-home target must not be chowned): %v", err)
+		}
+		content, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read %s: %v", target, err)
+		}
+		if string(content) != "cert-content" {
+			t.Errorf("content = %q, want %q", content, "cert-content")
+		}
+	})
+}
+
 func TestDecodeErrors(t *testing.T) {
 	for name, encoded := range map[string]string{
 		"invalid base64": "not-valid-base64!!!",
