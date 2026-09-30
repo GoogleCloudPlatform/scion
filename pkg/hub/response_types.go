@@ -244,12 +244,18 @@ type RuntimeBrokerWithCapabilities struct {
 	// failed — see resolveBrokerCapacity.
 	AgentLimit *int64 `json:"agentLimit,omitempty"`
 	// AgentCount is the number of active max_agents_per_broker reservations
-	// held by this broker. Unset (nil) under the same conditions as
-	// AgentLimit; a zero count is reported as 0, not omitted.
+	// held by this broker. Unset (nil) only when resolution didn't run or
+	// failed — see resolveBrokerCapacity. Unlike AgentLimit, it is still
+	// present (and may be a real, non-zero value) when the broker is
+	// unlimited, since AgentLimit's nil there means "no cap", not "no
+	// count"; a zero count is reported as 0, not omitted.
 	AgentCount *int64 `json:"agentCount,omitempty"`
 	// AgentLimitSource is one of the BrokerLimitSource* constants
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
-	// "unlimited". Omitted under the same conditions as AgentLimit/AgentCount.
+	// "unlimited". Omitted only when resolution didn't run or failed — the
+	// same condition as AgentCount, not AgentLimit (AgentLimitSource is
+	// still present, as "unlimited", exactly when AgentLimit is nil because
+	// the broker has no cap).
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 

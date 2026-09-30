@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -243,4 +244,66 @@ type countingLimitDefLookupStore struct {
 func (c *countingLimitDefLookupStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
 	c.calls++
 	return c.Store.GetLimitDefinitionByName(ctx, name)
+}
+
+// TestListRuntimeBrokers_AgentCountAgreesWithReserve pins AC-P2-10 against
+// the actual enforcement path, not just a manually-inserted reservation row:
+// the brokers list's agentCount/agentLimit must match what
+// checkAndReserveBrokerQuota itself counts and enforces (review round 1,
+// F2), including the unlimited shape (maxAgents=0): agentLimit absent,
+// agentCount still present, source still "broker" (the override — not the
+// entitlement engine or the hub default — is what produced "unlimited").
+func TestListRuntimeBrokers_AgentCountAgreesWithReserve(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker, project := newQuotaTestBrokerAndProject(t, s, "capacity-list-agree")
+
+	maxAgents := int64(2)
+	rec1, err := s.PutBrokerSettings(ctx, broker.ID, store.BrokerSettings{MaxAgents: &maxAgents}, 0, "test")
+	require.NoError(t, err)
+
+	agent1 := newQuotaTestAgent(t, s, broker, project, "capacity-list-agree-1", state.PhaseRunning)
+	created, err := srv.checkAndReserveBrokerQuota(ctx, agent1)
+	require.NoError(t, err)
+	assert.True(t, created)
+
+	agent2 := newQuotaTestAgent(t, s, broker, project, "capacity-list-agree-2", state.PhaseRunning)
+	created, err = srv.checkAndReserveBrokerQuota(ctx, agent2)
+	require.NoError(t, err)
+	assert.True(t, created)
+
+	brokers := listRuntimeBrokersCapacity(t, srv)
+	view := brokerByID(brokers, broker.ID)
+	require.NotNil(t, view)
+	require.NotNil(t, view.AgentLimit)
+	assert.EqualValues(t, 2, *view.AgentLimit)
+	require.NotNil(t, view.AgentCount)
+	assert.EqualValues(t, 2, *view.AgentCount, "agentCount must agree with what Reserve actually admitted")
+	assert.Equal(t, BrokerLimitSourceBroker, view.AgentLimitSource)
+
+	// A third reservation must be rejected at the cap — the same cap the
+	// list just reported.
+	agent3 := newQuotaTestAgent(t, s, broker, project, "capacity-list-agree-3", state.PhaseRunning)
+	_, err = srv.checkAndReserveBrokerQuota(ctx, agent3)
+	assert.ErrorIs(t, err, store.ErrQuotaExceeded)
+
+	// Clear the cap to unlimited (maxAgents=0).
+	unlimited := int64(0)
+	_, err = s.PutBrokerSettings(ctx, broker.ID, store.BrokerSettings{MaxAgents: &unlimited}, rec1.Revision, "test")
+	require.NoError(t, err)
+
+	created, err = srv.checkAndReserveBrokerQuota(ctx, agent3)
+	require.NoError(t, err)
+	assert.False(t, created, "unlimited resolves before creating a reservation (quota.go)")
+
+	brokers = listRuntimeBrokersCapacity(t, srv)
+	view = brokerByID(brokers, broker.ID)
+	require.NotNil(t, view)
+	assert.Nil(t, view.AgentLimit, "unlimited must leave agentLimit unset")
+	require.NotNil(t, view.AgentCount, "agentCount must still be reported when unlimited")
+	assert.EqualValues(t, 2, *view.AgentCount,
+		"unlimited Reserve returns before creating a reservation, so the count doesn't advance synchronously for agent3")
+	assert.Equal(t, BrokerLimitSourceBroker, view.AgentLimitSource,
+		"the override (now resolving to unlimited) is still what produced the result, not the entitlement engine or hub default")
 }

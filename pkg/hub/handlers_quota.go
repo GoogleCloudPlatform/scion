@@ -113,7 +113,10 @@ type usageReservationView struct {
 	BrokerAgentLimit *int64 `json:"brokerAgentLimit,omitempty"`
 	// BrokerAgentLimitSource is one of the BrokerLimitSource* constants
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
-	// "unlimited". Empty under the same conditions as BrokerAgentLimit.
+	// "unlimited". Empty only when this row isn't a max_agents_per_broker
+	// broker-scoped reservation, or brokerCapacity's own resolution failed
+	// outright (BrokerCapacity{}, both fields zero). Unlike BrokerAgentLimit,
+	// it is still populated — as "unlimited" — when the broker has no cap.
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
@@ -734,7 +737,14 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 // (store.QuotaScopeBroker, scope_id=broker ID), so listing them requires
 // enumerating brokers first — store.Store.ListActiveReservations takes one
 // exact scope, not a wildcard. This mirrors
-// ReconcileStaleBrokerQuotaReservations's own broker loop (broker_quota.go).
+// ReconcileStaleBrokerQuotaReservations's own broker loop (broker_quota.go),
+// including its bounds: 1+B queries (one ListRuntimeBrokers, one
+// ListActiveReservations per broker) and the same 10,000-broker cap, below
+// which a hub with more brokers than that would silently undercount here
+// exactly as reconcile already does. Reviewed and accepted for this PR
+// (round 1, F3); a single-query store method (e.g.
+// ListActiveReservationsByScopeType) usable by both call sites is a
+// follow-up, not required here.
 func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) ([]*store.UsageReservation, error) {
 	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
