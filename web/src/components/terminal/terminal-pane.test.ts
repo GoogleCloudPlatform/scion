@@ -1023,4 +1023,70 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     ).toBe(true);
     expect(radio('project')?.hasAttribute('disabled')).toBe(true);
   });
+
+  // Round-2 review nit 2: the other resolution order. The stale (older)
+  // fetch settles first, while the newer one is still pending — it must
+  // not apply its result, and loading must stay true (the dialog must not
+  // look "ready" based on a stale response) until the newer fetch settles.
+  it('overlapping settings fetches, stale-first order: the older result never applies and loading stays true until the newer one settles', async () => {
+    await makeCaptureEligible();
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    let call = 0;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/api/v1/settings/public')) {
+        call += 1;
+        return call === 1 ? first.promise : second.promise;
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    // First open starts the first (stale-to-be) fetch.
+    captureAuthButton()!.click();
+    await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
+
+    // Close and reopen before it resolves — starts the second (newer) fetch.
+    (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
+      false;
+    await page.updateComplete;
+    captureAuthButton()!.click();
+    await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
+
+    // The first (older, stale) request resolves first, with the setting on.
+    // Applying this would be wrong on two counts: it is not the latest
+    // request, and it would incorrectly clear loading while the newer
+    // fetch is still in flight.
+    first.resolve(json({ agentSecretsUserScopeOnly: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await page.updateComplete;
+
+    expect(
+      (page as unknown as { captureAuthSettingsLoading: boolean }).captureAuthSettingsLoading
+    ).toBe(true);
+    expect(
+      (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
+    ).toBe(false);
+    expect(
+      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
+    ).toBe('project');
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true); // still loading
+    expect(radio('user')?.hasAttribute('disabled')).toBe(true); // still loading
+
+    // The second (newer) request now resolves, with the setting off. This
+    // is the one that must actually apply.
+    second.resolve(json({ agentSecretsUserScopeOnly: false }));
+    await vi.waitFor(() => {
+      const state = page as unknown as { captureAuthSettingsLoading: boolean };
+      expect(state.captureAuthSettingsLoading).toBe(false);
+    });
+    await page.updateComplete;
+
+    expect(
+      (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
+    ).toBe(false);
+    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+  });
 });
