@@ -15,74 +15,138 @@
 package permissions
 
 // legacyUATScopeToPermissionID is a FROZEN literal snapshot, taken
-// 2026-09-29, of the UATScope -> canonical permission ID mapping for every
-// scope a CeilingVersionUnspecified row can hold.
+// 2026-09-30, of the resource:action -> canonical permission ID mapping for
+// every scope a CeilingVersionUnspecified row can hold. It covers the whole
+// Registry, not only permissions with a UATScope: authorization has always
+// matched a stored scope string against Resource+":"+Action across every
+// permission, independent of whether that permission is a currently
+// mintable selector, so freezing only the UATScope-bearing subset would
+// deny scopes an existing credential — or a caller that constructs an
+// identity directly from a raw scope string — has always been evaluated
+// against.
 //
 // This table must NEVER be regenerated from, or fall back to, the live
-// Registry: a later Registry addition or UATScope retarget must not
-// silently change what an already-minted legacy token means. A change here
-// requires a new CeilingVersion, not an edit to this map — see
-// TestLegacyUATScopeToPermissionID_Golden, which fails on any modification.
+// Registry: a later Registry addition must not silently change what an
+// already-issued scope means. A change here requires a new CeilingVersion,
+// not an edit to this map — see TestLegacyUATScopeToPermissionID_Golden,
+// which fails on any modification.
 //
-// Every entry a legacy row's stored Scopes can actually contain is a key
-// here: minting has always validated each stored scope against a
-// Registry-derived UATValidScopes set (itself built from Permission.UATScope
-// and UATManageAliases), and a manage alias is expanded to its concrete
-// scopes before being persisted, so it is never stored raw. Every
-// Permission.UATScope value equals Resource+":"+Action (see
-// TestPermissionRegistry_UATScopeMatchesResourceAction), which is what makes
-// this table a faithful snapshot of that mapping.
+// A handful of resource:action pairs are claimed by more than one
+// permission today (every hub.* action, since every hub.* permission
+// shares its resource across many distinct concerns — settings, config,
+// diagnostics, and so on — see the a1-operation-dispositions note on the
+// hub.settings.read/hub.config.read collision). This snapshot keeps
+// whichever permission Registry lists first for that pair, the same
+// resolution a plain resource:action scan has always produced; none of
+// those collision-prone resource:action pairs is a real UATScope, so no
+// legitimately minted token has ever been able to hold one, and the choice
+// only affects direct, non-mint test construction.
 var legacyUATScopeToPermissionID = map[string]string{
-	"agent:attach":               "agent.attach",
-	"agent:create":               "agent.create",
-	"agent:delete":               "agent.delete",
-	"agent:lifecycle":            "agent.lifecycle",
-	"agent:list":                 "agent.list",
-	"agent:message":              "agent.message",
-	"agent:port_access":          "agent.port_access",
-	"agent:read":                 "agent.read",
-	"broker:list":                "broker.list",
-	"broker:read":                "broker.read",
-	"gcp_service_account:assign": "gcp_service_account.assign",
-	"gcp_service_account:list":   "gcp_service_account.list",
-	"gcp_service_account:read":   "gcp_service_account.read",
-	"gcp_service_account:verify": "gcp_service_account.verify",
-	"group:addMember":            "group.addMember",
-	"group:create":               "group.create",
-	"group:delete":               "group.delete",
-	"group:list":                 "group.list",
-	"group:read":                 "group.read",
-	"group:removeMember":         "group.removeMember",
-	"group:update":               "group.update",
-	"harness_config:create":      "harness_config.create",
-	"harness_config:delete":      "harness_config.delete",
-	"harness_config:list":        "harness_config.list",
-	"harness_config:read":        "harness_config.read",
-	"harness_config:update":      "harness_config.update",
-	"project:clone":              "project.clone",
-	"project:manage":             "project.manage",
-	"project:read":               "project.read",
-	"project:update":             "project.update",
-	"skill:create":               "skill.create",
-	"skill:delete":               "skill.delete",
-	"skill:list":                 "skill.list",
-	"skill:read":                 "skill.read",
-	"skill:register":             "skill.register",
-	"skill:update":               "skill.update",
-	"template:create":            "template.create",
-	"template:delete":            "template.delete",
-	"template:list":              "template.list",
-	"template:read":              "template.read",
-	"template:update":            "template.update",
-	"user:invite":                "user.invite",
-	"user:list":                  "user.list",
-	"user:read":                  "user.read",
+	"access_constraint:manage":     "access_constraint.admin",
+	"access_constraint:read":       "access_constraint.read",
+	"agent:attach":                 "agent.attach",
+	"agent:create":                 "agent.create",
+	"agent:delete":                 "agent.delete",
+	"agent:grant_hub_mode":         "agent.grant_hub_mode",
+	"agent:identity_token":         "agent.identity_token",
+	"agent:lifecycle":              "agent.lifecycle",
+	"agent:list":                   "agent.list",
+	"agent:log_append":             "agent.log_append",
+	"agent:message":                "agent.message",
+	"agent:notify":                 "agent.notify",
+	"agent:port_access":            "agent.port_access",
+	"agent:port_forward":           "agent.port_forward",
+	"agent:read":                   "agent.read",
+	"agent:set_message_mode":       "agent.set_message_mode",
+	"agent:status_update":          "agent.status_update",
+	"agent:stop_all":               "agent.stop_all",
+	"agent:token_refresh":          "agent.token_refresh",
+	"agent:update":                 "agent.update",
+	"broker:create":                "broker.create",
+	"broker:delete":                "broker.delete",
+	"broker:dispatch":              "broker.dispatch",
+	"broker:list":                  "broker.list",
+	"broker:read":                  "broker.read",
+	"broker:update":                "broker.update",
+	"gcp_service_account:assign":   "gcp_service_account.assign",
+	"gcp_service_account:create":   "gcp_service_account.create",
+	"gcp_service_account:delete":   "gcp_service_account.delete",
+	"gcp_service_account:list":     "gcp_service_account.list",
+	"gcp_service_account:mint":     "gcp_service_account.mint",
+	"gcp_service_account:read":     "gcp_service_account.read",
+	"gcp_service_account:verify":   "gcp_service_account.verify",
+	"group:addMember":              "group.addMember",
+	"group:create":                 "group.create",
+	"group:delete":                 "group.delete",
+	"group:list":                   "group.list",
+	"group:read":                   "group.read",
+	"group:removeMember":           "group.removeMember",
+	"group:update":                 "group.update",
+	"harness_config:create":        "harness_config.create",
+	"harness_config:delete":        "harness_config.delete",
+	"harness_config:list":          "harness_config.list",
+	"harness_config:read":          "harness_config.read",
+	"harness_config:update":        "harness_config.update",
+	"hub:execute":                  "hub.maintenance.execute",
+	"hub:manage":                   "hub.audit.read",
+	"hub:read":                     "hub.settings.read",
+	"hub:update":                   "hub.settings.update",
+	"policy:create":                "policy.create",
+	"policy:delete":                "policy.delete",
+	"policy:list":                  "policy.list",
+	"policy:read":                  "policy.read",
+	"policy:update":                "policy.update",
+	"project:clone":                "project.clone",
+	"project:create":               "project.create",
+	"project:delete":               "project.delete",
+	"project:list":                 "project.list",
+	"project:manage":               "project.manage",
+	"project:read":                 "project.read",
+	"project:register":             "project.register",
+	"project:secret_read":          "project.secret_read",
+	"project:set_messaging_policy": "project.set_messaging_policy",
+	"project:update":               "project.update",
+	"quota:create":                 "quota.create",
+	"quota:delete":                 "quota.delete",
+	"quota:read":                   "quota.read",
+	"quota:update":                 "quota.update",
+	"role:create":                  "role.create",
+	"role:delete":                  "role.delete",
+	"role:read":                    "role.read",
+	"role:update":                  "role.update",
+	"role_binding:create":          "role_binding.create",
+	"role_binding:delete":          "role_binding.delete",
+	"role_binding:read":            "role_binding.read",
+	"scheduled_event:create":       "scheduled_event.create",
+	"scheduled_event:delete":       "scheduled_event.delete",
+	"scheduled_event:list":         "scheduled_event.list",
+	"scheduled_event:read":         "scheduled_event.read",
+	"scheduled_event:update":       "scheduled_event.update",
+	"skill:create":                 "skill.create",
+	"skill:create_global":          "skill.create_global",
+	"skill:delete":                 "skill.delete",
+	"skill:list":                   "skill.list",
+	"skill:read":                   "skill.read",
+	"skill:register":               "skill.register",
+	"skill:update":                 "skill.update",
+	"template:create":              "template.create",
+	"template:delete":              "template.delete",
+	"template:list":                "template.list",
+	"template:read":                "template.read",
+	"template:update":              "template.update",
+	"user:delete":                  "user.delete",
+	"user:invite":                  "user.invite",
+	"user:list":                    "user.list",
+	"user:promote":                 "user.promote",
+	"user:read":                    "user.read",
+	"user:suspend":                 "user.suspend",
+	"user:update":                  "user.update",
 }
 
 // NormalizeLegacyUATScopes maps a CeilingVersionUnspecified row's raw stored
 // Scopes to canonical permission IDs using the frozen snapshot above, never
-// the live, mutable ResolveSelector: a scope grants exactly the one
-// permission it names, and no scope implies another.
+// the live, mutable Registry: a scope grants exactly the one permission it
+// names, and no scope implies another.
 //
 // A scope with no entry (never valid, or valid only after this snapshot was
 // taken) is dropped rather than denying the whole ceiling: dropping an

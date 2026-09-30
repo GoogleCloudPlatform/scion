@@ -77,6 +77,7 @@ var decorationGuardAllowed = map[string]bool{
 
 	// Function/method-level carriage and rendering points.
 	"identity.go:NewScopedUserIdentityWithDecoration":            true,
+	"identity.go:NewScopedUserIdentityWithCeilingAndDecoration":  true,
 	"identity.go:(*ScopedUserIdentity).Decoration":               true,
 	"useraccesstoken.go:(*UserAccessTokenService).ValidateToken": true,
 	"authz.go:credentialContextForIdentity":                      true,
