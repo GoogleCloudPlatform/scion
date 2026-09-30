@@ -2666,13 +2666,11 @@ type DecisionAuditRecord struct {
 	// are the ones that set it.
 	ExecutorKind string
 	ExecutorID   string
-	// DeniedBy is B.1/B.2's typed denial-source string, recorded verbatim
-	// when the deciding code sets it on the Decision (ruling: "Decision.DeniedBy
-	// is a typed string ... recorded verbatim in a denied_by column"). The
-	// aggregated list-filter record (G) leaves it empty by agreement. This
-	// column is additive and unpopulated as of E.2a: Decision.DeniedBy does
-	// not exist on this branch's Decision type yet (B.1 has not merged) — see
-	// the E.2a handoff note's follow-up.
+	// DeniedBy is the Decision's typed denial-source string (hub.DeniedBy),
+	// recorded verbatim by Decide's single audit exit through
+	// BuildDecisionAuditRecord, for example "delegation_ceiling". It is empty
+	// on allow and on a deny not attributed to a named stage. The aggregated
+	// list-filter record (G) leaves it empty by agreement.
 	DeniedBy string
 }
 

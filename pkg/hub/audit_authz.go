@@ -118,6 +118,7 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		MatchedGrant:   decision.MatchedGrant,
 		PolicyID:       decision.BindingID,
 		CorrelationID:  logging.RequestIDFromContext(ctx),
+		DeniedBy:       string(decision.DeniedBy),
 	}
 
 	if route := routeFromContext(ctx); route != "" {
