@@ -171,8 +171,12 @@ func TestDirectRawConversationID_RecipientInDMKey_Accepted(t *testing.T) {
 // the supplied recipient (so the pre-existing thread_id/recipient ownership
 // check passes), but the conversation being asserted (by raw conversation_id
 // or by conversation_ref) is a DIFFERENT direct conversation whose DM key
-// does not include that recipient. The recipient check must still apply and
-// reject identically on both paths.
+// does not include that recipient. The dm: thread_id consistency check
+// (ptone/scion#2211, checkDirectThreadIDMatchesDMKey) runs first and rejects
+// the request before the recipient check; the test pins a 400 on both
+// paths. See also TestDirectConversation_ThreadIDMismatch_Rejected_RawConvID
+// (handlers_outbound_dm_thread_recipient_test.go), which isolates the
+// thread_id check on its own.
 // ---------------------------------------------------------------------------
 
 func TestDirectConversation_ThreadID_RecipientMismatch_SameOnBothPaths(t *testing.T) {
