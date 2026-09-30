@@ -1,4 +1,4 @@
-# Project Log: Agent-lookup error disclosure and comment hygiene
+# Project Log: Agent-lookup error disclosure
 
 **Date:** 2026-09-30
 
@@ -6,8 +6,7 @@
 
 Closed a disclosure gap in the broker's stop/restart handlers, where a
 container-runtime listing failure's own error text reached the HTTP
-response body, and brought a set of comments describing removed or
-relocated code back in line with what the code at this tip actually does.
+response body.
 
 ## Agent-lookup error disclosure
 
@@ -25,21 +24,3 @@ relocated code back in line with what the code at this tip actually does.
   (`execCommand`, `resetAuth`, the PTY attach and control-channel paths) was
   checked and already maps a listing failure to a fixed body or an internal
   enum with no error text in it.
-
-## Comment and test hygiene
-
-- Several comments across `pkg/sciontool/dirfd`, `pkg/sciontool/hooks`,
-  `pkg/sciontool/rootexec`, `pkg/sciontool/supervisor`,
-  `pkg/sciontool/services`, `pkg/sciontool/hub`, `cmd/sciontool/commands`,
-  and `cmd` stated a code property by contrasting it with an earlier
-  implementation, or named a symbol that lives in a different package at
-  this tip. Each now states the current property directly.
-- `scion_harness.py`'s two atomic-write comments read the same way, and the
-  per-harness generated copies are regenerated to match.
-- `cmd/sciontool/commands/init_test.go`'s `captureStderr` helper sets
-  `os.Stderr` back to its original value via `t.Cleanup`, so a failing
-  assertion inside the captured function still puts it back for the rest of
-  the suite.
-- `TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID` covers
-  every combination of a non-positive uid or gid the `uid > 0 && gid > 0`
-  guard is meant to reject, not only `(0, 0)`.

@@ -18,10 +18,12 @@ broker logic without hardcoding a single runtime's assumptions.
   guard so a root-context subprocess never resolves a bare command name
   against an inherited, workload-influenceable `PATH`.
 - Routed the agent token, GitHub token, log file, scion-env file,
-  agent-limits file, shared-workspace gitconfig, and harness exit-code file
-  through these primitives, closing symlink, hard-link, and FIFO races a
-  root-owned process is otherwise exposed to against a directory the
-  workload owns.
+  agent-limits file, and harness exit-code file through these primitives,
+  closing symlink, hard-link, and FIFO races a root-owned process is
+  otherwise exposed to against a directory the workload owns.
+  Shared-workspace `git config` runs as the workload identity
+  (`SysProcAttr.Credential`), refusing outright when privilege drop is
+  required but no usable uid/gid exists.
 - `sciontool init`'s host-user setup, git clone, and shared-workspace git
   configuration now resolve `git`, `iptables`, and `pgrep` by fixed path
   instead of the ambient `PATH`, and `doctor`'s git status check refuses to
@@ -66,10 +68,11 @@ broker logic without hardcoding a single runtime's assumptions.
 
 - `attachSupportedByBroker` no longer defaults to "supported" when the
   runtime broker's point-GET fails. It falls back to matching the same
-  broker by ID in the `RuntimeBrokers().List` response, and only refuses
-  before dialing (fixed message, no raw server text) when neither read can
-  produce the record. A record read by either path keeps the existing
-  profile-then-broker-wide ruling unchanged. The LIST fallback's pagination
+  broker by ID in the `RuntimeBrokers().List` response. It refuses before
+  dialing (fixed message, no raw server text) only when a record read by
+  either path says attach is unsupported; when neither read produces the
+  record, the CLI proceeds to dial and the broker's own gate (4501 close /
+  501 `runtime_attach_unsupported`) stays authoritative. The LIST fallback's pagination
   has a page cap and stops on a repeated cursor, so a misbehaving response
   can't turn one attach call into an unbounded loop; the point-GET and LIST
   errors discarded from the user-facing message are debug-logged for
