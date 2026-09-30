@@ -295,18 +295,48 @@ convention for the same callee elsewhere in the repo, rather than accepted or re
 
 | # | Location | Disposition | Why |
 |---|---|---|---|
-| 6 | `handlers_quota.go:472-486`, nil `limitDef` in `createEntitlement` | DECLINED | `GetLimitDefinition`'s only implementation (`quota_store.go:115-123`) never returns `(nil, nil)` — `entLimitDefinitionToStore` (`:42-54`) always allocates. Four pre-existing call sites in this same file (`:313,359,415,668`) and `quota.go:307` all skip the guard. |
+| 6 | `handlers_quota.go:472-486`, nil `limitDef` in `createEntitlement` | DECLINED | `GetLimitDefinition`'s only implementation (`quota_store.go:115-125`) never returns `(nil, nil)` — `entLimitDefinitionToStore` (`:42-54`) always allocates. Four pre-existing call sites in this same file use the result with no guard beyond the same `err != nil` check: `getLimitDefinition` (`:314-323`, passed straight to `writeJSON`, no field access at all), `updateLimitDefinition`'s `existing` (`:359-373`), `deleteLimitDefinition`'s `def` (`:415-426`), `getUsageByLimit`'s `def` (`:668-688`, also passed straight through with no field access); `quota.go:307-315` does the same for the sibling call. |
 | 7 | `handlers_quota.go:584-593`, nil `limitDef` in `updateEntitlement` | DECLINED | Same contract and convention as item 6 — the second of the two call sites this PR added. |
-| 8 | `boot_broker_quota_bindings_to_settings.go:103`, nil `limitDef` from `GetLimitDefinitionByName` | DECLINED | Same non-nil guarantee via `entLimitDefinitionToStore`. `broker_quota.go:179` uses the identical call with no guard. (Noted honestly: `quota.go`'s `Reserve`/`Release` *do* add a defensive guard there, treating it as "no limit configured" — the exception, not the rule, and not the right semantics for a migration that only proceeds once the limit is confirmed to exist.) |
-| 9 | `boot_broker_quota_bindings_to_settings.go:111`, nil `b` in the grouping loop | DECLINED | `ListEntitlementBindings`'s only implementation (`quota_store.go:231-248`) builds every element via `entEntitlementBindingToStore` (`:56-68`, always non-nil) from ent's own `.All(ctx)`, which never contains nil elements. `quota.go`'s four binding-iteration sites (`:230,250,264,320`) never guard nil elements either. |
-| 10 | `boot_broker_quota_bindings_to_settings.go:154`, nil `existing` with `err == nil` | DECLINED | `GetBrokerSettings`'s only implementation (`brokersetting_store.go:77-85`) always returns a non-nil `entBrokerSettingToStore(row)` (`:62-74`) on success. P2.1's own `broker_capacity.go:111-121` dereferences the identical call's result with no guard. |
-| 11 | `maxAgentsFromBindings`, nil `b` | DECLINED | Same contract/convention as item 9 — every slice passed in is sourced from the same non-nil-guaranteed `ListEntitlementBindings` grouping. |
-| 12 | `entitlementBindingIDs`, nil `b` | DECLINED | Same contract/convention as item 9. |
+| 8 | `boot_broker_quota_bindings_to_settings.go:103`, nil `limitDef` from `GetLimitDefinitionByName` | DECLINED | Same non-nil guarantee via `entLimitDefinitionToStore` (`quota_store.go:128-136,42-54`). `broker_quota.go:179-184` uses the identical call with no guard. (Noted honestly: `quota.go`'s `Reserve` (`:103-112`) and `Release` (`:346-355`) *do* add a defensive guard there, treating it as "no limit configured" — the exception, not the rule, and not the right semantics for a migration that only reaches this line after a successful lookup.) |
+| 9 | `boot_broker_quota_bindings_to_settings.go:111`, nil `b` in the grouping loop | DECLINED | `ListEntitlementBindings`'s only implementation (`quota_store.go:231-248`) builds every element via `entEntitlementBindingToStore` (`:56-68`, always non-nil) from ent's own `.All(ctx)`, which never contains nil elements. `quota.go`'s five binding-iteration loops (`:265-269,285-289,298-302,320-324,328-332`) never guard nil elements either. |
+| 10 | `boot_broker_quota_bindings_to_settings.go:154`, nil `existing` with `err == nil` | DECLINED | `GetBrokerSettings`'s only implementation (`brokersetting_store.go:71-79`) always returns a non-nil `entBrokerSettingToStore(row)` (`:56-68`) on success. P2.1's own `broker_capacity.go:111-121` dereferences the identical call's result (`rec.Settings.MaxAgents` at `:118`) with no guard. |
+| 11 | `maxAgentsFromBindings`, nil `b` | DECLINED | Same contract/convention as item 9, plus a local proof: the grouping loop at `boot_broker_quota_bindings_to_settings.go:111-112` already dereferences every element's `ScopeType`/`ScopeID` before any of them reach `byBroker` — the source of this function's argument — so a nil guard here would be unreachable dead code. |
+| 12 | `entitlementBindingIDs`, nil `b` | DECLINED | Same contract/convention and the same local proof as item 11. |
 
-No fixes were needed, so no code commit was made for this round — this project-log update is the
-only change, plus the reply-draft file above (outside the repo). Gates run: `git log --format=%B
-upstream-main..HEAD \| grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'` (clean); the same grep over this log file
-and the reply-draft file (clean, after rewording two internal table cross-references from `#6`/`#9`
-to `item 6`/`item 9` so they wouldn't false-positive as issue refs). No `gh` calls beyond the one
-batched fetch of the seven review-comment bodies by ID, and no CI watch, per the EM's instruction to
-keep `gh` usage minimal.
+No fixes were needed, so no code commit was made for this round — the project-log update(s) are the
+only changes, plus the reply-draft file above (outside the repo). Gates run: `git log --format=%B
+upstream-main..HEAD | grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'` (clean) and the same grep over this log
+file and the reply-draft file. The first version of this section failed that last check — it named
+two internal table cross-references using the literal digraphs, which the grep pattern matches inside
+backticks even though GitHub does not autolink code spans; reworded them to "item 6"/"item 9" so the
+grep is actually clean, not just "clean except for the two things this sentence used to point at". No
+`gh` calls beyond the one batched fetch of the seven review-comment bodies by ID, and no CI watch, per
+the EM's instruction to keep `gh` usage minimal.
+
+### Round 1 citation fixes (broker-settings-rev-up2142-1)
+
+Independent review agreed with all seven dispositions on substance (7/7 AGREE) but found several line
+citations had drifted from the numbers first noted and returned REQUEST CHANGES limited to text. Full
+review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-up2142-1.md`.
+Every citation below was re-checked directly against the branch head, not copied from the reviewer's
+numbers:
+
+- **R1 (fixed):** item 6's `handlers_quota.go` citations were off by a small, consistent drift
+  (`363/418/672` instead of `359/415/668`), and the claim that all four sites "dereference the result
+  immediately" was inaccurate — `getLimitDefinition` and `getUsageByLimit` never dereference a field
+  at all (they pass the pointer straight into `writeJSON`/a response struct); only
+  `updateLimitDefinition` and `deleteLimitDefinition` read a field (`.System`), and only a few lines
+  after the fetch, not immediately. Reworded to state this precisely; corrected to `314-323, 359-373,
+  415-426, 668-688`.
+- **R2 (fixed):** `quota.go`'s binding-loop citations for items 9, 11, 12 were wrong (`230,250,264,320`
+  instead of the actual `265,285,298,320,328`); `brokersetting_store.go`'s citations for item 10 were
+  wrong (`77-85`/`62-74` instead of `71-79`/`56-68`); item 8's `GetLimitDefinitionByName` range was
+  off by two lines (`126-134` instead of `128-136`). All corrected in both this table and the reply
+  drafts.
+- **R3 (fixed):** this table now cites the same lines as `upstream-replies-2142.md` — both were wrong
+  in the same way before, so both needed the same fix, made together in this commit.
+- **Optional, done:** items 11 and 12 now also cite the stronger, local argument the reviewer
+  suggested — the grouping loop dereferences every element before either helper is ever called, so a
+  guard inside them would be unreachable.
+
+No production code changed in this fixup either — same as the first pass, this is text-only.
