@@ -270,6 +270,12 @@ func (s *Server) createLimitDefinition(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	if req.ResourceType == "" {
+		BadRequest(w, "resource type is required")
+		return
+	}
+
 	if req.DefaultValue < 0 {
 		BadRequest(w, "default_value must be non-negative (0 means unlimited)")
 		return
@@ -375,11 +381,11 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			BadRequest(w, "resource type is required")
 			return
 		}
+		// unit is trimmed but not required: createLimitDefinition accepts an
+		// empty unit (the admin UI treats it as optional, rendering "—"),
+		// and unit is not read by quota resolution, so requiring it here
+		// would make existing empty-unit rows permanently uneditable.
 		req.Unit = strings.TrimSpace(req.Unit)
-		if req.Unit == "" {
-			BadRequest(w, "unit is required")
-			return
-		}
 		existing.Name = req.Name
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
