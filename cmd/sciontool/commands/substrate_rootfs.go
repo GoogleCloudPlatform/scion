@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
@@ -265,7 +267,11 @@ func stripSetuidBitsNoFollow(path string) bool {
 		log.Error("fixupRootfsForScion: failed to stat %s: %v", dest, err)
 		return false
 	}
-	perm := st.Mode & 0o7777
+	// st.Mode's width is platform-dependent (uint32 on Linux, uint16 on
+	// darwin); normalize to uint32 up front so the bitwise ops below and
+	// the Fchmod call type-check identically on every platform this
+	// package builds for.
+	perm := uint32(st.Mode) & 0o7777
 	if perm&specialModeBits == 0 {
 		return false
 	}
@@ -301,7 +307,7 @@ func removeSudoersGrants(root string) (changed bool) {
 	defer func() { _ = syscall.Close(dirFd) }()
 
 	for _, name := range sudoersGrantNames {
-		if err := syscall.Unlinkat(dirFd, name); err != nil {
+		if err := unix.Unlinkat(dirFd, name, 0); err != nil {
 			if !os.IsNotExist(err) {
 				log.Error("fixupRootfsForScion: failed to remove %s/%s: %v", dirPath, name, err)
 			}
@@ -353,7 +359,9 @@ func fixupWorldWritableTmpDirSticky(dir string) bool {
 		return false
 	}
 
-	perm := st.Mode & 0o7777
+	// st.Mode's width is platform-dependent (uint32 on Linux, uint16 on
+	// darwin); normalize to uint32 up front, matching stripSetuidBitsNoFollow.
+	perm := uint32(st.Mode) & 0o7777
 	if perm&worldWritable == 0 || perm&sticky != 0 {
 		// Not world-writable, or already sticky: nothing to do.
 		return false
