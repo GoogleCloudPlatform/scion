@@ -115,7 +115,8 @@ upstream at time of writing). Design: `/scion-volumes/scratchpad/projects/broker
 
 ## Deliverables
 
-- Draft fork PR against `ptone/scion` `main` from `scion/broker-settings-p2-1`, stacked on PR
-  ptone/scion#2168 until it lands upstream.
+- PR ptone/scion#2275 against `ptone/scion` `main` from `scion/broker-settings-p2-1`, marked ready
+  for review. PR ptone/scion#2168 (GoogleCloudPlatform/scion#2097) squash-merged upstream and this
+  branch is rebased onto `upstream-main` on top of it.
 - This log entry.
 - `scion message` to `broker-settings-em` with PR number, head SHA, and the test evidence above.

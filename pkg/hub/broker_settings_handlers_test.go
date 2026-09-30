@@ -85,6 +85,12 @@ func TestBrokerSettings_Get_NoRowDefaults(t *testing.T) {
 	assert.EqualValues(t, def.DefaultValue, *resp.Effective.MaxAgents.Value)
 	assert.Equal(t, BrokerLimitSourceHubDefault, resp.Effective.MaxAgents.Source)
 	assert.True(t, resp.Capabilities.Update, "the dev/admin caller must be able to write")
+
+	// With no override in play, Inherited must agree with Effective (review
+	// round 3, F1): both resolve to the hub-wide default.
+	require.NotNil(t, resp.Effective.MaxAgents.Inherited.Value)
+	assert.EqualValues(t, def.DefaultValue, *resp.Effective.MaxAgents.Inherited.Value)
+	assert.Equal(t, BrokerLimitSourceHubDefault, resp.Effective.MaxAgents.Inherited.Source)
 }
 
 // =============================================================================
@@ -198,8 +204,14 @@ func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
 
 	// Re-sending the identical current value is a no-op for the stored
 	// value, so it needs no permission: this is the "either allowed or 403,
-	// pick one and test it" case from review round 1.
+	// pick one and test it" case from review round 1. It must also be a
+	// true no-op on an *existing* row (review round 3, F4/C1 coverage): no
+	// revision bump and no updatedBy rewrite, which would otherwise
+	// misattribute the admin-set value to the owner who merely re-sent it.
 	t.Run("identical value is allowed without permission", func(t *testing.T) {
+		before, err := s.GetBrokerSettings(context.Background(), broker.ID)
+		require.NoError(t, err)
+
 		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
 			"settings":         map[string]interface{}{"maxAgents": 3},
 			"expectedRevision": 1,
@@ -209,6 +221,9 @@ func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, got.Settings.MaxAgents)
 		assert.EqualValues(t, 3, *got.Settings.MaxAgents)
+		assert.Equal(t, before.Revision, got.Revision, "a no-op PUT must not bump the revision")
+		assert.Equal(t, before.UpdatedBy, got.UpdatedBy,
+			"a no-op PUT must not overwrite updatedBy with the re-sending caller's identity")
 	})
 }
 
@@ -566,6 +581,18 @@ func TestBrokerSettings_ClearOverrideFallsBackToHubDefault(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, setRec.Code, setRec.Body.String())
 
+	// While the override is active, Inherited must still report what
+	// clearing it would produce — the hub-wide default, not the override
+	// itself (review round 3, F1; design.md §5.6, R2).
+	var setResp BrokerSettingsResponse
+	require.NoError(t, json.Unmarshal(setRec.Body.Bytes(), &setResp))
+	require.NotNil(t, setResp.Effective.MaxAgents.Value)
+	assert.EqualValues(t, 1, *setResp.Effective.MaxAgents.Value)
+	assert.Equal(t, BrokerLimitSourceBroker, setResp.Effective.MaxAgents.Source)
+	require.NotNil(t, setResp.Effective.MaxAgents.Inherited.Value)
+	assert.EqualValues(t, def.DefaultValue, *setResp.Effective.MaxAgents.Inherited.Value)
+	assert.Equal(t, BrokerLimitSourceHubDefault, setResp.Effective.MaxAgents.Inherited.Source)
+
 	clearRec := doRequest(t, srv, http.MethodPut, settingsPath(brokerID), map[string]interface{}{
 		"settings":         map[string]interface{}{"maxAgents": nil},
 		"expectedRevision": 1,
@@ -579,6 +606,9 @@ func TestBrokerSettings_ClearOverrideFallsBackToHubDefault(t *testing.T) {
 	require.NotNil(t, settingsResp.Effective.MaxAgents.Value)
 	assert.EqualValues(t, def.DefaultValue, *settingsResp.Effective.MaxAgents.Value)
 	assert.Equal(t, BrokerLimitSourceHubDefault, settingsResp.Effective.MaxAgents.Source)
+	require.NotNil(t, settingsResp.Effective.MaxAgents.Inherited.Value)
+	assert.EqualValues(t, def.DefaultValue, *settingsResp.Effective.MaxAgents.Inherited.Value)
+	assert.Equal(t, BrokerLimitSourceHubDefault, settingsResp.Effective.MaxAgents.Inherited.Source)
 
 	providersRec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/providers", nil)
 	require.Equal(t, http.StatusOK, providersRec.Code, providersRec.Body.String())
@@ -679,6 +709,12 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 	require.NotNil(t, settingsResp.Effective.MaxAgents.Count,
 		"the settings response must include the live count (review round 1, F3), not leave the detail page to compute its own")
 	assert.EqualValues(t, 1, *settingsResp.Effective.MaxAgents.Count)
+	// Inherited must report the entitlement binding (30) — what clearing the
+	// override would fall back to — not the hub-wide default, since a
+	// matching system-scoped binding beats it (review round 3, F1).
+	require.NotNil(t, settingsResp.Effective.MaxAgents.Inherited.Value)
+	assert.EqualValues(t, 30, *settingsResp.Effective.MaxAgents.Inherited.Value)
+	assert.Equal(t, BrokerLimitSourceEntitlement, settingsResp.Effective.MaxAgents.Inherited.Source)
 
 	// Clear the override — the entitlement engine applies again. A
 	// system-scoped binding (30) is in effect, so the fallback is that
