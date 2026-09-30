@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Chat quick command palette fixture</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #chat-outlet,
+      #terminal-outlet {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+      /*
+       * `display: flex` above otherwise wins over the UA default
+       * `[hidden] { display: none }` rule (an inline style always outranks
+       * a plain element-selector rule of equal specificity that comes
+       * earlier in the cascade) — without this, hideChatShowTerminal()'s
+       * `chatOutlet.hidden = true` would leave chat fully laid out and
+       * visible, and a test relying on chat being genuinely hidden while
+       * the terminal is shown would never actually exercise that.
+       */
+      #chat-outlet[hidden],
+      #terminal-outlet[hidden] {
+        display: none;
+      }
+      scion-page-chat {
+        width: 100%;
+      }
+      scion-terminal-pane {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Mirrors main.ts: the route outlet is hidden (not the page itself)
+         while the terminal workspace is shown, and the chat page stays
+         mounted underneath. -->
+    <div id="chat-outlet"></div>
+    <div id="terminal-outlet" hidden></div>
+    <script type="module" src="./fixture.ts"></script>
+  </body>
+</html>

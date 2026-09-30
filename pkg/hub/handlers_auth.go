@@ -1426,96 +1426,90 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		if user.Role == "admin" {
 			s.ensureSuperAdminBinding(ctx, user.ID)
 		}
-	} else {
-		// Reject suspended users (covers both OAuth and proxy auth paths)
-		if user.Status == "suspended" {
-			slog.Warn("login rejected: user is suspended", "email", info.Email, "user_id", user.ID)
-			return nil, ErrUserSuspended
+		// Make the hub-members group and hub-viewer binding match the role
+		// now, so the user's first request already has the right hub
+		// permissions. Best-effort: a grant write failure degrades the
+		// session but must not fail the login; the startup backfill repairs
+		// it.
+		if err := syncHubRoleGrants(ctx, s.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
+			slog.Warn("failed to sync hub role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
 		}
+		return user, nil
+	}
 
-		// Track whether we need to create or delete a super-admin
-		// RoleBinding. The actual mutation is deferred until after
-		// UpdateUser succeeds so that a failed UpdateUser cannot leave
-		// the binding state diverged from User.Role.
-		var bindingSuperAdmin string // "", "ensure", or "delete"
+	// Existing record: apply the same live sign-in policy and account-state
+	// handling every sign-in path shares (see applyLiveSignInPolicy in
+	// sign_in_policy.go). The sign-in policy was already checked above for
+	// both branches of this function, so preAuthorized=true here — the
+	// helper still enforces suspension unconditionally.
+	user, err = applyLiveSignInPolicy(ctx, s.signInPolicyDeps(), user, info.DisplayName, info.AvatarURL, true, signInPolicyPersistOpts{AlwaysPersist: true})
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
 
-		if user.Status == store.UserStatusInvited {
-			// Transition invited → active on first login
-			slog.Info("user activated from invited state", "email", info.Email, "user_id", user.ID)
-			user.Status = store.UserStatusActive
-			if info.DisplayName != "" {
-				user.DisplayName = info.DisplayName
-			}
-			if info.AvatarURL != "" {
-				user.AvatarURL = info.AvatarURL
-			}
-			user.LastLogin = time.Now()
-			oldRole := user.Role
+// signInPolicyDeps returns the applyLiveSignInPolicy callbacks backed by
+// this Server's config and store. Used by provisionUser for the
+// existing-record case; kept faithful to provisionUser's pre-refactor
+// inline logic field for field.
+func (s *Server) signInPolicyDeps() signInPolicyDeps {
+	return signInPolicyDeps{
+		authorize: s.isUserAuthorized,
+		activationRole: func(ctx context.Context, email, currentRole, userID string) string {
 			// The stored role on an invited row is a placeholder (invites
 			// carry no role), so evaluate as a brand-new user: admin if in
 			// admin_emails, otherwise the current default_user_role. The one
-			// carve-out is a pending invite that was already promoted through
-			// the admin UI; keep that admin.
-			activationRole := ""
-			uiPromoted := user.Role == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, user.ID)
+			// carve-out is a pending invite that was already promoted
+			// through the admin UI; keep that admin.
+			activation := ""
+			uiPromoted := currentRole == store.UserRoleAdmin && hasUIPromotedBinding(ctx, s.store, userID)
 			if uiPromoted {
-				activationRole = user.Role
+				activation = currentRole
 			}
-			user.Role = determineUserRole(info.Email, s.AdminEmails(), activationRole, s.demotionSafe.Load(), uiPromoted, s.DefaultUserRole())
-			if oldRole == "admin" && user.Role != "admin" {
-				bindingSuperAdmin = "delete"
-			} else if user.Role == "admin" && oldRole != "admin" {
-				bindingSuperAdmin = "ensure"
-			}
-			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, info.Email, "", user.ID, info.Email, nil)
-		} else {
-			// Update last login and backfill profile
-			user.LastLogin = time.Now()
-			if info.AvatarURL != "" && user.AvatarURL == "" {
-				user.AvatarURL = info.AvatarURL
-			}
-			if info.DisplayName != "" && user.DisplayName == "" {
-				user.DisplayName = info.DisplayName
-			}
-			// Re-evaluate admin status on every login.
+			return determineUserRole(email, s.AdminEmails(), activation, s.demotionSafe.Load(), uiPromoted, s.DefaultUserRole())
+		},
+		roleFor: func(ctx context.Context, email, currentRole, userID string) string {
+			// Re-evaluate admin status on every sign-in.
 			// D11-fix2: when demotion actually happens (admin → non-admin),
-			// also delete the super-admin binding so IsSystemAdmin immediately
-			// agrees with IsUnscopedLocalPlatformAdmin. The empty-list guard
-			// is inherited: determineUserRole refuses to demote when AdminEmails
-			// is nil/empty, so oldRole == newRole and this branch is skipped.
-			if newRole := s.getUserRole(ctx, info.Email, user.Role, user.ID); user.Role != newRole {
-				oldRole := user.Role
-				slog.Info("User role changed on login", "email", info.Email, "old_role", oldRole, "new_role", newRole)
-				user.Role = newRole
-				if oldRole == "admin" {
-					bindingSuperAdmin = "delete"
-				} else if newRole == "admin" {
-					bindingSuperAdmin = "ensure"
-				}
+			// also delete the super-admin binding so IsSystemAdmin
+			// immediately agrees with IsUnscopedLocalPlatformAdmin. The
+			// empty-list guard is inherited: determineUserRole refuses to
+			// demote when AdminEmails is nil/empty.
+			return s.getUserRole(ctx, email, currentRole, userID)
+		},
+		UpdateUser:              s.store.UpdateUser,
+		ensureSuperAdminBinding: s.ensureSuperAdminBinding,
+		deleteSuperAdminBinding: s.deleteSuperAdminBinding,
+		syncGrants: func(ctx context.Context, userID, role string) error {
+			return syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+		},
+		auditActivated: func(ctx context.Context, email, userID string) {
+			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
+		},
+		// auditDenied mirrors provisionUser's own denial-reason logic above.
+		// provisionUser calls the helper with preAuthorized=true, so this
+		// only fires from a caller (the resolver) that passes
+		// preAuthorized=false and fails the authorize check — provisionUser
+		// itself already audited its denial before ever reaching the helper,
+		// so there is no double-audit for that path.
+		//
+		// Volume note: the external-bearer path validates a cached credential
+		// on every request, so a token that keeps failing the sign-in policy
+		// writes one denial record per request for as long as the caller
+		// keeps presenting it. That is accepted deliberately: a policy
+		// denial is exactly the kind of event the audit trail exists to
+		// capture, an unauthorized caller retrying is expected to stop or be
+		// blocked at a layer above this one, and de-duplicating here would
+		// mean dropping legitimate repeat-denial records.
+		auditDenied: func(ctx context.Context, email string) {
+			reason := "not_on_allow_list"
+			if s.UserAccessMode() != "invite_only" {
+				reason = "domain_not_authorized"
 			}
-		}
-		if err := s.store.UpdateUser(ctx, user); err != nil {
-			slog.Error("failed to update user on login", "email", info.Email, "user_id", user.ID, "error", err)
-			return nil, fmt.Errorf("update user: %w", err)
-		}
-		// Apply binding changes only after UpdateUser has succeeded.
-		switch bindingSuperAdmin {
-		case "ensure":
-			s.ensureSuperAdminBinding(ctx, user.ID)
-		case "delete":
-			s.deleteSuperAdminBinding(ctx, user.ID)
-		}
+			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email, reason)
+		},
 	}
-
-	// Make the hub-members group and hub-viewer binding match the role now,
-	// so the user's first request already has the right hub permissions.
-	// Best-effort: a grant write failure degrades the session but must not
-	// fail the login; the startup backfill repairs it.
-	if err := syncHubRoleGrants(ctx, s.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-		slog.Warn("failed to sync hub role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
-	}
-
-	return user, nil
 }
 
 // generateID generates a new UUID.

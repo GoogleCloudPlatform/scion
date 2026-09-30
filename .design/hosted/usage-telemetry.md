@@ -1,9 +1,10 @@
 # Design: holistic harness usage telemetry (fork issue ptone/scion#2053)
 
-Status: Agreed design (revision 4). Phases 1 and 2 (the Claude vertical slice, the canonical
-usage contract, the dashboard cumulative-math fix, and hook-side usage alignment) are
-implemented; phases 0, 3 and 4 (native-OTel routing, per-harness usage rules, build provenance)
-are follow-up work tracked against ptone/scion#2053.
+Status: Agreed design (revision 4). Phases 1, 2 and 3c (the Claude vertical slice, the canonical
+usage contract, the dashboard cumulative-math fix, hook-side usage alignment, and Codex native
+usage) are implemented; phases 0, 3a, 3b, 3d and 4 (native-OTel routing for copilot/grok-build,
+the remaining per-harness usage rules, build provenance) are follow-up work tracked against
+ptone/scion#2053.
 Updated: 2026-09-29.
 
 ptone agreed to every decision D1–D11. The opencode refinement from source investigation (§3.7) implements D9 as directed.
@@ -200,7 +201,7 @@ type UsageDeriver struct {
   - **Rewrite `scion-bridge.js`** to subscribe through the generic `event` hook, filtering in JS *before* `execSync`, because `message.part.delta` fires per chunk.
   - **Usage:** on `message.part.updated` with `part.type=="step-finish"`, emit one model-end carrying `tokens.{input,output,reasoning,cache.read,cache.write}`, deduped on `(sessionID, part.messageID, part.id)`. Fork replays are excluded by counting only parts whose message was seen live. The model is joined from the parent assistant message's `providerID/modelID`, which the bridge caches from `message.updated`.
   - **Token mapping:** OpenCode stores exclusive values, so input→`input`, output→`output`, reasoning→`reasoning`, cache.read→`cache_read`, cache.write→`cache_write`. Canonical `output` includes reasoning, so the mapping emits `output + reasoning` as `output` and `reasoning` informationally. All-zero tokens with `total` undefined mean unknown: count the call, emit no tokens.
-  - **Same rewrite for the other events:** route `session.idle`, `session.created`, `session.error` and `permission.*` through the event hook, and fix the tool args (`output.args`) and tool success.
+  - **Same rewrite for the other events:** route `session.idle`, `session.created`, `session.error` and `permission.*` through the event hook, and fix the tool args (`output.args`) and tool success. `session.error` is received through the event hook but emits nothing: turn end is `session.idle` after a `session.status` busy (or retry), never `session.error` itself, so a recoverable error or user abort does not end a turn twice.
   - ~~**Pin `opencode-ai`** in `harnesses/opencode/Dockerfile`~~ **Superseded by D11:** no pin. Record the fixture's CLI version in the test (1.18.32 was the version investigated). Confirm with ptone at P3b start.
   - **Known undercount:** calls that produce no step-finish (failed or retried attempts, aborts, title and agent generation). This is consistent with the contract's "completed model responses" meaning.
   - **Alternative rejected for now:** OpenCode's `experimental.openTelemetry` spans. They cover all provider calls, including title generation, but need OTLP/HTTP **JSON** support in the receiver (today protobuf only, `receiver.go:319-321`) plus a span-derivation rule, and they carry `session.id`. That is noted as a possible follow-up.
