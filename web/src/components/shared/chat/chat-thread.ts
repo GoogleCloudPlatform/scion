@@ -1910,10 +1910,13 @@ export class ScionChatThread extends LitElement {
   /**
    * Handle a read-watermark change arriving over SSE. This fires for two
    * different things sharing one event: a DM peer's watermark advancing
-   * (render the "Seen" tick), and the caller's OWN watermark moving on
-   * another axis — today that only ever means mark-unread, since normal
-   * /read only self-notifies via this tab's own advanceReadWatermark, not
-   * over SSE. The userId tells them apart.
+   * (render the "Seen" tick), and the caller's OWN watermark moving via
+   * mark-unread. The `unread` field is the sole discriminator for the
+   * latter — NOT the userId match. userId alone would also be true for any
+   * future self-notifying /read (round-1 review R1): today normal /read
+   * never self-notifies over SSE, so that coincidence used to be load-
+   * bearing. A self-targeted event without `unread: true` is neither a peer
+   * tick nor a mark-unread — it is ignored, not misapplied as either.
    */
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = {
@@ -1921,6 +1924,7 @@ export class ScionChatThread extends LitElement {
       userId?: string;
       messageId?: string;
       readAt?: string;
+      unread?: boolean;
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ReadStateData } & ReadStateData)
@@ -1928,7 +1932,9 @@ export class ScionChatThread extends LitElement {
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData || eventData.conversationKey !== this.conversationKey) return;
     if (eventData.userId && eventData.userId === this.selfUserId()) {
-      this.handleOwnReadStateChanged();
+      if (eventData.unread === true) {
+        this.handleOwnReadStateChanged();
+      }
       return;
     }
     if (!eventData.messageId) return;
@@ -1941,7 +1947,24 @@ export class ScionChatThread extends LitElement {
    * simply having it open does not immediately undo the mark-unread.
    */
   private handleOwnReadStateChanged(): void {
+    this.suppressAutoAdvance();
+  }
+
+  /**
+   * Suppress auto-advance immediately. Called from two places: the SSE path
+   * above (other tabs, and this one on the round trip back), and directly by
+   * the chat page right after this tab's own "Mark unread" POST succeeds —
+   * the same-tab case must not wait on the SSE echo (round-1 review O2). Also
+   * cancels any debounce timer already in flight, closing the race where a
+   * message arrived and armed the 1s debounce just before the mark-unread
+   * (round-1 review O1 covers the case where the timer is armed afterward).
+   */
+  suppressAutoAdvance(): void {
     this._autoAdvanceSuppressed = true;
+    if (this._readDebounceTimer) {
+      clearTimeout(this._readDebounceTimer);
+      this._readDebounceTimer = null;
+    }
   }
 
   /** Record the peer watermark and arm the auto-hide timer. */
@@ -2489,6 +2512,14 @@ export class ScionChatThread extends LitElement {
     // Debounce
     if (this._readDebounceTimer) clearTimeout(this._readDebounceTimer);
     this._readDebounceTimer = setTimeout(() => {
+      this._readDebounceTimer = null;
+      // Re-check: suppression can arrive after this callback is scheduled
+      // but before it fires (round-1 review O1) — a message arms this 1s
+      // debounce, then mark-unread lands mid-flight. suppressAutoAdvance
+      // already clears an in-flight timer when it runs first; this guard
+      // covers the case where the two land close enough that this callback
+      // is already queued before that clear takes effect.
+      if (this._autoAdvanceSuppressed) return;
       const messageId = this.lastReadableMessageId();
       if (messageId) {
         void this.advanceReadWatermark(messageId);

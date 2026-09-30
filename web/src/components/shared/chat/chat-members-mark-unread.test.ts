@@ -19,7 +19,9 @@
  *
  * The item only applies to a member with an existing, non-empty DM — hidden
  * for the caller themselves, for a member with no DM, and once the DM is
- * already unread.
+ * already unread (checked via the DM's own hasUnread, not the mute-filtered
+ * unreadFromIds dot list — round-1 review R2: a muted-but-unread DM must
+ * stay hidden too, not look eligible again because its dot is suppressed).
  */
 
 // @vitest-environment happy-dom
@@ -37,6 +39,8 @@ const apiFetchMock = vi.mocked(apiFetch);
 
 const AGENT = { id: 'agent-1', kind: 'agent' as const, displayName: 'Coder', slug: 'coder' };
 const HUMAN = { id: 'user-2', kind: 'user' as const, displayName: 'Bob' };
+const AGENT_DM_KEY = 'dm:agent:agent-1:user:user-1';
+const HUMAN_DM_KEY = 'dm:user:user-1:user:user-2';
 
 function createMembers(overrides: Record<string, unknown> = {}): any {
   const el = document.createElement('scion-chat-members') as any;
@@ -44,7 +48,10 @@ function createMembers(overrides: Record<string, unknown> = {}): any {
   el.agents = [AGENT];
   el.currentUserId = 'user-1';
   el.unreadFromIds = [];
-  el.dmKeyByPeerId = { [AGENT.id]: 'dm:agent:agent-1:user:user-1', [HUMAN.id]: 'dm:user:user-1:user:user-2' };
+  el.dmInfoByPeerId = {
+    [AGENT.id]: { key: AGENT_DM_KEY, muted: false, hasUnread: false },
+    [HUMAN.id]: { key: HUMAN_DM_KEY, muted: false, hasUnread: false },
+  };
   Object.assign(el, overrides);
   return el;
 }
@@ -63,7 +70,7 @@ afterEach(() => {
 });
 
 describe('members sidebar — mark unread eligibility', () => {
-  it('allows a member with an existing DM that is not already unread', () => {
+  it('allows a member with an existing, read DM', () => {
     const el = createMembers();
     expect(el.canMarkUnread(AGENT.id)).toBe(true);
   });
@@ -74,13 +81,32 @@ describe('members sidebar — mark unread eligibility', () => {
   });
 
   it('hides for a member with no DM', () => {
-    const el = createMembers({ dmKeyByPeerId: {} });
+    const el = createMembers({ dmInfoByPeerId: {} });
     expect(el.canMarkUnread(AGENT.id)).toBe(false);
   });
 
   it('hides once the DM is already unread', () => {
-    const el = createMembers({ unreadFromIds: [AGENT.id] });
+    const el = createMembers({
+      dmInfoByPeerId: { [AGENT.id]: { key: AGENT_DM_KEY, muted: false, hasUnread: true } },
+    });
     expect(el.canMarkUnread(AGENT.id)).toBe(false);
+  });
+
+  it('hides a muted DM that is already unread — the dot being suppressed must not make it look eligible', () => {
+    const el = createMembers({
+      dmInfoByPeerId: { [AGENT.id]: { key: AGENT_DM_KEY, muted: true, hasUnread: true } },
+    });
+    // Sanity: unreadFromIds (the dot list) has nothing for this peer, the
+    // way loadUnreadDMPeers would leave it for a muted-but-unread DM.
+    expect(el.unreadFromIds.includes(AGENT.id)).toBe(false);
+    expect(el.canMarkUnread(AGENT.id)).toBe(false);
+  });
+
+  it('allows a muted DM that is currently read — muting does not block the action, only the dot', () => {
+    const el = createMembers({
+      dmInfoByPeerId: { [AGENT.id]: { key: AGENT_DM_KEY, muted: true, hasUnread: false } },
+    });
+    expect(el.canMarkUnread(AGENT.id)).toBe(true);
   });
 });
 
@@ -91,12 +117,12 @@ describe('members sidebar — mark unread action', () => {
     await el.handleMarkUnread(AGENT.id);
 
     expect(apiFetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/conversations/' + encodeURIComponent('dm:agent:agent-1:user:user-1') + '/unread',
+      '/api/v1/chat/conversations/' + encodeURIComponent(AGENT_DM_KEY) + '/unread',
       expect.objectContaining({ method: 'POST' })
     );
   });
 
-  it('dispatches member-marked-unread on success', async () => {
+  it('dispatches member-marked-unread with the peerId and conversationKey on success', async () => {
     const el = createMembers();
     document.body.appendChild(el);
     const handler = vi.fn();
@@ -105,7 +131,10 @@ describe('members sidebar — mark unread action', () => {
     await el.handleMarkUnread(AGENT.id);
 
     expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler.mock.calls[0][0].detail).toEqual({ peerId: AGENT.id });
+    expect(handler.mock.calls[0][0].detail).toEqual({
+      peerId: AGENT.id,
+      conversationKey: AGENT_DM_KEY,
+    });
   });
 
   it('does not dispatch when the server refuses', async () => {
@@ -121,7 +150,7 @@ describe('members sidebar — mark unread action', () => {
   });
 
   it('is a no-op for a member with no DM key resolvable', async () => {
-    const el = createMembers({ dmKeyByPeerId: {} });
+    const el = createMembers({ dmInfoByPeerId: {} });
 
     await el.handleMarkUnread(AGENT.id);
 
@@ -145,7 +174,19 @@ describe('members sidebar — context menu gating', () => {
   });
 
   it('does not open the menu for an ineligible member (no DM)', () => {
-    const el = createMembers({ dmKeyByPeerId: {} });
+    const el = createMembers({ dmInfoByPeerId: {} });
+    const e = fakeEvent();
+
+    el.handleContextMenu(e, AGENT.id);
+
+    expect(e.preventDefault).not.toHaveBeenCalled();
+    expect(el.contextMenuTarget).toBeNull();
+  });
+
+  it('does not open the menu for a muted, already-unread member', () => {
+    const el = createMembers({
+      dmInfoByPeerId: { [AGENT.id]: { key: AGENT_DM_KEY, muted: true, hasUnread: true } },
+    });
     const e = fakeEvent();
 
     el.handleContextMenu(e, AGENT.id);

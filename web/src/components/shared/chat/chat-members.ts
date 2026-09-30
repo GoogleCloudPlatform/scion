@@ -203,12 +203,16 @@ export class ScionChatMembers extends LitElement {
   unreadFromIds: string[] = [];
 
   /**
-   * Map of DM peer ID → conversation key, for members with an existing,
-   * non-empty DM. Drives the "Mark unread" context-menu item: hidden for a
-   * member with no entry here (no DM exists, or it has no messages yet).
+   * Map of DM peer ID → DM info, for members with an existing, non-empty DM.
+   * Drives the "Mark unread" context-menu item: hidden for a member with no
+   * entry here (no DM exists, or it has no messages yet), or whose DM is
+   * already unread — checked here via `hasUnread` directly rather than via
+   * `unreadFromIds`, which deliberately excludes muted-but-unread DMs (the
+   * dot-suppression rule from #1029) and would otherwise make an
+   * already-unread muted DM look eligible again (round-1 review R2).
    */
   @property({ type: Object })
-  dmKeyByPeerId: Record<string, string> = {};
+  dmInfoByPeerId: Record<string, { key: string; muted: boolean; hasUnread: boolean }> = {};
 
   /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
   @state() private memberFilter: 'all' | 'unread' = 'all';
@@ -615,12 +619,16 @@ export class ScionChatMembers extends LitElement {
   /**
    * Whether "Mark unread" applies to this member: not the caller themselves
    * (moot for agents, and humans already exclude self from the list), an
-   * existing non-empty DM must exist, and it must not already be unread.
+   * existing non-empty DM must exist, and it must not already be unread —
+   * checked via the DM's own `hasUnread`, not `unreadFromIds` (that list
+   * excludes muted DMs regardless of their real unread state, so a muted DM
+   * that is already unread must still be hidden, not offered again).
    */
   private canMarkUnread(peerId: string): boolean {
     if (peerId === this.currentUserId) return false;
-    if (this.unreadFromIds.includes(peerId)) return false;
-    return !!this.dmKeyByPeerId[peerId];
+    const info = this.dmInfoByPeerId[peerId];
+    if (!info) return false;
+    return !info.hasUnread;
   }
 
   private handleContextMenu(e: MouseEvent, peerId: string): void {
@@ -650,22 +658,26 @@ export class ScionChatMembers extends LitElement {
 
   /**
    * Mark this member's DM unread. The dot itself is server-confirmed state
-   * the chat page owns (unreadFromIds) — on success this dispatches
-   * member-marked-unread so the page can reflect it immediately, the same
-   * way the space rail reflects its own "Mark unread" locally.
+   * the chat page owns (unreadFromIds, respecting mute) — on success this
+   * dispatches member-marked-unread with the DM key so the page can both
+   * reflect the dot immediately (mute permitting) and suppress the open
+   * thread's auto-advance without waiting on the SSE round trip (round-1
+   * review O2), the same way the space rail reflects its own "Mark unread"
+   * locally.
    */
   private async handleMarkUnread(peerId: string): Promise<void> {
     this.contextMenuTarget = null;
-    const key = this.dmKeyByPeerId[peerId];
-    if (!key) return;
+    const info = this.dmInfoByPeerId[peerId];
+    if (!info) return;
     try {
-      const res = await apiFetch(`/api/v1/chat/conversations/${encodeURIComponent(key)}/unread`, {
-        method: 'POST',
-      });
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(info.key)}/unread`,
+        { method: 'POST' }
+      );
       if (!res.ok) return;
       this.dispatchEvent(
         new CustomEvent('member-marked-unread', {
-          detail: { peerId },
+          detail: { peerId, conversationKey: info.key },
           bubbles: true,
           composed: true,
         })

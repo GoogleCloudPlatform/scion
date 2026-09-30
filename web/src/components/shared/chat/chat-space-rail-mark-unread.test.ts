@@ -103,6 +103,30 @@ describe('space rail — mark unread', () => {
     expect(storedThread(el).hasUnread).toBe(true);
   });
 
+  it('dispatches conversation-marked-unread on success, for same-tab suppression without the SSE round trip', async () => {
+    const el = createRail([thread()]);
+    document.body.appendChild(el);
+    const handler = vi.fn();
+    el.addEventListener('conversation-marked-unread', handler);
+
+    await el.handleMarkUnread(thread(), SPACE.projectId);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].detail).toEqual({ conversationKey: 'topic-1' });
+  });
+
+  it('does not dispatch conversation-marked-unread when the server refuses', async () => {
+    const el = createRail([thread()]);
+    document.body.appendChild(el);
+    apiFetchMock.mockResolvedValue(new Response('{}', { status: 500 }));
+    const handler = vi.fn();
+    el.addEventListener('conversation-marked-unread', handler);
+
+    await el.handleMarkUnread(thread(), SPACE.projectId);
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('bumps the space badge on success', async () => {
     const el = createRail([thread()]);
 

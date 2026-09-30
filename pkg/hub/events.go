@@ -66,10 +66,13 @@ type EventPublisher interface {
 	// PublishChatOwnReadStateEvent publishes a watermark change to the
 	// caller's OWN other sessions on user.<userID>.chat.read-state — the same
 	// event and subject convention as PublishChatReadStateEvent, just
-	// addressed to the reader instead of a DM peer. Used by "mark unread" so
-	// a user's other open tabs learn their own conversation went unread.
-	// Unlike PublishChatReadStateEvent it fires for topic keys too: a
-	// self-notification has no "no peer, so no audience" case to exclude.
+	// addressed to the reader instead of a DM peer. Used ONLY by "mark
+	// unread" so a user's other open tabs learn their own conversation went
+	// unread; it always sets the event's Unread field, which the client uses
+	// as the sole discriminator for "this is a mark-unread notification"
+	// (round-1 review R1). Unlike PublishChatReadStateEvent it fires for
+	// topic keys too: a self-notification has no "no peer, so no audience"
+	// case to exclude.
 	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
@@ -821,6 +824,11 @@ func (p *eventBuilder) PublishChatOwnReadStateEvent(_ context.Context, conversat
 		UserID:          userID,
 		MessageID:       messageID,
 		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		// Always true: this publisher exists only for mark-unread. If it is
+		// ever reused for a different self-notification, that caller must
+		// add its own way to say "not unread" rather than let this default
+		// silently become ambiguous again.
+		Unread: true,
 	}
 	p.sink("user."+userID+".chat.read-state", evt)
 }

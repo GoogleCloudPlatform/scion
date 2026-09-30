@@ -2942,10 +2942,15 @@ func (s *Server) conversationRecentMessages(
 			if err != nil {
 				return nil, err
 			}
-			if conv != nil {
-				filter.ThreadID = ""
-				filter.ConversationID = conv.ConversationID
+			if conv == nil {
+				// Never-used DM: matches nativeDMLastMessage's prior
+				// behaviour exactly (nil, nil) rather than falling back to
+				// a ThreadID filter, which would show unrelated legacy rows
+				// once envelope mode is the source of truth.
+				return nil, nil
 			}
+			filter.ThreadID = ""
+			filter.ConversationID = conv.ConversationID
 		}
 	} else {
 		filter = store.MessageFilter{Channel: "web", ThreadID: key}
@@ -3505,28 +3510,22 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // message, a deleted message, or one moved into a promoted thread, none of
 // which can be acknowledged by viewing this DM. Mention fan-out copies are
 // also excluded because chat-thread does not display them.
+//
+// Delegates to conversationRecentMessages (limit 1) rather than keeping a
+// second copy of this filter: the two are used together — this to know
+// "unread compared to what", mark-unread's predecessor lookup to know
+// "unread from what" — and a mention-exclusion (or envelope-switch) fix
+// applied to only one would silently reintroduce the gap round-1 review R3
+// found (a mention row masking mark-unread's effect).
 func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	filter := store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-		parts := strings.Split(key, ":")
-		if len(parts) != 5 {
-			return nil, fmt.Errorf("invalid DM key: %q", key)
-		}
-		conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
-		if err != nil || conv == nil {
-			return nil, err
-		}
-		filter.ThreadID = ""
-		filter.ConversationID = conv.ConversationID
-	}
-	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(result.Items) == 0 {
+	if len(recent) == 0 {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	return &recent[0], nil
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.

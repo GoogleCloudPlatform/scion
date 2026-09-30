@@ -1166,12 +1166,11 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
   /** Was a POST to /read issued? */
   function sawReadPost(): boolean {
     return apiFetch.mock.calls.some(
-      (c) =>
-        String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+      (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
     );
   }
 
-  it("suppresses auto-advance once this tab's own watermark moves backward via SSE", async () => {
+  it("suppresses auto-advance once this tab's own watermark moves backward via SSE with unread:true", async () => {
     const el = await mount();
     el.currentUserId = 'user-me';
     const internals = el as unknown as Internals;
@@ -1179,7 +1178,14 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
 
     fakeStateManager.dispatchEvent(
       new CustomEvent('chat-read-state-updated', {
-        detail: { data: { conversationKey: CONVERSATION_KEY, userId: 'user-me', messageId: '' } },
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
       })
     );
 
@@ -1187,6 +1193,56 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
 
     vi.useFakeTimers();
     internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  /**
+   * Round-1 review R1: the discriminator for "this is mark-unread" is the
+   * event's `unread` field, not merely a self-targeted userId. A self event
+   * lacking it — e.g. a hypothetical future self-notifying /read — must not
+   * suppress, and must not be misapplied as a peer's seen tick either.
+   */
+  it('does not suppress a self-targeted event without unread:true', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: CONVERSATION_KEY, userId: 'user-me', messageId: 'm1' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+    expect(internals.peerReadMessageId).toBe('');
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(true);
+  });
+
+  /**
+   * Round-1 review O1: the debounced callback re-checks suppression when it
+   * *fires*, not only when maybeAdvanceReadWatermark schedules it. Exercised
+   * directly here (flip the flag after scheduling, without going through
+   * suppressAutoAdvance's own clearTimeout) so this covers the guard even if
+   * some future suppression path ever sets the flag without also clearing
+   * the timer.
+   */
+  it('re-checks suppression when the debounced callback fires, not only when it was scheduled', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    internals._autoAdvanceSuppressed = true;
     await vi.advanceTimersByTimeAsync(1500);
 
     expect(sawReadPost()).toBe(false);
@@ -1264,6 +1320,69 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
     await el.updateComplete;
     expect(internals._autoAdvanceSuppressed).toBe(false);
   });
+
+  /**
+   * Round-1 review O3: a dedicated test for the initial-load watermark
+   * timer's suppression guard, independent of mount()'s "first apiFetch
+   * call" resolution heuristic. The earlier suppression test only exercised
+   * this guard by accident — mount() returns while loadHistory() is still
+   * in flight, and mergeMessages([m1]) happened to land before loadHistory's
+   * finally block (which arms the timer) rather than after. Any change to
+   * that ordering would silently drop coverage of this guard. This test
+   * instead waits for `loading` to go false — set in the same synchronous
+   * finally block, immediately before the timer is armed — so the timer is
+   * armed (on the real clock, since fake timers are never installed here)
+   * before the self event is dispatched and before the real-time wait past
+   * its delay.
+   */
+  it('suppresses the initial-load watermark timer directly, independent of mount() timing', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: unknown) => {
+      if (String(url).includes('/messages?')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ items: [aMessage('m1')] }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({}),
+      } as unknown as Response);
+    });
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = 'user-me';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const internals = el as unknown as Internals & { loading: boolean };
+    await vi.waitFor(() => expect(internals.loading).toBe(false));
+
+    apiFetch.mockClear();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
+      })
+    );
+
+    // Real-time wait past the initial timer's delay (500ms with no prior
+    // read state to show a divider for). Deliberately not vi.useFakeTimers()
+    // — the timer was armed on the real clock before this test could have
+    // installed a fake one.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(sawReadPost()).toBe(false);
+  }, 8000);
 });
 
 describe('scion-chat-thread SSE message filtering', () => {

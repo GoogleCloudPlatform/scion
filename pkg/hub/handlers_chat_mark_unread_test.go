@@ -106,6 +106,60 @@ func TestChatV2_MarkUnread_TopicMovesToPredecessor(t *testing.T) {
 	}
 }
 
+// TestChatV2_MarkUnread_TieBreaksByID: two messages with an identical
+// CreatedAt must resolve "which one is newer" the same way ListMessages
+// (and /read's monotonic guard) does — (created_at, id) DESC, so the
+// higher-ID row counts as newer and becomes the predecessor's successor,
+// never the reverse. Pins the ordering claim conversationRecentMessages'
+// doc comment makes, the same way
+// TestChatV2_ConversationRead_MonotonicTieBreaksByID pins it for /read.
+func TestChatV2_MarkUnread_TieBreaksByID(t *testing.T) {
+	srv, s, wcs, proj, topicID := setupMutePinTest(t)
+	ctx := context.Background()
+
+	tied := time.Now().UTC()
+	a := &store.Message{ID: tid("unread-tie-a"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:" + topicID, Msg: "a", Type: messages.TypeChat, Channel: "web", ThreadID: topicID, CreatedAt: tied}
+	b := &store.Message{ID: tid("unread-tie-b"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:" + topicID, Msg: "b", Type: messages.TypeChat, Channel: "web", ThreadID: topicID, CreatedAt: tied}
+	if err := s.CreateMessage(ctx, a); err != nil {
+		t.Fatalf("CreateMessage(a): %v", err)
+	}
+	if err := s.CreateMessage(ctx, b); err != nil {
+		t.Fatalf("CreateMessage(b): %v", err)
+	}
+
+	// Determine which of the two sorts later (higher ID) without assuming
+	// tid()'s output order — the test must hold regardless.
+	lo, hi := a, b
+	if lo.ID > hi.ID {
+		lo, hi = b, a
+	}
+	if lo.ID >= hi.ID {
+		t.Fatalf("test fixture invariant broken: lo.ID (%q) must be < hi.ID (%q)", lo.ID, hi.ID)
+	}
+
+	if err := wcs.TouchTopicActivity(ctx, topicID, hi.ID); err != nil {
+		t.Fatalf("TouchTopicActivity: %v", err)
+	}
+	if err := wcs.SetReadState(ctx, DevUserID, topicID, hi.ID); err != nil {
+		t.Fatalf("SetReadState: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/unread", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, topicID)
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != lo.ID {
+		t.Fatalf("watermark = %+v, want LastReadMessageID = %q (the lower-ID row, tied on created_at)", rs, lo.ID)
+	}
+}
+
 // TestChatV2_MarkUnread_TopicClearsWithSingleMessage: a conversation with
 // only one message has no predecessor, so mark-unread must clear the
 // watermark entirely rather than leaving it pointed at some other message.
@@ -218,6 +272,93 @@ func TestChatV2_MarkUnread_DM(t *testing.T) {
 		found = true
 		if !dm.HasUnread {
 			t.Errorf("expected DM %q to be unread after mark-unread", dmKey)
+		}
+	}
+	if !found {
+		t.Fatalf("DM %q not found in dms list", dmKey)
+	}
+}
+
+// TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor: a mention
+// fan-out copy sitting as the newest row in a DM's message stream must not
+// count as "the latest message". If it did, the predecessor computation
+// would land one message too late (on the last genuinely visible message
+// instead of the one before it), and since the DM list's own hasUnread
+// check (nativeDMLastMessage) already excludes mention rows when computing
+// LastMessageID, the watermark would equal LastMessageID and mark-unread
+// would silently do nothing (round-1 review R3 — this is the exact failure
+// `grep Mention` on this file used to turn up empty for).
+func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
+	srv, s, wcs, proj, _ := setupMutePinTest(t)
+	ctx := context.Background()
+
+	peerID := tid("unread-dm-mention-peer")
+	dmKey := "dm:user:" + DevUserID + ":user:" + peerID
+	if err := wcs.UpsertDM(ctx, WebChatDM{ConversationKey: dmKey, ParticipantID: DevUserID, PeerID: peerID, PeerKind: "user"}); err != nil {
+		t.Fatalf("UpsertDM: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-time.Minute)
+	// Three rows, oldest to newest: a visible chat message, a second visible
+	// chat message, and a mention fan-out copy newer than both. Without the
+	// exclusion, the predecessor of "the newest row" would be `visible2`;
+	// with it, the predecessor of "the newest VISIBLE row" (`visible2`) is
+	// `visible1`.
+	visible1 := &store.Message{ID: tid("unread-dm-mention-v1"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "user:peer", RecipientID: peerID, Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base}
+	visible2 := &store.Message{ID: tid("unread-dm-mention-v2"), ProjectID: proj.ID, Sender: "user:peer", SenderID: peerID,
+		Recipient: "user:dev", RecipientID: DevUserID, Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: dmKey, CreatedAt: base.Add(time.Second)}
+	mentionCopy := &store.Message{ID: tid("unread-dm-mention-copy"), ProjectID: proj.ID, Sender: "user:peer", SenderID: peerID,
+		Recipient: "user:dev", RecipientID: DevUserID, Msg: "@dev fyi", Type: messages.TypeMention, Channel: "web", ThreadID: dmKey, CreatedAt: base.Add(2 * time.Second)}
+	for _, m := range []*store.Message{visible1, visible2, mentionCopy} {
+		if err := s.CreateMessage(ctx, m); err != nil {
+			t.Fatalf("CreateMessage(%s): %v", m.ID, err)
+		}
+	}
+
+	// Start fully read at the newest VISIBLE message (what a normal /read
+	// after viewing the DM would have set — the mention copy is never shown,
+	// so it is never read either).
+	if err := wcs.SetReadState(ctx, DevUserID, dmKey, visible2.ID); err != nil {
+		t.Fatalf("SetReadState: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/unread", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, dmKey)
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != visible1.ID {
+		t.Fatalf("watermark = %+v, want LastReadMessageID = %q (visible1) — got the mention-inclusive "+
+			"predecessor instead, meaning the mention exclusion was skipped", rs, visible1.ID)
+	}
+
+	// hasUnread must be true: if the exclusion were dropped, the watermark
+	// would land on visible2, which equals nativeDMLastMessage's
+	// (mention-excluding) LastMessageID, and hasUnread would be false.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for dms list, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var dmsResp chatDMListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&dmsResp); err != nil {
+		t.Fatalf("decode dms: %v", err)
+	}
+	found := false
+	for _, dm := range dmsResp.DMs {
+		if dm.ConversationKey != dmKey {
+			continue
+		}
+		found = true
+		if dm.LastMessageID != visible2.ID {
+			t.Fatalf("dms list LastMessageID = %q, want %q (visible2, mention-excluded)", dm.LastMessageID, visible2.ID)
+		}
+		if !dm.HasUnread {
+			t.Error("expected DM to be unread after mark-unread excluded the mention row")
 		}
 	}
 	if !found {
@@ -417,6 +558,11 @@ func TestPublishChatOwnReadStateEvent_ReachesCallerOnly(t *testing.T) {
 		}
 		if payload.MessageID != "msg-5" {
 			t.Errorf("expected messageId msg-5, got %s", payload.MessageID)
+		}
+		// The client's sole discriminator for "this is mark-unread, not some
+		// other self-notification" (round-1 review R1) — must always be set.
+		if !payload.Unread {
+			t.Error("expected unread=true on a PublishChatOwnReadStateEvent payload")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for own read-state event")
