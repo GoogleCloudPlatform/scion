@@ -75,10 +75,10 @@ import (
 // isRootWorkingDir reports whether wd is the filesystem root. A daemon
 // supervisor started without an explicit working directory (for example a
 // systemd unit with no WorkingDirectory=) leaves its child process here,
-// which is rarely a sane base for cwd-derived path resolution. On Windows,
-// filepath.Separator is "\", and os.Getwd never returns a bare "\" (it's
-// always drive-letter-prefixed), so this never matches there and the
-// fallback below is a no-op on that platform.
+// which is rarely a sane base for cwd-derived path resolution. On Windows
+// os.Getwd always returns a volume-qualified path (C:\ or \\server\share\),
+// never a bare separator, so this never matches there and the fallback
+// below is a no-op on that platform.
 func isRootWorkingDir(wd string) bool {
 	return wd == string(filepath.Separator)
 }
