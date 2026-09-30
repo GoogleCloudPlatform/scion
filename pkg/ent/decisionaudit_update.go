@@ -285,6 +285,166 @@ func (_u *DecisionAuditUpdate) SetNillableSampled(v *bool) *DecisionAuditUpdate 
 	return _u
 }
 
+// SetPermissionID sets the "permission_id" field.
+func (_u *DecisionAuditUpdate) SetPermissionID(v string) *DecisionAuditUpdate {
+	_u.mutation.SetPermissionID(v)
+	return _u
+}
+
+// SetNillablePermissionID sets the "permission_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillablePermissionID(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetPermissionID(*v)
+	}
+	return _u
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (_u *DecisionAuditUpdate) ClearPermissionID() *DecisionAuditUpdate {
+	_u.mutation.ClearPermissionID()
+	return _u
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (_u *DecisionAuditUpdate) SetCredentialName(v string) *DecisionAuditUpdate {
+	_u.mutation.SetCredentialName(v)
+	return _u
+}
+
+// SetNillableCredentialName sets the "credential_name" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableCredentialName(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetCredentialName(*v)
+	}
+	return _u
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (_u *DecisionAuditUpdate) ClearCredentialName() *DecisionAuditUpdate {
+	_u.mutation.ClearCredentialName()
+	return _u
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (_u *DecisionAuditUpdate) SetCredentialBoundaryKind(v string) *DecisionAuditUpdate {
+	_u.mutation.SetCredentialBoundaryKind(v)
+	return _u
+}
+
+// SetNillableCredentialBoundaryKind sets the "credential_boundary_kind" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableCredentialBoundaryKind(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetCredentialBoundaryKind(*v)
+	}
+	return _u
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (_u *DecisionAuditUpdate) ClearCredentialBoundaryKind() *DecisionAuditUpdate {
+	_u.mutation.ClearCredentialBoundaryKind()
+	return _u
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (_u *DecisionAuditUpdate) SetCredentialBoundaryProjectID(v string) *DecisionAuditUpdate {
+	_u.mutation.SetCredentialBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableCredentialBoundaryProjectID sets the "credential_boundary_project_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableCredentialBoundaryProjectID(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetCredentialBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (_u *DecisionAuditUpdate) ClearCredentialBoundaryProjectID() *DecisionAuditUpdate {
+	_u.mutation.ClearCredentialBoundaryProjectID()
+	return _u
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (_u *DecisionAuditUpdate) SetCredentialLabels(v string) *DecisionAuditUpdate {
+	_u.mutation.SetCredentialLabels(v)
+	return _u
+}
+
+// SetNillableCredentialLabels sets the "credential_labels" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableCredentialLabels(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetCredentialLabels(*v)
+	}
+	return _u
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (_u *DecisionAuditUpdate) ClearCredentialLabels() *DecisionAuditUpdate {
+	_u.mutation.ClearCredentialLabels()
+	return _u
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (_u *DecisionAuditUpdate) SetExecutorKind(v string) *DecisionAuditUpdate {
+	_u.mutation.SetExecutorKind(v)
+	return _u
+}
+
+// SetNillableExecutorKind sets the "executor_kind" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableExecutorKind(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetExecutorKind(*v)
+	}
+	return _u
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (_u *DecisionAuditUpdate) ClearExecutorKind() *DecisionAuditUpdate {
+	_u.mutation.ClearExecutorKind()
+	return _u
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (_u *DecisionAuditUpdate) SetExecutorID(v string) *DecisionAuditUpdate {
+	_u.mutation.SetExecutorID(v)
+	return _u
+}
+
+// SetNillableExecutorID sets the "executor_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableExecutorID(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetExecutorID(*v)
+	}
+	return _u
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (_u *DecisionAuditUpdate) ClearExecutorID() *DecisionAuditUpdate {
+	_u.mutation.ClearExecutorID()
+	return _u
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (_u *DecisionAuditUpdate) SetDeniedBy(v string) *DecisionAuditUpdate {
+	_u.mutation.SetDeniedBy(v)
+	return _u
+}
+
+// SetNillableDeniedBy sets the "denied_by" field if the given value is not nil.
+func (_u *DecisionAuditUpdate) SetNillableDeniedBy(v *string) *DecisionAuditUpdate {
+	if v != nil {
+		_u.SetDeniedBy(*v)
+	}
+	return _u
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (_u *DecisionAuditUpdate) ClearDeniedBy() *DecisionAuditUpdate {
+	_u.mutation.ClearDeniedBy()
+	return _u
+}
+
 // Mutation returns the DecisionAuditMutation object of the builder.
 func (_u *DecisionAuditUpdate) Mutation() *DecisionAuditMutation {
 	return _u.mutation
@@ -432,6 +592,54 @@ func (_u *DecisionAuditUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.Sampled(); ok {
 		_spec.SetField(decisionaudit.FieldSampled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.PermissionID(); ok {
+		_spec.SetField(decisionaudit.FieldPermissionID, field.TypeString, value)
+	}
+	if _u.mutation.PermissionIDCleared() {
+		_spec.ClearField(decisionaudit.FieldPermissionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialName(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialName, field.TypeString, value)
+	}
+	if _u.mutation.CredentialNameCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialName, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialBoundaryKind(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryKind, field.TypeString, value)
+	}
+	if _u.mutation.CredentialBoundaryKindCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialBoundaryKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialBoundaryProjectID(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryProjectID, field.TypeString, value)
+	}
+	if _u.mutation.CredentialBoundaryProjectIDCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialBoundaryProjectID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialLabels(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialLabels, field.TypeString, value)
+	}
+	if _u.mutation.CredentialLabelsCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialLabels, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExecutorKind(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorKind, field.TypeString, value)
+	}
+	if _u.mutation.ExecutorKindCleared() {
+		_spec.ClearField(decisionaudit.FieldExecutorKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExecutorID(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorID, field.TypeString, value)
+	}
+	if _u.mutation.ExecutorIDCleared() {
+		_spec.ClearField(decisionaudit.FieldExecutorID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeniedBy(); ok {
+		_spec.SetField(decisionaudit.FieldDeniedBy, field.TypeString, value)
+	}
+	if _u.mutation.DeniedByCleared() {
+		_spec.ClearField(decisionaudit.FieldDeniedBy, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -711,6 +919,166 @@ func (_u *DecisionAuditUpdateOne) SetNillableSampled(v *bool) *DecisionAuditUpda
 	return _u
 }
 
+// SetPermissionID sets the "permission_id" field.
+func (_u *DecisionAuditUpdateOne) SetPermissionID(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetPermissionID(v)
+	return _u
+}
+
+// SetNillablePermissionID sets the "permission_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillablePermissionID(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetPermissionID(*v)
+	}
+	return _u
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (_u *DecisionAuditUpdateOne) ClearPermissionID() *DecisionAuditUpdateOne {
+	_u.mutation.ClearPermissionID()
+	return _u
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (_u *DecisionAuditUpdateOne) SetCredentialName(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetCredentialName(v)
+	return _u
+}
+
+// SetNillableCredentialName sets the "credential_name" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableCredentialName(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetCredentialName(*v)
+	}
+	return _u
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (_u *DecisionAuditUpdateOne) ClearCredentialName() *DecisionAuditUpdateOne {
+	_u.mutation.ClearCredentialName()
+	return _u
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (_u *DecisionAuditUpdateOne) SetCredentialBoundaryKind(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetCredentialBoundaryKind(v)
+	return _u
+}
+
+// SetNillableCredentialBoundaryKind sets the "credential_boundary_kind" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableCredentialBoundaryKind(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetCredentialBoundaryKind(*v)
+	}
+	return _u
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (_u *DecisionAuditUpdateOne) ClearCredentialBoundaryKind() *DecisionAuditUpdateOne {
+	_u.mutation.ClearCredentialBoundaryKind()
+	return _u
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (_u *DecisionAuditUpdateOne) SetCredentialBoundaryProjectID(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetCredentialBoundaryProjectID(v)
+	return _u
+}
+
+// SetNillableCredentialBoundaryProjectID sets the "credential_boundary_project_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableCredentialBoundaryProjectID(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetCredentialBoundaryProjectID(*v)
+	}
+	return _u
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (_u *DecisionAuditUpdateOne) ClearCredentialBoundaryProjectID() *DecisionAuditUpdateOne {
+	_u.mutation.ClearCredentialBoundaryProjectID()
+	return _u
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (_u *DecisionAuditUpdateOne) SetCredentialLabels(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetCredentialLabels(v)
+	return _u
+}
+
+// SetNillableCredentialLabels sets the "credential_labels" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableCredentialLabels(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetCredentialLabels(*v)
+	}
+	return _u
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (_u *DecisionAuditUpdateOne) ClearCredentialLabels() *DecisionAuditUpdateOne {
+	_u.mutation.ClearCredentialLabels()
+	return _u
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (_u *DecisionAuditUpdateOne) SetExecutorKind(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetExecutorKind(v)
+	return _u
+}
+
+// SetNillableExecutorKind sets the "executor_kind" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableExecutorKind(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetExecutorKind(*v)
+	}
+	return _u
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (_u *DecisionAuditUpdateOne) ClearExecutorKind() *DecisionAuditUpdateOne {
+	_u.mutation.ClearExecutorKind()
+	return _u
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (_u *DecisionAuditUpdateOne) SetExecutorID(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetExecutorID(v)
+	return _u
+}
+
+// SetNillableExecutorID sets the "executor_id" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableExecutorID(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetExecutorID(*v)
+	}
+	return _u
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (_u *DecisionAuditUpdateOne) ClearExecutorID() *DecisionAuditUpdateOne {
+	_u.mutation.ClearExecutorID()
+	return _u
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (_u *DecisionAuditUpdateOne) SetDeniedBy(v string) *DecisionAuditUpdateOne {
+	_u.mutation.SetDeniedBy(v)
+	return _u
+}
+
+// SetNillableDeniedBy sets the "denied_by" field if the given value is not nil.
+func (_u *DecisionAuditUpdateOne) SetNillableDeniedBy(v *string) *DecisionAuditUpdateOne {
+	if v != nil {
+		_u.SetDeniedBy(*v)
+	}
+	return _u
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (_u *DecisionAuditUpdateOne) ClearDeniedBy() *DecisionAuditUpdateOne {
+	_u.mutation.ClearDeniedBy()
+	return _u
+}
+
 // Mutation returns the DecisionAuditMutation object of the builder.
 func (_u *DecisionAuditUpdateOne) Mutation() *DecisionAuditMutation {
 	return _u.mutation
@@ -888,6 +1256,54 @@ func (_u *DecisionAuditUpdateOne) sqlSave(ctx context.Context) (_node *DecisionA
 	}
 	if value, ok := _u.mutation.Sampled(); ok {
 		_spec.SetField(decisionaudit.FieldSampled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.PermissionID(); ok {
+		_spec.SetField(decisionaudit.FieldPermissionID, field.TypeString, value)
+	}
+	if _u.mutation.PermissionIDCleared() {
+		_spec.ClearField(decisionaudit.FieldPermissionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialName(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialName, field.TypeString, value)
+	}
+	if _u.mutation.CredentialNameCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialName, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialBoundaryKind(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryKind, field.TypeString, value)
+	}
+	if _u.mutation.CredentialBoundaryKindCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialBoundaryKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialBoundaryProjectID(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryProjectID, field.TypeString, value)
+	}
+	if _u.mutation.CredentialBoundaryProjectIDCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialBoundaryProjectID, field.TypeString)
+	}
+	if value, ok := _u.mutation.CredentialLabels(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialLabels, field.TypeString, value)
+	}
+	if _u.mutation.CredentialLabelsCleared() {
+		_spec.ClearField(decisionaudit.FieldCredentialLabels, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExecutorKind(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorKind, field.TypeString, value)
+	}
+	if _u.mutation.ExecutorKindCleared() {
+		_spec.ClearField(decisionaudit.FieldExecutorKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExecutorID(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorID, field.TypeString, value)
+	}
+	if _u.mutation.ExecutorIDCleared() {
+		_spec.ClearField(decisionaudit.FieldExecutorID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeniedBy(); ok {
+		_spec.SetField(decisionaudit.FieldDeniedBy, field.TypeString, value)
+	}
+	if _u.mutation.DeniedByCleared() {
+		_spec.ClearField(decisionaudit.FieldDeniedBy, field.TypeString)
 	}
 	_node = &DecisionAudit{config: _u.config}
 	_spec.Assign = _node.assignValues

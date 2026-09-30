@@ -701,6 +701,15 @@ func requireSessionCredential(ctx context.Context) error {
 	}
 }
 
+// denyTokenManagement logs and writes the standard 403 for a token-management
+// request from a non-session credential — exactly the case where a UAT (or
+// other non-interactive credential) attempting to manage access tokens would
+// show up (plan §3.4, item 4).
+func denyTokenManagement(w http.ResponseWriter, r *http.Request, identity Identity, err error) {
+	logAuthzDenial(r, identity, Resource{Type: "user_access_token"}, ActionManage, err.Error())
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+}
+
 // handleTokens routes user access token requests.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -757,7 +766,7 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
 	if err := requireSessionCredential(r.Context()); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		denyTokenManagement(w, r, user, err)
 		return
 	}
 
@@ -785,7 +794,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
 	if err := requireSessionCredential(r.Context()); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		denyTokenManagement(w, r, user, err)
 		return
 	}
 
@@ -845,7 +854,7 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request, id strin
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
 	if err := requireSessionCredential(r.Context()); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		denyTokenManagement(w, r, user, err)
 		return
 	}
 
@@ -869,7 +878,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
 	if err := requireSessionCredential(r.Context()); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		denyTokenManagement(w, r, user, err)
 		return
 	}
 
@@ -892,7 +901,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 
 	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
 	if err := requireSessionCredential(r.Context()); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		denyTokenManagement(w, r, user, err)
 		return
 	}
 
