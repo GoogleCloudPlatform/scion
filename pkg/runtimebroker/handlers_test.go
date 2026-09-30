@@ -60,6 +60,10 @@ type mockManager struct {
 	// lastListFilter captures the filter map passed to List, so tests can
 	// assert on which keys the handler builds from query parameters.
 	lastListFilter map[string]string
+	// sendKeysFunc, when set, backs SendKeys so keys-handler tests can
+	// control its return value (including the three agentkeys sentinels)
+	// and capture its arguments, without needing a real AgentManager/tmux.
+	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -124,6 +128,13 @@ func (m *mockManager) Message(ctx context.Context, agentID, projectID string, me
 }
 
 func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
+	return nil
+}
+
+func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	if m.sendKeysFunc != nil {
+		return m.sendKeysFunc(ctx, projectID, agentSlug, expectedAgentID, keys)
+	}
 	return nil
 }
 
