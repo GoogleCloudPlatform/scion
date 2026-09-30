@@ -1429,8 +1429,7 @@ func (a *AuthzService) hasProjectRoleFlatPermission(ctx context.Context, princip
 	// Uses projectScopedPermissionsStrict, not getProjectScopedPermissions:
 	// this is CanMintSelector's flat-role mint path, and a transient
 	// constraint-load failure here must surface as an error like every other
-	// CanMintSelector path, not the deny-all restriction
-	// getProjectScopedPermissions's other caller (useraccesstoken.go) keeps.
+	// CanMintSelector path, not a deny-all restriction.
 	perms, err := a.projectScopedPermissionsStrict(ctx, string(principal.Kind), principal.ID, projectID)
 	if err != nil {
 		return false, err

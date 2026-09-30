@@ -144,15 +144,19 @@ type PrincipalContext struct {
 }
 
 // CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials.
+// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
+// the UAT's normalized permission ceiling — the single source every
+// credential-scope restriction evaluates through, for every ceiling
+// version.
 type CredentialContext struct {
 	Kind      CredentialKind
 	ID        string
 	Type      string
 	ProjectID string
 	Scopes    []string
+	Ceiling   permissions.FrozenPermissionCeiling
 
-	// E.1 descriptive credential metadata. Decoration is additive,
+	// Descriptive credential metadata. Decoration is additive,
 	// server-derived attribution (token name/boundary/purpose/labels) for
 	// logs and audit. It is never read by authorization decisions — see
 	// TestCredentialDecorationNotReadByAuthzCode.
@@ -613,9 +617,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 7: Build restrictions ────────────────────────────────────
 	var restrictions []Restriction
 
-	// 7a. UAT credential scope restriction.
-	if credential.Kind == CredentialKindUAT && len(credential.Scopes) > 0 {
-		restrictions = append(restrictions, uatScopeRestriction(credential.Scopes))
+	// 7a. UAT credential permission ceiling restriction. Every UAT request
+	// applies this restriction, including one whose ceiling has no
+	// permission IDs at all: an empty or malformed ceiling denies every
+	// permission rather than lifting the restriction.
+	if credential.Kind == CredentialKindUAT {
+		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
 	}
 
 	// 7b. Agent JWT scope restriction.
@@ -1158,31 +1165,16 @@ func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 // Restriction builders
 // =============================================================================
 
-// uatScopeRestriction builds a kernel Restriction from UAT credential scopes.
-// Only permissions whose agent scope strings match the UAT scopes are allowed.
-func uatScopeRestriction(scopes []string) Restriction {
-	// UAT scopes are in "resource:action" format. Map them to permission IDs.
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		scopeSet[s] = true
-		for _, implied := range permissions.LegacyUATScopeImplications[s] {
-			scopeSet[implied] = true
-		}
-	}
-	// Build the set of allowed permission IDs from the scopes.
-	allowed := make(map[string]struct{})
-	for _, p := range permissions.Registry {
-		scopeKey := p.Resource + ":" + p.Action
-		if scopeSet[scopeKey] {
-			allowed[p.ID] = struct{}{}
-		}
-	}
+// ceilingRestriction builds a kernel Restriction from a UAT's permission
+// ceiling. It defers entirely to FrozenPermissionCeiling.Allows: an empty,
+// zero-value, or unknown-version ceiling denies every permission rather
+// than lifting the restriction, and no scope ever implies another.
+func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction {
 	return Restriction{
 		Kind:        "credential_scope",
-		Description: "UAT credential scope restriction",
+		Description: "UAT credential permission ceiling",
 		Check: func(permissionID string) bool {
-			_, ok := allowed[permissionID]
-			return ok
+			return ceiling.Allows(permissionID)
 		},
 	}
 }
@@ -1446,12 +1438,12 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
-		// E.1: carry the descriptive decoration, if ValidateToken attached
-		// one, through to the credential context. This is the single copy
-		// point named in the E.1 design (plan §2.2); decoration is never
-		// otherwise derived here. Decoration() already returns a deep copy,
-		// so this assignment cannot alias the identity's stored value.
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
+		// Carry the descriptive decoration, if ValidateToken attached one,
+		// through to the credential context. This is the single copy point;
+		// decoration is never otherwise derived here. Decoration() already
+		// returns a deep copy, so this assignment cannot alias the
+		// identity's stored value.
 		cc.Decoration = scoped.Decoration()
 		return cc
 	}
@@ -1539,10 +1531,13 @@ func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal Prin
 		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources"}
 	}
 
-	// Enforce scope constraint: the resource:action must be in the token's scopes.
-	scope := resource.Type + ":" + string(action)
-	if !scoped.HasScope(scope) {
-		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope}
+	// Enforce scope constraint: the token's frozen permission ceiling must
+	// allow the exact permission Decide resolved for this request. This is
+	// the same ceiling later steps (e.g. CanDelegate) consult, so this gate
+	// and the rest of the credential's authority share one source of truth
+	// instead of two independently-derived views of the same scopes.
+	if !scoped.Ceiling().Allows(permissionID) {
+		return &Decision{Allowed: false, Reason: "token does not have scope: " + resource.Type + ":" + string(action)}
 	}
 
 	// Live project access is required at use time, not just at mint time
@@ -1934,8 +1929,11 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 
 // getProjectScopedPermissions returns only the permissions that the principal
 // holds through project-scoped role bindings for the given project. System-
-// scoped bindings are excluded. This is the A2 issuer-ceiling resolver: hub
-// or system authority must not enlarge a project-scoped token.
+// scoped bindings are excluded: hub or system authority must not enlarge a
+// project-scoped token. No longer called from CreateToken, which resolves
+// mint eligibility through CanMintSelector instead; retained and directly
+// tested for its shared binding-resolution behavior with
+// projectScopedPermissionsStrict.
 //
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —
