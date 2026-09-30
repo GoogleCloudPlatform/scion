@@ -105,7 +105,7 @@ func (u *AuthenticatedUser) ClientType() string { return u.clientType }
 // It is produced when authenticating with a User Access Token (UAT).
 type ScopedUserIdentity struct {
 	UserIdentity
-	projectID    string
+	boundary     TokenBoundary
 	scopes       []string
 	credentialID string
 	ceiling      permissions.FrozenPermissionCeiling
@@ -117,22 +117,40 @@ type ScopedUserIdentity struct {
 	decoration *CredentialDecoration
 }
 
-// NewScopedUserIdentity creates a ScopedUserIdentity. The ceiling is derived
-// from scopes via the frozen legacy normalization (permissions.
-// NormalizeLegacyUATScopes) — the same interpretation a real
-// CeilingVersionUnspecified token gets — so callers that construct an
-// identity directly from raw scope strings (most test fixtures) exercise
-// the same permission-ID-based restriction that production applies. A
-// caller minting a real token should use NewScopedUserIdentityWithCeiling
-// with the token's actual store.UserAccessToken.NormalizedCeiling() instead,
+// newScopedUserIdentity is the single constructor body every
+// NewScopedUserIdentity* variant below funnels through, so the field set
+// cannot drift between them.
+func newScopedUserIdentity(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return &ScopedUserIdentity{
+		UserIdentity: user,
+		boundary:     boundary,
+		scopes:       scopes,
+		credentialID: credentialID,
+		ceiling:      ceiling,
+		decoration:   decoration,
+	}
+}
+
+// NewScopedUserIdentity creates a ScopedUserIdentity confined to a project
+// boundary. The ceiling is derived from scopes via the frozen legacy
+// normalization (permissions.NormalizeLegacyUATScopes) — the same
+// interpretation a real CeilingVersionUnspecified token gets — so callers
+// that construct an identity directly from raw scope strings (most test
+// fixtures) exercise the same permission-ID-based restriction that
+// production applies. An empty projectID yields an invalid boundary (see
+// TokenBoundary.Valid()), which every consumer of Boundary() must treat as
+// fail-closed. A caller minting a real token should use
+// NewScopedUserIdentityWithBoundaryAndDecoration with the token's actual
+// persisted boundary and store.UserAccessToken.NormalizedCeiling() instead,
 // so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
 }
 
-// NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
-// its persisted credential ID available for authorization audit context.
-// See NewScopedUserIdentity for how the ceiling is derived.
+// NewScopedUserIdentityWithCredentialID creates a project-boundary,
+// UAT-backed identity with its persisted credential ID available for
+// authorization audit context. See NewScopedUserIdentity for how the
+// ceiling is derived and how projectID becomes a boundary.
 func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCeiling(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
 		Version:       permissions.CeilingVersionUnspecified,
@@ -140,28 +158,20 @@ func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, 
 	})
 }
 
-// NewScopedUserIdentityWithCeiling creates a UAT-backed identity carrying an
-// explicit, already-normalized FrozenPermissionCeiling — the production
-// path (UserAccessTokenService.ValidateToken) uses this so a stored token's
-// real ceiling (legacy-normalized or CeilingVersionV1+, per
-// store.UserAccessToken.NormalizedCeiling) drives authorization, not a
-// re-derivation from raw scopes.
+// NewScopedUserIdentityWithCeiling creates a project-boundary, UAT-backed
+// identity carrying an explicit, already-normalized FrozenPermissionCeiling.
+// Prefer NewScopedUserIdentityWithBoundaryAndDecoration for a token whose
+// persisted boundary may be hub, not project.
 func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
-	return &ScopedUserIdentity{
-		UserIdentity: user,
-		projectID:    projectID,
-		scopes:       scopes,
-		credentialID: credentialID,
-		ceiling:      ceiling,
-	}
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, nil)
 }
 
-// NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
-// descriptive credential decoration alongside its credential ID. The
-// ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithDecoration creates a project-boundary, UAT-backed
+// identity carrying descriptive credential decoration alongside its
+// credential ID. The ceiling is derived from scopes the same way
 // NewScopedUserIdentityWithCredentialID derives it; see
-// NewScopedUserIdentityWithCeilingAndDecoration for a constructor that takes
-// an explicit, already-normalized ceiling instead.
+// NewScopedUserIdentityWithBoundaryAndDecoration for the canonical
+// constructor that also takes an explicit boundary.
 func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
 		Version:       permissions.CeilingVersionUnspecified,
@@ -169,21 +179,25 @@ func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, sc
 	}, decoration)
 }
 
-// NewScopedUserIdentityWithCeilingAndDecoration creates a UAT-backed identity
-// carrying both an explicit, already-normalized FrozenPermissionCeiling and
-// descriptive credential decoration. UserAccessTokenService.ValidateToken —
-// the single point that has the server-validated token row in hand — uses
-// this to attach both pieces of derived state in one call, so a
-// CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+// NewScopedUserIdentityWithCeilingAndDecoration creates a project-boundary,
+// UAT-backed identity carrying both an explicit, already-normalized
+// FrozenPermissionCeiling and descriptive credential decoration. Prefer
+// NewScopedUserIdentityWithBoundaryAndDecoration for a token whose persisted
+// boundary may be hub, not project.
 func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
-	return &ScopedUserIdentity{
-		UserIdentity: user,
-		projectID:    projectID,
-		scopes:       scopes,
-		credentialID: credentialID,
-		ceiling:      ceiling,
-		decoration:   decoration,
-	}
+	return newScopedUserIdentity(user, TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, scopes, credentialID, ceiling, decoration)
+}
+
+// NewScopedUserIdentityWithBoundaryAndDecoration creates a UAT-backed
+// identity carrying an explicit TokenBoundary (project or hub), an explicit,
+// already-normalized FrozenPermissionCeiling, and descriptive credential
+// decoration. UserAccessTokenService.ValidateToken — the single point that
+// has the server-validated token row, including its persisted boundary, in
+// hand — uses this constructor, so a hub-boundary token is never
+// misrepresented as project-scoped and a CeilingVersionV1+ ceiling is never
+// silently reinterpreted as legacy.
+func NewScopedUserIdentityWithBoundaryAndDecoration(user UserIdentity, boundary TokenBoundary, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return newScopedUserIdentity(user, boundary, scopes, credentialID, ceiling, decoration)
 }
 
 // Decoration returns a deep copy of the descriptive credential metadata
@@ -198,8 +212,25 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 	return &d
 }
 
-// ScopedProjectID returns the project this identity is restricted to.
-func (s *ScopedUserIdentity) ScopedProjectID() string { return s.projectID }
+// Boundary returns the credential-side boundary (project or hub) this
+// identity's UAT was issued under.
+func (s *ScopedUserIdentity) Boundary() TokenBoundary { return s.boundary }
+
+// ScopedProjectID returns the project this identity is restricted to, or ""
+// for a hub-boundary identity — never a positive claim of hub access by
+// itself. Every consumer of this string must treat an empty value as no
+// project, not as unscoped.
+//
+// This accessor is derived from the boundary field, so a project-boundary
+// identity's project reads exactly as it would from a dedicated field.
+// auth.go's logging, authz.go's Decide gate, authz_list.go's list-caveat
+// reduction, authorized_list.go's cursor key, and authz_candelegate.go's
+// delegation check each call this accessor directly; each needs its own
+// boundary-aware handling to serve a hub-boundary identity correctly, which
+// Boundary() exists to support going forward. Token mint issues only
+// project-boundary tokens, so this accessor's callers only ever observe a
+// project boundary from a real, server-issued token.
+func (s *ScopedUserIdentity) ScopedProjectID() string { return s.boundary.ProjectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
 func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }

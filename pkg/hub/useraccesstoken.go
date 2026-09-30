@@ -411,6 +411,18 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, &UATRejection{err: ErrUATExpired, Reason: "expired", Found: true, TokenID: token.ID}
 	}
 
+	// A stored row that fails boundary validation (an unrecognized kind, a
+	// project boundary with a missing/malformed project ID, or a hub
+	// boundary carrying a project ID) is a data-integrity problem, never the
+	// caller's fault: reject it here, before it can authenticate, rather
+	// than guessing at its meaning. In particular, a missing or blank
+	// project ID is never coerced into a hub boundary. The token ID is a
+	// server-issued identifier, not the bearer secret, so it is safe to log.
+	if err := token.ValidateBoundary(); err != nil {
+		s.logger.Warn("rejected user access token with invalid stored boundary", "token_id", token.ID)
+		return nil, &UATRejection{err: ErrInvalidUAT, Reason: "invalid", Found: true, TokenID: token.ID}
+	}
+
 	// Update last used (async)
 	go func() {
 		_ = s.tokens.UpdateUserAccessTokenLastUsed(context.Background(), token.ID)
@@ -428,20 +440,21 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
 	}
 
+	// The boundary was already validated above (ValidateBoundary), so it is
+	// safe to trust here without re-checking: kind is project or hub, a
+	// project boundary has a non-empty, well-formed project ID, and a hub
+	// boundary has none.
+	boundary := TokenBoundary{Kind: BoundaryKind(token.BoundaryKind), ProjectID: token.ProjectID}
+
 	// Derive the descriptive credential decoration from the
 	// server-validated token row this function already loaded. This is the
 	// single trustworthy derivation point — no header, query parameter, or
 	// body field ever contributes to it.
-	//
-	// D.1 has not yet persisted a boundary column on the UAT row, so this
-	// builds TokenBoundary inline from the token's stored project ID (every
-	// UAT is project-scoped today). This is the one call site that changes
-	// when D.1 lands.
 	decoration := &CredentialDecoration{
 		Kind:      CredentialKindUAT,
 		TokenID:   token.ID,
 		TokenName: token.Name,
-		Boundary:  decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: token.ProjectID}),
+		Boundary:  decorationBoundaryFromToken(boundary),
 	}
 	if token.Purpose != nil {
 		decoration.Purpose = *token.Purpose
@@ -454,9 +467,9 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		decoration.Labels = labels
 	}
 
-	return NewScopedUserIdentityWithCeilingAndDecoration(
+	return NewScopedUserIdentityWithBoundaryAndDecoration(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
-		token.ProjectID,
+		boundary,
 		token.Scopes,
 		token.ID,
 		token.NormalizedCeiling(),

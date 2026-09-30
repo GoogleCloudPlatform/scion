@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -175,6 +176,7 @@ func newTestValidateService() (*UserAccessTokenService, *mockUATStore, *mockUser
 		tokens:  tokenStore,
 		users:   userStore,
 		nowFunc: time.Now,
+		logger:  slog.Default(),
 	}
 	return svc, tokenStore, userStore
 }
@@ -201,15 +203,16 @@ func seedTestToken(t *testing.T, tokenStore *mockUATStore, userID, projectID str
 
 	future := time.Now().Add(90 * 24 * time.Hour)
 	tok := &store.UserAccessToken{
-		ID:        uuid.New().String(),
-		UserID:    userID,
-		Name:      "test-token",
-		Prefix:    prefix,
-		KeyHash:   hashStr,
-		ProjectID: projectID,
-		Scopes:    scopes,
-		ExpiresAt: &future,
-		Created:   time.Now(),
+		ID:           uuid.New().String(),
+		UserID:       userID,
+		Name:         "test-token",
+		Prefix:       prefix,
+		KeyHash:      hashStr,
+		BoundaryKind: string(permissions.BoundaryKindProject),
+		ProjectID:    projectID,
+		Scopes:       scopes,
+		ExpiresAt:    &future,
+		Created:      time.Now(),
 	}
 	if err := tokenStore.CreateUserAccessToken(context.Background(), tok); err != nil {
 		t.Fatalf("failed to seed token: %v", err)
@@ -280,6 +283,57 @@ func TestValidateToken(t *testing.T) {
 			t.Errorf("expected ErrUATExpired, got %v", err)
 		}
 	})
+}
+
+// TestValidateToken_RejectsMalformedStoredBoundary pins that a stored row
+// whose boundary_kind/project_id combination is invalid must never
+// authenticate. Each case simulates a row a real database could never
+// produce through CreateUserAccessToken's own ValidateBoundary call — the
+// point is that ValidateToken denies it anyway, as a second, independent
+// check at load, not just at write. An empty or malformed project ID is
+// never coerced into a hub boundary.
+func TestValidateToken_RejectsMalformedStoredBoundary(t *testing.T) {
+	cases := []struct {
+		name         string
+		boundaryKind string
+		projectID    string
+	}{
+		{"hub kind with a project id set", "hub", tid("mismatch-project")},
+		{"empty kind", "", tid("mismatch-project")},
+		{"unrecognized kind", "org", tid("mismatch-project")},
+		{"project kind with an empty project id", "project", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			svc, tokenStore, _ := newTestValidateService()
+			token := seedTestToken(t, tokenStore, tid("user-1"), tid("mismatch-project"), []string{"agent:read"})
+
+			// Overwrite the stored row directly: no production write path
+			// (CreateUserAccessToken) can produce this shape, but a stored
+			// row's own load-time validation must still catch it — belt and
+			// suspenders, since a malformed row must never authenticate
+			// regardless of how it came to exist.
+			stored := tokenStore.tokens[token.stored.ID]
+			stored.BoundaryKind = c.boundaryKind
+			stored.ProjectID = c.projectID
+
+			_, err := svc.ValidateToken(context.Background(), token.plaintext)
+			if !errors.Is(err, ErrInvalidUAT) {
+				t.Errorf("expected ErrInvalidUAT, got %v", err)
+			}
+			var rejection *UATRejection
+			if !errors.As(err, &rejection) {
+				t.Fatalf("expected a *UATRejection, got %T: %v", err, err)
+			}
+			if rejection.Reason != "invalid" {
+				t.Errorf("expected reason %q, got %q", "invalid", rejection.Reason)
+			}
+			if !rejection.Found || rejection.TokenID != token.stored.ID {
+				t.Errorf("expected Found=true and TokenID=%q (a matched, rejected record), got Found=%v TokenID=%q",
+					token.stored.ID, rejection.Found, rejection.TokenID)
+			}
+		})
+	}
 }
 
 func TestExpandScopes(t *testing.T) {
