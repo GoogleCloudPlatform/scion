@@ -25,7 +25,10 @@ func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 		t.Fatalf("failed to start test process: %v", err)
 	}
 	pid := cmd.Process.Pid
-	defer cmd.Wait()
+	// Best-effort cleanup: an error here (e.g. procreap's own reaper won the
+	// race and already reaped this child) doesn't affect the assertions
+	// above, so it's intentionally ignored rather than failing the test.
+	defer func() { _ = cmd.Wait() }()
 
 	waitUntilZombie(t, pid)
 
