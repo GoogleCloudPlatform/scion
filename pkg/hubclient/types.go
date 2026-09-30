@@ -56,10 +56,14 @@ type Agent struct {
 	DeletedAt         time.Time         `json:"deletedAt,omitempty"`
 	CreatedBy         string            `json:"createdBy,omitempty"`
 	OwnerID           string            `json:"ownerId,omitempty"`
-	MessageMode       string            `json:"messageMode,omitempty"`
-	StateVersion      int64             `json:"stateVersion,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
-	ExitReason        string            `json:"exitReason,omitempty"`
+	// Ancestry is the ordered chain of ancestor principal IDs (users and/or
+	// agents) recorded at creation time, used for transitive relationship
+	// queries such as `scion list --ancestors` (ptone/scion#2146).
+	Ancestry     []string `json:"ancestry,omitempty"`
+	MessageMode  string   `json:"messageMode,omitempty"`
+	StateVersion int64    `json:"stateVersion,omitempty"`
+	ExitCode     *int     `json:"exitCode,omitempty"`
+	ExitReason   string   `json:"exitReason,omitempty"`
 }
 
 // AgentConfig represents agent configuration.

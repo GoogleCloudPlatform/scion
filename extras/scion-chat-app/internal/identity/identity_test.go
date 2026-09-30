@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -193,6 +192,6 @@ type fakeUserService struct {
 	users []hubclient.User
 }
 
-func (f *fakeUserService) List(ctx context.Context, opts *apiclient.PageOptions) (*hubclient.ListUsersResponse, error) {
+func (f *fakeUserService) List(ctx context.Context, opts *hubclient.ListUsersOptions) (*hubclient.ListUsersResponse, error) {
 	return &hubclient.ListUsersResponse{Users: f.users}, nil
 }

@@ -78,6 +78,8 @@ const (
 	FieldMessage = "message"
 	// FieldAppliedConfig holds the string denoting the applied_config field in the database.
 	FieldAppliedConfig = "applied_config"
+	// FieldHarnessConfig holds the string denoting the harness_config field in the database.
+	FieldHarnessConfig = "harness_config"
 	// FieldAncestry holds the string denoting the ancestry field in the database.
 	FieldAncestry = "ancestry"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -187,6 +189,7 @@ var Columns = []string{
 	FieldTaskSummary,
 	FieldMessage,
 	FieldAppliedConfig,
+	FieldHarnessConfig,
 	FieldAncestry,
 	FieldCreated,
 	FieldUpdated,
@@ -478,6 +481,11 @@ func ByMessage(opts ...sql.OrderTermOption) OrderOption {
 // ByAppliedConfig orders the results by the applied_config field.
 func ByAppliedConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAppliedConfig, opts...).ToFunc()
+}
+
+// ByHarnessConfig orders the results by the harness_config field.
+func ByHarnessConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHarnessConfig, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

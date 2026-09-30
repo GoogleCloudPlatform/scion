@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +119,46 @@ func parseLabelFilters(params []string) (map[string]string, error) {
 		return nil, fmt.Errorf("invalid label filter: %w", err)
 	}
 	return m, nil
+}
+
+// maxRelationshipIDs caps the id[] relationship filter (ptone/scion#2146).
+// Unbounded, it is one IN(...) bind list per caller, limited
+// only by the ~1 MB HTTP header size (roughly 25k UUIDs) — that both bloats
+// the query next to AuthorizedProjectIDs and costs query-planning time far
+// beyond what the real use (a CLI-resolved Ancestry chain, or a lineage
+// root's own small candidate set) ever needs.
+const maxRelationshipIDs = 256
+
+// applyAgentAttributeAndRelationshipFilters reads the ownerId, ancestorId,
+// harnessConfig, id, and lineageRootId query params shared by listAgents and
+// listProjectAgents into filter. Factored into one place so the two list
+// endpoints cannot drift on these narrowing-only filters (ptone/scion#2146).
+//
+// Every field this sets is combined with the rest of the caller's filter
+// (including any authorization predicate, such as AuthorizedProjectIDs) using
+// AND — see the field docs on store.AgentFilter. None of them may be used to
+// widen a result beyond what the caller was already authorized to list.
+//
+// Returns a non-nil error (a caller-facing message, suitable for a 400) only
+// when id[] exceeds maxRelationshipIDs.
+func applyAgentAttributeAndRelationshipFilters(filter *store.AgentFilter, query url.Values) error {
+	filter.RequestedOwnerID = query.Get("ownerId")
+	filter.AncestorID = query.Get("ancestorId")
+	filter.HarnessConfig = query.Get("harnessConfig")
+	if ids := query["id"]; len(ids) > 0 {
+		if len(ids) > maxRelationshipIDs {
+			return fmt.Errorf("id: too many values (%d); maximum is %d", len(ids), maxRelationshipIDs)
+		}
+		// Canonicalize (dedupe + sort) before this reaches the cursor
+		// binding, like every other set-like filter field (Finding 8) —
+		// otherwise the same logical request with id= params in a
+		// different order mints a different cursor binding, and a cursor
+		// minted under one ordering is rejected when replayed under
+		// another.
+		filter.IDs = canonicalizeStringSlice(append([]string{}, ids...))
+	}
+	filter.LineageRootID = query.Get("lineageRootId")
+	return nil
 }
 
 type ListAgentsResponse struct {
@@ -312,6 +353,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return
 	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
