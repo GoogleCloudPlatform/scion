@@ -302,7 +302,12 @@
         },
         "host": { "type": "string" },
         "context": { "type": "string" },
-        "namespace": { "type": "string" },
+        "namespace": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "Kubernetes namespace (DNS-1123 label) for agents using this runtime entry, or the empty string for the runtime's default namespace. A profile that needs a different namespace selects its own runtime entry."
+        },
         "env": {
           "type": "object",
           "additionalProperties": { "type": "string" }
@@ -361,6 +366,18 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
+        },
+        "kubernetes_service_account_mappings": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+gserviceaccount\\.com$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+            "maxLength": 253
+          },
+          "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind the KSA; it must already be pre-provisioned by the operator. Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
         }
       },
       "additionalProperties": false
@@ -826,6 +843,18 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
+        },
+        "kubernetes_service_account_mappings": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+gserviceaccount\\.com$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+            "maxLength": 253
+          },
+          "description": "Per-profile override of runtimes.<name>.kubernetes_service_account_mappings: for a given GSA email key present here, the KSA name here wins over the runtime-level entry. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false
