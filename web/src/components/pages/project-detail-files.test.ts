@@ -67,8 +67,18 @@ function fileListResponse(paths: string[]): Response {
   });
 }
 
+const DEFAULT_PROJECT_FIELDS = {
+  id: PROJECT_ID,
+  name: 'Project One',
+  slug: 'project-one',
+  // No gitRemote => hub-native project => gets a 'workspace' tab, plus one
+  // tab per shared dir (see getFileTabs()).
+  sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+  _capabilities: { actions: ['read', 'update'] },
+};
+
 /** Tracks calls per logical listing endpoint (workspace / each shared dir). */
-function createFetchHandler() {
+function createFetchHandler(projectOverrides: Record<string, unknown> = {}) {
   const listingCalls: Record<string, number> = {
     workspace: 0,
     [SHARED_DIR_A]: 0,
@@ -84,28 +94,29 @@ function createFetchHandler() {
     if (path.includes(`/api/v1/projects/${PROJECT_ID}/agents`)) {
       return Promise.resolve(jsonResponse({ agents: [], _capabilities: { actions: [] } }));
     }
+    // File-content endpoint (editor open): .../workspace/files/<name>?format=json
+    if (path.includes(`/api/v1/projects/${PROJECT_ID}/workspace/files/`)) {
+      return Promise.resolve(
+        jsonResponse({ content: 'hello from workspace', modTime: '2026-01-01T00:00:00Z' })
+      );
+    }
     if (path.includes(`/api/v1/projects/${PROJECT_ID}/workspace/files`)) {
       listingCalls.workspace++;
       return Promise.resolve(fileListResponse(['workspace-file.txt']));
     }
     for (const dir of [SHARED_DIR_A, SHARED_DIR_B]) {
+      if (path.includes(`/api/v1/projects/${PROJECT_ID}/shared-dirs/${dir}/files/`)) {
+        return Promise.resolve(
+          jsonResponse({ content: `hello from ${dir}`, modTime: '2026-01-01T00:00:00Z' })
+        );
+      }
       if (path.includes(`/api/v1/projects/${PROJECT_ID}/shared-dirs/${dir}/files`)) {
         listingCalls[dir]++;
         return Promise.resolve(fileListResponse([`${dir}-file.txt`]));
       }
     }
     if (path.endsWith(`/api/v1/projects/${PROJECT_ID}`)) {
-      return Promise.resolve(
-        jsonResponse({
-          id: PROJECT_ID,
-          name: 'Project One',
-          slug: 'project-one',
-          // No gitRemote => hub-native project => gets a 'workspace' tab,
-          // plus one tab per shared dir (see getFileTabs()).
-          sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
-          _capabilities: { actions: ['read', 'update'] },
-        })
-      );
+      return Promise.resolve(jsonResponse({ ...DEFAULT_PROJECT_FIELDS, ...projectOverrides }));
     }
     return Promise.resolve(jsonResponse({}, 404));
   };
@@ -119,11 +130,14 @@ type TestElement = HTMLElement & {
   projectId: string;
 };
 
-async function createComponent(role: UserRole = 'member'): Promise<{
+async function createComponent(
+  role: UserRole = 'member',
+  projectOverrides: Record<string, unknown> = {}
+): Promise<{
   el: TestElement;
   listingCalls: Record<string, number>;
 }> {
-  const { handler, listingCalls } = createFetchHandler();
+  const { handler, listingCalls } = createFetchHandler(projectOverrides);
   vi.stubGlobal('fetch', vi.fn(handler));
   const el = document.createElement('scion-page-project-detail') as TestElement;
   el.projectId = PROJECT_ID;
@@ -148,12 +162,44 @@ function fileBrowserFor(el: TestElement, tab: string): Element | null {
   return el.shadowRoot!.querySelector(`scion-file-browser[data-tab="${tab}"]`);
 }
 
-/** Invokes the private onFileTabChange handler with `this` correctly bound to el. */
+/** Number of tab panels configured (one <sl-tab> per rendered tab) — the
+ * count every one of them would have mounted a browser for on main. */
+function getTabCountForFixture(el: TestElement): number {
+  return el.shadowRoot!.querySelectorAll('sl-tab').length;
+}
+
+/**
+ * Switches tabs by dispatching a real `sl-tab-show` event on the rendered
+ * `sl-tab-group` element — the same event Shoelace's tab-group emits on
+ * click/keyboard activation — rather than calling the private
+ * onFileTabChange handler directly. This exercises the actual
+ * `@sl-tab-show=${this.onFileTabChange}` wiring in the template.
+ */
 async function changeFileTab(el: TestElement, tab: string): Promise<void> {
-  (el as unknown as Record<string, (e: CustomEvent) => void>)['onFileTabChange'].call(
-    el,
-    new CustomEvent('sl-tab-show', { detail: { name: tab } })
+  const tabGroup = el.shadowRoot!.querySelector('sl-tab-group');
+  if (!tabGroup) throw new Error('sl-tab-group not found — is the Files section open?');
+  tabGroup.dispatchEvent(
+    new CustomEvent('sl-tab-show', { detail: { name: tab }, bubbles: true, composed: true })
   );
+  await el.updateComplete;
+  await new Promise((r) => setTimeout(r, 0));
+  await el.updateComplete;
+}
+
+/**
+ * Simulates a live project update arriving over SSE: updates the shared
+ * stateManager's project map and fires the same `projects-updated` event
+ * type the component's onProjectsUpdated() listener is registered for
+ * (production dispatches this from StateManager.notify() after processing
+ * an SSE `project.{id}.updated` event). onProjectsUpdated() itself just
+ * reads `stateManager.getProject(this.projectId)` back out and merges it,
+ * so seeding the map and firing the event reproduces that path exactly.
+ */
+async function pushProjectUpdate(el: TestElement, patch: Record<string, unknown>): Promise<void> {
+  const { stateManager } = await import('../../client/state.js');
+  const current = stateManager.getProject(PROJECT_ID) ?? { id: PROJECT_ID };
+  stateManager.seedProjects([{ ...current, ...patch } as never]);
+  stateManager.dispatchEvent(new CustomEvent('projects-updated'));
   await el.updateComplete;
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
@@ -219,7 +265,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(listingCalls[SHARED_DIR_B]).toBe(0);
   });
 
-  it('keeps a visited tab mounted and does not refetch on revisit', async () => {
+  it('keeps a visited tab mounted and does not refetch on revisit, without mounting untouched tabs', async () => {
     const { el, listingCalls } = await createComponent();
     element = el;
 
@@ -227,6 +273,11 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     const countAfterFirstVisit = listingCalls[SHARED_DIR_A];
     expect(countAfterFirstVisit).toBeGreaterThan(0);
     const firstInstance = fileBrowserFor(el, SHARED_DIR_A);
+    // Two of the three configured tabs (workspace, shared-dir-A) have been
+    // visited so far — on main, all three would already be mounted, so this
+    // distinguishes the fix from main rather than trivially passing there.
+    expect(fileBrowsers(el).length).toBe(2);
+    expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
 
     await changeFileTab(el, 'workspace');
     await changeFileTab(el, SHARED_DIR_A);
@@ -235,20 +286,41 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // beyond whatever the initial mount already issued.
     expect(fileBrowserFor(el, SHARED_DIR_A)).toBe(firstInstance);
     expect(listingCalls[SHARED_DIR_A]).toBe(countAfterFirstVisit);
+    // Still only the two actually-visited tabs, even after switching back
+    // and forth between them.
+    expect(fileBrowsers(el).length).toBe(2);
+    expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
   });
 
-  it('retains correct data-source selection per tab after switching', async () => {
+  it('retains correct data-source selection per tab after switching — verified via rendered rows', async () => {
     const { el } = await createComponent();
     element = el;
 
     await changeFileTab(el, SHARED_DIR_B);
+    await changeFileTab(el, SHARED_DIR_A);
 
-    const browserB = fileBrowserFor(el, SHARED_DIR_B) as unknown as {
-      dataSource: { listFiles: () => Promise<{ files: Array<{ path: string }> }> } | null;
-    };
-    expect(browserB.dataSource).not.toBeNull();
-    const result = await browserB.dataSource!.listFiles();
-    expect(result.files.map((f) => f.path)).toEqual([`${SHARED_DIR_B}-file.txt`]);
+    // Assert what each mounted browser actually rendered, not just what its
+    // dataSource object would return if called directly — this exercises
+    // scion-file-browser's own connectedCallback -> loadFiles -> render
+    // path for both tabs' data sources, not just getTabDataSource() wiring.
+    const rowsFor = (tab: string): string =>
+      (fileBrowserFor(el, tab)?.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ');
+
+    expect(rowsFor(SHARED_DIR_A)).toContain(`${SHARED_DIR_A}-file.txt`);
+    expect(rowsFor(SHARED_DIR_A)).not.toContain(`${SHARED_DIR_B}-file.txt`);
+    expect(rowsFor(SHARED_DIR_B)).toContain(`${SHARED_DIR_B}-file.txt`);
+    expect(rowsFor(SHARED_DIR_B)).not.toContain(`${SHARED_DIR_A}-file.txt`);
+  });
+
+  it('records the before/after mounted-browser count for the configured tab set', async () => {
+    const { el } = await createComponent();
+    element = el;
+
+    // Before (main): every configured tab panel unconditionally mounted a
+    // scion-file-browser, so this fixture (workspace + 2 shared dirs) would
+    // mount 3. After (this fix): only the active tab does, at initial load.
+    expect(getTabCountForFixture(el)).toBe(3);
+    expect(fileBrowsers(el).length).toBe(1);
   });
 
   it('defers the whole Files section until the placeholder is observed as visible', async () => {
@@ -293,5 +365,140 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
     expect(fileBrowsers(el).length).toBe(1);
     expect(listingCalls.workspace).toBeGreaterThan(0);
+  });
+
+  // ── Regression coverage: activeFileTab can drift from the rendered tab
+  // list (round-1 review, blocking finding 1). Reproduced originally via a
+  // live project update that adds a shared dir to a project that had none —
+  // exactly what onProjectsUpdated() applies from an SSE
+  // project.{id}.updated event. ──
+
+  it('mounts the first shared-dir tab at initial load for a git project that already has shared dirs', async () => {
+    // Coverage gap noted in review: this path (git project, shared dirs
+    // present from the very first load — loadData() sets activeFileTab to
+    // the first one) already worked, but had no test pinning it.
+    const { el, listingCalls } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    // Git (non-shared-workspace) projects get no workspace tab — only one
+    // per shared dir (getFileTabs()) — and loadData() activates the first.
+    expect(getTabCountForFixture(el)).toBe(2);
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
+    expect(listingCalls[SHARED_DIR_A]).toBeGreaterThan(0);
+  });
+
+  it('mounts a shared dir that appears after load via a live project update, instead of leaving the panel empty', async () => {
+    // Reproduces the round-1 regression: a git (non-shared-workspace)
+    // project starts with zero shared dirs, so shouldShowFilesSection() is
+    // false and the whole Files section — including activeFileTab
+    // normalization — never runs. activeFileTab is left at its default,
+    // 'workspace', which is not a real tab for this project type. A live
+    // update (SSE project.{id}.updated) then adds a shared dir.
+    const { el, listingCalls } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [],
+    });
+    element = el;
+
+    // No shared dirs yet: the Files section doesn't render at all.
+    expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.workspace-section')).toBeNull();
+
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_A }] });
+
+    // Before the fix: activeFileTab stayed 'workspace', which matches no
+    // tab; Shoelace falls back to displaying tabs[0] without emitting
+    // sl-tab-show, so nothing mounted a browser for it and the panel shown
+    // was empty with no way to recover by clicking. After the fix: the
+    // normalized activeFileTab is marked visited as soon as the section
+    // opens, so the newly-appeared tab is mounted and loaded correctly.
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    expect(listingCalls[SHARED_DIR_A]).toBeGreaterThan(0);
+  });
+
+  it('falls back to another tab when the active shared dir is removed while the page is open', async () => {
+    const { el, listingCalls } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    // loadData() activates the first shared dir at load.
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+
+    // The active shared dir (A) is removed server-side; only B remains.
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_B }] });
+
+    // activeFileTab pointed at a now-gone tab; the component falls back to
+    // the remaining one and mounts it, rather than leaving an empty panel
+    // with no matching tab at all.
+    expect(fileBrowserFor(el, SHARED_DIR_B)).not.toBeNull();
+    expect(listingCalls[SHARED_DIR_B]).toBeGreaterThan(0);
+  });
+
+  it('hides the Files section entirely when the last shared dir is removed (no empty panel left behind)', async () => {
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }],
+    });
+    element = el;
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+
+    await pushProjectUpdate(el, { sharedDirs: [] });
+
+    expect(el.shadowRoot?.querySelector('.workspace-section')).toBeNull();
+    expect(fileBrowsers(el).length).toBe(0);
+  });
+
+  // ── AC3: editor/back-flow coverage (round-1 review, blocking finding 2) ──
+
+  it('unmounts file browsers while the editor is open, and remounts previously-visited tabs on Back', async () => {
+    const { el } = await createComponent();
+    element = el;
+
+    await changeFileTab(el, SHARED_DIR_A); // visit a second tab besides the default workspace one
+    expect(fileBrowsers(el).length).toBe(2);
+
+    // Open the editor the same way a real row click does: scion-file-browser
+    // dispatches `file-edit-requested`, which bubbles/composes out of its
+    // shadow root to the listener wired on the element in
+    // renderFilesSection(). changeFileTab() above made SHARED_DIR_A active.
+    fileBrowserFor(el, SHARED_DIR_A)!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: `${SHARED_DIR_A}-file.txt` },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    // Every file browser (and the tab group) is unmounted while editing.
+    expect(fileBrowsers(el).length).toBe(0);
+    expect(el.shadowRoot?.querySelector('sl-tab-group')).toBeNull();
+    const editor = el.shadowRoot?.querySelector('scion-file-editor');
+    expect(editor).not.toBeNull();
+
+    // "clicks Back": dispatch a real click on the rendered Back button,
+    // rather than calling handleEditorClosed() directly.
+    const backButton = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find((b) =>
+      (b.textContent ?? '').includes('Back to files')
+    );
+    expect(backButton).toBeTruthy();
+    backButton!.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // Back to the tab view: both previously-visited tabs remount ...
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).toBeNull();
+    expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    // ... and the never-visited one still does not.
+    expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
+    expect(fileBrowsers(el).length).toBe(2);
   });
 });
