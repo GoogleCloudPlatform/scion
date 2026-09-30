@@ -119,7 +119,7 @@ func TestDefaultLookupUserByID_RefusesUnderTest(t *testing.T) {
 // TestReportInitFailure_WritesPhaseErrorAndMessage proves the shared
 // reporting helper every RunInit failure path (including the privilege-drop
 // defence-in-depth check) calls: it must report PhaseError to local
-// agent-info state (the same way the git-clone failure path pioneered),
+// agent-info state (the same way the git-clone failure path does),
 // not just log it. Driven directly against a temp directory rather than
 // through RunInit's real setupHostUser/resolveAgentHome, which resolve
 // against whatever "scion" user (if any) actually exists on the machine
@@ -251,9 +251,8 @@ func TestAdjustScionUser_AlreadyCorrect_ShortCircuitsRegardlessOfFlag(t *testing
 
 // TestAdjustScionUser_ScionUserNotFound covers the first fail-closed case: under
 // RequirePrivilegeDrop, a missing scion user must fail closed; every other
-// runtime (RequirePrivilegeDrop: false) must see the exact same
-// (uid, gid, false) it always has, since those runtimes depend on the
-// historical fallback and must not be changed here.
+// runtime (RequirePrivilegeDrop: false) must see the same (uid, gid, false)
+// result, since those runtimes depend on that lenient fallback.
 func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return nil, errors.New("user: unknown user scion")
@@ -271,10 +270,9 @@ func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 		if uid != 0 || gid != 0 || rootless != false {
 			t.Errorf("adjustScionUser(..., true) = (%d,%d,%v), want (0,0,false)", uid, gid, rootless)
 		}
-		// Mutation check: runDirectSetUID must never be called once the
-		// early return fires — this is what actually pins "never even try
-		// the rewrite," not just "the return value happens to come out
-		// right."
+		// runDirectSetUID must never be called once the early return fires:
+		// this pins "never even try the rewrite," not just "the return
+		// value happens to come out right."
 		if calls != 0 {
 			t.Errorf("runDirectSetUID was called %d time(s) after a failed scion user lookup with requirePrivilegeDrop=true, want 0 — the early return must skip the rewrite attempt entirely, not just fail closed on its result", calls)
 		}
@@ -376,13 +374,11 @@ func TestAdjustScionUser_PostAdjustVerifyMismatch(t *testing.T) {
 // directSetUID's "no entry to rewrite" detection.
 // -----------------------------------------------------------------------
 
-// TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError proves a parity
-// requirement: the historical directSetUID, run against a
-// passwd file with no entry for username, still chowned the home
-// directory — the sed simply matched nothing and exited 0. That side
-// effect must happen exactly the same way now, with the pre-check only
-// changing what directSetUIDAt *reports*, not what it *does*: home gets
-// chowned either way, and only an enforced requirePrivilegeDrop=true
+// TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError proves directSetUIDAt,
+// run against a passwd file with no entry for username, still chowns the
+// home directory — the sed simply matches nothing and exits 0 — while the
+// pre-check only changes what directSetUIDAt *reports*, not what it *does*:
+// home gets chowned either way, and only an enforced requirePrivilegeDrop=true
 // caller treats the report as fatal (adjustScionUser, tested separately).
 func TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
@@ -532,9 +528,8 @@ func TestDirectSetUIDAt_RewritesExistingEntry(t *testing.T) {
 // a passwd entry that exists but whose primary group isn't literally named
 // "scion" (e.g. `useradd -g users scion`) is a legitimate, real-world case
 // — the group sed matching nothing must not fail the whole operation, and
-// the passwd rewrite (the one that actually matters) must still succeed.
-// This is the historical unenforced behaviour, preserved exactly: only a
-// real command failure or a missing *passwd* entry is an error.
+// the passwd rewrite (the one that actually matters) must still succeed:
+// only a real command failure or a missing *passwd* entry is an error.
 func TestDirectSetUIDAt_PasswdEntryNoMatchingGroupLine_GroupIsBestEffort(t *testing.T) {
 	dir := t.TempDir()
 	groupPath := filepath.Join(dir, "group")

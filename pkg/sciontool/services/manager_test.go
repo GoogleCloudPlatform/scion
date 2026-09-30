@@ -659,9 +659,9 @@ func TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath(t *testing.T) 
 		{Name: "evil", Command: []string{"sh", "-c", "echo PWNED"}},
 		{Name: "ok", Command: []string{"sleep", "60"}},
 	}
-	// uid/gid are a real, non-zero target (this test now requires root, via
+	// uid/gid are a real, non-zero target (this test requires root, via
 	// the Geteuid check above) rather than 0: with requirePrivilegeDrop=true,
-	// uid/gid<=0 now refuses to start ANY service (see
+	// uid/gid<=0 refuses to start ANY service (see
 	// TestManager_Start_EnforcedRefusesUndroppableCredentials), which would
 	// mask the hard-link refusal this test is actually about.
 	const dropUID, dropGID = 1000, 1000
@@ -858,9 +858,9 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()
 
-	// A real, non-zero target (this test now requires root, via the
+	// A real, non-zero target (this test requires root, via the
 	// Geteuid check above): with requirePrivilegeDrop=true, uid/gid<=0
-	// now refuses to start ANY service (see
+	// refuses to start ANY service (see
 	// TestManager_Start_EnforcedRefusesUndroppableCredentials), which would
 	// prevent "first"/"warmup" from starting at all and change this test's
 	// fd-count assertions.

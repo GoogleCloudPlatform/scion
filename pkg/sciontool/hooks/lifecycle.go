@@ -47,10 +47,9 @@ type LifecycleManager struct {
 	AgentHome string
 
 	// EnforcePrivilegeDrop selects privilege-drop-enforced mode (set from
-	// InitRunOptions.RequirePrivilegeDrop). false (the zero value) keeps
-	// executeScript's behaviour byte-identical to before this field
-	// existed: every hook script runs via the calling process's own
-	// credentials, exactly as today, for every unenforced caller.
+	// InitRunOptions.RequirePrivilegeDrop). false (the zero value) runs
+	// every hook script via the calling process's own credentials, for
+	// every unenforced caller.
 	//
 	// true switches executeScript to the fstat-based root/drop decision
 	// (DecideExecAsRoot): a script runs as root only if it and every
@@ -281,8 +280,7 @@ func (m *LifecycleManager) skipRefusedEntry(hooksDir, scriptPath string, err err
 }
 
 // executeScript runs a hook script for eventName. When EnforcePrivilegeDrop
-// is false (the zero value), this is exactly today's behaviour, unchanged:
-// every unenforced caller keeps running every hook script
+// is false (the zero value), every unenforced caller runs every hook script
 // via the calling process's own credentials, with no ownership check at
 // all (eventName is unused on this path). See executeScriptEnforced for the
 // privilege-drop-enforced path.
@@ -615,8 +613,7 @@ var rootHookEnvAllowlist = map[string]bool{
 // and, unlike hookEnv, does NOT otherwise inherit the process environment at
 // all: only the exact names in rootHookEnvAllowlist survive from it, so an
 // interpreter/loader redirector variable (see that var's own doc comment) —
-// including one this denylist-based construction used to miss entirely,
-// such as NODE_OPTIONS, PERL5OPT, RUBYOPT, or XDG_CONFIG_HOME — never
+// including NODE_OPTIONS, PERL5OPT, RUBYOPT, and XDG_CONFIG_HOME — never
 // reaches a root-eligible hook regardless of where it came from. The dropped
 // branch (droppedHookEnv) is unaffected by any of this — a dropped hook gets
 // the same environment the harness child process itself gets, unfiltered.

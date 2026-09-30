@@ -267,8 +267,8 @@ func TestExecViaFd_RunsShebangScript(t *testing.T) {
 	}
 }
 
-// TestExecViaFd_SwapAfterOpenRunsOriginalInode is the committed form of the
-// TOCTOU probe: it opens a script, then REPLACES the directory entry at
+// TestExecViaFd_SwapAfterOpenRunsOriginalInode is the TOCTOU probe for
+// execViaFd: it opens a script, then REPLACES the directory entry at
 // that same path with a brand-new inode (remove, then create — not a
 // truncate-in-place, which would rewrite the already-open fd's own
 // content), and asserts execViaFd still runs the ORIGINAL content. This is
@@ -939,8 +939,9 @@ func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang(t *testing
 // real filesystem at all.
 //
 // Uses a project/hub hook name (30-project-custom), not the harness-provision
-// wrapper: that one root-eligible pre-start script now runs dropped instead
-// — see TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot
+// wrapper: buildEnforcedCmd's carve-out runs that one root-eligible
+// pre-start script dropped — see
+// TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot
 // immediately below for its own real-exec proof.
 func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -980,7 +981,7 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 
 // TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot is
 // TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot's counterpart for the
-// one root-eligible pre-start script that carve-out now drops: the same
+// one root-eligible pre-start script buildEnforcedCmd's carve-out drops: the same
 // root-owned, non-writable directory chain (proving DecideExecAsRoot still
 // classifies the genuine, root-owned wrapper asRoot regardless of the
 // fd-anchored open), but the script is named exactly
@@ -1039,10 +1040,9 @@ func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing
 }
 
 // TestExecuteScriptEnforced_NonEnforcedModeUnchanged verifies executeScript
-// takes the pre-existing, unchanged path when EnforcePrivilegeDrop is false
+// runs every hook script unconditionally when EnforcePrivilegeDrop is false
 // — including for a script that the enforced decision would drop (a
-// world-writable ancestor under t.TempDir()) — matching the "byte-identical
-// on every other runtime" requirement.
+// world-writable ancestor under t.TempDir()).
 func TestExecuteScriptEnforced_NonEnforcedModeUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "marker")
@@ -1058,24 +1058,16 @@ func TestExecuteScriptEnforced_NonEnforcedModeUnchanged(t *testing.T) {
 		t.Fatalf("read marker: %v", err)
 	}
 	if string(got) != "ran" {
-		t.Fatalf("expected the legacy exec path to run the script unconditionally, got %q", got)
+		t.Fatalf("expected the non-enforced exec path to run the script unconditionally, got %q", got)
 	}
 }
 
-// TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening proves ruling
-// 3's "non-enforced (docker) behaviour is unchanged" requirement for the
-// pre-start hardening in this same commit: a non-enforced LifecycleManager
-// (EnforcePrivilegeDrop false, the zero value) still runs a pre-start hook
-// via the unfiltered m.hookEnv() — the exact pre-existing path
-// executeScript's own doc comment describes — never hardenedRootHookEnv's
-// allowlist. Variables hardenedRootHookEnv now strips in enforced mode
-// (NODE_OPTIONS, GIT_CONFIG_GLOBAL) must still reach the script unchanged
-// here, and HOME must still be the workload-owned AgentHome, not /root.
-//
-// MUTATION: gate hardenedRootHookEnv (or its pre-start call) on something
-// other than EnforcePrivilegeDrop, or apply it unconditionally — this test
-// goes red (NODE_OPTIONS/GIT_CONFIG_GLOBAL would be missing, or HOME would
-// be /root instead of AgentHome).
+// TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening proves a
+// non-enforced LifecycleManager (EnforcePrivilegeDrop false, the zero
+// value) runs a pre-start hook via the unfiltered m.hookEnv(), never
+// hardenedRootHookEnv's allowlist: variables hardenedRootHookEnv strips in
+// enforced mode (NODE_OPTIONS, GIT_CONFIG_GLOBAL) still reach the script
+// unchanged here, and HOME is the workload-owned AgentHome, not /root.
 func TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening(t *testing.T) {
 	t.Setenv("NODE_OPTIONS", "--require /home/scion/evil.js")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/home/scion/.gitconfig")

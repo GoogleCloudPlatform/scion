@@ -210,7 +210,7 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 }
 
 // reportInitFailure reports a RunInit failure the same way the git-clone
-// failure path pioneered: local agent-info state to PhaseError with a
+// failure path does: local agent-info state to PhaseError with a
 // message, plus a best-effort direct Hub report. For runtimes whose broker
 // reads the container's agent-info.json as part of its own status
 // heartbeat, that local write is a second, independent path to the same
@@ -223,9 +223,9 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 // do) — never one built from raw command output or file contents.
 //
 // Shared by every RunInit failure path that needs to report before
-// returning, rather than each constructing its own StatusHandler: this is
-// what makes it possible to close a "some early-return paths report,
-// others silently don't" gap in one place. It is its own function, taking
+// returning, rather than each constructing its own StatusHandler: every
+// early-return path reports through this one function, so none can
+// silently skip it. It is its own function, taking
 // agentHome directly, so it's testable with a plain temp directory,
 // independent of setupHostUser's real-environment-dependent agentHome
 // resolution.
@@ -320,7 +320,7 @@ func newLifecycleManager(agentHome string, targetUID, targetGID int, requirePriv
 	// Register the per-agent hooks directory so container-script harnesses
 	// (whose pre-start wrapper is staged at $HOME/.scion/hooks/pre-start.d/)
 	// participate in the standard hook discovery alongside system hooks. In
-	// enforced mode this directory no longer carries broker-delivered
+	// enforced mode this directory does not carry broker-delivered
 	// content (redirected above), but stays registered and subject to the
 	// same ownership check: anything the workload itself later plants here
 	// (e.g. a session-end script) is workload-owned by construction — the
@@ -1623,12 +1623,8 @@ func extractChildCommand(args []string) []string {
 // filepath.EvalSymlinks would be redundant: syscall.Exec passes the literal
 // string "/proc/self/exe", and it is the KERNEL, not this process, that resolves
 // that magic symlink to the running inode at the moment of the execve
-// syscall itself — standard behavior on Linux >= 2.6, true under docker,
-// Apple VZ, and Cloud Run alike, since all three run a real Linux kernel
-// under their respective hypervisor/sandbox layer. Confirmed directly on
-// docker: a manual re-exec with a staged secret set leaves both the
-// child's environment and the parent's own /proc/<pid>/environ clean of it
-// afterward.
+// syscall itself — standard behavior on Linux >= 2.6, under any runtime that
+// runs a real Linux kernel beneath its own hypervisor/sandbox layer.
 func reExecWithCleanEnv() error {
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
@@ -1988,17 +1984,14 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 // or pass the capability/env preconditions above it in setupHostUser (same
 // reasoning as requirePrivilegeDropOrFail).
 //
-// requirePrivilegeDrop gates every fail-closed check added here: a "scion
-// user not found" that setupHostUser used to just log and push through, a
-// directSetUID rewrite that silently matched nothing, and a post-adjust
-// verify that doesn't show the target UID/GID. Under it, each of
-// those returns (0, 0, false) instead of the historical (uid, gid, false) —
-// which requirePrivilegeDropOrFail then turns into a fail-closed refusal to
-// start the harness, reported through RunInit's own failure path. Without
-// it, this function's return value is byte-identical to the non-drop path:
-// the same silent "report success anyway" fallback every other caller has
-// relied on stays exactly as it was, since those callers depend on that
-// historical fallback and must not be changed here.
+// requirePrivilegeDrop gates three checks in this function: a missing
+// "scion" user, a directSetUID rewrite that matches nothing, and a
+// post-adjust verify that cannot confirm the target UID/GID. When true,
+// each of these returns (0, 0, false), which requirePrivilegeDropOrFail
+// turns into a fail-closed refusal to start the harness, reported through
+// RunInit's own failure path. When false, this function's return value is
+// byte-identical to the path that logs and continues past all three: every
+// other caller depends on that lenient fallback and must see it unchanged.
 func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
 	// Skip if UID/GID already match (1001 is the default)
 	currentInfo, lookupErr := scionUserLookup("scion")
@@ -2026,10 +2019,10 @@ func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop
 			if requirePrivilegeDrop || !errors.Is(err, errPasswdEntryNotRewritten) {
 				return 0, 0, false
 			}
-			// requirePrivilegeDrop is false and the only problem was the new
-			// "nothing to rewrite" detection: preserve the historical
-			// unenforced behaviour of falling through to the verify step
-			// below (which, also gated on requirePrivilegeDrop, just logs).
+			// requirePrivilegeDrop is false and the only problem was the
+			// "nothing to rewrite" detection: fall through to the verify
+			// step below, which (also gated on requirePrivilegeDrop) just
+			// logs.
 		}
 	} else {
 		// Modify group first (if different from current)
@@ -2131,8 +2124,7 @@ var directSetUIDAtChown = os.Chown
 // instead of the real /etc/group and /etc/passwd.
 func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string) error {
 	// Recorded up front but only acted on at the end: every side effect
-	// below must run unconditionally, exactly like the historical
-	// directSetUID, regardless of whether username has a
+	// below runs unconditionally, regardless of whether username has a
 	// passwd entry to rewrite.
 	hasEntry := passwdEntryExists(passwdPath, username)
 
@@ -2175,8 +2167,8 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		}
 	}
 
-	// Only now — after every side effect above ran exactly as it always did
-	// — report whether there was anything to rewrite: a
+	// Only now — after every side effect above has run unconditionally —
+	// report whether there was anything to rewrite: a
 	// requirePrivilegeDrop=true caller fails closed on this, every other
 	// caller absorbs it (see errPasswdEntryNotRewritten's own doc comment).
 	if !hasEntry {
@@ -3411,8 +3403,7 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 // regular file, so it passes every check above) would make root's own init
 // process read the whole thing into memory before the harness ever starts —
 // a self-inflicted OOM, not a privilege issue, but cheap to close. The
-// non-enforced branch stays genuinely byte-identical to the previous
-// os.ReadFile call, unbounded exactly as it always was.
+// non-enforced branch is a plain, unbounded os.ReadFile call.
 func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 	if !requirePrivilegeDrop {
 		return os.ReadFile(path)
