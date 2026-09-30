@@ -42,6 +42,12 @@
     </style>
   </head>
   <body>
+    <!-- A real focusable element outside <scion-page-chat> entirely — distinct
+         from both a real composer and the page's own #palette-focus-fallback
+         — so a test can tell "the invoker was actually restored" apart from
+         "focus fell back to the page's own default" when this is the
+         invoker. -->
+    <button id="outside-invoker" type="button">Outside invoker</button>
     <!-- Mirrors main.ts: the route outlet is hidden (not the page itself)
          while the terminal workspace is shown, and the chat page stays
          mounted underneath. -->

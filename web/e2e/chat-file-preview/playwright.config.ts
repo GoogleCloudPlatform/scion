@@ -28,6 +28,12 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:4535',
     viewport: { width: 1200, height: 800 },
+    // The markdown-copy test depends on the browser's default
+    // clipboard-write permission, which varies by environment ("prompt" in
+    // some containers, where writeText is denied, and "granted" in others);
+    // the grant pins it to granted so the result does not depend on the
+    // environment.
+    permissions: ['clipboard-read', 'clipboard-write'],
     launchOptions: {
       ...(process.env.CHROMIUM_EXECUTABLE
         ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
