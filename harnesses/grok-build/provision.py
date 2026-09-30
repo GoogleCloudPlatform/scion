@@ -357,14 +357,19 @@ def _write_vertex_model_alias(
         original = f.read()
 
     # Strip any existing block with this alias name to avoid duplicates.
+    # Only match the bare-key form ([model.<alias_name>]) when alias_name is
+    # actually a valid TOML bare key: for a dotted name like "grok-4.2" (the
+    # realistic case — model names commonly contain dots), that bare-looking
+    # header is a *different* TOML path ([model.grok-4]["2"], not
+    # [model."grok-4.2"]), so matching it here would strip and discard an
+    # unrelated user table instead of leaving it alone, turning a harmless
+    # hand-written overlay into a hard ProvisionError from the ("model",
+    # alias_name) key-path check below (ptone/scion#2427 review round 3).
     escaped_alias = scion_harness.toml_escape(alias_name)
-    content = scion_harness.strip_toml_sections(
-        original,
-        lambda line: (
-            line == f'[model."{escaped_alias}"]'
-            or line == f"[model.{alias_name}]"
-        ),
-    )
+    headers = {f'[model."{escaped_alias}"]'}
+    if _TOML_BARE_KEY_RE.match(alias_name):
+        headers.add(f"[model.{alias_name}]")
+    content = scion_harness.strip_toml_sections(original, lambda line: line in headers)
 
     # Append the alias block.  Use quoted key so dots in the model name
     # (e.g. "grok-4.6") are treated as a single key, not a TOML path.

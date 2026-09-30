@@ -567,11 +567,13 @@ Key API surface:
   (content, key)` and `insert_toml_top_level_line(content, line)` do the
   equivalent surgery for bare top-level `key = value` lines rather than
   whole sections (codex uses these for `model`/`model_reasoning_effort`);
-  both also skip lines inside a multi-line string. The one documented
-  residual gap: an escaped closing-delimiter sequence's backslash-escaping
-  is only understood inside a `"""` (basic) string, since `'''` (literal)
-  strings have no escapes in TOML at all — the `tomllib` round-trip check
-  above is what catches anything past that. See
+  both also skip lines inside a multi-line string (including a
+  backslash-escaped closing-delimiter sequence inside a `"""` (basic)
+  string — `'''` (literal) strings have no escapes in TOML at all, so no
+  such handling applies there). There are no known residual gaps in this
+  scanner as of ptone/scion#2427; the `tomllib` round-trip check above
+  remains the backstop regardless, since this is still a line-oriented
+  scanner rather than a full TOML tokenizer. See
   `harnesses/scion_harness_test.py`'s `TestStripTomlSections` /
   `TestTomlEnteringArrayDepths` / `TestTomlEditPreserves` /
   `TestWriteTomlIfPreserves` for worked examples, including the fragility

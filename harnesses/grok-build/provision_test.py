@@ -74,25 +74,6 @@ def _also_strip_sections_damaging(header: str):
         yield
 
 
-@contextmanager
-def _force_is_header(fake_header_line: str):
-    """Force real damage by making scion_harness.is_toml_table_header report
-    True for the exact raw line `fake_header_line`, regardless of its
-    actual depth (ptone/scion#2427 review round 2, R2-b) — simulating a
-    (currently hypothetical, since the known string-tracking gaps are
-    closed) bug where a line that is really inside a multi-line string gets
-    mistaken for a genuine table header."""
-    real_is_header = scion_harness.is_toml_table_header
-
-    def wrapper(line, depth):
-        if line == fake_header_line:
-            return True
-        return real_is_header(line, depth)
-
-    with mock.patch.object(scion_harness, "is_toml_table_header", side_effect=wrapper):
-        yield
-
-
 def _make_ctx(
     manifest: dict[str, Any] | None = None,
 ) -> scion_harness.ProvisionContext:
@@ -1176,6 +1157,37 @@ class VertexConfigTomlWriteTest(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("vertex-ai model alias 'grok-4.2'", warnings[0])
 
+    def test_write_vertex_model_alias_accepts_dotted_bare_header(self) -> None:
+        # ptone/scion#2427 review round 3 ("Consider", dotted bare alias
+        # header): a hand-written *bare* dotted header like
+        # "[model.grok-4.2]" is a *different* TOML path than the quoted
+        # alias this function writes ([model."grok-4.2"]) — it parses as
+        # model.grok-4."2", not model."grok-4.2". Before this fix, the
+        # strip predicate matched the bare form unconditionally, so it
+        # stripped that unrelated table; the ("model", alias_name) key-path
+        # check then correctly saw an unmanaged change and raised
+        # ProvisionError on every start. Since alias_name is not a valid
+        # TOML bare key (it contains a dot), the bare-form predicate must
+        # not be included at all: the unrelated table survives untouched,
+        # the write is accepted, and the file stays valid.
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write("[model.grok-4.2]\nmodel = \"old\"\n")
+
+                provision._write_vertex_model_alias(ctx, "https://example/v1", "xai/grok-4.6", "grok-4.2")
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        # The hand-written bare-dotted table (model.grok-4."2") survives,
+        # untouched and distinct from the new quoted alias.
+        self.assertEqual(data["model"]["grok-4"]["2"], {"model": "old"})
+        self.assertEqual(data["model"]["grok-4.2"]["model"], "xai/grok-4.6")
+
 
 # ---------------------------------------------------------------------------
 # Vertex AI Auth Tests
@@ -2005,6 +2017,59 @@ class VertexAIAuthTest(unittest.TestCase):
                     after = f.read()
             self.assertEqual(after, original, "config.toml must be left untouched")
         self.assertNotIn("GROK_DEFAULT_MODEL", env, "GROK_DEFAULT_MODEL must not be exported on a rejected write")
+
+    def test_configure_vertex_ai_raises_and_does_not_report_success_when_alias_write_rejected(self) -> None:
+        # ptone/scion#2427 review round 3 (Nit): mirrors the config-rejection
+        # test above, but for the alias write's raise (R2-a) — asserts that
+        # GROK_DEFAULT_MODEL is not exported and no "vertex-ai: project=..."
+        # success line is logged when _write_vertex_model_alias's write is
+        # the one that's rejected (the primary vertex config write itself
+        # succeeds normally). Uses a targeted patch on write_toml_if_preserves
+        # (rather than the section-damage helper) so only the alias step is
+        # affected, not the earlier config step.
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            project_path = os.path.join(tmp, "project-id")
+            with open(project_path, "w") as f:
+                f.write("my-gcp-project")
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                    "env_secret_files": {"GOOGLE_CLOUD_PROJECT": project_path},
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            env: dict[str, str] = {}
+            os.environ["SCION_MODEL"] = "grok-4.2"
+            info_lines: list[str] = []
+            ctx.info = info_lines.append  # type: ignore[method-assign]
+
+            real_write_if_preserves = scion_harness.write_toml_if_preserves
+
+            def fail_only_alias(ctx_arg, path, original, content, managed_keys=(), *, what="", mode=None):
+                if what.startswith("vertex-ai model alias"):
+                    ctx_arg.warn(f"{what}: forced rejection for test")
+                    return False
+                return real_write_if_preserves(ctx_arg, path, original, content, managed_keys, what=what, mode=mode)
+
+            with temporary_home(tmp):
+                with mock.patch.object(scion_harness, "write_toml_if_preserves", side_effect=fail_only_alias):
+                    with self.assertRaises(scion_harness.ProvisionError):
+                        provision._configure_vertex_ai(ctx, env)
+                # The primary vertex config write (unaffected by the patch)
+                # must still have succeeded.
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["model"]["vertex-grok"]["model"], "xai/grok-4.6")
+        self.assertNotIn("GROK_DEFAULT_MODEL", env, "GROK_DEFAULT_MODEL must not be exported on a rejected write")
+        self.assertFalse(
+            any("vertex-ai: project=" in line for line in info_lines),
+            f"expected no success line, got: {info_lines}",
+        )
 
 
 # ---------------------------------------------------------------------------
