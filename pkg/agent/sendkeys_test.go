@@ -1253,7 +1253,7 @@ func TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName(t *test
 	first.ContainerID = sharedContainerID
 	first.Image = "agent-image:v1"
 
-	var currentAgent api.AgentInfo = first
+	var currentAgent = first
 	var versionOutput = "tmux 3.3a\n"
 	var capturedCmd []string
 

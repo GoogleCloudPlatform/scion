@@ -329,13 +329,13 @@ func spanText(s sdktrace.ReadOnlySpan) string {
 	b.WriteString(s.Name())
 	for _, kv := range s.Attributes() {
 		b.WriteString(string(kv.Key))
-		b.WriteString(kv.Value.Emit())
+		b.WriteString(kv.Value.String())
 	}
 	for _, ev := range s.Events() {
 		b.WriteString(ev.Name)
 		for _, kv := range ev.Attributes {
 			b.WriteString(string(kv.Key))
-			b.WriteString(kv.Value.Emit())
+			b.WriteString(kv.Value.String())
 		}
 	}
 	b.WriteString(s.Status().Description)
