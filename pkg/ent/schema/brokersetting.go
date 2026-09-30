@@ -52,7 +52,7 @@ func (BrokerSetting) Fields() []ent.Field {
 			Comment("Optimistic concurrency token; incremented on every update"),
 		field.String("updated_by").
 			Optional().
-			Comment("Email of the admin who last wrote this document"),
+			Comment("Identity ID (store.Identity.ID(), e.g. a user ID) of whoever last wrote this document"),
 		field.Time("create_time").
 			Default(time.Now).
 			Immutable(),

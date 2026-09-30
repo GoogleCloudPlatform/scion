@@ -33,12 +33,21 @@ import (
 // EffectiveSetting is the resolved value of one broker-settings key plus the
 // precedence step that produced it (design.md §5.2, §5.9).
 type EffectiveSetting struct {
-	// Value is nil only when resolution could not determine a value at all
-	// (no quota service configured, or no matching limit definition); a
-	// resolved-but-unlimited value is reported as 0, not omitted, so the UI
-	// can always show a number next to Source.
+	// Value is nil only when effectiveBrokerLimit itself errors (a store
+	// failure) — Source is then "" too. Every other outcome, including "no
+	// quota service configured" and "no matching limit definition" (both
+	// reported as Source "unlimited"), resolves to a concrete number: a
+	// resolved-but-unlimited value is 0, not omitted, so the UI can always
+	// show a number next to Source.
 	Value  *int64 `json:"value"`
 	Source string `json:"source"`
+	// Count is the current active-reservation count for this key (nil when
+	// resolution failed or the key isn't quota-backed). It is the same
+	// CountActiveReservations value Reserve itself counts against, shared
+	// via brokerCapacity (design.md §5.9, AC-P2-9/AC-P2-10) — the broker
+	// detail page must render this rather than compute its own count from a
+	// visibility-filtered agent list.
+	Count *int64 `json:"count,omitempty"`
 }
 
 // BrokerSettingsEffective holds the effective value for every registered
@@ -64,12 +73,14 @@ type brokerSettingsCapabilities struct {
 
 // BrokerSettingsResponse is the GET/PUT response body.
 type BrokerSettingsResponse struct {
-	BrokerID     string                     `json:"brokerId"`
-	Settings     store.BrokerSettings       `json:"settings"`
-	Effective    BrokerSettingsEffective    `json:"effective"`
-	Revision     int64                      `json:"revision"`
-	UpdatedBy    string                     `json:"updatedBy,omitempty"`
-	Updated      time.Time                  `json:"updated"`
+	BrokerID  string                  `json:"brokerId"`
+	Settings  store.BrokerSettings    `json:"settings"`
+	Effective BrokerSettingsEffective `json:"effective"`
+	Revision  int64                   `json:"revision"`
+	UpdatedBy string                  `json:"updatedBy,omitempty"`
+	// Updated is nil when the broker has no settings row yet (no write has
+	// ever happened, so there is no timestamp to report).
+	Updated      *time.Time                 `json:"updated,omitempty"`
 	Capabilities brokerSettingsCapabilities `json:"_capabilities"`
 }
 
@@ -99,13 +110,14 @@ func (s *Server) handleBrokerSettings(w http.ResponseWriter, r *http.Request, br
 	}
 }
 
-// handleGetBrokerSettings returns brokerID's settings document and effective
-// values. Requires broker.read. 404 if the broker doesn't exist; settings={}
-// and revision=0 when the broker has no settings row.
-func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request, brokerID string) {
+// handleGetBrokerSettings returns the settings document and effective values
+// for the broker at the given path segment. Requires broker.read. 404 if the
+// broker doesn't exist; settings={} and revision=0 when the broker has no
+// settings row.
+func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request, pathBrokerID string) {
 	ctx := r.Context()
 
-	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	broker, err := s.store.GetRuntimeBroker(ctx, pathBrokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -113,6 +125,14 @@ func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request,
 	if !s.authorize(w, r, brokerResource(broker), ActionRead) {
 		return
 	}
+
+	// Use the canonical ID the lookup resolved to, not the raw path segment:
+	// GetRuntimeBroker's UUID parsing accepts uppercase/braced/urn forms, and
+	// every other reader/writer of broker settings (Reserve, the providers
+	// listing) keys off store.RuntimeBroker.ID. Keying this handler off the
+	// raw segment instead would silently write/read a different row than the
+	// one enforcement uses.
+	brokerID := broker.ID
 
 	rec, err := s.store.GetBrokerSettings(ctx, brokerID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -123,25 +143,35 @@ func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, s.buildBrokerSettingsResponse(r, brokerID, rec))
 }
 
-// handlePutBrokerSettings replaces brokerID's settings document. Each
-// present key must be a known brokersettings key (400 otherwise), pass its
-// own validation (400), and the caller must hold its declared write
-// permission (403). The write is a full replace with optimistic concurrency
-// (409 on a stale expectedRevision, with the current record in the body).
-func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request, brokerID string) {
+// handlePutBrokerSettings replaces the settings document for the broker at
+// the given path segment. Every present key must be a known brokersettings
+// key (400 otherwise) and pass its own validation (400). The write is a full
+// replace (design.md §5.4: absent/null = unset), so a key can be cleared by
+// omitting it — which means the permission check must run over the keys that
+// actually *change* between the stored document and the new one, not just
+// the keys present in the request body. Checking only present keys would let
+// any caller with broker.read (e.g. any broker owner) clear an admin-set cap
+// by sending an empty or partial body without ever touching quota.update
+// (ptone/scion#2061 P2 review round 1, F1). Optimistic concurrency (409 on a
+// stale expectedRevision, with the current record in the body).
+func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request, pathBrokerID string) {
 	ctx := r.Context()
 
-	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	broker, err := s.store.GetRuntimeBroker(ctx, pathBrokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 	// GET-level read access is a precondition for writing at all; the
-	// per-key permission check below (quota.update for maxAgents) is the
-	// real write gate (design.md §5.3).
+	// per-key, diff-based permission check below is the real write gate
+	// (design.md §5.3).
 	if !s.authorize(w, r, brokerResource(broker), ActionRead) {
 		return
 	}
+
+	// See handleGetBrokerSettings: always key store calls off the canonical
+	// ID, never the raw path segment.
+	brokerID := broker.ID
 
 	var req brokerSettingsPutRequest
 	if err := readJSON(r, &req); err != nil {
@@ -149,14 +179,13 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	var settings store.BrokerSettings
+	// Parse and validate every present key first (400s only — no permission
+	// checks yet, since permission is decided by what *changes*, computed
+	// below against the currently stored document).
+	var newSettings store.BrokerSettings
 	for key, raw := range req.Settings {
-		def, ok := brokersettings.Lookup(key)
-		if !ok {
+		if _, ok := brokersettings.Lookup(key); !ok {
 			BadRequest(w, fmt.Sprintf("unknown broker setting %q", key))
-			return
-		}
-		if !s.authorizeBrokerSettingWrite(w, r, def) {
 			return
 		}
 		switch key {
@@ -170,7 +199,26 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 				BadRequest(w, err.Error())
 				return
 			}
-			settings.MaxAgents = value
+			newSettings.MaxAgents = value
+		}
+	}
+
+	current, err := s.store.GetBrokerSettings(ctx, brokerID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	var oldSettings store.BrokerSettings
+	if current != nil {
+		oldSettings = current.Settings
+	}
+
+	// Authorize every key whose value actually changes (set, cleared, or
+	// changed to a different value) — a key a caller left untouched, or
+	// re-sent identical to its current value, needs no permission.
+	for _, def := range changedBrokerSettingsKeys(oldSettings, newSettings) {
+		if !s.authorizeBrokerSettingWrite(w, r, def) {
+			return
 		}
 	}
 
@@ -179,10 +227,10 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		updatedBy = identity.ID()
 	}
 
-	rec, err := s.store.PutBrokerSettings(ctx, brokerID, settings, req.ExpectedRevision, updatedBy)
+	rec, err := s.store.PutBrokerSettings(ctx, brokerID, newSettings, req.ExpectedRevision, updatedBy)
 	if err != nil {
 		if errors.Is(err, store.ErrRevisionConflict) {
-			current, getErr := s.store.GetBrokerSettings(ctx, brokerID)
+			latest, getErr := s.store.GetBrokerSettings(ctx, brokerID)
 			if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
 				RuntimeError(w, "Failed to load current broker settings")
 				return
@@ -190,7 +238,7 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 			writeJSON(w, http.StatusConflict, map[string]interface{}{
 				"error":   ErrCodeRevisionConflict,
 				"message": "Broker settings were modified concurrently. Refresh and retry.",
-				"current": s.buildBrokerSettingsResponse(r, brokerID, current),
+				"current": s.buildBrokerSettingsResponse(r, brokerID, latest),
 			})
 			return
 		}
@@ -205,6 +253,27 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 	})
 
 	writeJSON(w, http.StatusOK, s.buildBrokerSettingsResponse(r, brokerID, rec))
+}
+
+// changedBrokerSettingsKeys returns the registry KeyDef for every field that
+// differs between oldSettings and newSettings. Adding a new
+// store.BrokerSettings field means adding one comparison here alongside its
+// new brokersettings.KeyDef.
+func changedBrokerSettingsKeys(oldSettings, newSettings store.BrokerSettings) []brokersettings.KeyDef {
+	var changed []brokersettings.KeyDef
+	if !int64PtrEqual(oldSettings.MaxAgents, newSettings.MaxAgents) {
+		changed = append(changed, brokersettings.MaxAgents)
+	}
+	return changed
+}
+
+// int64PtrEqual reports whether a and b are both nil or both non-nil with
+// equal values.
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // canWriteBrokerSettingKey reports whether identity holds def's declared
@@ -258,12 +327,13 @@ func (s *Server) buildBrokerSettingsResponse(r *http.Request, brokerID string, r
 		resp.Settings = rec.Settings
 		resp.Revision = rec.Revision
 		resp.UpdatedBy = rec.UpdatedBy
-		resp.Updated = rec.Updated
+		updated := rec.Updated
+		resp.Updated = &updated
 	}
 
 	limitDef := s.lookupAgentLimitDefinition(ctx)
 	bc := s.brokerCapacity(ctx, brokerID, limitDef)
-	resp.Effective.MaxAgents = EffectiveSetting{Source: bc.Source}
+	resp.Effective.MaxAgents = EffectiveSetting{Source: bc.Source, Count: bc.Count}
 	if bc.Source != "" {
 		// bc.Limit is nil to mean unlimited (providers-listing convention);
 		// the settings API instead always shows a concrete number when

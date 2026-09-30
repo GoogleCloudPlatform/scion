@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -121,10 +122,14 @@ type BrokerCapacity struct {
 
 // brokerCapacity computes brokerID's current BrokerCapacity. limitDef is
 // looked up once per listing by the caller (lookupAgentLimitDefinition),
-// matching effectiveBrokerLimit's convention.
+// matching effectiveBrokerLimit's convention. Failures are logged here —
+// callers such as resolveBrokerCapacity must not need their own copy of
+// this logging (ptone/scion#2061 P2 review round 1, F5).
 func (s *Server) brokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) BrokerCapacity {
 	value, source, err := s.effectiveBrokerLimit(ctx, brokerID, limitDef)
 	if err != nil {
+		slog.WarnContext(ctx, "broker capacity: failed to resolve effective agent limit",
+			"broker_id", brokerID, "error", err)
 		return BrokerCapacity{}
 	}
 
@@ -139,6 +144,8 @@ func (s *Server) brokerCapacity(ctx context.Context, brokerID string, limitDef *
 	}
 	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
 	if err != nil {
+		slog.WarnContext(ctx, "broker capacity: failed to count active reservations",
+			"broker_id", brokerID, "error", err)
 		return bc
 	}
 	bc.Count = &count

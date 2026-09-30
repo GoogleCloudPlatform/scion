@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -931,17 +932,28 @@ func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id,
 // DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
 // edge to broker_settings (design.md §5.1), so the settings row, if any, is
 // deleted explicitly rather than relying on an FK cascade
-// (ptone/scion#2061 P2, AC-P2-4).
+// (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
+// failure partway through never orphans a settings row for an ID that no
+// longer has a broker (ptone/scion#2061 P2 review round 1, F10).
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.client.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("delete runtime broker: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := tx.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
 	}
-	if err := NewBrokerSettingStore(s.client).DeleteBrokerSettings(ctx, id); err != nil {
+	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(id)).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete runtime broker: commit: %w", err)
 	}
 	return nil
 }

@@ -785,15 +785,6 @@ export class ScionPageBrokerDetail extends LitElement {
   // Settings card (ptone/scion#2061 P2, ptone/scion#2177, design.md §5.6)
   // ---------------------------------------------------------------------------
 
-  /** Number of agents on this broker that count against max_agents_per_broker
-   * (design.md §5.6's usage line), mirroring isBrokerQuotaCountedPhase
-   * (pkg/hub/broker_quota.go): every phase except stopped/suspended/error. */
-  private get countedAgentCount(): number {
-    return this.agents.filter(
-      (a) => a.phase !== 'stopped' && a.phase !== 'suspended' && a.phase !== 'error'
-    ).length;
-  }
-
   private sourceLabel(source: string): string {
     switch (source) {
       case 'broker':
@@ -806,6 +797,8 @@ export class ScionPageBrokerDetail extends LitElement {
         return 'not enforced (quota switch is off)';
       case 'unlimited':
         return 'unlimited (no quota configured)';
+      case '':
+        return 'unknown — resolution failed';
       default:
         return source;
     }
@@ -889,11 +882,15 @@ export class ScionPageBrokerDetail extends LitElement {
     const settings = this.brokerSettings;
     const canEdit = settings._capabilities.update;
     const effective = settings.effective.maxAgents;
-    // The hub-default number is only known from this endpoint when no
-    // broker override is currently active (source is then hub_default or
-    // entitlement); while a custom override is active, the label omits the
-    // number rather than showing a stale or misleading one.
-    const hubDefaultKnown = this.brokerSettingsMode === 'default' && effective.value !== null;
+    // The hub/entitlement default number is only known from this endpoint
+    // when the *stored* effective source is not "broker" — i.e. no override
+    // is currently in effect server-side. This must key off effective.source,
+    // not the local radio selection (brokerSettingsMode): while an override
+    // is active, flipping the radio to "default" before saving must not
+    // relabel it using the still-in-effect override's value (round 1 review,
+    // F4) — the label only updates once the save actually clears it and a
+    // fresh response comes back with a non-"broker" source.
+    const hubDefaultKnown = effective.source !== 'broker' && effective.value !== null;
     const hubDefaultLabel = hubDefaultKnown
       ? `Use hub default (${effective.value})`
       : 'Use hub default';
@@ -956,8 +953,11 @@ export class ScionPageBrokerDetail extends LitElement {
         <p
           style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
         >
-          Currently ${this.countedAgentCount} agent${this.countedAgentCount === 1 ? '' : 's'}
-          counted toward this broker’s cap. Effective limit:
+          ${effective.count === undefined || effective.count === null
+            ? 'Usage unknown.'
+            : html`Currently ${effective.count} agent${effective.count === 1 ? '' : 's'} counted
+              toward this broker’s cap.`}
+          Effective limit:
           ${effective.value === null
             ? 'unknown'
             : effective.value === 0

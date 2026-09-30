@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -141,6 +142,77 @@ func TestBrokerSettings_Put_OwnerWithoutQuotaUpdate403(t *testing.T) {
 }
 
 // =============================================================================
+// PUT: a broker owner cannot clear an admin-set cap by omission (review
+// round 1, F1 — critical authz bypass). PUT is a full replace (design.md
+// §5.4: absent/null = unset), so the permission check must run over the keys
+// that *change*, not just the keys present in the request. Each variant here
+// must be forbidden and must leave the stored value untouched.
+// =============================================================================
+
+func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newPlainUser(t, s, "clear-omission-owner")
+	broker := newBrokerSettingsTestBroker(t, s, "clear-omission", owner.ID)
+
+	// An admin sets the cap first.
+	adminRec := doRequest(t, srv, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 3},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+
+	assertUnchanged := func(t *testing.T) {
+		t.Helper()
+		rec, err := s.GetBrokerSettings(context.Background(), broker.ID)
+		require.NoError(t, err)
+		require.NotNil(t, rec.Settings.MaxAgents)
+		assert.EqualValues(t, 3, *rec.Settings.MaxAgents, "the admin-set cap must survive a denied owner PUT")
+		assert.EqualValues(t, 1, rec.Revision, "a denied PUT must not bump the revision")
+	}
+
+	t.Run("empty settings object", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+			"settings":         map[string]interface{}{},
+			"expectedRevision": 1,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertUnchanged(t)
+	})
+
+	t.Run("settings key omitted entirely", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+			"expectedRevision": 1,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertUnchanged(t)
+	})
+
+	t.Run("explicit null", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+			"settings":         map[string]interface{}{"maxAgents": nil},
+			"expectedRevision": 1,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assertUnchanged(t)
+	})
+
+	// Re-sending the identical current value is a no-op for the stored
+	// value, so it needs no permission: this is the "either allowed or 403,
+	// pick one and test it" case from review round 1.
+	t.Run("identical value is allowed without permission", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+			"settings":         map[string]interface{}{"maxAgents": 3},
+			"expectedRevision": 1,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := s.GetBrokerSettings(context.Background(), broker.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.Settings.MaxAgents)
+		assert.EqualValues(t, 3, *got.Settings.MaxAgents)
+	})
+}
+
+// =============================================================================
 // PUT: hub-admin -> 200
 // =============================================================================
 
@@ -209,6 +281,50 @@ func TestBrokerSettings_Put_StaleRevision409(t *testing.T) {
 	current, ok := body["current"].(map[string]interface{})
 	require.True(t, ok, "409 body must include the current record: %s", second.Body.String())
 	assert.EqualValues(t, 1, current["revision"])
+}
+
+// =============================================================================
+// PUT/GET must key settings off the canonical broker ID GetRuntimeBroker
+// resolves to, not the raw path segment (review round 1, F2): GetRuntimeBroker's
+// UUID parsing accepts uppercase/braced forms, and a naive handler that keys
+// off the raw segment would write/read a different row than the one Reserve
+// and the providers listing use.
+// =============================================================================
+
+func TestBrokerSettings_Put_NonCanonicalBrokerIDUsesCanonicalKey(t *testing.T) {
+	srv, s := testServer(t)
+	broker := newBrokerSettingsTestBroker(t, s, "non-canonical", "")
+	uppercasePath := settingsPath(strings.ToUpper(broker.ID))
+
+	putRec := doRequest(t, srv, http.MethodPut, uppercasePath, map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 1},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+	// The row must be stored under the canonical (lowercase) ID: a GET on
+	// the canonical path must see it...
+	getRec := doRequest(t, srv, http.MethodGet, settingsPath(broker.ID), nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var resp BrokerSettingsResponse
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Settings.MaxAgents, "the setting must be readable from the canonical broker ID")
+	assert.EqualValues(t, 1, *resp.Settings.MaxAgents)
+
+	// ...and the store itself must have exactly one row, keyed by the
+	// canonical ID.
+	rec, err := s.GetBrokerSettings(context.Background(), broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Settings.MaxAgents)
+	assert.EqualValues(t, 1, *rec.Settings.MaxAgents)
+
+	// effectiveBrokerLimit (and therefore Reserve) must see the same row.
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	value, source, err := srv.effectiveBrokerLimit(context.Background(), broker.ID, def)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, value)
+	assert.Equal(t, BrokerLimitSourceBroker, source)
 }
 
 // =============================================================================
@@ -312,6 +428,14 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 	otherBroker := newTestBroker(t, s, "unaffected")
 	otherProject := addProjectOnBroker(t, s, "unaffected-project", otherBroker)
 
+	// AC-P2-2 / review round 1 F6: a system-scoped entitlement binding of 30
+	// would, on its own, let this broker run up to 30 agents (most generous
+	// wins over the hub default). The per-broker override must still win at
+	// Reserve, not just on the read side.
+	limitDef, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	seedBinding(t, s, limitDef.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeSystem, "", 30)
+
 	// Set maxAgents=1 on the primary broker via PUT.
 	putRec := doRequest(t, srv, http.MethodPut, settingsPath(brokerID), map[string]interface{}{
 		"settings":         map[string]interface{}{"maxAgents": 1},
@@ -353,6 +477,8 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 	assert.EqualValues(t, 1, *providersResp.Providers[0].AgentLimit)
 	require.NotNil(t, providersResp.Providers[0].AgentCount)
 	assert.EqualValues(t, 1, *providersResp.Providers[0].AgentCount)
+	assert.Equal(t, BrokerLimitSourceBroker, providersResp.Providers[0].AgentLimitSource,
+		"the providers response must report the broker override, not the 30-value system binding, as the source")
 
 	settingsRec := doRequest(t, srv, http.MethodGet, settingsPath(brokerID), nil)
 	require.Equal(t, http.StatusOK, settingsRec.Code, settingsRec.Body.String())
@@ -361,17 +487,22 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 	require.NotNil(t, settingsResp.Effective.MaxAgents.Value)
 	assert.EqualValues(t, 1, *settingsResp.Effective.MaxAgents.Value)
 	assert.Equal(t, BrokerLimitSourceBroker, settingsResp.Effective.MaxAgents.Source)
+	require.NotNil(t, settingsResp.Effective.MaxAgents.Count,
+		"the settings response must include the live count (review round 1, F3), not leave the detail page to compute its own")
+	assert.EqualValues(t, 1, *settingsResp.Effective.MaxAgents.Count)
 
-	// Clear the override — the hub default applies again.
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
+	// Clear the override — the entitlement engine applies again. A
+	// system-scoped binding (30) is in effect, so the fallback is that
+	// binding, not the hub-wide default (existing ResolveEffectiveLimit
+	// "most generous wins" behaviour, unaffected by broker settings).
 	clearRec := doRequest(t, srv, http.MethodPut, settingsPath(brokerID), map[string]interface{}{
 		"settings":         map[string]interface{}{"maxAgents": nil},
 		"expectedRevision": 1,
 	})
 	require.Equal(t, http.StatusOK, clearRec.Code, clearRec.Body.String())
 
-	// Now the hub default (>1) allows another agent on the primary broker.
+	// Now the entitlement binding (30, well above 1) allows another agent on
+	// the primary broker.
 	rec4 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name: "settings-e2e-after-clear", ProjectID: project.ID,
 	})
@@ -382,6 +513,15 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 	var afterClearResp BrokerSettingsResponse
 	require.NoError(t, json.Unmarshal(afterClear.Body.Bytes(), &afterClearResp))
 	require.NotNil(t, afterClearResp.Effective.MaxAgents.Value)
-	assert.EqualValues(t, def.DefaultValue, *afterClearResp.Effective.MaxAgents.Value)
-	assert.Equal(t, BrokerLimitSourceHubDefault, afterClearResp.Effective.MaxAgents.Source)
+	assert.EqualValues(t, 30, *afterClearResp.Effective.MaxAgents.Value)
+	assert.Equal(t, BrokerLimitSourceEntitlement, afterClearResp.Effective.MaxAgents.Source)
+
+	afterClearProvidersRec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/providers", nil)
+	require.Equal(t, http.StatusOK, afterClearProvidersRec.Code, afterClearProvidersRec.Body.String())
+	var afterClearProvidersResp struct {
+		Providers []providerCapacityView `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(afterClearProvidersRec.Body.Bytes(), &afterClearProvidersResp))
+	require.Len(t, afterClearProvidersResp.Providers, 1)
+	assert.Equal(t, BrokerLimitSourceEntitlement, afterClearProvidersResp.Providers[0].AgentLimitSource)
 }

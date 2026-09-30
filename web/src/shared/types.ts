@@ -809,10 +809,16 @@ export interface BrokerSettings {
  * (pkg/hub/broker_settings_handlers.go).
  */
 export interface EffectiveSetting {
-  /** null when resolution could not determine a value at all. */
+  /** null only when resolution errored outright; source is then "" too.
+   * Every other outcome, including "no quota configured" (source
+   * "unlimited"), is a concrete number (0 = unlimited). */
   value: number | null;
-  /** "broker" | "entitlement" | "hub_default" | "unlimited" | "not_enforced" */
+  /** "broker" | "entitlement" | "hub_default" | "unlimited" | "not_enforced" | "" */
   source: string;
+  /** Current active-reservation count for this key, the same value Reserve
+   * counts against (shared via brokerCapacity, AC-P2-9/AC-P2-10). Omitted
+   * when resolution failed or the key isn't quota-backed. */
+  count?: number;
 }
 
 /**
@@ -829,7 +835,8 @@ export interface BrokerSettingsResponse {
   /** Optimistic concurrency revision; 0 when the broker has no settings row. */
   revision: number;
   updatedBy?: string;
-  updated: string;
+  /** Absent when the broker has no settings row yet. */
+  updated?: string;
   /** Per-key write permission for the caller. */
   _capabilities: {
     update: boolean;

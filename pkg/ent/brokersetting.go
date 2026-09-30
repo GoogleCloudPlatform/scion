@@ -25,7 +25,7 @@ type BrokerSetting struct {
 	Value json.RawMessage `json:"value,omitempty"`
 	// Optimistic concurrency token; incremented on every update
 	Revision int64 `json:"revision,omitempty"`
-	// Email of the admin who last wrote this document
+	// Identity ID (store.Identity.ID(), e.g. a user ID) of whoever last wrote this document
 	UpdatedBy string `json:"updated_by,omitempty"`
 	// CreateTime holds the value of the "create_time" field.
 	CreateTime time.Time `json:"create_time,omitempty"`
