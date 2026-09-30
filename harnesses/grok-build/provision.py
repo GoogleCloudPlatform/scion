@@ -307,10 +307,34 @@ default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
         content += "\n\n"
     content += vertex_toml + "\n"
 
-    scion_harness.write_toml_if_preserves(
+    # Key-path managed keys (rather than bare "auth_provider"/"model") so
+    # this write can't be fooled into silently accepting damage to some
+    # other tool's [auth_provider.*] or [model.*] sub-table — only the
+    # named vertex-grok ones are actually written here. "models" stays a
+    # bare top-level key: the whole [models] table (just `default = ...`)
+    # is unconditionally replaced by this write, not a shared table this
+    # site owns only part of.
+    if not scion_harness.write_toml_if_preserves(
         ctx, config_path, existing, content,
-        managed_keys={"auth_provider", "model", "models"},
-    )
+        managed_keys={
+            ("auth_provider", _VERTEX_AUTH_PROVIDER_NAME),
+            ("model", _VERTEX_MODEL_CONFIG_NAME),
+            "models",
+        },
+        what="vertex-ai auth/model config",
+    ):
+        # A vertex-auth agent with no vertex config is guaranteed broken —
+        # grok would fall back to the direct xAI API and fail auth outright
+        # — so this must fail loudly rather than continue as if it
+        # succeeded (ptone/scion#2427 review round 1, R2). The caller
+        # (_configure_vertex_ai) must not reach its GROK_DEFAULT_MODEL env
+        # export or success log after this.
+        raise scion_harness.ProvisionError(
+            f"vertex-ai: failed to write auth_provider/model/models config "
+            f"to {config_path}; grok would start without vertex routing "
+            "configured (see the preceding warning for what blocked the "
+            "write)"
+        )
 
 
 def _write_vertex_model_alias(
@@ -353,8 +377,14 @@ api_backend = "chat_completions"
 supports_backend_search = false'''
 
     content = content.rstrip("\n") + "\n" + alias_toml + "\n"
+    # Key-path ("model", alias_name), not bare "model": this write owns
+    # only its own alias sub-table, not the whole shared [model.*] table
+    # (which also holds _write_vertex_config's own vertex-grok block and
+    # possibly a user's [model.custom]).
     if scion_harness.write_toml_if_preserves(
-        ctx, config_path, original, content, managed_keys={"model"}
+        ctx, config_path, original, content,
+        managed_keys={("model", alias_name)},
+        what=f"vertex-ai model alias '{alias_name}'",
     ):
         ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
@@ -417,7 +447,8 @@ def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]
         new_content += "\n"
 
     scion_harness.write_toml_if_preserves(
-        ctx, config_path, existing, new_content, managed_keys={"mcp_servers"}
+        ctx, config_path, existing, new_content,
+        managed_keys={"mcp_servers"}, what="MCP server registration",
     )
 
 
@@ -485,6 +516,7 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.write_toml_if_preserves(
         ctx, config_path, existing, content,
         managed_keys={"cli", "features", "memory", "subagents"},
+        what="config hardening",
     )
 
 
