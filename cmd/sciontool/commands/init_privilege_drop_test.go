@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -698,6 +699,80 @@ func TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget(t *testing.T) {
 	}
 	if !sawNormal {
 		t.Error("the normal entry \"normal\" was never a chown target")
+	}
+}
+
+// TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry proves the base-present
+// hardlink gap this round closes: AT_SYMLINK_NOFOLLOW on the chown itself
+// defeats a symlinked entry, but a HARDLINKED entry has no symlink for that
+// flag to stop at — it names the very same inode as an unrelated (possibly
+// root-owned) file the workload does not own at all, planted by
+// hard-linking into $HOME (which only needs write access to the directory,
+// not ownership of the target). Under enforcement, a planted hardlink entry
+// must never reach the chown call at all, while a normal entry is still
+// chowned as usual, and the victim's own ownership and mode never change.
+func TestDirectSetUIDAt_EnforcedSkipsHardlinkedEntry(t *testing.T) {
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:x:2000:2000:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, filepath.Join(homeDir, "hardlinked")); err != nil {
+		t.Fatal(err)
+	}
+	normalEntry := filepath.Join(homeDir, "normal")
+	if err := os.WriteFile(normalEntry, []byte("skel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chowns := recordDirectSetUIDAtChowns(t)
+
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	if err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir, true); err != nil {
+		t.Fatalf("directSetUIDAt() = %v, want nil", err)
+	}
+
+	var sawHardlinked, sawNormal bool
+	for _, c := range *chowns {
+		if c.name == "hardlinked" {
+			sawHardlinked = true
+		}
+		if c.name == "normal" {
+			sawNormal = true
+		}
+	}
+	if sawHardlinked {
+		t.Error("the hardlinked entry was a chown target; want it skipped under enforcement")
+	}
+	if !sawNormal {
+		t.Error("the normal entry was never a chown target")
+	}
+
+	gotInfo, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if gotInfo.Sys().(*syscall.Stat_t).Uid != wantInfo.Sys().(*syscall.Stat_t).Uid {
+		t.Error("victim owner changed")
 	}
 }
 

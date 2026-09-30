@@ -2194,6 +2194,30 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		names, err := homeDirFile.Readdirnames(-1)
 		if err == nil {
 			for _, name := range names {
+				// AT_SYMLINK_NOFOLLOW on the chown itself defeats a
+				// symlinked entry (it chowns the link, never its target),
+				// but a HARDLINKED entry has no symlink for that flag to
+				// stop at: it names the same inode as whatever else links
+				// to it, possibly a file the workload does not own at all
+				// (hard-linking only needs write access to the directory a
+				// link is created in, not ownership of the target). Under
+				// enforcement, fstat the entry first (AT_SYMLINK_NOFOLLOW,
+				// so a symlink is still classified by its own link count,
+				// never the target's) and skip it — logged, non-fatal, the
+				// same as every other per-entry chown failure here — when
+				// it has more than one link. Unenforced mode keeps the
+				// base behaviour of chowning it unconditionally.
+				if requirePrivilegeDrop {
+					var st unix.Stat_t
+					if serr := unix.Fstatat(int(homeDirFile.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
+						log.Debug("Failed to stat %s: %v", filepath.Join(homeDir, name), serr)
+						continue
+					}
+					if st.Nlink != 1 {
+						log.Debug("Skipping chown of %s: hardlinked entry (link count %d)", filepath.Join(homeDir, name), st.Nlink)
+						continue
+					}
+				}
 				if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 					log.Debug("Failed to chown %s: %v", filepath.Join(homeDir, name), err)
 				}
