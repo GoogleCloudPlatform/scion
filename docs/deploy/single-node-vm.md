@@ -39,7 +39,7 @@ Key properties:
 | GCP project | A Google Cloud project with billing enabled |
 | `gcloud` CLI | Authenticated (`gcloud auth login`) with a project set (`gcloud config set project PROJECT_ID`) |
 | Required APIs | `compute`, `run`, `iap`, `cloudbuild`, `artifactregistry` — enabled automatically by the script |
-| Permissions | Project Editor or equivalent (create VMs, Cloud Run services, service accounts, IAM bindings). The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. |
+| Permissions | Project Owner, or Editor plus `roles/resourcemanager.projectIamAdmin` and `roles/run.admin` (create VMs, Cloud Run services, service accounts, IAM bindings) — Editor alone lacks both `resourcemanager.projects.setIamPolicy` (the project-level IAM bindings this script creates) and `run.services.setIamPolicy` (the Cloud Run service's own invoker binding); `projectIamAdmin` covers the first but not the second, hence `run.admin` too. Both Owner and Editor already include `iam.serviceAccounts.actAs` on the service accounts the script uses, so no separate Service Account User grant is needed. The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. With the optional hybrid tier enabled, also `roles/iam.serviceAccountAdmin` (`iam.serviceAccounts.setIamPolicy`, for the transport service account's token-creator binding) and `roles/iap.admin` (`iap.webServices.setIamPolicy`, for its IAP access grant). Owner already covers both. |
 | VM OS image | Ubuntu 22.04 LTS — pinned, not currently configurable (see [Architecture](#architecture)). |
 
 ## Quick Start
