@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 96
+**Operations:** 97
 
 ## Table of Contents
 
@@ -43,6 +43,7 @@
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
+- [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
@@ -1634,6 +1635,38 @@
 **Credentials:** `session_jwt`
 
 **Base Permission:** `hub.messaging.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.experiments.update
+
+**Domain:** hub
+
+**Description:** Read and update hub-wide experiment overrides
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/experiments` |
+| http_route | PUT | `/api/v1/admin/experiments` |
+| http_route | DELETE | `/api/v1/admin/experiments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.experiments.update`
 
 **Resource Resolver:** hub-scoped
 

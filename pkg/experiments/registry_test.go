@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"testing"
+	"time"
 )
 
 // valid returns a minimally valid Experiment with every required field set,
@@ -129,6 +130,72 @@ func TestHasLayerAndStableOrder(t *testing.T) {
 	all := r.All()
 	if len(all) != 2 || all[0].Name != "web.a" || all[1].Name != "web.b" {
 		t.Fatalf("All() = %v, want [web.a, web.b] (stable order by name)", all)
+	}
+}
+
+// TestReviewOverdue asserts the boundary explicitly (ptone/scion#2217): the
+// tab shows "review overdue" starting the day after ReviewBy, not during
+// ReviewBy itself.
+func TestReviewOverdue(t *testing.T) {
+	e := valid("web.reviewed", LayerWeb)
+	e.ReviewBy = "2026-06-15"
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"before ReviewBy", time.Date(2026, 6, 14, 23, 59, 0, 0, time.UTC), false},
+		{"during ReviewBy (start of day)", time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC), false},
+		{"during ReviewBy (end of day)", time.Date(2026, 6, 15, 23, 59, 59, 0, time.UTC), false},
+		{"the day after ReviewBy", time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC), true},
+		{"well after ReviewBy", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := e.ReviewOverdue(tt.now); got != tt.want {
+				t.Errorf("ReviewOverdue(%v) = %v, want %v", tt.now, got, tt.want)
+			}
+		})
+	}
+
+	if (Experiment{ReviewBy: "not-a-date"}).ReviewOverdue(time.Now()) {
+		t.Error("an unparsable ReviewBy must resolve to not-overdue, not panic")
+	}
+}
+
+// TestReviewOverdue_LocationIndependent asserts that ReviewOverdue gives the
+// same answer for the same instant regardless of now's Location. Uses
+// time.FixedZone instead of a real IANA zone so it has no tzdata dependency.
+func TestReviewOverdue_LocationIndependent(t *testing.T) {
+	e := valid("web.reviewed", LayerWeb)
+	e.ReviewBy = "2026-06-15"
+	boundary := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC) // ReviewBy + 1 day, UTC midnight
+
+	farPositive := time.FixedZone("UTC+14", 14*60*60)  // e.g. Pacific/Kiritimati
+	farNegative := time.FixedZone("UTC-12", -12*60*60) // e.g. Etc/GMT+12
+	locations := []*time.Location{time.UTC, farPositive, farNegative}
+
+	tests := []struct {
+		name    string
+		instant time.Time
+		want    bool
+	}{
+		{"1s before the boundary", boundary.Add(-time.Second), false},
+		{"exactly at the boundary", boundary, true},
+		{"1s after the boundary", boundary.Add(time.Second), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, loc := range locations {
+				// .In(loc) re-expresses the same instant in a different
+				// Location; it does not change what instant tt.instant is.
+				now := tt.instant.In(loc)
+				if got := e.ReviewOverdue(now); got != tt.want {
+					t.Errorf("ReviewOverdue(%v) = %v, want %v (same instant, different Location must not change the answer)", now, got, tt.want)
+				}
+			}
+		})
 	}
 }
 

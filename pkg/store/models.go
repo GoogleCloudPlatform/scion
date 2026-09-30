@@ -1672,6 +1672,21 @@ type UserAccessToken struct {
 	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
 	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
+	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
+	// permission ceiling. CeilingVersionUnspecified (zero value) with
+	// CeilingPermissionIDs == nil means no ceiling has been persisted for
+	// this row yet: NormalizedCeiling recomputes it from Scopes via the
+	// frozen legacy snapshot rather than trusting a zero value that could
+	// equally mean "persisted, and resolves to nothing." Once
+	// CeilingPermissionIDs is non-nil — backfilled, or set at mint for any
+	// CeilingVersionV1+ row — it is the authoritative, already-resolved
+	// value and Scopes is retained only for display/audit, never re-derived.
+	// Excluded from JSON: the HTTP token response is a separate type, and
+	// omitempty would collapse the nil-vs-empty-list distinction on a round
+	// trip.
+	CeilingVersion       permissions.CeilingVersion `json:"-"`
+	CeilingPermissionIDs []string                   `json:"-"`
+
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"` // Required for UATs
@@ -1683,6 +1698,31 @@ type UserAccessToken struct {
 	// true for tokens created before E.1).
 	Purpose *string           `json:"purpose,omitempty"`
 	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// NormalizedCeiling returns t's FrozenPermissionCeiling. A row that has never
+// been normalized — CeilingVersion is CeilingVersionUnspecified and
+// CeilingPermissionIDs is nil, meaning no value has been persisted, not even
+// an explicit empty one — is normalized on the fly from the raw stored Scopes
+// via permissions.NormalizeLegacyUATScopes, the frozen legacy snapshot. This
+// never calls the live, mutable permissions.ResolveSelector, so a later
+// Registry or alias change cannot retroactively change what an existing
+// token means. Once CeilingPermissionIDs has been persisted
+// (by the migration backfill, or because the token was minted under
+// CeilingVersionV1+), that value is authoritative and is returned as-is,
+// including when it is an explicit empty list — which denies, not
+// "unrestricted."
+func (t *UserAccessToken) NormalizedCeiling() permissions.FrozenPermissionCeiling {
+	if t.CeilingVersion == permissions.CeilingVersionUnspecified && t.CeilingPermissionIDs == nil {
+		return permissions.FrozenPermissionCeiling{
+			Version:       permissions.CeilingVersionUnspecified,
+			PermissionIDs: permissions.NormalizeLegacyUATScopes(t.Scopes),
+		}
+	}
+	return permissions.FrozenPermissionCeiling{
+		Version:       t.CeilingVersion,
+		PermissionIDs: t.CeilingPermissionIDs,
+	}
 }
 
 // UATPrefix is the token prefix that distinguishes UATs from other token types.

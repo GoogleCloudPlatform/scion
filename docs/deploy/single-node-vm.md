@@ -177,6 +177,10 @@ On the VM itself:
 | `/home/scion/.scion/plugins/broker/` | Chat plugin binaries (if selected) |
 | `/etc/systemd/system/scion-hub.service` | systemd unit file |
 
+The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
+the paths above — the Hub's daemon working directory is that user's home
+directory, not `/`.
+
 ## Configuration
 
 ### settings.yaml

@@ -100,10 +100,10 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 // resource/action cannot collapse into one selector." hub.settings.read and
 // hub.config.read are real Registry entries that already share
 // {Resource: hub, Action: read} today. A resource:action reconstruction
-// (like useraccesstoken.go's scopeToPermissionIDs) would map the single
-// selector string "hub:read" to BOTH permission IDs at once. ResolveSelector
-// must not do that: it has no resource:action path at all, so "hub:read"
-// resolves to nothing rather than to an ambiguous pair.
+// would map the single selector string "hub:read" to BOTH permission IDs
+// at once. ResolveSelector must not do that: it has no resource:action
+// path at all, so "hub:read" resolves to nothing rather than to an
+// ambiguous pair.
 func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 	var settingsRead, configRead *Permission
 	for i := range Registry {
@@ -122,9 +122,9 @@ func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 			settingsRead.Resource, settingsRead.Action, configRead.Resource, configRead.Action)
 	}
 
-	// The naive resource:action reconstruction (what scopeToPermissionIDs
-	// does today) WOULD match both permissions for a single scope key.
-	// Demonstrate that fact so the contrast with ResolveSelector is legible.
+	// A naive resource:action reconstruction WOULD match both permissions
+	// for a single scope key. Demonstrate that fact so the contrast with
+	// ResolveSelector is legible.
 	scopeKey := settingsRead.Resource + ":" + settingsRead.Action
 	var naiveMatches []string
 	for _, p := range Registry {
