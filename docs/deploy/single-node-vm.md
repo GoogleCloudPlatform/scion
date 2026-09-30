@@ -23,6 +23,9 @@ Key properties:
 
 - **Binary-based** — downloads a pre-built release; no source checkout or
   container build required.
+- **Checksum-verified** — every downloaded binary and chat-plugin tarball is
+  verified against the release's `SHA256SUMS` asset before it is extracted;
+  see [Quick Start](#quick-start) below.
 - **Local storage** — Hub state lives in embedded SQLite on the VM disk; no GCS
   or Cloud SQL.
 - **Local secrets** — secrets are stored on disk (`hub.env`); no Secret Manager.
@@ -63,6 +66,17 @@ To install a specific release version:
 ```bash
 ./scripts/single-node-vm/deploy.sh --version v0.5.0
 ```
+
+Before downloading anything, the script checks that the chosen release
+publishes a `SHA256SUMS` checksums asset, and downloads and verifies every
+binary and chat-plugin tarball against it before installing.
+A release published before checksum publishing existed has no `SHA256SUMS`
+asset; targeting one with `--version` (or letting auto-detect pick a nightly
+that predates it) fails immediately, before any GCP resource is created, with
+an error naming the release. To install such a release anyway, without
+verification, set `ALLOW_UNVERIFIED_RELEASE=true` in the environment — this
+prints a loud warning and is not recommended outside of migrating off an old
+pinned version.
 
 ### Config File (Headless Mode)
 
@@ -225,6 +239,12 @@ Key settings:
   - `"disabled"` — no automatic update checking (manual checks via the admin
     UI still work).
 
+  Like the initial install, an `"auto"` update verifies the downloaded binary
+  against the target release's `SHA256SUMS` asset and fails the update (with
+  no binary swapped in) if that asset or a matching entry is missing, or the
+  hash doesn't match. Unlike the initial install, there is no override: a
+  release with no checksums simply isn't auto-installed.
+
 ### hub.env
 
 Environment variables for the Hub process, stored at
@@ -274,7 +294,9 @@ You can select multiple plugins by entering comma-separated numbers (e.g.,
 
 Plugins are downloaded from the same GitHub Release as the main binary and
 installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
-broker plugin within the Hub process.
+broker plugin within the Hub process. Like the main binary, each plugin
+tarball is verified against the release's `SHA256SUMS` asset before
+installation (see [Quick Start](#quick-start)).
 
 ## Container Images
 

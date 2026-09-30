@@ -2,6 +2,7 @@ import type { User } from '../shared/types.js';
 import {
   TerminalSessionRegistry,
   AGENT_UNAVAILABLE_REASONS,
+  AGENT_STOPPED_MESSAGE,
   type TerminalConnectionState,
   type TerminalSession,
   type TerminalSessionState,
@@ -408,11 +409,23 @@ export class TerminalWorkspaceRoot {
           ) {
             entry.session.markUnavailable('agent-deleted', next.error ?? 'Agent was deleted.');
           } else if (
-            next.agent?.phase === 'stopped' &&
-            entry.session.state.connection !== 'closed' &&
-            entry.session.state.connection !== 'unavailable'
+            // A crashed container reports phase 'error', not 'stopped'
+            // (ptone/scion#2096); treat both the same so a crashed agent's
+            // pane also re-arms once it is running again.
+            (next.agent?.phase === 'stopped' || next.agent?.phase === 'error') &&
+            entry.session.state.connection !== 'closed'
           ) {
-            entry.session.markUnavailable('agent-stopped', 'Agent has stopped.');
+            if (entry.session.state.connection !== 'unavailable') {
+              entry.session.markUnavailable('agent-stopped', AGENT_STOPPED_MESSAGE);
+            } else {
+              // The session is already unavailable — most often because a
+              // WebSocket close already reported agent_stopped before this
+              // SSE update arrived. markUnavailable() would be a no-op here,
+              // but this SSE update is still the independent down
+              // observation noteAgentAvailable() requires before it will act
+              // on a later "running" signal (ptone/scion#2096).
+              entry.session.noteAgentDown();
+            }
           } else if (
             // An agent that stops and restarts re-arms auto-reconnect once
             // it is confirmed running again. The WebSocket drop usually

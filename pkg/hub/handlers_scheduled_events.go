@@ -211,8 +211,13 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
-	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
-		return
+	if req.EventType == "dispatch_agent" {
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
 	}
 	// C1 containment: for message events, validate the target agent belongs to
 	// this project and the caller is authorized to message it. Scheduled messages

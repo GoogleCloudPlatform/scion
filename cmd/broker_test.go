@@ -57,3 +57,51 @@ func TestBrokerRestartCmdMetadata(t *testing.T) {
 func TestBrokerCmdLongDescriptionIncludesRestart(t *testing.T) {
 	assert.Contains(t, brokerCmd.Long, "restart")
 }
+
+// TestBuildBrokerForegroundArgsIncludesForeground is the regression guard for
+// a bug where `runtime-broker start --foreground` used to build the
+// underlying `server start` args without `--foreground`, so
+// serverStartCmd.RunE (runServerStartOrDaemon) daemonized instead of running
+// inline. Under a systemd Type=simple unit that meant the parent exited
+// immediately and the orphaned daemon child got reaped by cgroup cleanup.
+// --foreground must always be present, and first, regardless of the other
+// flags.
+func TestBuildBrokerForegroundArgsIncludesForeground(t *testing.T) {
+	got := buildBrokerForegroundArgs(DefaultBrokerPort, false, false)
+	assert.Equal(t, []string{"--foreground", "--hosted", "--enable-runtime-broker"}, got)
+	assert.Equal(t, "--foreground", got[0], "--foreground must be forwarded to the underlying server start invocation")
+}
+
+// TestBuildBrokerForegroundArgsForwardsAllFlags pins the full constructed
+// argv for every combination of the other runtime-broker start flags, so a
+// future change cannot silently drop --auto-provide, --debug, or the
+// non-default port the way --foreground was dropped.
+func TestBuildBrokerForegroundArgsForwardsAllFlags(t *testing.T) {
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--runtime-broker-port=9801", "--auto-provide", "--debug"},
+		buildBrokerForegroundArgs(9801, true, true),
+	)
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--auto-provide"},
+		buildBrokerForegroundArgs(DefaultBrokerPort, true, false),
+	)
+	assert.Equal(t,
+		[]string{"--foreground", "--hosted", "--enable-runtime-broker", "--debug"},
+		buildBrokerForegroundArgs(DefaultBrokerPort, false, true),
+	)
+}
+
+// TestBuildBrokerDaemonArgsForwardsAllFlags pins the argv used to launch (or
+// relaunch, on restart) the broker as a background daemon: the re-exec'd
+// child always runs with --foreground itself (daemon.Start is what
+// backgrounds it), and the other broker start/restart flags must survive.
+func TestBuildBrokerDaemonArgsForwardsAllFlags(t *testing.T) {
+	assert.Equal(t,
+		[]string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker"},
+		buildBrokerDaemonArgs(DefaultBrokerPort, false, false),
+	)
+	assert.Equal(t,
+		[]string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker", "--runtime-broker-port=9801", "--auto-provide", "--debug"},
+		buildBrokerDaemonArgs(9801, true, true),
+	)
+}

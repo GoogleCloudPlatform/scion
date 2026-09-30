@@ -53,6 +53,17 @@ export const PTY_CLOSE = {
 
 export type PtyCloseDisposition = 'detached' | 'retry' | 'terminal';
 
+/**
+ * Close-frame reason on a SESSION_GONE (4410) close that flags the tmux
+ * session as gone because the runtime reports its container definitively
+ * stopped or crashed, rather than the session itself having ended some other
+ * way (mirrors pkg/wsprotocol/pty_close.go's CloseReasonAgentStopped, sent
+ * unchanged on the wire by pkg/hub/pty_handlers.go's closeWith). Unlike a
+ * plain 4410, this one re-arms auto-reconnect once the agent phase is
+ * running again (ptone/scion#2096).
+ */
+export const AGENT_STOPPED_CLOSE_REASON = 'agent_stopped';
+
 /** Maps a PTY WebSocket close code to what the client should do next. */
 export function classifyPtyClose(code: number): PtyCloseDisposition {
   if (code === PTY_CLOSE.NORMAL) return 'detached';

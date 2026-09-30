@@ -209,8 +209,13 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
-	if req.EventType == "dispatch_agent" && !s.authorizeAgentCreate(w, r, projectID) {
-		return
+	if req.EventType == "dispatch_agent" {
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
 	}
 	// C1 containment: validate target agent project scope for message schedules.
 	if req.EventType == "message" {
@@ -366,9 +371,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
-	if (schedule.EventType == "dispatch_agent" || req.EventType == "dispatch_agent") &&
-		!s.authorizeAgentCreate(w, r, projectID) {
-		return
+	if schedule.EventType == "dispatch_agent" || req.EventType == "dispatch_agent" {
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
+		if !s.authorizeAgentCreate(w, r, projectID) {
+			return
+		}
 	}
 	// C1 containment: validate target agent project scope when the schedule
 	// is or becomes a message schedule. Check both the effective event type
@@ -475,6 +484,13 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
 		return
+	}
+	// Resuming re-arms future dispatch authority for a dispatch_agent
+	// schedule; gate it the same way authoring is gated.
+	if schedule.EventType == "dispatch_agent" {
+		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
+			return
+		}
 	}
 	if schedule.Status != store.ScheduleStatusPaused {
 		ValidationError(w, "only paused schedules can be resumed", nil)

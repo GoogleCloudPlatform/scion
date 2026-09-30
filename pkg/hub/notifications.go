@@ -507,7 +507,10 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		Msg:         msgBody,
 		Type:        msgType,
 		AgentID:     agent.ID,
-		CreatedAt:   time.Now(),
+		// This persist *is* the delivery; Ent defaults dispatch_state to
+		// "pending" if left unset (nc-promote-busy).
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now(),
 	}
 
 	// Phase 5 dual-write: resolve-or-create DM conversation for inbox notification messages.
