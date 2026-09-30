@@ -32,6 +32,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
 import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
+import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref } from '../../../client/open-terminal.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
@@ -201,6 +202,14 @@ export class ScionChatMembers extends LitElement {
   @property({ type: Array })
   unreadFromIds: string[] = [];
 
+  /**
+   * Map of DM peer ID → conversation key, for members with an existing,
+   * non-empty DM. Drives the "Mark unread" context-menu item: hidden for a
+   * member with no entry here (no DM exists, or it has no messages yet).
+   */
+  @property({ type: Object })
+  dmKeyByPeerId: Record<string, string> = {};
+
   /** Filter mode: 'all' shows every member, 'unread' shows only those with unread messages. */
   @state() private memberFilter: 'all' | 'unread' = 'all';
 
@@ -213,6 +222,13 @@ export class ScionChatMembers extends LitElement {
   private _wobbleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Previous agent state snapshots for change detection. */
   private _prevAgentStates = new Map<string, string>();
+
+  /** The member the right-click/long-press context menu targets, if open. */
+  @state() private contextMenuTarget: { peerId: string } | null = null;
+  /** Viewport position to render the context menu at. */
+  @state() private contextMenuPos = { x: 0, y: 0 };
+  /** Bound so it can be removed with the same reference it was added with. */
+  private _outsideClickHandler: ((e: Event) => void) | null = null;
 
   static override styles = css`
     :host {
@@ -476,13 +492,55 @@ export class ScionChatMembers extends LitElement {
         opacity: 1;
       }
     }
+
+    /* Context menu (same look as the space rail's) */
+    .context-menu {
+      position: fixed;
+      z-index: 1000;
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+      min-width: 160px;
+      padding: 0.25rem 0;
+    }
+
+    .context-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      font-size: var(--chat-fs-md, 0.875rem);
+      cursor: pointer;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .context-menu-item:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .context-menu-item sl-icon {
+      font-size: var(--chat-fs-lg, 1rem);
+    }
   `;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // Close the context menu on outside click, same as the space rail's.
+    this._outsideClickHandler = () => {
+      if (this.contextMenuTarget) this.contextMenuTarget = null;
+    };
+    document.addEventListener('click', this._outsideClickHandler);
+  }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     // Clean up wobble timers
     for (const timer of this._wobbleTimers.values()) clearTimeout(timer);
     this._wobbleTimers.clear();
+    if (this._outsideClickHandler) {
+      document.removeEventListener('click', this._outsideClickHandler);
+    }
   }
 
   override updated(changedProps: PropertyValues): void {
@@ -550,7 +608,71 @@ export class ScionChatMembers extends LitElement {
     return html`
       ${this.renderToolbar()}
       <div class="members-body">${this.renderHumans()} ${this.renderAgents()}</div>
+      ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
     `;
+  }
+
+  /**
+   * Whether "Mark unread" applies to this member: not the caller themselves
+   * (moot for agents, and humans already exclude self from the list), an
+   * existing non-empty DM must exist, and it must not already be unread.
+   */
+  private canMarkUnread(peerId: string): boolean {
+    if (peerId === this.currentUserId) return false;
+    if (this.unreadFromIds.includes(peerId)) return false;
+    return !!this.dmKeyByPeerId[peerId];
+  }
+
+  private handleContextMenu(e: MouseEvent, peerId: string): void {
+    if (!this.canMarkUnread(peerId)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.contextMenuTarget = { peerId };
+    this.contextMenuPos = { x: e.clientX, y: e.clientY };
+  }
+
+  private renderContextMenu() {
+    if (!this.contextMenuTarget) return nothing;
+    const { peerId } = this.contextMenuTarget;
+    return html`
+      <div
+        class="context-menu"
+        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
+        @click=${(e: Event) => e.stopPropagation()}
+      >
+        <div class="context-menu-item" @click=${() => void this.handleMarkUnread(peerId)}>
+          <sl-icon name="envelope"></sl-icon>
+          Mark unread
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Mark this member's DM unread. The dot itself is server-confirmed state
+   * the chat page owns (unreadFromIds) — on success this dispatches
+   * member-marked-unread so the page can reflect it immediately, the same
+   * way the space rail reflects its own "Mark unread" locally.
+   */
+  private async handleMarkUnread(peerId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    const key = this.dmKeyByPeerId[peerId];
+    if (!key) return;
+    try {
+      const res = await apiFetch(`/api/v1/chat/conversations/${encodeURIComponent(key)}/unread`, {
+        method: 'POST',
+      });
+      if (!res.ok) return;
+      this.dispatchEvent(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch {
+      // Non-critical
+    }
   }
 
   /** Render the filter + sort toolbar at the top of the members sidebar. */
@@ -654,6 +776,7 @@ export class ScionChatMembers extends LitElement {
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(m.id, 'user', m.displayName)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, m.id)}
         title="${m.email || m.displayName}"
       >
         <div class="avatar-wrapper">
@@ -771,6 +894,7 @@ export class ScionChatMembers extends LitElement {
       <div
         class="member-item ${isActive ? 'active-peer' : ''}"
         @click=${() => this.handleMemberClick(a.id, 'agent', a.displayName)}
+        @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, a.id)}
       >
         <div class="avatar-wrapper ${this.recentlyChangedAgents.has(a.id) ? 'active' : ''}">
           <scion-chat-avatar

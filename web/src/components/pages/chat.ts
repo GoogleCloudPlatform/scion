@@ -280,6 +280,14 @@ export class ScionPageChat extends LitElement {
   private _onAgentCreated = this._handleAgentCreated.bind(this);
   private _onScopeChanged = this._handleScopeChanged.bind(this);
   private _onReadStateUpdated = this._handleReadStateUpdated.bind(this);
+  /**
+   * Bound listener for the read-state SSE event (stateManager's
+   * 'chat-read-state-updated', sourced from ChatReadStateEvent — distinct
+   * from the same-tab DOM event above). Filters to the caller's own userId:
+   * today that only ever means mark-unread, since normal /read only
+   * self-notifies via the local DOM event, not over SSE.
+   */
+  private _onOwnReadStateSSE = this._handleOwnReadStateSSE.bind(this);
   private _unreadDMRequestId = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
@@ -294,6 +302,12 @@ export class ScionPageChat extends LitElement {
   private _typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** IDs of members with unread DM messages (for the unread dot on avatars). */
   @state() private v2UnreadFromIds: string[] = [];
+  /**
+   * Map of DM peer ID → conversation key, for members with an existing DM.
+   * Lets the members sidebar's "Mark unread" item know which conversation to
+   * act on, and hide itself for a member with no DM at all.
+   */
+  @state() private v2DMKeyByPeerId: Record<string, string> = {};
   /** Whether the quick-switcher modal is visible (Cmd/Ctrl+K). */
   @state() private v2SwitcherOpen = false;
   /**
@@ -1012,6 +1026,7 @@ export class ScionPageChat extends LitElement {
       stateManager.removeEventListener('agent-created', this._onAgentCreated);
       stateManager.removeEventListener('scope-changed', this._onScopeChanged);
       stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
+      stateManager.removeEventListener('chat-read-state-updated', this._onOwnReadStateSSE);
       this.removeEventListener('rail-loaded', this._onRailLoaded);
       this.removeEventListener('read-state-updated', this._onReadStateUpdated);
       this.stopPresenceHeartbeat();
@@ -1250,6 +1265,7 @@ export class ScionPageChat extends LitElement {
     stateManager.addEventListener('agent-created', this._onAgentCreated);
     stateManager.addEventListener('scope-changed', this._onScopeChanged);
     stateManager.addEventListener('chat-dm-promoted', this._onDMPromoted);
+    stateManager.addEventListener('chat-read-state-updated', this._onOwnReadStateSSE);
 
     // Listen for rail-loaded to set up the SSE scope with space IDs
     this.addEventListener('rail-loaded', this._onRailLoaded);
@@ -1833,6 +1849,44 @@ export class ScionPageChat extends LitElement {
     rail?.markThreadRead(key);
   }
 
+  /**
+   * A read-state change arrived over the SSE 'chat-read-state-updated'
+   * event. Only the caller's OWN watermark moving is this page's concern — a
+   * DM peer's "seen" receipt (a different userId) is chat-thread's — and
+   * today a self-targeted event only ever means mark-unread: normal /read
+   * self-notifies via the local 'read-state-updated' DOM event above, not
+   * over SSE. Mirrors _handleReadStateUpdated's DM-peer-ID resolution, but
+   * marks the thread/DM unread rather than read.
+   */
+  private _handleOwnReadStateSSE(e: Event): void {
+    type ReadStateData = { conversationKey?: string; userId?: string };
+    const detail = (e as CustomEvent).detail as
+      | ({ data?: ReadStateData } & ReadStateData)
+      | undefined;
+    const eventData: ReadStateData | undefined = detail?.data ?? detail;
+    const key = eventData?.conversationKey || '';
+    const userId = this.pageData?.user?.id;
+    if (!key || !userId || eventData?.userId !== userId) return;
+
+    if (key.startsWith('dm:')) {
+      const parts = key.split(':');
+      let peerId = '';
+      if (parts.length === 5) {
+        if (parts[1] === 'user' && parts[2] === userId) peerId = parts[4];
+        else if (parts[3] === 'user' && parts[4] === userId) peerId = parts[2];
+      }
+      if (peerId && !this.v2UnreadFromIds.includes(peerId)) {
+        this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
+      }
+      return;
+    }
+
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    rail?.markThreadUnread(key);
+  }
+
   private handleChatMessage(e: Event): void {
     // A message can move any group's recency ranking — a DM message affects
     // Agents/People, a thread message affects Threads — and the event detail
@@ -2377,9 +2431,11 @@ export class ScionPageChat extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as {
         dms?: Array<{
+          conversationKey: string;
           peerId: string;
           hasUnread: boolean;
           muted?: boolean;
+          lastMessageId?: string;
         }>;
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
@@ -2397,6 +2453,15 @@ export class ScionPageChat extends LitElement {
       ) {
         this.v2UnreadFromIds = unreadIds;
       }
+      // Which members have an existing, non-empty DM, and its key — the
+      // members sidebar's "Mark unread" needs this to know what to act on
+      // and to hide itself for a member with no DM (or a DM with no
+      // messages yet, which mark-unread has nothing to do to).
+      this.v2DMKeyByPeerId = Object.fromEntries(
+        (data?.dms || [])
+          .filter((dm) => !!dm.lastMessageId)
+          .map((dm) => [dm.peerId, dm.conversationKey])
+      );
     } catch {
       // Non-critical — unread dots just won't show
     }
@@ -2636,6 +2701,19 @@ export class ScionPageChat extends LitElement {
     if (!detail) return;
 
     this.openDM(detail.memberId, detail.memberKind, detail.displayName);
+  }
+
+  /**
+   * A member's DM was marked unread from the members sidebar's context menu.
+   * The sidebar already confirmed the request succeeded — this just reflects
+   * it in the unread-dot state the page owns, the same list loadUnreadDMPeers
+   * populates.
+   */
+  private handleMemberMarkedUnread(e: CustomEvent): void {
+    const detail = e.detail as { peerId?: string } | undefined;
+    const peerId = detail?.peerId || '';
+    if (!peerId || this.v2UnreadFromIds.includes(peerId)) return;
+    this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
   }
 
   // ---- Mobile swipe navigation ----
@@ -3894,10 +3972,12 @@ export class ScionPageChat extends LitElement {
             .agents=${this.v2AgentMembers}
             .typingUserIds=${this.v2TypingUserIds}
             .unreadFromIds=${this.v2UnreadFromIds}
+            .dmKeyByPeerId=${this.v2DMKeyByPeerId}
             current-user-id="${this.pageData?.user?.id || ''}"
             dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
             default-agent-slug="${this.v2Conversation?.defaultAgent || ''}"
             @member-click=${this.handleMemberClick}
+            @member-marked-unread=${this.handleMemberMarkedUnread}
           ></scion-chat-members>
         </div>
       </div>

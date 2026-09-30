@@ -1121,6 +1121,151 @@ describe('scion-chat-thread receipt expiry', () => {
   });
 });
 
+/**
+ * Mark-unread sets the caller's own watermark backwards. If this conversation
+ * is open when that happens, the normal auto-advance (viewing = read) must
+ * not immediately undo it — Slack-like behaviour — until the user navigates
+ * away and back, or sends a message here. The signal for "this just
+ * happened" is a self-targeted read-state event: the same SSE event a DM
+ * peer's "seen" tick uses, just addressed to the reader instead.
+ */
+describe('scion-chat-thread mark-unread auto-advance suppression', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  type Internals = {
+    mergeMessages(messages: Message[]): void;
+    maybeAdvanceReadWatermark(): void;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    _autoAdvanceSuppressed: boolean;
+    peerReadMessageId: string;
+  };
+
+  function aMessage(id: string): Message {
+    return {
+      id,
+      projectId: '',
+      sender: 'them@example.com',
+      senderId: 'user-them',
+      recipient: '',
+      msg: 'hi',
+      type: 'chat',
+      agentId: '',
+      dispatchState: 'dispatched',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /** Was a POST to /read issued? */
+  function sawReadPost(): boolean {
+    return apiFetch.mock.calls.some(
+      (c) =>
+        String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+  }
+
+  it("suppresses auto-advance once this tab's own watermark moves backward via SSE", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: CONVERSATION_KEY, userId: 'user-me', messageId: '' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(true);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  it("still applies a DM peer's seen tick for a different user id", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-them',
+            messageId: 'm-99',
+            readAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+
+    expect(internals.peerReadMessageId).toBe('m-99');
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('ignores a self-targeted read-state event for a different conversation', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: 'some-other-topic', userId: 'user-me', messageId: '' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the user sends a message', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'sent-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the conversation is switched away from and back', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+
+    el.conversationKey = 'some-other-topic';
+    await el.updateComplete;
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+});
+
 describe('scion-chat-thread SSE message filtering', () => {
   beforeEach(() => {
     apiFetch.mockReset();

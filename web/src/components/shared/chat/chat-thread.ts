@@ -559,6 +559,16 @@ export class ScionChatThread extends LitElement {
   /** Last message ID POSTed to /read — suppresses redundant watermark writes. */
   private _lastAdvancedMessageId = '';
 
+  /**
+   * Set when this conversation was just marked unread (from the rail, the
+   * members sidebar, or another of the user's own tabs) while it is open
+   * here. Blocks maybeAdvanceReadWatermark so viewing the still-open
+   * conversation does not immediately re-mark it read — Slack-like
+   * behaviour. Cleared by a conversation switch (navigate away and back) or
+   * by sending a message here.
+   */
+  private _autoAdvanceSuppressed = false;
+
   // ---- Typing indicator state ----
 
   /** Map of userId -> { displayName, timer } for active typing indicators. */
@@ -1052,6 +1062,11 @@ export class ScionChatThread extends LitElement {
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
 
+    // A thread switch is "navigate away" — mark-unread's suppression is
+    // scoped to the conversation being open continuously, so leaving it
+    // (even to come straight back) lifts it.
+    this._autoAdvanceSuppressed = false;
+
     // Clear unread divider state.
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
@@ -1416,6 +1431,11 @@ export class ScionChatThread extends LitElement {
         if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
         this._initialWatermarkTimer = setTimeout(() => {
           this._initialWatermarkTimer = null;
+          // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
+          // gates — a mark-unread landing during this delay (e.g. another tab,
+          // or this one via the rail) must not be undone the instant this
+          // timer fires.
+          if (this._autoAdvanceSuppressed) return;
           const messageId = this.lastReadableMessageId();
           if (messageId) {
             void this.advanceReadWatermark(messageId);
@@ -1887,16 +1907,41 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Handle a peer's read-watermark advance arriving over SSE. */
+  /**
+   * Handle a read-watermark change arriving over SSE. This fires for two
+   * different things sharing one event: a DM peer's watermark advancing
+   * (render the "Seen" tick), and the caller's OWN watermark moving on
+   * another axis — today that only ever means mark-unread, since normal
+   * /read only self-notifies via this tab's own advanceReadWatermark, not
+   * over SSE. The userId tells them apart.
+   */
   private handleV2ReadStateEvent(e: Event): void {
-    type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
+    type ReadStateData = {
+      conversationKey?: string;
+      userId?: string;
+      messageId?: string;
+      readAt?: string;
+    };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ReadStateData } & ReadStateData)
       | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
-    if (!eventData?.messageId) return;
-    if (eventData.conversationKey !== this.conversationKey) return;
+    if (!eventData || eventData.conversationKey !== this.conversationKey) return;
+    if (eventData.userId && eventData.userId === this.selfUserId()) {
+      this.handleOwnReadStateChanged();
+      return;
+    }
+    if (!eventData.messageId) return;
     this.applyPeerReadState(eventData.messageId, eventData.readAt);
+  }
+
+  /**
+   * The caller's own watermark moved via mark-unread while this conversation
+   * is open (here, or in another of their tabs). Suppress auto-advance so
+   * simply having it open does not immediately undo the mark-unread.
+   */
+  private handleOwnReadStateChanged(): void {
+    this._autoAdvanceSuppressed = true;
   }
 
   /** Record the peer watermark and arm the auto-hide timer. */
@@ -2015,6 +2060,10 @@ export class ScionChatThread extends LitElement {
 
     this.sending = true;
     this.sendError = null;
+    // Sending is the other way mark-unread's suppression lifts (besides
+    // navigating away and back): you cannot both have just marked a
+    // conversation unread and be sending into it without meaning to read it.
+    this._autoAdvanceSuppressed = false;
 
     // Generate an idempotency key so duplicate sends (e.g. network retry)
     // are collapsed server-side. Also used as the optimistic message temp ID.
@@ -2434,6 +2483,7 @@ export class ScionChatThread extends LitElement {
   /** Advance the read watermark if conditions are met. */
   private maybeAdvanceReadWatermark(): void {
     if (!this.isV2 || !this._tabFocused || !this.pinnedToBottom) return;
+    if (this._autoAdvanceSuppressed) return;
     if (this.messages.length === 0) return;
 
     // Debounce
