@@ -42,6 +42,9 @@ type BrokerJoinToken func(*sql.Selector)
 // BrokerSecret is the predicate function for brokersecret builders.
 type BrokerSecret func(*sql.Selector)
 
+// BrokerSetting is the predicate function for brokersetting builders.
+type BrokerSetting func(*sql.Selector)
+
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
 
