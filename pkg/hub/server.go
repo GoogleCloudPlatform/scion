@@ -168,6 +168,10 @@ type ServerConfig struct {
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. nil means unset — the
+	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
+	EnforceBrokerQuotas *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -387,6 +391,22 @@ func DefaultServerConfig() ServerConfig {
 		StalledThreshold: 5 * time.Minute,
 		BrokerAuthConfig: DefaultBrokerAuthConfig(),
 	}
+}
+
+// brokerQuotasEnforced reports whether the per-broker agent quota cap
+// (max_agents_per_broker) is enforced on create. Fail-safe default: an
+// absent (nil) switch means enforced (design P1-D4/P1-D5).
+//
+// Thread-safe: s.config.EnforceBrokerQuotas is written under s.mu.Lock() by
+// ApplySnapshot (on the admin PUT path, and on every replica via the
+// LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it must be
+// read under s.mu.RLock() here — this is called on every QuotaService.Reserve,
+// for every limit, on every create/start/restart/resume/wake.
+func (s *Server) brokerQuotasEnforced() bool {
+	s.mu.RLock()
+	v := s.config.EnforceBrokerQuotas
+	s.mu.RUnlock()
+	return v == nil || *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
@@ -1261,9 +1281,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
+	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
+	// override (design.md §5.2): see brokerSettingLimitOverride.
 	srv.quotaService = &QuotaService{
 		store:  s,
 		logger: slog.Default().With("component", "quota"),
+		enforced: func(limitName string) bool {
+			return limitName != store.LimitMaxAgentsPerBroker || srv.brokerQuotasEnforced()
+		},
+		limitOverride: srv.brokerSettingLimitOverride,
 	}
 
 	// Per-sender chat send rate limiter (#1054).
@@ -1923,6 +1949,21 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 
 	// Try to load from the secret backend if configured
 	if hasSecretBackend {
+		// Hub-scope signing keys created before ptone/scion#2152 only exist
+		// under the legacy (pre hub-prefix) GCP SM name. Copy the value
+		// forward to the current hub-prefixed name so it is reachable once an
+		// operator narrows IAM to the new prefix, without waiting for an
+		// explicit `migrate-names` run — losing a signing key invalidates
+		// every live session/agent token, so this can't wait on an operator's
+		// schedule the way ordinary secrets can. Idempotent; the legacy
+		// secret is left in place. Best-effort: a failure here just means the
+		// existing (legacy-ref) resolution below is used instead.
+		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+			if copyErr := gcpBackend.CopyHubSecretForward(ctx, keyName); copyErr != nil && copyErr != store.ErrNotFound {
+				slog.Warn("Failed to copy hub signing key forward to hub-prefixed GCP SM name", "key", keyName, "error", copyErr)
+			}
+		}
+
 		sv, err := s.secretBackend.Get(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil {
 			slog.Info("Loaded existing signing key from secret backend", "key", keyName)

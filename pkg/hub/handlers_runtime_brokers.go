@@ -222,6 +222,15 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Check for the /settings path (ptone/scion#2061 P2, ptone/scion#2177,
+	// design.md §5.4). A dedicated subresource, not an extension of PATCH on
+	// the broker itself: it keeps settings out of the heartbeat-contended
+	// row and gives a clean per-key authorization point (design.md §5.4).
+	if subPath == "settings" {
+		s.handleBrokerSettings(w, r, brokerID)
+		return
+	}
+
 	// Delegate to the original handler for other operations
 	s.handleRuntimeBrokerByIDInternal(w, r, brokerID, subPath)
 }

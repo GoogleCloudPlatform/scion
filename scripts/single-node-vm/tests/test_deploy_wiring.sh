@@ -2126,6 +2126,8 @@ test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
     assert_eq "$mode" "$(_json_get "$json" server.auth.mode)" "${mode}-mode write: server.auth.mode"
     assert_eq "block" "$(_json_get "$json" default_gcp_identity_mode)" \
       "${mode}-mode write: default_gcp_identity_mode is block with the tier on"
+    assert_eq "antigravity" "$(_json_get "$json" default_harness_config)" \
+      "${mode}-mode write: default_harness_config"
     assert_eq "iap" "$(_json_get "$json" server.auth.transport.mode)" "${mode}-mode write: server.auth.transport.mode"
     assert_eq "$TRANSPORT_TEST_CLIENT_ID" "$(_json_get "$json" server.auth.transport.oidc_audience)" \
       "${mode}-mode write: server.auth.transport.oidc_audience must be the discovered client ID, verbatim"
@@ -2157,6 +2159,7 @@ test_deploy_create_tier_off_settings_writes_parse_as_yaml() {
   # Together with the value pins below, this fails a test when a key is
   # added to, dropped from or renamed in the tier-off template.
   local common_leaves="default_gcp_identity_mode
+default_harness_config
 image_registry
 schema_version
 server.auth.mode
@@ -2197,6 +2200,8 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: image_registry"
     assert_eq "passthrough" "$(_json_get "$json" default_gcp_identity_mode)" \
       "tier-off ${mode}-mode write: default_gcp_identity_mode"
+    assert_eq "antigravity" "$(_json_get "$json" default_harness_config)" \
+      "tier-off ${mode}-mode write: default_harness_config"
     assert_eq "$HUB" "$(_json_get "$json" server.hub.name)" "tier-off ${mode}-mode write: server.hub.name"
     assert_eq "admin@example.com" "$(_json_get "$json" server.hub.admin_emails.0)" \
       "tier-off ${mode}-mode write: server.hub.admin_emails"

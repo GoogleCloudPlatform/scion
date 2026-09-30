@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -45,6 +47,7 @@ var (
 
 	convGetJSON        bool
 	convGetMessageJSON bool
+	convGetMessageBody bool
 
 	convParticipantsJSON bool
 
@@ -144,7 +147,12 @@ var conversationGetMessageCmd = &cobra.Command{
 
 Examples:
   scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
-  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json`,
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --body
+
+--body prints only the message's body (msg.Msg) to stdout, with no added
+bytes, and exits 0. It is the fetch command a large-DM offload stub names
+(ptone/scion#2257) — it is silent to make "> file" redirection exact.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConversationGetMessage,
 }
@@ -250,6 +258,7 @@ func init() {
 	// Get flags
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageBody, "body", false, "Print only the message body to stdout (no added bytes)")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -499,6 +508,16 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// writeMessageBody writes msg.Msg to w with no added bytes — no trailing
+// newline, no label — so a large-DM offload stub's fetch command
+// (ptone/scion#2257, `scion conversation get-message ... --body`) reproduces
+// exactly the persisted bytes when redirected to a file. Extracted from
+// runConversationGetMessage for direct unit testing.
+func writeMessageBody(w io.Writer, msg *store.Message) error {
+	_, err := io.WriteString(w, msg.Msg)
+	return err
+}
+
 func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	if convGetMessageJSON {
 		outputFormat = "json"
@@ -520,6 +539,10 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	msg, err := client.Conversations().GetMessage(ctx, conversationID, args[1])
 	if err != nil {
 		return fmt.Errorf("failed to get message: %w", err)
+	}
+
+	if convGetMessageBody {
+		return writeMessageBody(os.Stdout, msg)
 	}
 
 	if isJSONOutput() {

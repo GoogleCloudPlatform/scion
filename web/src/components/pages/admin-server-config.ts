@@ -247,6 +247,8 @@ interface ServerConfigResponse {
 
   auto_expose_ports?: { enabled?: boolean };
 
+  quotas?: { enforce_broker_quotas?: boolean };
+
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
   settings_tier?: 'db' | 'file';
   env_overrides?: string[];
@@ -367,6 +369,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
+  // quotas section
+  'quotas.enforce_broker_quotas': 'Enforce Broker Agent Quotas',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -546,6 +550,9 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Auto-expose ports
   @state() private autoExposePortsEnabled = false;
+
+  // Quotas
+  @state() private enforceBrokerQuotas = true;
 
   // Telemetry
   @state() private telemetryEnabled = false;
@@ -1602,6 +1609,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.autoExposePortsEnabled = aep.enabled || false;
     }
 
+    // Quotas — absent means enforced (fail-safe default).
+    const quotas = data.quotas;
+    this.enforceBrokerQuotas = quotas?.enforce_broker_quotas ?? true;
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
     this.profiles = data.profiles
@@ -1908,6 +1919,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
+    // Quotas — Layer-1
+    if (ok('quotas.enforce_broker_quotas')) {
+      payload.quotas = {
+        enforce_broker_quotas: this.enforceBrokerQuotas,
+      };
+    }
+
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
     if (ok('runtimes')) payload.runtimes = this.runtimes;
@@ -2154,6 +2172,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('auto_expose_ports.enabled')) {
       payload.auto_expose_ports = {
         enabled: this.autoExposePortsEnabled,
+      };
+    }
+
+    // Quotas
+    if (ok('quotas.enforce_broker_quotas')) {
+      payload.quotas = {
+        enforce_broker_quotas: this.enforceBrokerQuotas,
       };
     }
 
@@ -3465,6 +3490,31 @@ export class ScionPageAdminServerConfig extends LitElement {
             </div>
           `
         : nothing}
+
+      <!-- Card 4: Quotas -->
+      <div class="section">
+        <h3 class="section-title">Quotas</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderFieldValue(
+              'quotas.enforce_broker_quotas',
+              this.enforceBrokerQuotas ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('quotas.enforce_broker_quotas')}<sl-switch
+                  ?checked=${this.enforceBrokerQuotas}
+                  @sl-change=${(e: Event) => {
+                    this.enforceBrokerQuotas = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Enforce broker agent quotas</sl-switch
+                >`
+            )}
+            <span class="hint"
+              >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
+              Usage is still counted. Manage the per-broker cap from
+              <a href="/admin/quotas">Admin &gt; Quotas</a>.</span
+            >
+          </div>
+        </div>
+      </div>
     `;
   }
 

@@ -129,7 +129,16 @@ type usageIncrement struct {
 type usageRule interface {
     Harness() string                       // matches SCION_HARNESS
     MatchLog(scope string, rec *logspb.LogRecord) (usageIncrement, bool)
-    MatchMetric(scope string, m *metricpb.Metric) ([]usageIncrement, bool) // delta only
+}
+// A rule whose source is metrics rather than (or in addition to) log events
+// implements this separate, optional interface instead of adding a method
+// to usageRule. DeriveBatch sees one whole ResourceMetrics (one received
+// export request) at a time, not one metric at a time, because some
+// mappings need to combine more than one sibling metric from the same
+// export to produce a canonical increment -- see "Batch-correlation
+// contract" below.
+type metricBatchDeriver interface {
+    DeriveBatch(rm *metricpb.ResourceMetrics) (increments []usageIncrement, matchedNames map[string]bool, err error)
 }
 type UsageDeriver struct {
     rules  []usageRule         // filtered to SCION_HARNESS at construction
@@ -140,6 +149,12 @@ type UsageDeriver struct {
 ```
 
 **Emission.** The deriver records to an in-process OTel `MeterProvider`. It is built like the hook providers (`providers.go:101-151`: loopback gRPC, delta temporality) with deriver scope, and the point labels in §3.2 are computed in-process. This reuses the existing reserved-counter path through `metricStreams` unchanged, so there is no second export path. (The alternative, injecting directly into `metricStreams`, was rejected: it would bypass the admission and diagnostics code that hook counters already exercise.)
+
+**Batch-correlation contract (metric-sourced rules).** A metric-sourced rule may need to combine more than one sibling metric from the same export to produce one canonical increment (for example, subtracting a cached-token counter from a raw total token count). A single-metric-at-a-time view cannot express that, so such a rule implements `metricBatchDeriver.DeriveBatch` and receives one whole `ResourceMetrics` at a time. Two things follow from that scope:
+- **Cumulative-only sources.** A source that cannot be made to emit delta temporality (confirmed for Copilot by a real capture: §5) needs its own cumulative-to-delta conversion inside the rule, keyed by stream identity (resource attributes + scope + metric name + point attributes + start_time) so that two concurrent processes, and a process restart, cannot cross-contaminate each other's state, and bounded so unboundedly many distinct streams cannot leak memory. A value that goes backwards for the *same* stream identity is stale (an out-of-order or retried export), not a reset: it produces no delta and never regresses the remembered high-water mark. Only a genuinely new stream identity (a new start_time) is ever treated as that stream starting over.
+- **Correlation is scoped to one received export request, never across requests.** Two concurrent processes can be indistinguishable by resource attributes alone, so correlating across two separate requests risks merging their usage together. This is a strict, load-bearing scoping rule, not just an implementation detail: it depends on the receiver never batching or merging separate OTLP export requests before the deriver sees them, which holds today (`Receiver.handleHTTPMetrics`/`metricsServiceServer.Export` each invoke the metric handler exactly once per received request, and `Pipeline.handleMetrics` passes that slice straight into `UsageDeriver.ProcessResourceMetrics`, which calls `DeriveBatch` once per `ResourceMetrics`). Each `DeriveBatch` call also converts its whole batch atomically (one lock held for every conversion in it), so two concurrent calls for the same stream can never interleave at the per-metric level and mis-correlate one call's data with the other's.
+
+See §5's copilot row for the concrete counters, key formula and edge-case handling this contract produces in practice.
 
 **Rules are enabled only when `SCION_USAGE_SOURCE=native`** (D4) and filtered to `SCION_HARNESS`. A deriver with no matching rules is a no-op.
 
@@ -190,7 +205,7 @@ type UsageDeriver struct {
 - **codex:** logs on, native metrics off on GCP (as claude), `SCION_USAGE_SOURCE=native`.
 - **copilot:**
   - always route to the local receiver at `http://127.0.0.1:${SCION_OTEL_HTTP_PORT:-4318}` with `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (the receiver accepts only protobuf, `receiver.go:319-321`);
-  - `COPILOT_OTEL_ENABLED=true`, `COPILOT_OTEL_EXPORTER_TYPE=otlp-http`, `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`;
+  - `COPILOT_OTEL_ENABLED=true`, `COPILOT_OTEL_EXPORTER_TYPE=otlp-http`, `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta` (kept for forward compatibility, but a real capture shows Copilot CLI 1.0.89 does not honor it and has no documented temporality override at all — every point it exports is cumulative; the deriver converts cumulative points to deltas itself, see §5's copilot row);
   - stop copying cloud endpoint, headers and CA;
   - keep the `SCION_COPILOT_OTEL_*` explicit override only as a local debugging escape, documented as bypassing redaction;
   - set `SCION_NATIVE_TELEMETRY_POLICY` so the env guard applies;
@@ -216,7 +231,7 @@ type UsageDeriver struct {
 |---|---|
 | **A. Teach the dashboard every native name** (the miller79/scion#137 and miller79/scion#138 approach): `claude_code.token.usage`, `gen_ai.client.token.usage`, and so on | Normalization lands in the least appropriate layer: every new harness or CLI rename becomes a hub change. It doesn't work on the default GCP path, because native metrics are rejected there and lack point identity. It needs the allowlist widened with harness-specific keys (`type`, `gen_ai.token.type`). And Claude has no call metric, so it forces an external collector. |
 | **B. Widen the GCP allowlist and copy resource identity onto native points** | This reverses GoogleCloudPlatform/scion#1792's deliberate privacy stance (`agent-observability-milestone.md:128-160`). Each harness's attribute vocabulary becomes a Cloud descriptor: several per harness, unbounded over time, with label churn every time a CLI renames something. It still needs dashboard-side per-harness logic (A), and it still has no Claude call count. |
-| **C. Derive from native *metrics* rather than events** | Claude has no call-count metric. Cumulative native metrics need stateful diffing, which events don't. And it requires re-enabling native metrics on GCP, where they would be rejected unless consumed. It is used only for Copilot, where events aren't confirmed, and only with delta forced. |
+| **C. Derive from native *metrics* rather than events** | Claude has no call-count metric. Cumulative native metrics need stateful diffing, which events don't. And it requires re-enabling native metrics on GCP, where they would be rejected unless consumed. It is used only for Copilot, where events aren't confirmed. A real capture later showed Copilot's metrics are cumulative-only with no working delta override, so the deriver performs that stateful diffing itself (§3.3's batch-correlation contract) rather than requiring delta from the source. |
 | **D. Parse transcripts or session files** (Claude JSONL `usage`, Gemini `usageMetadata` in hook payloads) | Transcript parsing ties us to private file formats with no stability promise, and it's per-harness code running on each hook invocation. Native OTel events are the documented, versioned contract. The hook-payload route stays open for harnesses whose hooks carry usage (muse-code), via the hook path. |
 | **E. Ship an OTel Collector sidecar** (miller79/scion#138's count connector) | It adds a component per agent and still doesn't solve GCP identity or privacy. The sciontool receiver already *is* the collector. |
 | **F. Producer-stamped `project_id`/`agent_id` as canonical** (the original draft) | Rejected by ptone (D3): "project" is ambiguous in a store that also has GCP projects, and every producer would have to stamp identity correctly. Exporter-stamped `scion_*` labels come from a single authoritative place. |
@@ -227,12 +242,12 @@ The load-bearing choices are §3.2 (names, labels, temporality: Cloud descriptor
 
 ## 5. Per-harness table
 
-| Harness | Source after this project | Derivation rule (`MatchLog`/`MatchMetric`) | Token mapping | Phase | Status |
+| Harness | Source after this project | Derivation rule (`MatchLog`/`metricBatchDeriver`) | Token mapping | Phase | Status |
 |---|---|---|---|---|---|
 | claude | native events | log, scope `com.anthropic.claude_code.events`, `event.name=api_request` → calls+1 | `input_tokens`→input, `output_tokens`→output, `cache_read_tokens`→cache_read, `cache_creation_tokens`→cache_write; status success (`api_error`→calls+1, status error, no tokens) | 1 | in scope |
 | gemini-cli | hooks (unchanged) — **deferred** | follow-up rule: log `gemini_cli.api_response` → calls+1; `gemini_cli.api_error` → calls+1 error | follow-up: input=`input_token_count − cached_content_token_count`, output=`output_token_count`, cache_read=`cached_content_token_count`, reasoning=`thoughts_token_count` | — | deferred (D6) |
 | codex | native events | log `codex.sse_event` with `event.kind=response.completed` → calls+1 | input=`input_token_count − cached_token_count`, output=`output_token_count`, cache_read=`cached_token_count`, reasoning=`reasoning_token_count` | 3c | in scope, fixture-gated |
-| copilot | native metrics (delta) | metric `gen_ai.client.token.usage` (histogram, delta): tokens[type]+=sum; calls+=count where `gen_ai.token.type=input`; model=`gen_ai.request.model`/`gen_ai.response.model` | `input`→input, `output`→output | 3a | in scope, fixture-gated |
+| copilot | native metrics, converted from cumulative | **Confirmed by a real capture (CLI 1.0.89, phase 3a):** `gen_ai.client.token.usage` does not exist past CLI 1.0.45; the post-1.0.45 GenAI-semconv shape is used instead. Calls: the `gen_ai.client.inference.operation.input_tokens` histogram's per-export observation count (confirmed exactly one observation per model call). Tokens: each `gen_ai.client.inference.usage.*` counter; `gen_ai.client.inference.operation.{input,output}_tokens` histograms are never read for tokens. model=`gen_ai.request.model`/`gen_ai.response.model`, confirmed always on the point, never only on the resource. **Temporality note:** every Copilot metric point is cumulative — `copilot help monitoring` documents no temporality override, and `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta` makes no observed difference. The deriver converts cumulative points to per-export deltas itself (a bounded, per-stream last-value cache keyed on resource+scope+metric+point attributes+start_time, with a restart baseline and a stale-point rule (a value going backwards under the same start_time emits 0 and never lowers the stored value; only a new start_time starts a new stream) — see `usage_copilot_metrics.go`); a delta-temporal point, from any rule, is unaffected and passes through unchanged. **Batch-correlation contract:** a real capture also shows `input_tokens` is not exclusive of cached tokens (per call, `input_tokens − cache_read.input_tokens − cache_write.input_tokens` is constant): the deriver correlates the three post-conversion deltas by stream identity minus the metric-name/token-type dimension, within a single received export request only (never across two requests — Copilot's resource carries no per-process identifier, so cross-request correlation could merge two concurrent processes' usage). A cache metric absent from a batch counts as 0; a negative result clamps to 0 and is logged, never emitted, never panics. After the bounded state evicts an entry, a still-running process's own new stream is also baselined if its start_time does not exceed the largest evicted start_time — a conservative undercount, not a bug, and counted. | `input_tokens − cache_read − cache_write`→input, `output_tokens`→output (already inclusive of reasoning), `cache_read.input_tokens`→cache_read, `cache_write.input_tokens`→cache_write, `reasoning.output_tokens`→reasoning (informational, already counted in output) | 3a | in scope, fixture-gated |
 | grok-build | hooks (unchanged) | none | — | 0 (routing fix only, D8) | usage deferred (D6) |
 | muse-code | hooks | hook tokens land in `scion.usage.tokens` via §3.5 | hook fields | 2 (automatic) | runtime verification is follow-up |
 | antigravity | hooks | `PostInvocation` → model-end (calls), confirmed one per main-loop model request, not per turn (auxiliary calls such as title generation fire no hook: known undercount) | none: a real capture from `agy` 1.2.12 shows `PreInvocation`/`PostInvocation` never carry a usage or token field | 3d | in scope, fixture-gated; calls-only (confirmed no usage in the hook payload, D9); tokens filed as a follow-up |
@@ -264,7 +279,7 @@ The load-bearing choices are §3.2 (names, labels, temporality: Cloud descriptor
 6. **Cross-side golden test:** the exported point from (5) is serialized as a Cloud `TimeSeries` fixture and fed to the dashboard fake from (2). The dashboard returns the expected totals. This single test pins emitter → dashboard.
 7. **Hook tests:** `telemetry_test.go` asserts `scion.usage.tokens` replaces `scion.hook.tokens.*`, and that `SCION_USAGE_SOURCE=native` suppresses calls and tokens but not tool or session metrics.
 8. **Provision tests:** extend `harnesses/telemetry_provision_test.py` and `copilot/provision_test.py`:
-   - copilot always local on 4318 with http/protobuf, never copying cloud headers or CA, with delta temporality;
+   - copilot always local on 4318 with http/protobuf, never copying cloud headers or CA, requesting delta temporality (kept for forward compatibility; a real capture shows Copilot does not honor it and the deriver converts cumulative points to deltas itself);
    - grok-build always local;
    - claude, copilot and codex set `SCION_USAGE_SOURCE=native`;
    - codex metrics are off on GCP;
@@ -272,7 +287,7 @@ The load-bearing choices are §3.2 (names, labels, temporality: Cloud descriptor
 9. **Live validation** (phase gate, manual, staging hub): after a `scion-base` rebuild, run one agent per in-scope harness for a few prompts, then check the project dashboard shows non-zero calls and tokens attributed to that agent's project, and that the numbers are plausible against the CLI's own usage output (±5%).
 
 ## 8. Open questions
-- **OQ-1.** Copilot per-request semantics: does `gen_ai.client.token.usage` record exactly one `input` observation per model request? A live capture is needed (phase 3a gate). If not, fall back to Copilot `chat` spans (semconv `gen_ai.usage.*`), if Copilot emits spans. That would be a spans-rule extension to §3.3.
+- **OQ-1 (resolved by a real capture, phase 3a).** Copilot per-call semantics: does the calls source record exactly one observation per model call? Confirmed yes: `gen_ai.client.inference.operation.input_tokens`'s per-export observation count matches the session's chat-span count exactly (a 3-model-call session produced count=3), independently corroborated by `gen_ai.invoke_agent.inference_calls`'s delta sum. The old `gen_ai.client.token.usage` histogram this question originally named does not exist past CLI 1.0.45 and is not used; see §5's copilot row.
 - **OQ-2.** Hub DB sink: the deriver runs in the same process as `TelemetryHandler`'s aggregator (`init.go:459-474`). Should derived increments also feed `OnSessionEnd` totals so that `/metrics/summary` shows tokens? Recommended as a follow-up, out of scope here.
 - **OQ-3.** Web UI: show the cache-read and cache-write series on the tokens chart now, or leave that to the follow-up? Default: the API adds the fields and the UI is unchanged.
 - **OQ-4.** Codex SessionStart/End semantics and antigravity PostInvocation granularity and usage: resolved by the fixtures. The OpenCode field names are verified from source, and a fixture still pins them.

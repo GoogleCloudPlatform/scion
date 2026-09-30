@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -146,6 +147,7 @@ func checkColumn(t, c string) error {
 			brokerdispatch.Table:           brokerdispatch.ValidColumn,
 			brokerjointoken.Table:          brokerjointoken.ValidColumn,
 			brokersecret.Table:             brokersecret.ValidColumn,
+			brokersetting.Table:            brokersetting.ValidColumn,
 			chatlinkcode.Table:             chatlinkcode.ValidColumn,
 			conversation.Table:             conversation.ValidColumn,
 			conversationparticipant.Table:  conversationparticipant.ValidColumn,

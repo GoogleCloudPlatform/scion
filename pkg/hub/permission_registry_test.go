@@ -103,7 +103,11 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 	want := map[AgentTokenScope][]string{
 		ScopeAgentStatusUpdate: {"agent.status_update"},
 		ScopeAgentLogAppend:    {"agent.log_append"},
-		ScopeProjectSecretRead: {"project.secret_read"},
+		// ptone/scion#2129 gives secret.use the same explicit AgentScopes
+		// mapping as project.secret_read, so a runtime read and a project
+		// secret-read decision share one token capability. No other
+		// permission gains this mapping (TestMaterialPermissions_AgentScopeMappingExplicit).
+		ScopeProjectSecretRead: {"project.secret_read", "secret.use"},
 		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
 		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},

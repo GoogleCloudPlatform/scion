@@ -52,7 +52,12 @@ const fakeStateManager = new FakeStateManager();
 
 const apiFetch = vi.fn();
 
+const navigateToMock = vi.fn();
+
 vi.mock('../../../client/main.js', () => ({
+  get navigateTo() {
+    return navigateToMock;
+  },
   get stateManager() {
     return fakeStateManager;
   },
@@ -64,11 +69,17 @@ vi.mock('../../../client/api.js', () => ({
 }));
 
 await import('./chat-thread.js');
+// Registers <sl-textarea> so the composer's shadow root actually contains it
+// (and its own shadow root) instead of an unupgraded, shadow-less stand-in —
+// needed for the reply-focus tests below to walk into the native <textarea>.
+import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 type ChatSendDetail = import('./chat-composer.js').ChatSendDetail;
 type Message = import('../../../shared/types.js').Message;
+type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -1119,6 +1130,268 @@ describe('scion-chat-thread receipt expiry', () => {
     el.remove();
     expect(internals._seenExpiryTimer).toBeNull();
   });
+});
+
+/**
+ * Mark-unread sets the caller's own watermark backwards. If this conversation
+ * is open when that happens, the normal auto-advance (viewing = read) must
+ * not immediately undo it — Slack-like behaviour — until the user navigates
+ * away and back, or sends a message here. The signal for "this just
+ * happened" is a self-targeted read-state event: the same SSE event a DM
+ * peer's "seen" tick uses, just addressed to the reader instead.
+ */
+describe('scion-chat-thread mark-unread auto-advance suppression', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  type Internals = {
+    mergeMessages(messages: Message[]): void;
+    maybeAdvanceReadWatermark(): void;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    _autoAdvanceSuppressed: boolean;
+    peerReadMessageId: string;
+  };
+
+  function aMessage(id: string): Message {
+    return {
+      id,
+      projectId: '',
+      sender: 'them@example.com',
+      senderId: 'user-them',
+      recipient: '',
+      msg: 'hi',
+      type: 'chat',
+      agentId: '',
+      dispatchState: 'dispatched',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /** Was a POST to /read issued? */
+  function sawReadPost(): boolean {
+    return apiFetch.mock.calls.some(
+      (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+  }
+
+  it("suppresses auto-advance once this tab's own watermark moves backward via SSE with unread:true", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(true);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  /**
+   * The discriminator for "this is mark-unread" is the event's `unread`
+   * field, not merely a self-targeted userId. A self event lacking it — e.g.
+   * a hypothetical future self-notifying /read — must not suppress, and must
+   * not be misapplied as a peer's seen tick either.
+   */
+  it('does not suppress a self-targeted event without unread:true', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: CONVERSATION_KEY, userId: 'user-me', messageId: 'm1' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+    expect(internals.peerReadMessageId).toBe('');
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(true);
+  });
+
+  /**
+   * The debounced callback re-checks suppression when it *fires*, not only
+   * when maybeAdvanceReadWatermark schedules it. Exercised directly here
+   * (flip the flag after scheduling, without going through
+   * suppressAutoAdvance's own clearTimeout) so this covers the guard even if
+   * some future suppression path ever sets the flag without also clearing
+   * the timer.
+   */
+  it('re-checks suppression when the debounced callback fires, not only when it was scheduled', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    internals._autoAdvanceSuppressed = true;
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  it("still applies a DM peer's seen tick for a different user id", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-them',
+            messageId: 'm-99',
+            readAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+
+    expect(internals.peerReadMessageId).toBe('m-99');
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('ignores a self-targeted read-state event for a different conversation', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: 'some-other-topic', userId: 'user-me', messageId: '' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the user sends a message', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'sent-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the conversation is switched away from and back', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+
+    el.conversationKey = 'some-other-topic';
+    await el.updateComplete;
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  /**
+   * A dedicated test for the initial-load watermark timer's suppression
+   * guard, independent of mount()'s "first apiFetch call" resolution
+   * heuristic: mount() returns while loadHistory() may still be in flight,
+   * so relying on that resolution order to imply the timer is already armed
+   * would be fragile. This test instead waits for `loading` to go false —
+   * set in the same synchronous finally block, immediately before the timer
+   * is armed — so the timer is armed (on the real clock, since fake timers
+   * are never installed here) before the self event is dispatched and before
+   * the real-time wait past
+   * its delay.
+   */
+  it('suppresses the initial-load watermark timer directly, independent of mount() timing', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: unknown) => {
+      if (String(url).includes('/messages?')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ items: [aMessage('m1')] }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({}),
+      } as unknown as Response);
+    });
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = 'user-me';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const internals = el as unknown as Internals & { loading: boolean };
+    await vi.waitFor(() => expect(internals.loading).toBe(false));
+
+    apiFetch.mockClear();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
+      })
+    );
+
+    // Real-time wait past the initial timer's delay (500ms with no prior
+    // read state to show a divider for). Deliberately not vi.useFakeTimers()
+    // — the timer was armed on the real clock before this test could have
+    // installed a fake one.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(sawReadPost()).toBe(false);
+  }, 8000);
 });
 
 describe('scion-chat-thread SSE message filtering', () => {
@@ -4787,5 +5060,616 @@ describe('scion-chat-thread recent-files capture', () => {
 
     const [, , context] = ingestSpy.mock.calls[0];
     expect((context as { projectId?: string }).projectId).toBeUndefined();
+  });
+});
+
+/**
+ * "Open terminal" / "Open in graph" on the message right-click context menu
+ * (nc-msg-agent-actions). These reuse the exact icons/labels/actions the
+ * toolbar (`renderAgentToolbarButtons`, pages/chat.ts) and members sidebar
+ * (`renderAgent`, chat-members.ts) already use, but act on the message's
+ * author agent rather than the thread's default agent or DM peer.
+ */
+describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-actions)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    navigateToMock.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function rightClick(target: Element): void {
+    target.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 20,
+      })
+    );
+  }
+
+  /** Mount a thread with the given history items and agent roster. */
+  async function mountWithMessages(
+    items: Record<string, unknown>[],
+    agentMembers: ChatAgentMember[] = []
+  ): Promise<{ el: ScionChatThread; bubbles: HTMLElement[] }> {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.agentMembers = agentMembers;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(items.length)
+    );
+    const bubbles = Array.from(el.shadowRoot!.querySelectorAll('scion-chat-message')) as Array<
+      HTMLElement & { updateComplete: Promise<boolean> }
+    >;
+    for (const b of bubbles) await b.updateComplete;
+    return { el, bubbles };
+  }
+
+  /** Text of every open context-menu item, trimmed. */
+  function menuItemLabels(el: ScionChatThread): string[] {
+    return Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (n) => n.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+    );
+  }
+
+  function findMenuItem(el: ScionChatThread, label: string): HTMLElement | undefined {
+    return Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.context-menu-item')).find(
+      (n) => n.textContent?.includes(label)
+    );
+  }
+
+  const AGENT_MSG = {
+    id: 'm1',
+    sender: 'agent:coder',
+    senderId: 'agent-1',
+    msg: 'agent says hi',
+    type: 'chat',
+    createdAt: '2026-01-01T00:00:00Z',
+  };
+  const USER_MSG = {
+    id: 'm2',
+    sender: 'them@example.com',
+    senderId: 'user-them',
+    msg: 'user says hi',
+    type: 'chat',
+    createdAt: '2026-01-01T00:01:00Z',
+  };
+
+  /**
+   * A second roster entry, listed *before* the author in every fixture below,
+   * with `canAttach`/`projectId` deliberately opposite the author's. A lookup
+   * that resolved `agentMembers[0]` instead of matching `senderId` would gate
+   * "Open terminal" on this agent's `canAttach` and build the graph link from
+   * this agent's `projectId` instead of the author's — every assertion below
+   * is written so that substitution produces a visibly wrong result.
+   */
+  const OTHER_AGENT: ChatAgentMember = {
+    id: 'agent-other',
+    kind: 'agent',
+    displayName: 'Other',
+    canAttach: false,
+    projectId: 'proj-other',
+  };
+
+  it('shows both items on an agent message and hides them on a user message', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG, USER_MSG],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    let labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(true);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+    rightClick(bubbles[1]);
+    await el.updateComplete;
+    labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  it('resolves the lookup by the message author id, not roster position (roster-ordering regression)', async () => {
+    // The reviewer's exact repro (nc-msg-agent-actions-review.md, R1): the
+    // author is second in the roster, and the first entry has the opposite
+    // canAttach and a different projectId. `agentMembers[0]` would show
+    // terminal (the other agent can attach) and point the graph link at
+    // `proj-other` — both wrong for this message's actual author.
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [
+        {
+          id: 'agent-other',
+          kind: 'agent',
+          displayName: 'Other',
+          canAttach: true,
+          projectId: 'proj-other',
+        },
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: false,
+          projectId: 'proj-author',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    expect(menuItemLabels(el).some((l) => l.includes('Open terminal'))).toBe(false);
+
+    findMenuItem(el, 'Open in graph')!.click();
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+  });
+
+  it('clicking "Open terminal" invokes the same nav-click action the toolbar button uses, for the message author agent', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+
+    const navClick = vi.fn();
+    document.addEventListener('nav-click', navClick);
+    try {
+      findMenuItem(el, 'Open terminal')!.click();
+    } finally {
+      document.removeEventListener('nav-click', navClick);
+    }
+
+    expect(navClick).toHaveBeenCalledTimes(1);
+    const detail = (navClick.mock.calls[0][0] as CustomEvent<{ path: string }>).detail;
+    expect(detail.path).toBe(terminalHref('agent-1'));
+    // The context menu closes after acting, same as every other item.
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('clicking "Open in graph" invokes the same navigation the toolbar button uses, for the message author agent', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+    await el.updateComplete;
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-1', 'agent-1'));
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('prefers the message senderProjectId over the roster projectId for the graph link (agents from another project, #1913)', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, senderProjectId: 'proj-sender' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
+  });
+
+  it("prefers the message senderProjectId over the message's own projectId for the graph link", async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, senderProjectId: 'proj-sender', projectId: 'proj-msg' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
+  });
+
+  it("prefers the roster projectId over the message's own projectId for the graph link", async () => {
+    // No senderProjectId. The rostered author's projectId ('proj-roster')
+    // must win over the message's own projectId ('proj-msg') — the roster
+    // is checked first in the chain.
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, projectId: 'proj-msg' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-roster',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-roster', 'agent-1'));
+  });
+
+  it('hides "Open terminal" (fail closed) when canAttach is not explicitly true, but keeps "Open in graph"', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [OTHER_AGENT, { id: 'agent-1', kind: 'agent', displayName: 'Coder', projectId: 'proj-1' }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+  });
+
+  it('hides "Open in graph" when no project can be resolved, but keeps "Open terminal"', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [OTHER_AGENT, { id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(true);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  it('hides both items when the message has no senderId, even if classified as agent-authored by type', async () => {
+    // isSenderAgent can return true by `msg.type` alone (assistant-reply /
+    // mention-reply) with no matching roster member. Without an id there is
+    // no agent to open a terminal on or focus the graph on.
+    const { el, bubbles } = await mountWithMessages(
+      [
+        {
+          id: 'm3',
+          sender: 'unknown',
+          senderId: '',
+          senderProjectId: 'proj-sender',
+          msg: 'no sender id',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:02:00Z',
+        },
+      ],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  describe('a departed author (no longer in the roster)', () => {
+    it('shows "Open in graph" using senderProjectId, but hides "Open terminal" (product decision: graph can still show the project/history)', async () => {
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, senderProjectId: 'proj-sender' }],
+        [OTHER_AGENT]
+      );
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
+    });
+
+    it('hides both items when no project can be resolved', async () => {
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+    });
+
+    it("prefers the message's own projectId over the thread's, for a cross-project departed author (agent-to-user rows never set senderProjectId)", async () => {
+      // No senderProjectId and no roster entry, but the message carries its
+      // own projectId (the author's project, as agent-to-user rows do)
+      // which differs from the thread's project. The author's project must
+      // win — falling back to the thread's would point the graph at the
+      // wrong project.
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, projectId: 'proj-author' }],
+        [OTHER_AGENT]
+      );
+      el.projectId = 'proj-thread';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+    });
+
+    it("prefers the message's own projectId over the thread's in a DM too", async () => {
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, projectId: 'proj-author' }],
+        [OTHER_AGENT]
+      );
+      el.isDM = true;
+      el.projectId = 'proj-inherited';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+    });
+
+    it('falls back to the thread\'s own project id for "Open in graph" in a project-scoped (non-DM) thread, when the message carries no project of its own', async () => {
+      // Neither senderProjectId, a roster entry, nor the message's own
+      // projectId is available, but this is a project-scoped thread, so its
+      // own projectId is a correct, safe last resort — unlike a DM's
+      // projectId (see the next test).
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+      el.projectId = 'proj-thread';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-thread', 'agent-1'));
+    });
+
+    it('does not fall back to the thread projectId in a DM — it is only the inherited, unrelated project', async () => {
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+      el.isDM = true;
+      el.projectId = 'proj-inherited';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+    });
+  });
+});
+
+/**
+ * Choosing Reply from the message context menu must move keyboard focus into
+ * the composer so the user can start typing the reply immediately. The menu
+ * itself must be gone and the reply-preview chip rendered before focus lands
+ * — otherwise the menu's own teardown could still be mid-flight and steal
+ * focus back to the message bubble.
+ */
+describe('scion-chat-thread reply focuses the composer', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /** Mount a v2 thread with one rendered message bubble per given item, in order. */
+  async function mountWithMessages(
+    items: Array<{ id: string; msg: string; createdAt: string }>
+  ): Promise<{ el: ScionChatThread; bubbles: HTMLElement[] }> {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: items.map((item) => ({
+            sender: 'them@example.com',
+            senderId: 'user-them',
+            type: 'chat',
+            ...item,
+          })),
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(items.length)
+    );
+    const bubbles = Array.from(
+      el.shadowRoot!.querySelectorAll('scion-chat-message')
+    ) as (HTMLElement & {
+      updateComplete: Promise<boolean>;
+    })[];
+    await Promise.all(bubbles.map((b) => b.updateComplete));
+    return { el, bubbles };
+  }
+
+  /** Right-click a message bubble, then click the "Reply" item in the menu that opens. */
+  async function chooseReplyFromContextMenu(
+    el: ScionChatThread,
+    bubble: HTMLElement
+  ): Promise<void> {
+    bubble.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 })
+    );
+    await el.updateComplete;
+
+    const replyItem = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+      (item) => item.textContent?.includes('Reply')
+    ) as HTMLElement | undefined;
+    expect(replyItem).toBeTruthy();
+    replyItem!.click();
+    await el.updateComplete;
+  }
+
+  it('makes the composer textarea the active element after choosing Reply', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+    ]);
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    // Menu is gone and the reply-preview chip is up before focus is asserted.
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+    expect(composer.shadowRoot?.querySelector('.reply-bar')).not.toBeNull();
+
+    await vi.waitFor(() => {
+      const slTextarea = composer.shadowRoot?.querySelector('sl-textarea') as
+        | (HTMLElement & { shadowRoot: ShadowRoot | null })
+        | null;
+      expect(slTextarea).not.toBeNull();
+      const textarea = slTextarea!.shadowRoot?.querySelector('textarea') ?? null;
+      expect(composer.shadowRoot?.activeElement).toBe(slTextarea);
+      expect(slTextarea!.shadowRoot?.activeElement).toBe(textarea);
+    });
+  });
+
+  it('places the caret at the end of the existing draft, not at its start', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+    ]);
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+
+    const slTextarea = composer.shadowRoot!.querySelector('sl-textarea') as HTMLElement & {
+      shadowRoot: ShadowRoot | null;
+      updateComplete: Promise<boolean>;
+    };
+    await slTextarea.updateComplete;
+    const textarea = slTextarea.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+
+    // Simulate an in-progress draft the user had already typed.
+    textarea.value = 'existing draft text';
+    textarea.selectionStart = textarea.selectionEnd = 0;
+    textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    await composer.updateComplete;
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(el);
+      expect(textarea.selectionStart).toBe('existing draft text'.length);
+      expect(textarea.selectionEnd).toBe('existing draft text'.length);
+    });
+  });
+
+  it('re-focuses the composer when the reply target switches from one message to another', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+      { id: 'm2', msg: 'second message', createdAt: '2026-01-01T00:01:00Z' },
+    ]);
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+    const slTextarea = composer.shadowRoot!.querySelector('sl-textarea') as HTMLElement & {
+      shadowRoot: ShadowRoot | null;
+    };
+    let textarea: HTMLTextAreaElement | null = null;
+    await vi.waitFor(() => {
+      textarea = slTextarea.shadowRoot?.querySelector('textarea') ?? null;
+      expect(textarea).not.toBeNull();
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
+    });
+
+    // Move focus away — a subsequent reply-target change must reclaim it
+    // rather than leaving focus wherever it drifted to in between.
+    textarea!.blur();
+    expect(slTextarea.shadowRoot?.activeElement).not.toBe(textarea);
+
+    await chooseReplyFromContextMenu(el, bubbles[1]);
+    await composer.updateComplete;
+
+    // Confirms the target actually changed, not just a re-fire on message 1.
+    expect(composer.shadowRoot?.querySelector('.reply-bar .reply-content')?.textContent).toContain(
+      'second message'
+    );
+    await vi.waitFor(() => {
+      expect(composer.shadowRoot?.activeElement).toBe(slTextarea);
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
+    });
   });
 });

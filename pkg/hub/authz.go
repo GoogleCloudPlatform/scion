@@ -66,6 +66,13 @@ const (
 	// so a system-scoped binding carrying only these IDs does not
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
+
+	// ActionDeliver and ActionUse distinguish launch-time material delivery
+	// from an agent's own runtime retrieval or token-mint request. Neither
+	// is listed in isReadOnlyOperation: a material decision always runs the
+	// delegation ceiling.
+	ActionDeliver Action = "deliver"
+	ActionUse     Action = "use"
 )
 
 // Resource represents the target of an authorization check.

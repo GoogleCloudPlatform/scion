@@ -80,7 +80,7 @@ func (s *Server) handleConversationResolve(w http.ResponseWriter, r *http.Reques
 		// Hub-off guard: deny agent callers from resolving cross-project DMs
 		// when the feature is disabled (design §7).
 		if conv.Kind == "direct" {
-			if !s.enforceCrossProjectReadGate(w, r, conv) {
+			if !s.enforceCrossProjectReadGate(w, r, conv, nil) {
 				return
 			}
 		}
