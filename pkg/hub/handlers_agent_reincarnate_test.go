@@ -2655,7 +2655,11 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	initial := list[0]
-	<-disp.entered // worker has written the stopping and provisioning steps
+	select {
+	case <-disp.entered: // worker has written the stopping and provisioning steps
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for worker to reach DispatchAgentReprovision; it may have failed before reprovision")
+	}
 	defer close(disp.release)
 
 	// tryAdvanceReincarnation's provisioning write, and the agent row's
@@ -2668,17 +2672,11 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
 		"the record's own state must track the worker's progress, not stay pending")
 
-	// initial is not a safe baseline for the updated_at comparison below:
-	// the `go runReincarnationWorker` the handler started above has no
-	// synchronization with the ListAgentReincarnations call that captured
-	// `initial`, so under scheduler load the worker can win that race and
-	// have already written the provisioning step by the time `initial` is
-	// read, making `initial` and `cur` the very same write. The agent row's
-	// ReincarnationUpdatedAt is the provisioning step's own stamp instead:
-	// tryAdvanceReincarnation pins the record's updated_at and
-	// updateReincarnationStep pins ReincarnationUpdatedAt to that same
-	// instant for this step, so comparing against it is race-free proof
-	// that the record's updated_at cannot predate the step that set it.
+	// The agent row's ReincarnationUpdatedAt is the provisioning step's own
+	// stamp (the worker pins the record's updated_at to the same instant),
+	// and it is stable while the worker is held in DispatchAgentReprovision.
+	// `initial` is not usable: the worker can already have written this step
+	// when it is read.
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, a.ReincarnationUpdatedAt, "the provisioning step must have set ReincarnationUpdatedAt")
