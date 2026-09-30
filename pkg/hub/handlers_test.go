@@ -75,6 +75,32 @@ func testServer(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
+		// srv.Shutdown is a no-op here (it only tears down background
+		// services when srv.httpServer is set, i.e. after Start() — which
+		// unit tests calling handlers directly never do). Without this,
+		// every one of this helper's ~2200 call sites across pkg/hub leaks
+		// three chatLinkService.cleanupLoop goroutines (telegram/discord/
+		// teams, started unconditionally by New()) and one
+		// BrokerAuthService/NonceCache.cleanup goroutine (ptone/scion#2418:
+		// found via -race, where the accumulated leak from thousands of
+		// prior tests was enough to blow later tests' tight deadline
+		// budgets). Each Close()/Stop() below is sync.Once-guarded and safe
+		// to call even when the field is already stopped or was never used.
+		if srv.telegramLinkService != nil {
+			srv.telegramLinkService.Close()
+		}
+		if srv.discordLinkService != nil {
+			srv.discordLinkService.Close()
+		}
+		if srv.teamsLinkService != nil {
+			srv.teamsLinkService.Close()
+		}
+		if srv.brokerAuthService != nil {
+			srv.brokerAuthService.Close()
+		}
+		if srv.previewService != nil {
+			srv.previewService.Close()
+		}
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
 	return srv, s
@@ -2131,6 +2157,23 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
+		// See testServer's cleanup above (ptone/scion#2418) for why this is
+		// needed in addition to Shutdown.
+		if srv.telegramLinkService != nil {
+			srv.telegramLinkService.Close()
+		}
+		if srv.discordLinkService != nil {
+			srv.discordLinkService.Close()
+		}
+		if srv.teamsLinkService != nil {
+			srv.teamsLinkService.Close()
+		}
+		if srv.brokerAuthService != nil {
+			srv.brokerAuthService.Close()
+		}
+		if srv.previewService != nil {
+			srv.previewService.Close()
+		}
 		_ = s.Close()
 	})
 	return srv, s
