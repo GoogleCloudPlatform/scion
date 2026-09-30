@@ -4241,6 +4241,7 @@ export class ScionPageChat extends LitElement {
               currentUserId=${this.pageData?.user?.id || ''}
               ?canSend=${true}
               .members=${this.v2Members}
+              .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
               @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>

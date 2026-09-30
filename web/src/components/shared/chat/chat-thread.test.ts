@@ -52,7 +52,12 @@ const fakeStateManager = new FakeStateManager();
 
 const apiFetch = vi.fn();
 
+const navigateToMock = vi.fn();
+
 vi.mock('../../../client/main.js', () => ({
+  get navigateTo() {
+    return navigateToMock;
+  },
   get stateManager() {
     return fakeStateManager;
   },
@@ -67,6 +72,7 @@ await import('./chat-thread.js');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 type ChatSendDetail = import('./chat-composer.js').ChatSendDetail;
 type Message = import('../../../shared/types.js').Message;
+type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 
@@ -4683,5 +4689,207 @@ describe('scion-chat-thread recent-files capture', () => {
 
     const [, , context] = ingestSpy.mock.calls[0];
     expect((context as { projectId?: string }).projectId).toBeUndefined();
+  });
+});
+
+/**
+ * "Open terminal" / "Open in graph" on the message right-click context menu
+ * (nc-msg-agent-actions). These reuse the exact icons/labels/actions the
+ * toolbar (`renderAgentToolbarButtons`, pages/chat.ts) and members sidebar
+ * (`renderAgent`, chat-members.ts) already use, but act on the message's
+ * author agent rather than the thread's default agent or DM peer.
+ */
+describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-actions)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    navigateToMock.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function rightClick(target: Element): void {
+    target.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        clientX: 10,
+        clientY: 20,
+      })
+    );
+  }
+
+  /** Mount a thread with the given history items and agent roster. */
+  async function mountWithMessages(
+    items: Record<string, unknown>[],
+    agentMembers: ChatAgentMember[] = []
+  ): Promise<{ el: ScionChatThread; bubbles: HTMLElement[] }> {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.agentMembers = agentMembers;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(items.length)
+    );
+    const bubbles = Array.from(el.shadowRoot!.querySelectorAll('scion-chat-message')) as Array<
+      HTMLElement & { updateComplete: Promise<boolean> }
+    >;
+    for (const b of bubbles) await b.updateComplete;
+    return { el, bubbles };
+  }
+
+  /** Text of every open context-menu item, trimmed. */
+  function menuItemLabels(el: ScionChatThread): string[] {
+    return Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).map(
+      (n) => n.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+    );
+  }
+
+  function findMenuItem(el: ScionChatThread, label: string): HTMLElement | undefined {
+    return Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.context-menu-item')).find(
+      (n) => n.textContent?.includes(label)
+    );
+  }
+
+  const AGENT_MSG = {
+    id: 'm1',
+    sender: 'agent:coder',
+    senderId: 'agent-1',
+    msg: 'agent says hi',
+    type: 'chat',
+    createdAt: '2026-01-01T00:00:00Z',
+  };
+  const USER_MSG = {
+    id: 'm2',
+    sender: 'them@example.com',
+    senderId: 'user-them',
+    msg: 'user says hi',
+    type: 'chat',
+    createdAt: '2026-01-01T00:01:00Z',
+  };
+
+  it('shows both items on an agent message and hides them on a user message', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG, USER_MSG],
+      [
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    let labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(true);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+    rightClick(bubbles[1]);
+    await el.updateComplete;
+    labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  it('clicking "Open terminal" invokes the same nav-click action the toolbar button uses, for the message author agent', async () => {
+    const { terminalHref } = await import('../../../client/open-terminal.js');
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+
+    const navClick = vi.fn();
+    document.addEventListener('nav-click', navClick);
+    try {
+      findMenuItem(el, 'Open terminal')!.click();
+    } finally {
+      document.removeEventListener('nav-click', navClick);
+    }
+
+    expect(navClick).toHaveBeenCalledTimes(1);
+    const detail = (navClick.mock.calls[0][0] as CustomEvent<{ path: string }>).detail;
+    expect(detail.path).toBe(terminalHref('agent-1'));
+    // The context menu closes after acting, same as every other item.
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('clicking "Open in graph" invokes the same navigation the toolbar button uses, for the message author agent', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+    await el.updateComplete;
+
+    expect(navigateToMock).toHaveBeenCalledWith('/agents/graph?project=proj-1&focus=agent-1');
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+  });
+
+  it('prefers the message senderProjectId over the roster projectId for the graph link (agents from another project, #1913)', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, senderProjectId: 'proj-other' }],
+      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith('/agents/graph?project=proj-other&focus=agent-1');
+  });
+
+  it('hides "Open terminal" (fail closed) when canAttach is not explicitly true, but keeps "Open in graph"', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', projectId: 'proj-1' }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+  });
+
+  it('hides "Open in graph" when no project can be resolved, but keeps "Open terminal"', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true }]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(true);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  it('hides both items when the author agent is no longer in the roster (deleted/left)', async () => {
+    const { el, bubbles } = await mountWithMessages([AGENT_MSG], []);
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    const labels = menuItemLabels(el);
+    expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+    expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
   });
 });

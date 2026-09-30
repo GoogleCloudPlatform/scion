@@ -43,9 +43,11 @@ import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
-import { stateManager } from '../../../client/main.js';
+import { navigateTo, stateManager } from '../../../client/main.js';
+import { openTerminal } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
+import type { ChatAgentMember } from './chat-members.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -358,6 +360,18 @@ export class ScionChatThread extends LitElement {
     avatarUrl?: string;
     kind: 'user' | 'agent';
   }> = [];
+
+  /**
+   * Agent members with the richer per-agent fields (`canAttach`, `projectId`)
+   * the members sidebar (chat-members.ts) already receives as `.agents`.
+   * The context menu's "Open terminal" / "Open in graph" items key off this
+   * list rather than `members` because they act on the message's author
+   * agent, which may not be the thread's default agent or DM peer — the
+   * only agents `getAgentProjectId`/`renderAgentToolbarButtons` in
+   * pages/chat.ts otherwise resolve.
+   */
+  @property({ type: Array })
+  agentMembers: ChatAgentMember[] = [];
 
   /** Whether v2 mode is active. Derived from conversationKey presence. */
   private get isV2(): boolean {
@@ -3146,8 +3160,54 @@ export class ScionChatThread extends LitElement {
               Make this agent thread default
             </div>`
           : nothing}
+        ${this.isSenderAgent(msg) ? this.renderAgentActionMenuItems(msg) : nothing}
       </div>
     `;
+  }
+
+  /**
+   * "Open terminal" / "Open in graph" context-menu items for the message's
+   * author agent — the same icons, labels and actions as the toolbar's
+   * `renderAgentToolbarButtons` (pages/chat.ts) and the members sidebar's
+   * `renderAgent` (chat-members.ts), scoped to the author of this message
+   * rather than the thread's default agent or DM peer.
+   *
+   * Terminal is gated on `canAttach`, fail-closed exactly like the sidebar:
+   * absent, false, or the agent missing from `agentMembers` altogether (e.g.
+   * it left the space or was deleted — chat.ts drops deleted agents from
+   * that list) all hide the item rather than offering a control the server
+   * would refuse. Graph is gated on a resolvable project id, hidden when
+   * none is available — matching the toolbar's `projectId ? ... : nothing`.
+   */
+  private renderAgentActionMenuItems(msg: Message) {
+    const member = this.agentMembers.find((m) => m.id === msg.senderId);
+    const projectId = this.resolveAgentActionProjectId(msg);
+    return html`
+      ${member?.canAttach === true
+        ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuOpenTerminal()}>
+            <sl-icon name="terminal"></sl-icon>
+            Open terminal
+          </div>`
+        : nothing}
+      ${projectId
+        ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuOpenGraph()}>
+            <sl-icon name="diagram-3"></sl-icon>
+            Open in graph
+          </div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * Project id for the author agent's graph/terminal actions. Prefers the
+   * server-derived `senderProjectId` (see #1913 — always set for agent
+   * senders, and the only signal that's correct when the author belongs to
+   * a different project than this conversation), falling back to the
+   * roster's per-agent `projectId` for messages that predate that field.
+   */
+  private resolveAgentActionProjectId(msg: Message): string {
+    const member = this.agentMembers.find((m) => m.id === msg.senderId);
+    return msg.senderProjectId || member?.projectId || '';
   }
 
   /** Handle right-click on a message to show context menu. */
@@ -3297,6 +3357,26 @@ export class ScionChatThread extends LitElement {
     } catch {
       // Non-critical
     }
+  }
+
+  /** Context menu: Open a terminal for the message's author agent. */
+  private handleContextMenuOpenTerminal(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    openTerminal(msg.senderId);
+  }
+
+  /** Context menu: Open the message's author agent in the dependency graph. */
+  private handleContextMenuOpenGraph(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    const projectId = this.resolveAgentActionProjectId(msg);
+    if (!projectId) return;
+    navigateTo(
+      `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(msg.senderId)}`
+    );
   }
 
   // ---------------------------------------------------------------------------
