@@ -80,12 +80,17 @@ Options:
                           thick       - full thick rebuild: thick-prep + scion-base +
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)
-                        Individual image step IDs are also accepted (e.g.
-                        scion-claude, scion-hub, scion-codex) with every builder,
-                        including cloud-build (submits a generated single-step
-                        config instead of the group's static cloudbuild-*.yaml).
-                        Use the group target "all" with --dry-run to list all
-                        valid step IDs.
+                        Individual step IDs (e.g. scion-claude, scion-hub,
+                        scion-omni) are also accepted by local-docker and
+                        local-podman. Under cloud-build, only individual
+                        harness step IDs (e.g. scion-claude, scion-codex)
+                        work this way, submitting a generated single-step
+                        config instead of the group's static
+                        cloudbuild-*.yaml; scion-hub, scion-omni, and other
+                        non-harness step IDs are not mapped there, so use
+                        their group target (hub, omni) with cloud-build
+                        instead. Use the group target "all" with --dry-run
+                        to list all valid step IDs.
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
