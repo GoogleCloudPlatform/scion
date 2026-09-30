@@ -65,6 +65,13 @@ func (m *mockAgentService) SendStructuredMessage(ctx context.Context, agentID st
 	return nil, nil
 }
 
+func (m *mockAgentService) SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts hubclient.SendMessageOptions) (*hubclient.MessageResponse, error) {
+	if m.sendFn != nil {
+		return m.sendFn(ctx, agentID, msg, opts.Interrupt, opts.Notify, opts.Wake)
+	}
+	return nil, nil
+}
+
 func (m *mockAgentService) List(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
 	if m.listFn != nil {
 		return m.listFn(ctx, opts)

@@ -573,32 +573,45 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
-	result, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake)
+
+	// Server-side @mention fan-out: the hub parses the body itself and
+	// delivers each mention, so the CLI sends a single request. It still
+	// sends an explicit mentions list — unioned with --cc — so a hub that
+	// only fans out from the explicit field still delivers it. Filtering
+	// self and the primary here matters because such a hub does not
+	// exclude the sender.
+	mentions := filterMentionNames(
+		messages.DedupMentionNames(extractMentions(message), parseCCFlag(msgCC)),
+		strings.TrimPrefix(sender, "agent:"), agentName)
+
+	resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, agentName, msg, hubclient.SendMessageOptions{
+		Interrupt: interrupt,
+		Notify:    notify,
+		Wake:      wake,
+		Mentions:  mentions,
+	})
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
-	if !isJSONOutput() {
-		if result != nil && result.Status == "deferred" {
-			// Design agent-reincarnate §3.7: the recipient is mid-`scion
-			// reincarnate`. The message was saved to history, not dropped.
-			fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, result.MessageID)
-		} else {
-			fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+	if isJSONOutput() {
+		if resp != nil {
+			return outputJSON(resp)
 		}
-		if notify {
-			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
-		}
+		return nil
 	}
-
-	// @mention and --cc fan-out: send TypeMention messages to mentioned agents
-	var mentionNames []string
-	// Parse @mentions from message body
-	mentionNames = append(mentionNames, extractMentions(message)...)
-	// Parse --cc flag
-	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
-	if len(mentionNames) > 0 {
-		sendMentionMessages(hubCtx, sender, "agent:"+agentName, message, mentionNames, agentSvc)
+	if resp != nil && resp.Status == "deferred" {
+		// Design agent-reincarnate §3.7: the recipient is mid-`scion
+		// reincarnate`. The message was saved to history, not dropped.
+		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, resp.MessageID)
+	} else {
+		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+	}
+	if notify {
+		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
+	}
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
 	}
 
 	return nil
@@ -640,12 +653,23 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
 	// the project-scoped slug lookup and its project isolation check.
 	agentSvc := hubCtx.Client.ProjectAgents("")
-	if _, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake); err != nil {
+	resp, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	// The hub fans body @mentions out for this path too, the same as any
+	// other agent message; report the results the same way the other send
+	// paths do.
+	if isJSONOutput() {
+		if resp != nil {
+			return outputJSON(resp)
+		}
+		return nil
+	}
+	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
 	}
 
 	return nil
@@ -700,19 +724,33 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
-			result, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+			// Server-side @mention fan-out: no --cc here (not accepted on
+			// this path), just the body's @mentions, filtered of the sender
+			// and the primary for old-hub compatibility.
+			mentions := filterMentionNames(extractMentions(message), senderAgent, ref.Value)
+			resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, ref.Value, agentMsg, hubclient.SendMessageOptions{
+				Wake:     wake,
+				Mentions: mentions,
+			})
 			if err != nil {
 				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
 			}
-			if !isJSONOutput() {
-				if result != nil && result.Status == "deferred" {
-					// Design agent-reincarnate §3.7: the recipient is
-					// mid-`scion reincarnate`. The message was saved to
-					// history, not dropped.
-					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, result.MessageID)
-				} else {
-					fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+			if isJSONOutput() {
+				if resp != nil {
+					return outputJSON(resp)
 				}
+				return nil
+			}
+			if resp != nil && resp.Status == "deferred" {
+				// Design agent-reincarnate §3.7: the recipient is
+				// mid-`scion reincarnate`. The message was saved to
+				// history, not dropped.
+				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
+			} else {
+				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+			}
+			if resp != nil {
+				printMentionResults(resp.MentionResults)
 			}
 			return nil
 		}
@@ -754,30 +792,31 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
-		if !isJSONOutput() {
-			// apiclient.DecodeResponse returns (nil, nil) on 204 No Content, so
-			// result can be nil with a nil err; print the minimal confirmation
-			// instead of dereferencing a nil result.
-			if result == nil {
-				fmt.Printf("Message dispatched to %s.\n", ref.Raw)
-			} else {
-				// Distinguish accepted dispatch from confirmed delivery.
-				switch result.Status {
-				case "sent":
-					fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
-				case "deferred":
-					// Design agent-reincarnate §3.7: the recipient is mid-`scion
-					// reincarnate`. The message was saved to history, not dropped.
-					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
-				default:
-					fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
-				}
-			}
-		} else {
-			// JSON output with full result. outputJSON encodes a nil *OutboundMessageResult
-			// as JSON null, which is valid output and does not panic.
+		if isJSONOutput() {
+			// JSON output with full result (MentionResults included, if any).
+			// outputJSON encodes a nil *OutboundMessageResult as JSON null,
+			// which is valid output and does not panic.
 			return outputJSON(result)
 		}
+		// apiclient.DecodeResponse returns (nil, nil) on 204 No Content, so
+		// result can be nil with a nil err; print the minimal confirmation
+		// instead of dereferencing a nil result.
+		if result == nil {
+			fmt.Printf("Message dispatched to %s.\n", ref.Raw)
+			return nil
+		}
+		// Distinguish accepted dispatch from confirmed delivery.
+		switch result.Status {
+		case "sent":
+			fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+		case "deferred":
+			// Design agent-reincarnate §3.7: the recipient is mid-`scion
+			// reincarnate`. The message was saved to history, not dropped.
+			fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
+		default:
+			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+		}
+		printMentionResults(result.MentionResults)
 		return nil
 	}
 
@@ -877,12 +916,20 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 	}
 
-	if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+	result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	if isJSONOutput() {
+		if result != nil {
+			return outputJSON(result)
+		}
+		return nil
+	}
+	fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	if result != nil {
+		printMentionResults(result.MentionResults)
 	}
 	return nil
 }
@@ -1199,9 +1246,13 @@ func validateChannel(hubCtx *HubContext, channel string) error {
 	return fmt.Errorf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", "))
 }
 
-// extractMentions delegates to the shared messages.ExtractMentions.
+// extractMentions delegates to the shared messages.ExtractProseMentions, so
+// an @-mention inside a fenced code block, an inline backtick span, or a
+// quoted '>' line is not treated as an address. Agent bodies pasting logs or
+// diffs are common enough that this matters for the CLI's own
+// explicit-mentions list, same as it does for the server's body parsing.
 func extractMentions(text string) []string {
-	return messages.ExtractMentions(text)
+	return messages.ExtractProseMentions(text)
 }
 
 // parseCCFlag delegates to the shared messages.ParseCCFlags. The --cc flag is
@@ -1212,6 +1263,70 @@ func parseCCFlag(cc []string) []string {
 
 // maxMentionRecipients is an alias for the shared constant.
 const maxMentionRecipients = messages.MaxMentionRecipients
+
+// filterMentionNames drops any name equal (case-insensitively) to selfSlug or
+// primarySlug. This matters against an old hub, which does not exclude the
+// sender from an explicit mentions list the way the new hub's
+// fanOutAgentMentions does.
+func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	var out []string
+	for _, name := range names {
+		if selfSlug != "" && strings.EqualFold(name, selfSlug) {
+			continue
+		}
+		if primarySlug != "" && strings.EqualFold(name, primarySlug) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// printMentionResults prints one line per mention result to stderr,
+// describing the outcome for names that were not cleanly delivered. Skipped
+// entirely under --json output, where the caller includes the results in the
+// JSON response instead.
+func printMentionResults(results []messages.MentionResult) {
+	if isJSONOutput() {
+		return
+	}
+	for _, r := range results {
+		switch r.Status {
+		case "delivered":
+			// AgentPhase covers every non-running phase alike (stopped,
+			// suspended, errored, still starting, ...) — the hub delivers
+			// a mention regardless of which one it is, so the wording here
+			// must not claim it "resumes", which is only accurate for
+			// stopped/suspended.
+			if r.AgentPhase != "" && r.AgentPhase != "running" {
+				fmt.Fprintf(os.Stderr, "@%s is %s; it will see this mention once it is running.\n", r.Slug, r.AgentPhase)
+			} else {
+				fmt.Fprintf(os.Stderr, "Mention notification sent to @%s.\n", r.Slug)
+			}
+		case "not_found":
+			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", r.Slug)
+		case "unauthorized":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was denied (message delivery not authorized)\n", r.Slug)
+		case "suppressed":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was suppressed by loop protection; retry later\n", r.Slug)
+		case "rate_limited":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was rate-limited; retry later\n", r.Slug)
+		case "ambiguous":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s delivery is ambiguous; it may or may not have been delivered\n", r.Slug)
+		case "timeout":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s timed out and was not attempted\n", r.Slug)
+		default:
+			if r.Error != "" {
+				fmt.Fprintf(os.Stderr, "Warning: mention to @%s failed: %s\n", r.Slug, r.Error)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: mention to @%s: %s\n", r.Slug, r.Status)
+			}
+		}
+	}
+}
 
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient
@@ -1235,10 +1350,13 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 		return
 	}
 
-	// Build lookup map of known agents (slug -> slug with original case)
+	// Build lookup map of known agents (slug -> slug with original case).
+	// Keyed by Slug, not Name: a mention names the agent's slug (e.g.
+	// "@my-agent"), which can differ from its display Name, so looking up
+	// by Name missed or mis-resolved any agent whose Name and Slug diverge.
 	knownAgents := make(map[string]string, len(resp.Agents))
 	for _, a := range resp.Agents {
-		knownAgents[strings.ToLower(a.Name)] = a.Name
+		knownAgents[strings.ToLower(a.Slug)] = a.Slug
 	}
 
 	// Determine the primary recipient's slug for dedup

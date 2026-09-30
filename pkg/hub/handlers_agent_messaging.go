@@ -955,7 +955,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			WriteAgentDMError(w, dmErr)
 			return
 		}
-		WriteAgentDMResult(w, dmResult)
+
+		// Agent-authored @mention fan-out: the DM branch's primary is
+		// freshTarget. Fan-out runs synchronously before the response is
+		// written, so an old CLI's own follow-up mention POST (sent right
+		// after this response) always finds the row this call just created
+		// and is recognized as a duplicate rather than delivered twice.
+		// ParentConv is intentionally omitted (nil): this branch is reached
+		// only when the parent conversation is a direct (agent-to-agent DM)
+		// conversation, which is never reused for a mention regardless of
+		// verification, so there is nothing to pass.
+		mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+			Sender:          agent,
+			SenderIdent:     agentIdent,
+			Primary:         freshTarget,
+			Msg:             req.Msg,
+			Type:            req.Type,
+			ParentMessageID: dmResult.MessageID,
+			Channel:         result.Channel,
+		})
+		WriteAgentDMResult(w, dmResult, mentionResults)
 		return
 	}
 
@@ -966,9 +985,20 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Translate @email mentions to @firstname-lastname for user-facing messages.
+	// Agent-authored @mention fan-out extracts mentions from the ORIGINAL
+	// body, before translateMentionsInbound rewrites @email tokens to
+	// @firstname-lastname for human-facing display below.
+	originalMsgForMentions := req.Msg
+
+	// Translate @email mentions to @firstname-lastname for user-facing
+	// messages. Resolved once here and handed to fan-out below too — both
+	// need the same project human-member list, and it costs one member-list
+	// query plus one GetUser per member, so resolving it twice on the same
+	// request would double that cost for no benefit.
+	var humanMembers []chatMemberEntry
 	if agent.ProjectID != "" {
-		if humanMembers := s.resolveProjectHumanMembers(ctx, agent.ProjectID); len(humanMembers) > 0 {
+		humanMembers = s.resolveProjectHumanMembers(ctx, agent.ProjectID)
+		if len(humanMembers) > 0 {
 			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
 		}
 	}
@@ -1095,6 +1125,30 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Agent-authored @mention fan-out: the primary already succeeded (both
+	// delivery-path branches above return early on failure), so fan-out
+	// now. Primary is nil — a user/group-conversation
+	// recipient has no single agent primary to exclude.
+	//
+	// ParentConvVerified is result.Asserted (DEF-138 Rule 1): true only
+	// when the caller referenced this group conversation by an existing,
+	// already-authorized ID. A group conversation derived from the
+	// caller's own free-text thread_id (Rules 2/3) is minted on demand, so
+	// its external_ref embeds whatever the caller chose to send; fan-out
+	// treats that the same as no group context at all.
+	mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+		Sender:             agent,
+		SenderIdent:        agentIdent,
+		Primary:            nil,
+		Msg:                originalMsgForMentions,
+		Type:               req.Type,
+		ParentConv:         result.ConvResult,
+		ParentConvVerified: result.Asserted,
+		ParentMessageID:    storeMsg.ID,
+		Channel:            result.Channel,
+		HumanMembers:       humanMembers,
+	})
+
 	// Fire notifications (both broker and non-broker paths).
 	// W6-mention: mention notifications for agent → group messages.
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
@@ -1138,12 +1192,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	s.logMessage("outbound message sent", outboundLogAttrs...)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	respBody := map[string]interface{}{
 		"message_id":   storeMsg.ID,
 		"status":       "sent",
 		"recipient":    result.Recipient,
 		"recipient_id": result.RecipientID,
-	})
+	}
+	if len(mentionResults) > 0 {
+		respBody["mention_results"] = mentionResults
+	}
+	writeJSON(w, http.StatusOK, respBody)
 }
 
 // handleAgentGitHubTokenRefresh handles POST /api/v1/agents/{id}/refresh-token.
@@ -1456,6 +1514,35 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
 
+	// Old-CLI skew dedup gate. Placed here, before any conversation
+	// resolution runs, rather than immediately before ExecuteAgentDM, so a
+	// deduplicated POST cannot mint a conversation for a send that turns out
+	// not to happen. An old CLI still fans out @mentions client-side by
+	// POSTing its own Type=mention message to each mentioned agent
+	// (cmd/message.go sendMentionMessages). Against a new hub,
+	// fanOutAgentMentions has (synchronously, on the primary request)
+	// already delivered that same mention. Detect the duplicate by content
+	// match within a short window and short-circuit before this handler's
+	// conversation-resolution block runs at all — a deduplicated POST must
+	// not create a conversation (e.g. a fresh sender<->recipient DM) for a
+	// send that turns out not to happen, and must not log DEF-3/divergence
+	// data for a message that is never persisted.
+	if structuredMsg != nil && structuredMsg.Type == messages.TypeMention {
+		if senderAgentIdent := GetAgentIdentityFromContext(ctx); senderAgentIdent != nil {
+			if existing, found := s.recentDuplicateMention(ctx, senderAgentIdent.ID(), agent.ID, plainMessage); found {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
+					MessageID:  existing.ID,
+					Status:     "deduplicated",
+					Agent:      agent.Slug,
+					AgentPhase: agent.Phase,
+				})
+				return
+			}
+		}
+	}
+
 	// ── Foreign attachment rejection (#1687) — inbound path ──────────────
 	// When the authenticated sender is an agent in a different project,
 	// reject any attachments before persistence, dispatch, or publication.
@@ -1705,6 +1792,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// conversations (a mention target is by definition not a DM
 	// participant, invariant D-1) or when nothing resolved.
 	var groupConversationID string
+	// groupConversationThreadKey is the same resolved group conversation's
+	// own canonical external_ref, passed to processMentions alongside
+	// groupConversationID so a mention row's thread key can be set from this
+	// server-resolved value instead of from the primary message's own
+	// caller-supplied thread_id. Empty whenever groupConversationID is.
+	var groupConversationThreadKey string
+	// mentionParticipantGroupID is groupConversationID, but only when the
+	// group came from an existing, caller-referenced conversation — the
+	// same condition that gates groupConversationThreadKey. It is what
+	// processMentions actually registers mentioned agents into, kept
+	// separate from groupConversationID (which registerGroupPrimary still
+	// uses unconditionally for the PRIMARY recipient) so a mention's
+	// participant registration follows the same rule as its thread key.
+	var mentionParticipantGroupID string
 	if structuredMsg != nil {
 		// Migration gate: a human-sender message to a migrating recipient
 		// (reincarnating, computed above) is persisted with DispatchState
@@ -1747,6 +1848,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
+		// groupConvIsExistingReference is true only when the group
+		// conversation came from the caller referencing an
+		// already-existing conversation by ID (looked up and checked below,
+		// never minted). The other branch derives a conversation key from
+		// free-text thread_id and creates the conversation on demand if it
+		// doesn't exist yet, which means its external_ref embeds whatever
+		// text the caller chose to send — not a property that can identify
+		// a conversation the mentioned agent already belongs to. Only the
+		// looked-up case is used to key a mention row's thread identity.
+		groupConvIsExistingReference := false
 		if structuredMsg.ConversationID != "" {
 			// DEF-49 SECURITY: authorize the caller-supplied conversation_id
 			// against the authenticated sender before honouring it.
@@ -1850,6 +1961,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"principal_id", agent.ID,
 						"error", ensureErr)
 				}
+				groupConvIsExistingReference = true
 			default:
 				// Unknown conversation kind — fail closed.
 				s.messageLog.Warn("DEF-49: unknown conversation kind, denying",
@@ -1945,6 +2057,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		if convResult != nil && convResult.Kind == "group" {
 			groupConversationID = convResult.ConversationID
+			if groupConvIsExistingReference {
+				groupConversationThreadKey = convResult.ExternalRef
+				mentionParticipantGroupID = convResult.ConversationID
+			}
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(structuredMsg.SenderID, agent.ID, structuredMsg.ThreadID)
@@ -2039,10 +2155,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 			}
 
-			var mentionResults []messages.MentionResult
-			if len(req.Mentions) > 0 {
-				mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
+			// Agent-authored @mention fan-out: body mentions plus the
+			// explicit Mentions field, resolved and delivered through
+			// fanOutAgentMentions — not processMentions, which stays for the
+			// human/broker sender branch of this handler. ParentConvVerified
+			// is groupConvIsExistingReference: true only when the caller
+			// referenced this group conversation by an existing,
+			// already-authorized ID, never one minted on demand from
+			// free-text thread_id.
+			var groupConv *messaging.ConversationResult
+			if convResult != nil && convResult.Kind == "group" {
+				groupConv = convResult
 			}
+			mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+				Sender:             senderAgentRec,
+				SenderIdent:        senderAgentIdent,
+				Primary:            agent,
+				Msg:                plainMessage,
+				Type:               structuredMsg.Type,
+				Explicit:           req.Mentions,
+				ParentConv:         groupConv,
+				ParentConvVerified: groupConvIsExistingReference,
+				ParentMessageID:    dmResult.MessageID,
+				Channel:            structuredMsg.Channel,
+			})
 
 			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689),
 			// "deferred" while the recipient is mid-migration (design
@@ -2257,7 +2393,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// applies its own migration gate per mentioned recipient.
 	var mentionResults []messages.MentionResult
 	if len(req.Mentions) > 0 && structuredMsg != nil {
-		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, groupConversationID)
+		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
 	if reincarnating {
@@ -3056,13 +3192,24 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 //
 // groupConversationID, when non-empty, names a group conversation that the
 // dispatched mention recipients should be recorded as participants of
-// (design doc §3.3, F2b). The primary recipient is registered separately by
-// handleAgentMessage's callers — either the caller-supplied conversation_id
-// case's own pre-dispatch registration, or (for a thread-derived group)
-// registerGroupPrimary, called at each dispatch path right before it calls
-// this function (review round 2 finding #2). Pass "" to skip participant
-// registration (direct conversations, or no conversation resolved).
-func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage, groupConversationID string) []messages.MentionResult {
+// (design doc §3.3, F2b). Pass "" to skip participant registration (direct
+// conversations, no conversation resolved, or a group conversation that was
+// not an existing, caller-referenced one — matching the same condition
+// groupConversationThreadKey uses, so registration and thread key stay
+// consistent with each other). The primary recipient is registered
+// separately by handleAgentMessage's callers — either the caller-supplied
+// conversation_id case's own pre-dispatch registration, or (for a
+// thread-derived group) registerGroupPrimary, called at each dispatch path
+// right before it calls this function.
+//
+// groupConversationThreadKey is that same group conversation's own canonical
+// external_ref, or "" when groupConversationID is. It is the ONLY source for
+// a mention row's ThreadID: the primary message's own thread_id is never
+// copied onto a mention row, in any shape. When no group context was
+// resolved, a mention row simply gets no thread key at all — the fresh
+// conversation it lands in (see fanOutAgentMentions's equivalent treatment)
+// already identifies it.
+func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, primaryAgent *store.Agent, originalMsg *messages.StructuredMessage, groupConversationID, groupConversationThreadKey string) []messages.MentionResult {
 	if len(mentionSlugs) == 0 {
 		return nil
 	}
@@ -3126,7 +3273,10 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		mentionMsg.SenderID = originalMsg.SenderID
 		mentionMsg.RecipientID = mentionAgent.ID
 		mentionMsg.Channel = originalMsg.Channel
-		mentionMsg.ThreadID = originalMsg.ThreadID
+		// A mention row's thread key comes only from the verified group
+		// conversation (if any); the primary message's thread_id is never
+		// copied onto it.
+		mentionMsg.ThreadID = groupConversationThreadKey
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of

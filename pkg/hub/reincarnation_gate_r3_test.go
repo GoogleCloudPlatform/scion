@@ -143,7 +143,7 @@ func TestProcessMentions_O2_DeferredMentionDMResolutionFailure(t *testing.T) {
 	orig := messages.NewInstruction("user:tester", "agent:"+primary.Slug, "hey @"+mentioned.Slug)
 	orig.SenderID = tid("r3-dm-fail-user")
 
-	res := srv.processMentions(mctx, []string{mentioned.Slug}, primary, orig, "")
+	res := srv.processMentions(mctx, []string{mentioned.Slug}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "error", res[0].Status)
 	// O-a (p2a-r4 review): pin that this "error" specifically came from the
@@ -180,7 +180,7 @@ func TestProcessMentions_O2_DeferredMentionAgentSenderDM(t *testing.T) {
 	orig := messages.NewInstruction("agent:r3-sender", "agent:"+primary.Slug, "hey @"+mentioned.Slug)
 	orig.SenderID = sender.ID
 
-	res := srv.processMentions(actx, []string{mentioned.Slug}, primary, orig, "")
+	res := srv.processMentions(actx, []string{mentioned.Slug}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	require.Equal(t, "deferred", res[0].Status,
 		"an agent sender must reach the deferred path the same as a user sender")
@@ -220,7 +220,7 @@ func TestProcessMentions_O2_DeferredMentionBrokerSender(t *testing.T) {
 	bctx := contextWithBrokerIdentity(context.Background(), NewBrokerIdentity(primary.RuntimeBrokerID))
 	orig := messages.NewInstruction("system:x", "agent:"+primary.Slug, "hey @"+mentioned.Slug)
 
-	res := srv.processMentions(bctx, []string{mentioned.Slug}, primary, orig, "")
+	res := srv.processMentions(bctx, []string{mentioned.Slug}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "unauthorized", res[0].Status,
 		"a broker sender is denied by authz before the migration gate, not by the authID==\"\" guard")

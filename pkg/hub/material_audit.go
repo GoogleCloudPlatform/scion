@@ -49,7 +49,7 @@ type MaterialSelectionEvent struct {
 	ActorKind      string
 	ActorID        string
 	CredentialKind string // "agent_jwt"
-	CredentialID   string // agentCredentialIDContextKey value when present, else ""
+	CredentialID   string // auditActorFromContext's CredentialID (the request's agent JTI); "" when absent
 	TargetAgent    struct{ AgentID, ProjectID, BrokerID string }
 	ProvenanceRoot struct{ Kind, ID string } // Target.Root.Kind/ID: {"user", Ancestry[0]}; not the ancestry
 	RequestReason  string                    // set when checks 1-6 deny; items then empty
@@ -153,16 +153,16 @@ func (s *Server) logMaterialSelection(ctx context.Context, e *MaterialSelectionE
 // emitted per request. facts is nil for a whole-request denial (checks
 // 1-6); items is then empty and requestReason is set instead.
 func (s *Server) buildMaterialSelectionEvent(ctx context.Context, endpoint, correlationID string, facts *TargetFacts, requestReason string, items []MaterialSelectionEventItem) *MaterialSelectionEvent {
-	actorKind, actorID, credentialKind, credentialID := materialAuditActorFromContext(ctx)
+	actor := auditActorFromContext(ctx)
 	e := &MaterialSelectionEvent{
 		EventType:      "material_selection",
 		CorrelationID:  correlationID,
 		Purpose:        string(PurposeRuntimeRead),
 		Endpoint:       endpoint,
-		ActorKind:      actorKind,
-		ActorID:        actorID,
-		CredentialKind: credentialKind,
-		CredentialID:   credentialID,
+		ActorKind:      actor.PrincipalKind,
+		ActorID:        actor.PrincipalID,
+		CredentialKind: actor.CredentialKind,
+		CredentialID:   actor.CredentialID,
 		RequestReason:  requestReason,
 		Items:          items,
 		Timestamp:      time.Now(),
@@ -194,17 +194,6 @@ func materialSelectionItem(item ItemResult, permission, detail string) MaterialS
 		Permission:    permission,
 		Detail:        detail,
 	}
-}
-
-// materialAuditActorFromContext fills the actor fields from the presented
-// agent identity. It is unexported, one function, and is deleted in favour
-// of a shared actor-resolution helper once the audit package grows one.
-func materialAuditActorFromContext(ctx context.Context) (actorKind, actorID, credentialKind, credentialID string) {
-	ident := GetAgentIdentityFromContext(ctx)
-	if ident == nil {
-		return "", "", "", ""
-	}
-	return ident.Type(), ident.ID(), string(CredentialKindAgentJWT), GetAgentCredentialIDFromContext(ctx)
 }
 
 // newMaterialCorrelationID returns a fresh correlation ID for one request's

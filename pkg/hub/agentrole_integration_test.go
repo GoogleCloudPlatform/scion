@@ -990,8 +990,8 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
 
 	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
-	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
-	// Only list and project-level read endpoints pass through.
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id} for
+	// any agent other than the caller. List and project-level reads pass.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
 		"/api/v1/templates",
@@ -1010,11 +1010,13 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 		})
 	}
 
-	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	// Self-read: the token's agent reads its own record, which is allowed
+	// (as on the project-scoped route). CO1 still denies reading other agents
+	// by ID; see TestGetAgent_SelfRead.
 	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
 		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"a baseline agent must be able to read its own record; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 }
@@ -1026,7 +1028,8 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
 
 	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
-	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id} for
+	// any agent other than the caller.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
 		"/api/v1/templates",
@@ -1045,11 +1048,12 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 		})
 	}
 
-	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	// Self-read is allowed for readonly too (it carries project:read); CO1
+	// still denies reading other agents by ID.
 	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
 		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"a readonly agent must be able to read its own record; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 }

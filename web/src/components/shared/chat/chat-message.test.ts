@@ -177,6 +177,37 @@ describe('scion-chat-message attachment previews', () => {
     apiFetchMock.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve(text) });
   }
 
+  function respondWithImage(): void {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(['fake-bytes'], { type: 'image/png' })),
+    });
+  }
+
+  /**
+   * The full-attachment overlay is the reusable `<scion-chat-file-preview>`
+   * — a nested shadow root, with its own async load. Drain both shadow
+   * roots' microtasks/renders.
+   */
+  async function previewDialog(el: ScionChatMessage): Promise<HTMLElement | null> {
+    for (let i = 0; i < 8; i++) {
+      const preview = el.shadowRoot?.querySelector('scion-chat-file-preview') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      if (!preview) {
+        await Promise.resolve();
+        continue;
+      }
+      await preview.updateComplete;
+      await Promise.resolve();
+    }
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview');
+    return (
+      (preview?.shadowRoot?.querySelector('sl-dialog.file-preview-dialog') as HTMLElement) ?? null
+    );
+  }
+
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetchMock.mockReset();
@@ -230,20 +261,20 @@ describe('scion-chat-message attachment previews', () => {
       { id: 'att-expand', name: 'notes.txt', mime: 'text/plain', size: 600 },
     ]);
 
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
 
     const expand = el.shadowRoot?.querySelector(
       'sl-icon-button[name="arrows-angle-expand"]'
     ) as HTMLElement;
     expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('notes.txt');
     expect((editorIn(dialog) as unknown as { content: string }).content.split('\n')).toHaveLength(
       60
     );
-    expect(dialog?.querySelector('sl-button')?.getAttribute('href')).toBe(
+    expect(dialog?.querySelector('sl-button[href]')?.getAttribute('href')).toBe(
       '/api/v1/chat/attachments/att-expand'
     );
   });
@@ -274,13 +305,15 @@ describe('scion-chat-message attachment previews', () => {
   });
 
   it('expands an image into the overlay rather than a new tab', async () => {
+    respondWithImage();
     const el = await mountAttachments([
       { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
     ]);
+    apiFetchMock.mockClear();
 
     // No anchor around the thumbnail — the click stays in the page.
     expect(el.shadowRoot?.querySelector('.attachment-images a')).toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
 
     const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
     expect(button.querySelector('img.attachment-image')?.getAttribute('src')).toBe(
@@ -289,18 +322,23 @@ describe('scion-chat-message attachment previews', () => {
 
     button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('shot.png');
-    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
-      '/api/v1/chat/attachments/att-img'
+    // The overlay fetches the image itself (for uniform 403/404 handling)
+    // and renders it from an object URL, not the bare attachment URL.
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/attachments/att-img?view=true',
+      expect.anything()
     );
-    // Images are rendered by the browser; nothing is fetched as text.
+    const img = dialog?.querySelector('img.file-preview-image');
+    expect(img?.getAttribute('src')).toMatch(/^blob:/);
+    // Nothing is fetched as text for an image.
     expect(editorIn(dialog)).toBeNull();
-    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
   it('gives an image thumbnail an expand and a download action', async () => {
+    respondWithImage();
     const el = await mountAttachments([
       { id: 'att-img', name: 'shot.png', mime: 'image/png', size: 2048 },
     ]);
@@ -318,12 +356,10 @@ describe('scion-chat-message attachment previews', () => {
     ) as HTMLElement;
     expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
+    const dialog = await previewDialog(el);
 
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview');
     expect(dialog?.getAttribute('label')).toBe('shot.png');
-    expect(dialog?.querySelector('img.full-image')?.getAttribute('src')).toBe(
-      '/api/v1/chat/attachments/att-img'
-    );
+    expect(dialog?.querySelector('img.file-preview-image')?.getAttribute('src')).toMatch(/^blob:/);
   });
 
   it('closes the overlay when it is dismissed, so a click outside ends it', async () => {
@@ -334,15 +370,78 @@ describe('scion-chat-message attachment previews', () => {
     const button = el.shadowRoot?.querySelector('.image-expand') as HTMLElement;
     button.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
     await settle(el);
-
-    const dialog = el.shadowRoot?.querySelector('sl-dialog.full-preview') as HTMLElement;
+    const dialog = await previewDialog(el);
     expect(dialog).not.toBeNull();
 
     // sl-dialog closes itself on an overlay click and reports sl-after-hide.
-    dialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
+    dialog!.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: true, composed: true }));
     await settle(el);
 
-    expect(el.shadowRoot?.querySelector('sl-dialog')).toBeNull();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).toBeNull();
+  });
+
+  it('does not refetch or reset the overlay on an unrelated chat-message re-render', async () => {
+    respondWith('package main\n\nfunc main() {}\n');
+    const el = await mountAttachments([
+      { id: 'att-stable', name: 'main.go', mime: 'text/plain', size: 42 },
+    ]);
+
+    const expand = el.shadowRoot?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+    await previewDialog(el);
+
+    apiFetchMock.mockClear();
+
+    // A re-render triggered by something unrelated to the overlay (a
+    // reaction, a read receipt, an SSE edit, the parent thread re-rendering)
+    // must not rebuild the preview target and refetch it.
+    el.requestUpdate();
+    await settle(el);
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelector('scion-chat-file-preview')).not.toBeNull();
+  });
+
+  it('keeps the Source/Rendered toggle across an unrelated chat-message re-render', async () => {
+    respondWith('# Heading\n\nBody text.\n');
+    const el = await mountAttachments([
+      { id: 'att-md', name: 'notes.md', mime: 'text/markdown', size: 30 },
+    ]);
+
+    const expand = el.shadowRoot?.querySelector(
+      'sl-icon-button[name="arrows-angle-expand"]'
+    ) as HTMLElement;
+    expand.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+    const dialog = await previewDialog(el);
+
+    const sourceButton = Array.from(dialog?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Source')
+    ) as HTMLElement;
+    expect(sourceButton).toBeDefined();
+    sourceButton.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle(el);
+
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview');
+    expect(
+      Array.from(preview?.shadowRoot?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Preview')
+      )
+    ).toBe(true);
+
+    // An unrelated parent re-render must not reset the toggle back to the
+    // rendered view.
+    el.requestUpdate();
+    await settle(el);
+
+    expect(
+      Array.from(preview?.shadowRoot?.querySelectorAll('sl-button') ?? []).some((b) =>
+        b.textContent?.includes('Preview')
+      )
+    ).toBe(true);
   });
 
   it('reports a failed fetch inside the preview instead of an empty editor', async () => {
@@ -501,8 +600,9 @@ describe('scion-chat-message path links', () => {
   it('does not double-link paths already inside markdown links', async () => {
     // The mocked renderer turns `[text](url)` into `<a href="url">text</a>`.
     // Using the path as both the link text and the URL means the path
-    // string appears inside the anchor's text content, which is exactly
-    // the case that would previously produce a nested <a> tag.
+    // string appears inside the anchor's text content — exactly the case
+    // that would produce a nested <a> tag if path-linking ran unconditionally
+    // on that text.
     const el = await mount(
       'check [/scion-volumes/data/report.md](/scion-volumes/data/report.md) for details'
     );
@@ -514,6 +614,232 @@ describe('scion-chat-message path links', () => {
 
     const anchor = el.shadowRoot?.querySelector('.md-content a');
     expect(anchor?.querySelector('a')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GitHub shortform issue/PR reference links (owner/repo#N)
+// ---------------------------------------------------------------------------
+
+describe('scion-chat-message GitHub shortform refs', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function ghRefLinks(el: ScionChatMessage): HTMLAnchorElement[] {
+    return Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .gh-ref-link') ?? []
+    ) as HTMLAnchorElement[];
+  }
+
+  it('renders owner/repo#N as a link to the GitHub issue page', async () => {
+    const el = await mount('see ptone/scion#2217 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('excludes trailing sentence punctuation from the match', async () => {
+    const el = await mount('fixed in ptone/scion#2217. Thanks!');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+  });
+
+  it('excludes surrounding parentheses from the match', async () => {
+    const el = await mount('see the fix (ptone/scion#2217) for context');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
+
+  it('does not double-link a ref already inside an existing link', async () => {
+    // The mocked renderer turns `[text](url)` into `<a href="url">text</a>`.
+    const el = await mount(
+      'see [ptone/scion#2217](https://github.com/ptone/scion/issues/2217) for details'
+    );
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+    const anchor = el.shadowRoot?.querySelector('.md-content a');
+    expect(anchor?.querySelector('a')).toBeNull();
+  });
+
+  it('does not link a ref embedded in a URL path (preceded by /)', async () => {
+    const el = await mount('see https://example.com/ptone/scion#2217 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('does not link the tail of a longer slash-separated path', async () => {
+    // Neither the whole thing nor the `b/c#12` tail is a valid ref: a repo
+    // can never contain `/`, and `b`/`c` are each preceded by `/`.
+    const el = await mount('path is a/b/c#12 in the tree');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('leaves refs inside an inline code span as literal text', async () => {
+    const el = await mount('run `git log ptone/scion#2217` to check');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+    expect(el.shadowRoot?.querySelector('.md-content code')?.textContent).toBe(
+      'git log ptone/scion#2217'
+    );
+  });
+
+  it('leaves refs inside a fenced code block as literal text', async () => {
+    const el = await mount('run:\n```\necho ptone/scion#2217\n```\nthen see ptone/scion#2218');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2218');
+    const pre = el.shadowRoot?.querySelector('.md-content pre');
+    expect(pre?.querySelector('.gh-ref-link')).toBeNull();
+  });
+
+  it('does not link a bare #123 with no owner/repo', async () => {
+    const el = await mount('see #123 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(0);
+  });
+
+  it('links alongside an adjacent file path without interference', async () => {
+    const el = await mount('check /workspace/src/main.go and ptone/scion#2217');
+    const links = ghRefLinks(el);
+    const paths = Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .path-link') ?? []
+    ) as HTMLElement[];
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+    expect(paths).toHaveLength(1);
+    expect(paths[0].dataset.filePath).toBe('/workspace/src/main.go');
+  });
+
+  it('renders multiple refs in the same message', async () => {
+    const el = await mount('see ptone/scion#2217 and GoogleCloudPlatform/scion#2081');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(2);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/scion/issues/2217');
+    expect(links[1].getAttribute('href')).toBe(
+      'https://github.com/GoogleCloudPlatform/scion/issues/2081'
+    );
+  });
+
+  it('links a mixed-case owner', async () => {
+    const el = await mount('see PTone/Scion#42 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/PTone/Scion/issues/42');
+    expect(links[0].textContent).toBe('PTone/Scion#42');
+  });
+
+  it('does not link when a word character trails the number (R1)', async () => {
+    const el = await mount('see foo/bar#12abc for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when an underscore trails the number (R1)', async () => {
+    const el = await mount('see foo/bar#12_x for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a scheme-less host like example.com/foo#12 (O1)', async () => {
+    const el = await mount('see example.com/foo#12 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a dotted prefix like user.name/repo#1 (O1)', async () => {
+    const el = await mount('see user.name/repo#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link mid-word after a non-ASCII prefix like äptone/scion#1 (O1)', async () => {
+    const el = await mount('see äptone/scion#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('rejects a repo of just dots, e.g. ptone/.#1 (O2)', async () => {
+    const el = await mount('see ptone/.#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('rejects a repo of just dots, e.g. ptone/..#1 (O2)', async () => {
+    const el = await mount('see ptone/..#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('links a 39-character owner, the GitHub max length (O3)', async () => {
+    const owner = 'a'.repeat(39);
+    const el = await mount(`see ${owner}/repo#1 for details`);
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(`https://github.com/${owner}/repo/issues/1`);
+  });
+
+  it('does not link a 40-character owner, one past the GitHub max length (O3)', async () => {
+    const owner = 'a'.repeat(40);
+    const el = await mount(`see ${owner}/repo#1 for details`);
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('links a repo that starts with a dot, e.g. ptone/.github#1 (round 2 R1)', async () => {
+    const el = await mount('see ptone/.github#1 for details');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://github.com/ptone/.github/issues/1');
+    expect(links[0].textContent).toBe('ptone/.github#1');
+  });
+
+  it('does not slide past a hyphen after the dot exclusion blocks it (N1)', async () => {
+    const el = await mount('see user.foo-bar/repo#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when a trailing unicode letter follows the number (N2)', async () => {
+    const el = await mount('see ptone/scion#12é for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link when the owner is preceded by an underscore (N2)', async () => {
+    const el = await mount('see _ptone/scion#1 for details');
+    expect(ghRefLinks(el)).toHaveLength(0);
+  });
+
+  it('re-emits the boundary character unchanged (round 3 R1)', async () => {
+    const el = await mount('x (a/b#1),c/d#2 e/f#3');
+    expect(ghRefLinks(el).map((a) => a.textContent)).toEqual(['a/b#1', 'c/d#2', 'e/f#3']);
+    expect(el.shadowRoot?.querySelector('.md-content p')?.textContent).toBe(
+      'x (a/b#1),c/d#2 e/f#3'
+    );
+  });
+
+  it('links a ref at the very start of the message (round 3 R2)', async () => {
+    const el = await mount('ptone/scion#2217 is fixed');
+    const links = ghRefLinks(el);
+
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
   });
 });
 

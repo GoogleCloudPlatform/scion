@@ -228,7 +228,7 @@ func TestProcessMentions_F3_DeferredMentionGetsDMConversation(t *testing.T) {
 	orig := messages.NewInstruction("user:tester", "agent:"+primary.Slug, "hey @"+mentioned.Slug)
 	orig.SenderID = tid("f3-user")
 
-	res := srv.processMentions(mctx, []string{mentioned.Slug}, primary, orig, "")
+	res := srv.processMentions(mctx, []string{mentioned.Slug}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "deferred", res[0].Status)
 
@@ -260,7 +260,7 @@ func TestProcessMentions_F3_NonDeferredMentionStillHasNoConversation(t *testing.
 
 	orig := messages.NewInstruction("user:tester", "agent:f3n-primary", "hey @f3n-target")
 	orig.SenderID = tid("f3n-user")
-	res := srv.processMentions(mctx, []string{"f3n-target"}, primary, orig, "")
+	res := srv.processMentions(mctx, []string{"f3n-target"}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "delivered", res[0].Status)
 
@@ -279,7 +279,7 @@ func TestProcessMentions_F1_PersistFailureOnDeferredMentionIsErrorNotDeferred(t 
 	orig := messages.NewInstruction("user:tester", "agent:"+primary.Slug, "hey @target")
 	orig.SenderID = tid("f1m-user")
 
-	res := srv.processMentions(mctx, []string{"rvm-target"}, primary, orig, "")
+	res := srv.processMentions(mctx, []string{"rvm-target"}, primary, orig, "", "")
 	require.Len(t, res, 1)
 	assert.Equal(t, "error", res[0].Status,
 		"an unpersisted deferred mention must be reported as error, never deferred")

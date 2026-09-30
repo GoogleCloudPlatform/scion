@@ -71,6 +71,9 @@ type sentMessage struct {
 	Interrupt bool
 	// Structured message fields (new)
 	StructuredMsg *messages.StructuredMessage
+	// Mentions is the request body's explicit mentions field
+	// (SendStructuredMessageWithOptions), when present.
+	Mentions []string
 }
 
 func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hubclient.Agent) (*httptest.Server, *[]sentMessage) {
@@ -136,6 +139,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 				Message           string                      `json:"message"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
+				Mentions          []string                    `json:"mentions"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -143,6 +147,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 				AgentName:     agentName,
 				Interrupt:     body.Interrupt,
 				StructuredMsg: body.StructuredMessage,
+				Mentions:      body.Mentions,
 			}
 			// Extract message text from structured message if present
 			if body.StructuredMessage != nil {
@@ -154,8 +159,29 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 			mu.Lock()
 			sent = append(sent, sm)
 			mu.Unlock()
+
+			// Synthesize mention_results from the request's mentions field,
+			// matching against the fixture agent list — good enough to
+			// exercise the CLI's printMentionResults wiring end to end
+			// without a real hub's resolution logic.
+			known := make(map[string]bool, len(runningAgents))
+			for _, a := range runningAgents {
+				known[strings.ToLower(a.Name)] = true
+				if a.Slug != "" {
+					known[strings.ToLower(a.Slug)] = true
+				}
+			}
+			var mentionResults []messages.MentionResult
+			for _, m := range body.Mentions {
+				if known[strings.ToLower(m)] {
+					mentionResults = append(mentionResults, messages.MentionResult{Slug: m, Status: "delivered", AgentPhase: "running"})
+				} else {
+					mentionResults = append(mentionResults, messages.MentionResult{Slug: m, Status: "not_found", Error: "no matching agent in this project"})
+				}
+			}
+
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mention_results": mentionResults})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -1606,6 +1632,237 @@ func TestParseCCFlag(t *testing.T) {
 	}
 }
 
+// TestSendMessageViaHub_OldHubShaped_MentionsFieldCarriesTheMention: against
+// a server that only understands the legacy explicit "mentions" field (no
+// server-side body parsing — i.e. an "old hub" shape), the request body
+// still carries the mention, so processMentions on that old hub would fan it
+// out. This is what makes the new CLI's mention handling backward
+// compatible with a hub that has not yet picked up server-side body
+// parsing.
+func TestSendMessageViaHub_OldHubShaped_MentionsFieldCarriesTheMention(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-old-hub-shape"
+	var capturedMentions []string
+	var mu sync.Mutex
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/agents"):
+			// Old hub's agent listing — unrelated to mention resolution.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
+		case r.Method == http.MethodPost:
+			// Old hub's /message handler: only ever looks at the explicit
+			// "mentions" field (no ExtractProseMentions body parsing).
+			var body struct {
+				Mentions []string `json:"mentions"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			capturedMentions = body.Mentions
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": "old-hub-msg-1", "status": "delivered", "agent": "builder", "agent_phase": "running",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	err = sendMessageViaHub(hubCtx, "builder", "hey @bystander take a look", false, false, false)
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"bystander"}, capturedMentions,
+		"the old-hub-shaped server must still see the mention via the explicit field")
+}
+
+// TestSendMessageViaConversation_OutboundConvRef_PrintsMentionWarning covers
+// the outbound-endpoint branch of sendMessageViaConversation (conv:/#thread/
+// @email): the server resolves mentions itself on this path, and whatever it
+// reports back in mention_results must actually reach the sender as a
+// stderr warning, not be silently dropped.
+func TestSendMessageViaConversation_OutboundConvRef_PrintsMentionWarning(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "project-msg-outbound-mention-warn"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "outbound-msg-1",
+				"status":       "sent",
+				"recipient":    "conv:11111111-1111-1111-1111-111111111111",
+				"recipient_id": "uid-test",
+				"mention_results": []messages.MentionResult{
+					{Slug: "unknown-name", Status: "not_found", Error: "no matching agent in this project"},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	ref := &messaging.Reference{Kind: messaging.RefConversation, Value: "11111111-1111-1111-1111-111111111111", Raw: "conv:11111111-1111-1111-1111-111111111111"}
+
+	out := captureStderr(t, func() {
+		err = sendMessageViaConversation(hubCtx, ref, "please look at @unknown-name", false, false, nil)
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "@unknown-name does not match any agent in this project")
+}
+
+// TestSendOutboundMessageViaHub_PrintsMentionWarning covers the direct
+// user:<email> path (sendOutboundMessageViaHub, not routed through
+// sendMessageViaConversation at all): its own mention_results must also
+// reach the sender as a stderr warning.
+func TestSendOutboundMessageViaHub_PrintsMentionWarning(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "project-msg-outbound-direct-mention-warn"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "outbound-msg-2",
+				"status":       "sent",
+				"recipient":    "user:alice@example.com",
+				"recipient_id": "uid-test",
+				"mention_results": []messages.MentionResult{
+					{Slug: "unknown-name", Status: "not_found", Error: "no matching agent in this project"},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	out := captureStderr(t, func() {
+		err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "please look at @unknown-name", false)
+	})
+	require.NoError(t, err)
+	require.Contains(t, out, "@unknown-name does not match any agent in this project")
+}
+
+// printMentionResults prints the expected warning per non-delivered status,
+// a note for a delivered-but-not-currently-running recipient, and is silent
+// under --json.
+func TestPrintMentionResults(t *testing.T) {
+	results := []messages.MentionResult{
+		{Slug: "alice", Status: "delivered"},
+		{Slug: "bob", Status: "delivered", AgentPhase: "stopped"},
+		{Slug: "carol", Status: "not_found"},
+		{Slug: "dave", Status: "unauthorized"},
+		{Slug: "erin", Status: "suppressed"},
+		{Slug: "frank", Status: "rate_limited"},
+		{Slug: "grace", Status: "ambiguous"},
+		{Slug: "heidi", Status: "timeout"},
+		{Slug: "ivan", Status: "error", Error: "dispatch failed: boom"},
+	}
+
+	out := captureStderr(t, func() { printMentionResults(results) })
+
+	assert.Contains(t, out, "Mention notification sent to @alice.")
+	assert.Contains(t, out, "@bob is stopped; it will see this mention once it is running.")
+	assert.Contains(t, out, "@carol does not match any agent")
+	assert.Contains(t, out, "@dave was denied")
+	assert.Contains(t, out, "@erin was suppressed by loop protection")
+	assert.Contains(t, out, "@frank was rate-limited")
+	assert.Contains(t, out, "@grace delivery is ambiguous")
+	assert.Contains(t, out, "@heidi timed out")
+	assert.Contains(t, out, "@ivan failed: dispatch failed: boom")
+}
+
+func TestPrintMentionResults_SilentUnderJSON(t *testing.T) {
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	out := captureStderr(t, func() {
+		printMentionResults([]messages.MentionResult{{Slug: "carol", Status: "not_found"}})
+	})
+	assert.Empty(t, out, "printMentionResults must be silent under --json; results belong in the JSON body instead")
+}
+
+func TestPrintMentionResults_EmptyIsNoOp(t *testing.T) {
+	out := captureStderr(t, func() { printMentionResults(nil) })
+	assert.Empty(t, out)
+}
+
+func TestFilterMentionNames(t *testing.T) {
+	got := filterMentionNames([]string{"Alice", "bob", "Primary", "self"}, "self", "primary")
+	assert.Equal(t, []string{"Alice", "bob"}, got)
+}
+
+// TestSendMessageViaHub_JSONOutputIncludesMentionResults is path A's --json
+// coverage: the mock's echoed mention_results must actually reach stdout as
+// part of the decoded MessageResponse.
+func TestSendMessageViaHub_JSONOutputIncludesMentionResults(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	projectID := "project-msg-json-mentions"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Slug: "primary-agent", Status: "running"},
+		{Name: "mentioned-agent", Slug: "mentioned-agent", Status: "running"},
+	}
+	server, _ := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	out := captureStdout(t, func() {
+		err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false)
+	})
+	require.NoError(t, err)
+
+	var resp hubclient.MessageResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp), "stdout: %s", out)
+	require.Len(t, resp.MentionResults, 1, "--json output must include mention_results")
+	require.Equal(t, "mentioned-agent", resp.MentionResults[0].Slug)
+	require.Equal(t, "delivered", resp.MentionResults[0].Status)
+}
+
 func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -1636,20 +1893,14 @@ func TestSendMessageViaHub_MentionFanOut(t *testing.T) {
 	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mentioned-agent check this", false, false, false)
 	require.NoError(t, err)
 
-	// Should have 2 messages: primary + mention
-	require.Len(t, *sent, 2)
-
-	// First message is the primary instruction
+	// Server-side fan-out: the CLI sends exactly one request, with the body
+	// mention carried in the explicit "mentions" field so a hub that only
+	// fans out from that field still delivers it.
+	require.Len(t, *sent, 1)
 	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
 	require.NotNil(t, (*sent)[0].StructuredMsg)
 	assert.Equal(t, messages.TypeInstruction, (*sent)[0].StructuredMsg.Type)
-
-	// Second message is the mention notification
-	assert.Equal(t, "mentioned-agent", (*sent)[1].AgentName)
-	require.NotNil(t, (*sent)[1].StructuredMsg)
-	assert.Equal(t, messages.TypeMention, (*sent)[1].StructuredMsg.Type)
-	assert.Equal(t, "agent:primary-agent", (*sent)[1].StructuredMsg.Metadata["mention_source"])
-	assert.Equal(t, "body", (*sent)[1].StructuredMsg.Metadata["mention_position"])
+	assert.Equal(t, []string{"mentioned-agent"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_MentionDedup(t *testing.T) {
@@ -1681,11 +1932,12 @@ func TestSendMessageViaHub_MentionDedup(t *testing.T) {
 	err = sendMessageViaHub(hubCtx, "my-agent", "hey @my-agent check @other-agent", false, false, false)
 	require.NoError(t, err)
 
-	// Should have 2 messages: primary + mention for other-agent only (my-agent deduped)
-	require.Len(t, *sent, 2)
+	// One request; the primary (self-mentioned) is filtered out of the
+	// explicit mentions list client-side: old hubs do not exclude the
+	// sender/primary the way the new hub's fan-out does.
+	require.Len(t, *sent, 1)
 	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
-	assert.Equal(t, "other-agent", (*sent)[1].AgentName)
-	assert.Equal(t, messages.TypeMention, (*sent)[1].StructuredMsg.Type)
+	assert.Equal(t, []string{"other-agent"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
@@ -1712,13 +1964,19 @@ func TestSendMessageViaHub_UnknownMentionWarns(t *testing.T) {
 	msgCC = nil
 	defer func() { msgCC = origCC }()
 
-	// @nonexistent doesn't match any agent — should warn but not fail
-	err = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false)
-	require.NoError(t, err)
+	// @nonexistent doesn't match any agent — should warn but not fail. The
+	// mock server echoes a not_found mention_results entry for it,
+	// exercising the CLI's printMentionResults wiring.
+	var sendErr error
+	out := captureStderr(t, func() {
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hey @nonexistent check this", false, false, false)
+	})
+	require.NoError(t, sendErr)
 
 	// Only the primary message should be sent
 	require.Len(t, *sent, 1)
 	assert.Equal(t, "my-agent", (*sent)[0].AgentName)
+	assert.Contains(t, out, "@nonexistent does not match any agent in this project")
 }
 
 func TestSendMessageViaHub_CCFlag(t *testing.T) {
@@ -1750,18 +2008,11 @@ func TestSendMessageViaHub_CCFlag(t *testing.T) {
 	err = sendMessageViaHub(hubCtx, "primary-agent", "check this out", false, false, false)
 	require.NoError(t, err)
 
-	// Should have 3 messages: primary + 2 CC mentions
-	require.Len(t, *sent, 3)
+	// One request; --cc names go into the explicit mentions field.
+	require.Len(t, *sent, 1)
 	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
 	assert.Equal(t, messages.TypeInstruction, (*sent)[0].StructuredMsg.Type)
-
-	// CC agents get TypeMention messages (order may vary due to goroutines)
-	ccNames := []string{(*sent)[1].AgentName, (*sent)[2].AgentName}
-	assert.ElementsMatch(t, []string{"cc-agent-1", "cc-agent-2"}, ccNames)
-	for _, s := range (*sent)[1:] {
-		assert.Equal(t, messages.TypeMention, s.StructuredMsg.Type)
-		assert.Equal(t, "agent:primary-agent", s.StructuredMsg.Metadata["mention_source"])
-	}
+	assert.ElementsMatch(t, []string{"cc-agent-1", "cc-agent-2"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
@@ -1794,12 +2045,11 @@ func TestSendMessageViaHub_CCAndMentionCombined(t *testing.T) {
 	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @mention-agent check this", false, false, false)
 	require.NoError(t, err)
 
-	// Should have 3 messages: primary + @mention + --cc
-	require.Len(t, *sent, 3)
+	// One request; the explicit mentions field unions the body @mention and
+	// --cc.
+	require.Len(t, *sent, 1)
 	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
-
-	mentionNames := []string{(*sent)[1].AgentName, (*sent)[2].AgentName}
-	assert.ElementsMatch(t, []string{"mention-agent", "cc-agent"}, mentionNames)
+	assert.ElementsMatch(t, []string{"mention-agent", "cc-agent"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
@@ -1827,14 +2077,13 @@ func TestSendMessageViaHub_CCDedupWithMention(t *testing.T) {
 	msgCC = []string{"shared-agent"}
 	defer func() { msgCC = origCC }()
 
-	// Same agent in both @mention and --cc — should only get one mention
+	// Same agent in both @mention and --cc — should only appear once
 	err = sendMessageViaHub(hubCtx, "primary-agent", "hey @shared-agent check this", false, false, false)
 	require.NoError(t, err)
 
-	// Should have 2 messages: primary + 1 mention (deduped)
-	require.Len(t, *sent, 2)
+	require.Len(t, *sent, 1)
 	assert.Equal(t, "primary-agent", (*sent)[0].AgentName)
-	assert.Equal(t, "shared-agent", (*sent)[1].AgentName)
+	assert.Equal(t, []string{"shared-agent"}, (*sent)[0].Mentions)
 }
 
 func TestSendMessageViaHub_NoMentionsInBody(t *testing.T) {
@@ -1876,9 +2125,9 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 
 	projectID := "project-msg-group-mention"
 	agents := []hubclient.Agent{
-		{Name: "agent-a", Status: "running"},
-		{Name: "agent-b", Status: "running"},
-		{Name: "agent-c", Status: "running"},
+		{Name: "agent-a", Slug: "agent-a", Status: "running"},
+		{Name: "agent-b", Slug: "agent-b", Status: "running"},
+		{Name: "agent-c", Slug: "agent-c", Status: "running"},
 	}
 	server, sent := newMessageMockHubServer(t, projectID, agents)
 	defer server.Close()
@@ -2274,13 +2523,20 @@ func crossProjectMockServer(t *testing.T, targetAgentID, targetAgentSlug, target
 				Interrupt:     body.Interrupt,
 				StructuredMsg: body.StructuredMessage,
 			}
+			// Echo mention_results for any body @mentions, the same way the
+			// real hub's server-side fan-out reports on this path too (it
+			// has no explicit "mentions" request field to key off of here).
+			var mentionResults []messages.MentionResult
 			if body.StructuredMessage != nil {
 				sm.Message = body.StructuredMessage.Msg
+				for _, name := range messages.ExtractMentions(body.StructuredMessage.Msg) {
+					mentionResults = append(mentionResults, messages.MentionResult{Slug: name, Status: "delivered"})
+				}
 			}
 			mu.Lock()
 			sent = append(sent, sm)
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mention_results": mentionResults})
 
 		case strings.HasPrefix(r.URL.Path, "/api/v1/conversations/") && r.Method == http.MethodPost:
 			convID := strings.TrimPrefix(r.URL.Path, "/api/v1/conversations/")
@@ -2343,6 +2599,71 @@ func TestSendCrossProjectMessage_Success(t *testing.T) {
 	assert.Equal(t, "hello from project A", (*sent)[0].Message)
 	require.NotNil(t, (*sent)[0].StructuredMsg)
 	assert.Equal(t, "agent:"+targetAgentSlug, (*sent)[0].StructuredMsg.Recipient)
+}
+
+// The hub's @mention fan-out for this send path (cross-project `scion
+// message`) reports mention_results the same as every other agent message
+// path; the CLI must print them, not discard the response.
+func TestSendCrossProjectMessage_PrintsMentionResults(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	targetAgentID := "target-uuid-1234"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "project-b"
+
+	server, _ := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-a-uuid"}
+
+	out := captureStderr(t, func() {
+		err = sendCrossProjectMessage(hubCtx, targetProjectSlug, targetAgentSlug, "hey @mentioned-agent check this", false, false, nil)
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "@mentioned-agent", "mention results from this send path must reach stderr like any other")
+}
+
+// --json coverage for the same path: the mock's echoed mention_results must
+// reach stdout as part of the decoded response, not be discarded.
+func TestSendCrossProjectMessage_JSONOutputIncludesMentionResults(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	targetAgentID := "target-uuid-1234"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "proj-b-uuid"
+	targetProjectSlug := "project-b"
+
+	server, _ := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-a-uuid"}
+
+	out := captureStdout(t, func() {
+		err = sendCrossProjectMessage(hubCtx, targetProjectSlug, targetAgentSlug, "hey @mentioned-agent check this", false, false, nil)
+	})
+	require.NoError(t, err)
+
+	var resp hubclient.MessageResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp), "stdout: %s", out)
+	require.Len(t, resp.MentionResults, 1, "--json output must include mention_results")
+	require.Equal(t, "mentioned-agent", resp.MentionResults[0].Slug)
 }
 
 func TestSendCrossProjectMessage_TargetNotFound(t *testing.T) {

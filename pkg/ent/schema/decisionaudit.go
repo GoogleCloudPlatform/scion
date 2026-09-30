@@ -68,6 +68,25 @@ func (DecisionAudit) Fields() []ent.Field {
 			Optional(),
 		field.Bool("sampled").
 			Default(false),
+
+		// E.2a additive fields (ptone/scion#2127, plan §3.2). All optional,
+		// default "".
+		field.String("permission_id").
+			Optional(),
+		field.String("credential_name").
+			Optional(),
+		field.String("credential_boundary_kind").
+			Optional(),
+		field.String("credential_boundary_project_id").
+			Optional(),
+		field.String("credential_labels").
+			Optional(),
+		field.String("executor_kind").
+			Optional(),
+		field.String("executor_id").
+			Optional(),
+		field.String("denied_by").
+			Optional(),
 	}
 }
 
@@ -88,6 +107,8 @@ func (DecisionAudit) Indexes() []ent.Index {
 		index.Fields("result"),
 		// Request correlation
 		index.Fields("correlation_id"),
+		// Denial-source queries (E.2a)
+		index.Fields("denied_by"),
 	}
 }
 

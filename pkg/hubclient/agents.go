@@ -71,7 +71,19 @@ type AgentService interface {
 	// SendStructuredMessage sends a structured message to an agent.
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	// If wake is true, a suspended agent will be resumed before delivering the message.
+	//
+	// It delegates to SendStructuredMessageWithOptions with no explicit
+	// mentions; callers that need to pass mentions should call that method
+	// directly.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error)
+
+	// SendStructuredMessageWithOptions sends a structured message to an
+	// agent, same as SendStructuredMessage, plus an explicit list of agent
+	// slugs to mention: the server unions Mentions with body-extracted
+	// @mentions, deduplicates, excludes the sender and the primary
+	// recipient, and fans out a TypeMention to each. Callers on these send
+	// paths do not fan mentions out client-side; the server does it.
+	SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error)
 
 	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
@@ -501,22 +513,53 @@ type MessageResponse struct {
 	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
 	// was saved to conversation history but not dispatched.
 	Deferred string `json:"deferred,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+}
+
+// SendMessageOptions holds the optional parameters for
+// SendStructuredMessageWithOptions.
+type SendMessageOptions struct {
+	// Interrupt the harness before sending.
+	Interrupt bool
+	// Notify subscribes the sender to status notifications for the target agent.
+	Notify bool
+	// Wake resumes a suspended target agent before delivering the message.
+	Wake bool
+	// Mentions lists agent slugs to receive mention notifications, in
+	// addition to any @mentions the server extracts from the body. The
+	// primary recipient and the sender are excluded automatically.
+	Mentions []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
 // If notify is true, the sender subscribes to status notifications for the target agent.
 // If wake is true, a suspended agent will be resumed before delivering the message.
 func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error) {
+	return s.SendStructuredMessageWithOptions(ctx, agentID, msg, SendMessageOptions{
+		Interrupt: interrupt,
+		Notify:    notify,
+		Wake:      wake,
+	})
+}
+
+// SendStructuredMessageWithOptions sends a structured message to an agent
+// with an explicit mentions list. See AgentService.SendStructuredMessageWithOptions.
+func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error) {
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 		Interrupt         bool                        `json:"interrupt,omitempty"`
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
+		Mentions          []string                    `json:"mentions,omitempty"`
 	}{
 		StructuredMessage: msg,
-		Interrupt:         interrupt,
-		Notify:            notify,
-		Wake:              wake,
+		Interrupt:         opts.Interrupt,
+		Notify:            opts.Notify,
+		Wake:              opts.Wake,
+		Mentions:          opts.Mentions,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -563,6 +606,10 @@ type OutboundMessageResult struct {
 	RecipientID string `json:"recipient_id"`
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
