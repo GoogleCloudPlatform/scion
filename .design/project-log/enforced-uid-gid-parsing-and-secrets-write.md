@@ -5,8 +5,10 @@
 ## Overview
 
 Closes a fail-open uid/gid parsing gap that only applied outside enforced
-mode, and a symlink-following write in the staged-secrets writer that ran
-as root regardless of mode.
+mode, and a family of symlink-following writes and chowns in root-context
+code (the staged-secrets writer, and the direct `/etc/passwd`/`/etc/group`
+fallback's home-directory chown) that could be redirected by a workload-
+plantable symlink.
 
 ## ValidWorkloadID
 
@@ -32,10 +34,53 @@ removing the second, less strict parse path for the same two values.
 ## Staged-secrets symlink containment
 
 `stagedsecrets.Write`'s writes to a file secret's own `Target` and to
-`secrets.json` go through `dirfd.WriteFileNoFollow` with the
-`RefuseSymlink` leaf policy: a symlink planted at either path — left over
-from a previous run on a persisted home, or planted ahead of a restart — is
-refused outright rather than written or chowned through as root.
-`WriteFileNoFollow`'s own parent-directory walk is symlink-safe
-component-by-component regardless of mode, so this applies whether or not
-privilege drop is enforced.
+`secrets.json` go through `dirfd.WriteFileNoFollow`: a symlink planted at
+either leaf path — left over from a previous run on a persisted home, or
+planted ahead of a restart — is refused outright rather than written or
+chowned through as root. `WriteFileNoFollow`'s own parent-directory walk is
+symlink-safe component-by-component regardless of mode, so this applies
+whether or not privilege drop is enforced.
+
+The directory each leaf is about to be written into is created and (when it
+resolves under the agent home) chowned the same symlink-safe way, via
+`dirfd.EnsureDirNoFollowUnderRoot`: every component from the home directory
+down is opened `O_DIRECTORY|O_NOFOLLOW`, a missing component is created with
+`mkdirat` and only that newly created component is ever chowned (by fd,
+never a path-based `os.Chown`), and a symlink or any non-directory at any
+component — the home directory itself, an intermediate directory, or the
+immediate parent — is refused before anything is touched. A directory that
+does not resolve under the agent home at all (a legitimate operator-
+configured absolute target) is created the ordinary way and is never
+chowned to the workload; containment is decided by walking the chain, not
+by a string-prefix check on the path.
+
+On this runtime, staged secret paths under the agent home must not
+traverse a symlink at any component: init refuses the write rather than
+following one. This is intended behavior, not a defect — the alternative is
+resolving a workload-plantable link as root.
+
+A file-secret target may itself be a path the runtime bind-mounts into the
+container (for example gcloud's `application_default_credentials.json`).
+Because replacing a bind-mounted regular file's directory entry with a
+freshly created one via `rename(2)` fails `EBUSY` — the mount cannot follow
+the entry to a new inode — a file secret whose target already exists as a
+regular file is rewritten in place (truncate and overwrite through the same
+already-open parent directory descriptor) instead of being replaced
+atomically. This trades away crash-atomicity for that one write in exchange
+for working correctly against a bind-mounted target; every other writer
+built on `dirfd.WriteFileNoFollow` keeps its existing atomic create-and-
+rename behavior.
+
+## Direct passwd/group fallback: home-directory chown
+
+On runtimes where `usermod`'s recursive chown is too slow or unavailable
+(Podman's fuse-overlayfs, or `SCION_ALT_USERMOD`), the direct `/etc/passwd`
+and `/etc/group` edit path also chowns the scion user's home directory and
+its immediate entries. That chown now happens entirely through an already-
+open, already-verified `O_DIRECTORY|O_NOFOLLOW` descriptor for the home
+directory itself, with each entry chowned by name via `AT_SYMLINK_NOFOLLOW`
+— so a symlinked entry has its own directory-entry ownership changed, never
+whatever it points at. If the home directory itself is not a plain,
+non-symlink directory, enforced mode refuses the chown pass outright before
+touching anything; unenforced mode logs and skips it, leaving the rest of
+the direct-edit fallback (the `/etc/passwd`/`/etc/group` rewrite) unaffected.
