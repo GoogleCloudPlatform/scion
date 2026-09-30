@@ -659,6 +659,16 @@ export function isLikelyTextFileName(name: string): boolean {
 }
 
 /**
+ * Lowercased MIME type with any `;`-delimited parameters (e.g.
+ * `; charset=utf-8`) stripped, or '' for an empty input. Use this before
+ * comparing a raw MIME string against a specific type, so a parameter or
+ * unexpected case never defeats the comparison.
+ */
+export function baseMimeType(mime: string): string {
+  return mime.toLowerCase().split(';')[0]?.trim() ?? '';
+}
+
+/**
  * True for a MIME type known to be safe to fetch and render as plain
  * text/code — the classification an attachment target uses, since it always
  * carries a MIME type (unlike a container path, which never does). A
@@ -666,7 +676,7 @@ export function isLikelyTextFileName(name: string): boolean {
  * `image/svg+xml`) is text regardless of its top-level type, per RFC 6839.
  */
 export function isLikelyTextMime(mime: string): boolean {
-  const lower = mime.toLowerCase().split(';')[0]?.trim() ?? '';
+  const lower = baseMimeType(mime);
   if (lower.startsWith('text/')) return true;
   if (lower.endsWith('+json') || lower.endsWith('+xml')) return true;
   return KNOWN_TEXT_APPLICATION_MIMES.has(lower);
@@ -709,6 +719,27 @@ const KNOWN_BINARY_EXTENSIONS = new Set([
   '.pptx',
   '.db',
   '.sqlite',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.flac',
+  '.aac',
+  '.mp4',
+  '.mkv',
+  '.mov',
+  '.webm',
+  '.avi',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+  '.dmg',
+  '.iso',
+  '.pkg',
+  '.deb',
+  '.rpm',
 ]);
 
 /**

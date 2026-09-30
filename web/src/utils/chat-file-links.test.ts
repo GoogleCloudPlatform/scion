@@ -851,6 +851,13 @@ describe('isLikelyBinaryFileName', () => {
     expect(isLikelyBinaryFileName('lib.so')).toBe(true);
   });
 
+  it('is true for a known audio, video, font or disk-image extension', () => {
+    expect(isLikelyBinaryFileName('clip.mp3')).toBe(true);
+    expect(isLikelyBinaryFileName('movie.mp4')).toBe(true);
+    expect(isLikelyBinaryFileName('icon.woff2')).toBe(true);
+    expect(isLikelyBinaryFileName('installer.dmg')).toBe(true);
+  });
+
   it('is false for ordinary text/code files that no allow-list enumerates', () => {
     expect(isLikelyBinaryFileName('.gitignore')).toBe(false);
     expect(isLikelyBinaryFileName('go.mod')).toBe(false);
