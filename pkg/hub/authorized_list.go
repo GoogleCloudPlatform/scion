@@ -2,15 +2,21 @@ package hub
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -146,35 +152,58 @@ func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, I
 
 // listAuthorizedOrAll runs either the bounded per-resource authorization scan
 // or the direct store query selected by the caller's visibility decision.
+//
+// requestCursor is the raw, opaque cursor a client sent (or "" for a first
+// page); the returned NextCursor is opaque the same way. sealer opens
+// requestCursor and seals the result on BOTH paths below, so a list
+// endpoint's cursor format never depends on which path the caller's
+// authority happened to select that request -- an identity that gains or
+// loses wide access between page 1 and page 2 still gets a cursor the other
+// path accepts. See listCursorSealer's doc comment; a resumed cursor is
+// still only a position, never an access grant, on either path.
 func listAuthorizedOrAll[T any](
 	ctx context.Context,
 	identity Identity,
 	requestCursor string,
 	pageLimit int,
 	cursorBinding string,
+	sealer *listCursorSealer,
 	authorizeEach bool,
 	list func(context.Context, store.ListOptions) (*store.ListResult[T], error),
 	resource func(*T) Resource,
 	cursorFor func(*T) string,
 	read func(context.Context, Identity, []Resource) ([]bool, error),
 ) (authorizedListResult[T], error) {
+	cursor, err := openAndValidateListCursor(sealer, requestCursor, cursorBinding)
+	if err != nil {
+		return authorizedListResult[T]{}, err
+	}
+
 	if !authorizeEach {
 		result, err := list(ctx, store.ListOptions{
 			Limit:         pageLimit,
-			Cursor:        requestCursor,
+			Cursor:        cursor,
 			CursorBinding: cursorBinding,
 		})
 		if err != nil {
 			return authorizedListResult[T]{}, err
 		}
+		nextCursor := result.NextCursor
+		if nextCursor != "" {
+			sealed, err := sealer.Seal(nextCursor, cursorBinding)
+			if err != nil {
+				return authorizedListResult[T]{}, err
+			}
+			nextCursor = sealed
+		}
 		return authorizedListResult[T]{
 			Items:      result.Items,
-			NextCursor: result.NextCursor,
+			NextCursor: nextCursor,
 			TotalCount: result.TotalCount,
 		}, nil
 	}
 
-	return authorizedList(ctx, identity, requestCursor, pageLimit,
+	result, err := authorizedList(ctx, identity, cursor, pageLimit,
 		func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[T], error) {
 			page, err := list(ctx, store.ListOptions{
 				Limit:          limit,
@@ -187,6 +216,17 @@ func listAuthorizedOrAll[T any](
 			}
 			return authorizedCandidatePage[T]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		}, resource, cursorFor, read)
+	if err != nil {
+		return authorizedListResult[T]{}, err
+	}
+	if result.NextCursor != "" {
+		sealed, err := sealer.Seal(result.NextCursor, cursorBinding)
+		if err != nil {
+			return authorizedListResult[T]{}, err
+		}
+		result.NextCursor = sealed
+	}
+	return result, nil
 }
 
 func parseAuthorizedListLimit(raw string) (int, error) {
@@ -352,12 +392,6 @@ func authorizedListCursor(created time.Time, id, binding string) string {
 	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id + "," + binding))
 }
 
-func authorizedListCursorBinding(endpoint string, filter any) string {
-	encoded, _ := json.Marshal(filter)
-	digest := sha256.Sum256(append([]byte(endpoint+":"), encoded...))
-	return base64.RawURLEncoding.EncodeToString(digest[:])
-}
-
 // scopedCursorBinding creates a cursor binding that includes the endpoint,
 // filter (which already contains the authorized scope), and identity context.
 // This ensures cursors cannot be replayed across principals, credential kinds,
@@ -406,5 +440,218 @@ func validateAuthorizedListCursor(cursor, binding string) error {
 	if _, err := uuid.Parse(parts[1]); err != nil {
 		return fmt.Errorf("invalid cursor: %w", err)
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Opaque cursor sealing (ptone/scion#2124, ptone/scion#2151)
+//
+// authorizedList's cursors are opaque: a page reveals only items the caller
+// may see, and the cursor that resumes a walk is a sealed, authenticated
+// token rather than a readable encoding of the position it carries. Seal
+// wraps the existing "created,id,binding" cursor payload with AES-256-GCM
+// before it ever reaches a client; Open recovers that same payload on the
+// way in, or fails closed. The payload format, the binding computation
+// (scopedCursorBinding) and every pagination semantic (ordering,
+// over-fetch, scan budget, live per-item authorization on resume) are
+// unchanged -- sealing only makes the wire representation opaque and
+// tamper-evident, and binds it to the exact endpoint, filter and caller it
+// was issued for.
+//
+// Coverage: every authorizedList and listAuthorizedOrAll caller seals and
+// opens through this helper -- templates, harness configs and groups, on
+// both the per-item-scan path and the direct-query (wide-access/admin)
+// path listAuthorizedOrAll and listGroups also provide. Hub list handlers
+// that never run authorizedList's per-item scan because their store query
+// is already fully scoped (listAgents, listProjects) are out of scope here,
+// and are tracked as a follow-up instead of changed by this work
+// (ptone/scion#2124). listSkills (skill_handlers.go) and listProjectAgents
+// (handlers_projects_core.go) also drop items after the store query as
+// defense in depth over an already-scoped query, then return the store's
+// own (unsealed) NextCursor; they are the same kind of follow-up, tracked
+// alongside listAgents/listProjects rather than changed here.
+// ---------------------------------------------------------------------------
+
+// SecretKeyListCursorKey is the secret key name for the dedicated
+// authorizedList cursor-sealing key. It is separate from the agent, user,
+// OIDC and download-signing keys (see download_signing.go): it never signs
+// or verifies a credential, only seals a resume position, so its blast
+// radius on rotation or compromise is limited to pagination cursors.
+const SecretKeyListCursorKey = "list_cursor_key"
+
+// listCursorSealDomain domain-separates the AEAD's associated data from any
+// other AES-GCM use of the same key and binds it to this scheme; changing it
+// invalidates every previously issued cursor the same way rotating the key
+// does (see listCursorSealer.Open). The wire version marker is
+// listCursorPrefix.
+const listCursorSealDomain = "scion-list-cursor-v1:"
+
+// listCursorPrefix is the literal, cheap-to-check version marker every
+// sealed cursor starts with. It lets a server reject a cursor from an
+// unknown or future version (or one that is not a sealed cursor at all)
+// before spending an AEAD open on it, and gives a future key-rotation or
+// scheme change (a "c2." prefix) a dispatch point that does not require
+// trial-decrypting under every version's key and AAD.
+const listCursorPrefix = "c1."
+
+// errInvalidCursor is returned for every cursor failure a caller can hit --
+// malformed input, truncation, a tampered byte, a cursor sealed under a key
+// this sealer does not currently hold, or a binding (endpoint, filter or
+// caller) that does not match the one the cursor was sealed under -- so all
+// cursor failures get one uniform response.
+var errInvalidCursor = errors.New("invalid cursor")
+
+// errListCursorSealerUnavailable is returned by Seal when called on a nil
+// sealer -- a state New() never produces in production (it always either
+// provisions a sealer or fails startup outright), but one a test
+// constructing a bare Server{} can reach. Failing closed here (no cursor is
+// emitted; the caller turns this into a 500) is the same choice Open makes
+// for a nil sealer via openAndValidateListCursor, just surfaced as a
+// distinct error since an unsealable next page is a server-side problem,
+// not a bad cursor the client sent.
+var errListCursorSealerUnavailable = errors.New("list cursor sealer unavailable")
+
+// listCursorSealer seals authorizedList's client-facing cursors with
+// AES-256-GCM so a cursor carries no readable item ID or created time.
+// Seal's output is opaque; Open only recovers the sealed plaintext when
+// given the exact binding it was sealed under, so a cursor opened under a
+// different query or caller fails the same way a tampered one does.
+//
+// A sealed cursor never confers access by itself: it only carries a
+// position. Every page authorizedList returns -- including the first page
+// of a resumed walk -- still runs live per-item authorization; see
+// authorizedList's own doc comment.
+type listCursorSealer struct {
+	aead cipher.AEAD
+}
+
+// newListCursorSealer builds a sealer from a 32-byte AES-256 key.
+func newListCursorSealer(key []byte) (*listCursorSealer, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("list cursor sealer: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("list cursor sealer: %w", err)
+	}
+	return &listCursorSealer{aead: aead}, nil
+}
+
+// Seal encodes inner -- the existing plaintext authorizedListCursor
+// encoding -- into an opaque, authenticated cursor bound to binding
+// (scopedCursorBinding's output: the endpoint, normalized filter and
+// caller identity context), prefixed with listCursorPrefix. It never logs
+// inner or the key. Called on a nil sealer, it fails closed with
+// errListCursorSealerUnavailable instead of panicking; see that error's
+// doc comment.
+func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
+	if l == nil {
+		return "", errListCursorSealerUnavailable
+	}
+	nonce := make([]byte, l.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		// crypto/rand failing is unrecoverable for this process: there is no
+		// safe cursor left to hand back, sealed or otherwise.
+		panic("list cursor sealer: generating nonce: " + err.Error())
+	}
+	ciphertext := l.aead.Seal(nil, nonce, []byte(inner), []byte(listCursorSealDomain+binding))
+	return listCursorPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
+}
+
+// Open recovers the plaintext inner cursor Seal produced under binding, and
+// additionally re-validates it with validateAuthorizedListCursor as a
+// structural sanity check on the decrypted plaintext. It returns
+// errInvalidCursor -- never a partially authenticated value, and never a
+// logged one -- for anything else: a missing or unrecognized version
+// prefix, malformed base64, truncation, a flipped byte, a binding that does
+// not match the query or caller the cursor was sealed under, a legacy
+// (pre-sealing) plaintext cursor, or a cursor sealed under a key this
+// sealer does not currently hold (for example after key rotation). Called
+// on a nil sealer, it also returns errInvalidCursor rather than panicking,
+// matching Seal's fail-closed behavior; openAndValidateListCursor also
+// rejects a non-empty cursor when the sealer is nil.
+func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
+	if l == nil {
+		return "", errInvalidCursor
+	}
+	body, ok := strings.CutPrefix(sealed, listCursorPrefix)
+	if !ok {
+		return "", errInvalidCursor
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	nonceSize := l.aead.NonceSize()
+	if len(raw) < nonceSize {
+		return "", errInvalidCursor
+	}
+	nonce, ciphertext := raw[:nonceSize], raw[nonceSize:]
+	plaintext, err := l.aead.Open(nil, nonce, ciphertext, []byte(listCursorSealDomain+binding))
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	inner := string(plaintext)
+	if err := validateAuthorizedListCursor(inner, binding); err != nil {
+		return "", errInvalidCursor
+	}
+	return inner, nil
+}
+
+// openAndValidateListCursor turns a raw, client-supplied query-string cursor
+// into the plaintext cursor the existing store/authorizedList plumbing
+// expects. An empty cursor (a first-page request) is always valid and
+// returns "" unconditionally, without touching sealer -- so a fresh first
+// page always works even when sealer is nil, a key rotated, or a cursor
+// from a previous key is being rejected elsewhere in the same request.
+func openAndValidateListCursor(sealer *listCursorSealer, sealed, binding string) (string, error) {
+	if sealed == "" {
+		return "", nil
+	}
+	if sealer == nil {
+		return "", errInvalidCursor
+	}
+	return sealer.Open(sealed, binding)
+}
+
+// initListCursorSealer loads or creates the list-cursor sealing key through
+// the same persistence path as the Hub's other signing keys (see
+// initDownloadSigningKey), and follows the same stable-key failure policy:
+// a GCP secret backend or RequireStableSigningKey makes a missing,
+// unloadable, or wrong-length key (AES-256 requires exactly 32 bytes) a
+// startup failure. Replicas that disagree on this key would otherwise fail
+// every cross-replica cursor resume -- confusing, since it surfaces as an
+// intermittent ErrCodeInvalidCursor 400, but never unsafe: a cursor sealed
+// under a key this hub does not hold only ever fails closed (see
+// listCursorSealer.Open), and a fresh first-page request (no cursor) is
+// unaffected either way.
+//
+// Otherwise (local development, single-node hubs) it falls back to an
+// ephemeral in-memory key: a restart just invalidates outstanding cursors,
+// the same fallback the download-signing key uses.
+func (s *Server) initListCursorSealer(ctx context.Context) error {
+	key, err := s.ensureSigningKey(ctx, SecretKeyListCursorKey, nil)
+	if err == nil && len(key) != 32 {
+		err = fmt.Errorf("list cursor key must be 32 bytes for AES-256, got %d", len(key))
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("list cursor key: %w", err)
+		}
+		slog.Warn("List cursor key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(outstanding pagination cursors will not validate on other replicas or after restart)",
+			"error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral list cursor key: %w", rerr)
+		}
+	}
+	sealer, err := newListCursorSealer(key)
+	if err != nil {
+		return fmt.Errorf("list cursor key: %w", err)
+	}
+	s.listCursorSealer = sealer
 	return nil
 }

@@ -178,7 +178,13 @@ test('a non-viable (canMessage=false) agent never appears as a candidate', async
   await gotoChat(page);
   await page.keyboard.press('Control+k');
   await paletteInput(page).fill(AGENT_NOT_VIABLE.name);
-  await expect(page.locator('scion-chat-switcher .palette-empty')).toBeVisible();
+  // Scoped to the Agents group specifically: the palette also renders
+  // Threads/People, and this fixture's default (empty) Threads/People groups
+  // also show their own "No matches" for a query that matches nothing
+  // anywhere.
+  await expect(
+    page.locator('scion-chat-switcher [aria-labelledby="palette-heading-agents"] .palette-empty')
+  ).toBeVisible();
   await expect(paletteOptions(page)).toHaveCount(0);
 });
 

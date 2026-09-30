@@ -18,6 +18,20 @@ type Schedule struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// InitiatorPrincipalKind holds the value of the "initiator_principal_kind" field.
+	InitiatorPrincipalKind *string `json:"initiator_principal_kind,omitempty"`
+	// InitiatorPrincipalID holds the value of the "initiator_principal_id" field.
+	InitiatorPrincipalID *string `json:"initiator_principal_id,omitempty"`
+	// InitiatorCredentialKind holds the value of the "initiator_credential_kind" field.
+	InitiatorCredentialKind *string `json:"initiator_credential_kind,omitempty"`
+	// InitiatorCredentialID holds the value of the "initiator_credential_id" field.
+	InitiatorCredentialID *string `json:"initiator_credential_id,omitempty"`
+	// InitiatorCredentialSnapshot holds the value of the "initiator_credential_snapshot" field.
+	InitiatorCredentialSnapshot *string `json:"initiator_credential_snapshot,omitempty"`
+	// AttributionVersion holds the value of the "attribution_version" field.
+	AttributionVersion *int `json:"attribution_version,omitempty"`
+	// AuthorizationRevision holds the value of the "authorization_revision" field.
+	AuthorizationRevision *int `json:"authorization_revision,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// Name holds the value of the "name" field.
@@ -56,9 +70,9 @@ func (*Schedule) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case schedule.FieldRunCount, schedule.FieldErrorCount:
+		case schedule.FieldAttributionVersion, schedule.FieldAuthorizationRevision, schedule.FieldRunCount, schedule.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
-		case schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
+		case schedule.FieldInitiatorPrincipalKind, schedule.FieldInitiatorPrincipalID, schedule.FieldInitiatorCredentialKind, schedule.FieldInitiatorCredentialID, schedule.FieldInitiatorCredentialSnapshot, schedule.FieldName, schedule.FieldCronExpr, schedule.FieldEventType, schedule.FieldPayload, schedule.FieldStatus, schedule.FieldLastRunStatus, schedule.FieldLastRunError, schedule.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case schedule.FieldNextRunAt, schedule.FieldLastRunAt, schedule.FieldCreated, schedule.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -84,6 +98,55 @@ func (_m *Schedule) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case schedule.FieldInitiatorPrincipalKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalKind = new(string)
+				*_m.InitiatorPrincipalKind = value.String
+			}
+		case schedule.FieldInitiatorPrincipalID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_principal_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorPrincipalID = new(string)
+				*_m.InitiatorPrincipalID = value.String
+			}
+		case schedule.FieldInitiatorCredentialKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_kind", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialKind = new(string)
+				*_m.InitiatorCredentialKind = value.String
+			}
+		case schedule.FieldInitiatorCredentialID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_id", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialID = new(string)
+				*_m.InitiatorCredentialID = value.String
+			}
+		case schedule.FieldInitiatorCredentialSnapshot:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field initiator_credential_snapshot", values[i])
+			} else if value.Valid {
+				_m.InitiatorCredentialSnapshot = new(string)
+				*_m.InitiatorCredentialSnapshot = value.String
+			}
+		case schedule.FieldAttributionVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field attribution_version", values[i])
+			} else if value.Valid {
+				_m.AttributionVersion = new(int)
+				*_m.AttributionVersion = int(value.Int64)
+			}
+		case schedule.FieldAuthorizationRevision:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field authorization_revision", values[i])
+			} else if value.Valid {
+				_m.AuthorizationRevision = new(int)
+				*_m.AuthorizationRevision = int(value.Int64)
 			}
 		case schedule.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -213,6 +276,41 @@ func (_m *Schedule) String() string {
 	var builder strings.Builder
 	builder.WriteString("Schedule(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	if v := _m.InitiatorPrincipalKind; v != nil {
+		builder.WriteString("initiator_principal_kind=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorPrincipalID; v != nil {
+		builder.WriteString("initiator_principal_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorCredentialKind; v != nil {
+		builder.WriteString("initiator_credential_kind=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorCredentialID; v != nil {
+		builder.WriteString("initiator_credential_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.InitiatorCredentialSnapshot; v != nil {
+		builder.WriteString("initiator_credential_snapshot=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.AttributionVersion; v != nil {
+		builder.WriteString("attribution_version=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.AuthorizationRevision; v != nil {
+		builder.WriteString("authorization_revision=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
 	builder.WriteString("project_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
 	builder.WriteString(", ")
