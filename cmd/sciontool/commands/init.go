@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -2088,27 +2089,59 @@ var chownTreeRootOwnedFilter = isRootOwned
 //     os.Lchown(path) walk, unconditionally chowning the root filter admits
 //     — byte-identical to the pre-existing behaviour, ancestor symlinks and
 //     all.
-//   - requirePrivilegeDrop == true: dirfd.ChownTreeNoFollow, the same
-//     openat(O_NOFOLLOW) fd-relative walk supervisor.chownRecursive uses,
-//     with its hard-link guard enabled — never a full-path os.Lchown, which
-//     re-resolves every intermediate component on every call and can be
-//     redirected by a symlink a scion-uid process swaps into one of them
+//   - requirePrivilegeDrop == true: fsutil.CheckRoot refuses root outright
+//     on its own path/name alone when it is a known critical system path or
+//     looks like a filesystem root by content; fsutil.CheckMountSource
+//     additionally refuses root when it is itself a mount point whose bind
+//     source names a critical system directory (see that function's doc
+//     comment for exactly what it does and does not detect). Checking
+//     CheckRoot first means an already-invalid root is never checked
+//     against the mount table at all. Then dirfd.ChownTreeNoFollow, the
+//     same openat(O_NOFOLLOW) fd-relative walk supervisor.chownRecursive
+//     uses, with its hard-link guard enabled — never a full-path os.Lchown,
+//     which re-resolves every intermediate component on every call and can
+//     be redirected by a symlink a scion-uid process swaps into one of them
 //     mid-walk.
 func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (walked, changed int, err error) {
 	if !requirePrivilegeDrop {
 		return chownTreeRootOwnedPathBased(root, uid, gid)
 	}
+	if err := fsutil.CheckRoot(root); err != nil {
+		return 0, 0, err
+	}
+	if err := checkMountSource(root); err != nil {
+		return 0, 0, err
+	}
+	// dirfd.ChownTreeNoFollow's own doc comment: only an error opening or
+	// stat'ing root itself comes back as its own returned error; every
+	// per-entry problem goes through onErr instead, so the walk always
+	// completes and reports its full counts even when individual entries
+	// fail. A real per-entry failure must still be reported here, not just
+	// logged, so this collects every non-hard-link-guard error onErr sees
+	// and joins them into the result below -- deciding from the root-only
+	// err returned above first (never a joined error, so errors.Is on it
+	// can never be satisfied by an unrelated entry also matching
+	// os.ErrNotExist and masking a real failure alongside it) before even
+	// looking at the collected per-entry errors.
+	var entryErrs []error
 	walked, changed, err = dirfd.ChownTreeNoFollow(root, uid, gid, chownTreeRootOwnedFilter, true, func(name string, cerr error) {
 		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
 			log.Info("chownTreeRootOwned: WARN: skipping %s: %v", name, cerr)
 			return
 		}
 		log.Error("chownTreeRootOwned: failed to chown %s: %v", name, cerr)
+		entryErrs = append(entryErrs, cerr)
 	})
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, 0, nil
 	}
-	return walked, changed, err
+	if err != nil {
+		return walked, changed, err
+	}
+	if len(entryErrs) > 0 {
+		return walked, changed, errors.Join(entryErrs...)
+	}
+	return walked, changed, nil
 }
 
 // isRootOwned is chownTreeRootOwned's default shouldChown filter: only
@@ -2182,6 +2215,12 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requ
 		}
 	}
 }
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownTreeRootOwned actually
+// calls it) without needing a real mount to exercise. The production value
+// is fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
 	// Only root can successfully chown a mounted workspace. In restricted

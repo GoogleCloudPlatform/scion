@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
@@ -446,6 +447,14 @@ func indexByte(s string, c byte) int {
 // both before and after the drop, so there is no "leave root-owned entries
 // alone" distinction to make here, unlike chownTreeRootOwned).
 //
+// fsutil.CheckRoot refuses root outright on its own path/name alone when it
+// is a known critical system path or looks like a filesystem root by
+// content; fsutil.CheckMountSource additionally refuses root when it is
+// itself a mount point whose bind source names a critical system directory
+// — see that function's doc comment for exactly what it does and does not
+// detect. Checking CheckRoot first means an already-invalid root is never
+// checked against the mount table at all.
+//
 // It walks via dirfd.ChownTreeNoFollow: every entry is resolved to a file
 // descriptor exactly once (openat(O_DIRECTORY|O_NOFOLLOW) for a directory,
 // openat(O_PATH|O_NOFOLLOW) otherwise), and every chown is
@@ -467,6 +476,12 @@ func indexByte(s string, c byte) int {
 // Per-entry chown failures and hard-link-guard skips are logged (entry name
 // only) rather than silently discarded.
 func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
+	if err := fsutil.CheckRoot(root); err != nil {
+		return err
+	}
+	if err := checkMountSource(root); err != nil {
+		return err
+	}
 	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
 		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
 			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
@@ -476,3 +491,9 @@ func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error 
 	})
 	return err
 }
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownRecursive actually calls
+// it) without needing a real mount to exercise. The production value is
+// fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource
