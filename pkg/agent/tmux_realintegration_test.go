@@ -80,16 +80,10 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 		return out
 	}
 
-	// Best-effort cleanup: once cat exits below (via C-d), tmux's default
-	// exit-empty behavior tears the server down on its own, so a later
-	// kill-server legitimately finds nothing left to kill. Registered as
-	// t.Cleanup rather than defer, and before the new-session call below,
-	// so it still runs even if that mustTmux call fails: t.Fatal ends this
-	// goroutine immediately, skipping any defer that hasn't been reached
-	// yet, but t.Cleanup callbacks are tracked by the test framework itself
-	// and always run. t.Cleanup order is LIFO, so registering this after
-	// the MkdirTemp cleanup above means the server is killed before the
-	// socket directory is removed.
+	// Best-effort; exit-empty may already have stopped the server. Uses
+	// t.Cleanup (not defer) and is registered before new-session, so it
+	// runs even if that call fails. LIFO order means it runs before the
+	// socket dir is removed.
 	t.Cleanup(func() {
 		_, _ = runTmux("kill-server")
 	})
