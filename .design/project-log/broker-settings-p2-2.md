@@ -65,6 +65,9 @@ merged), started from its head `0875d543a658cd77e7a9ec92ba42436878aa0839`. Desig
   `/usage/me` entirely (it isn't a per-user quota) — the current 0 is at least not misleading in the
   way a borrowed system-wide count would be. Left as-is pending the EM's call; said so explicitly
   rather than applying the literal instruction where the precondition ("the same bug") didn't hold.
+  **EM decision (review round 1): leave `getMyUsage` as-is, `0` by construction, no change in this
+  PR.** The EM is logging a separate follow-up to consider excluding broker-scoped limits from
+  `/usage/me` entirely.
 - **Visibility rule for the brokers list mapped cleanly onto the providers-listing rule** (brief item
   3's "if it doesn't map cleanly, ask the EM first"): both listings already gate the entire row behind
   a read-capability/permission check before any capacity field is computed, so adding the fields
