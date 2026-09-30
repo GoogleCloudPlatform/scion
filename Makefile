@@ -151,6 +151,10 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
+## vet-integration: Compile-check integration-tagged code (ptone/scion#2348)
+vet-integration:
+	@go vet -tags integration ./...
+
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
 	@./hack/check-project-compat-literals.sh
