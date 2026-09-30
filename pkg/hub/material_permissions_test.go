@@ -171,9 +171,10 @@ func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 // admitted. This shows the two permissions decide independently; it does not
 // exercise the runtime read path itself. See
 // TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead
-// below for the end-to-end consequence: a root admitted at check 5 only
-// through secret.use system authority still cannot read a project secret,
-// because check 7 decides on project.secret_read specifically.
+// below for the end-to-end consequence: once the delegation-edge backfill
+// has completed, a root admitted at check 5 only through secret.use system
+// authority still cannot read a project secret, because check 7 decides on
+// project.secret_read specifically.
 func TestSecretUse_ProjectSecretRequiresProjectSecretRead(t *testing.T) {
 	f := newMaterialFixture(t, "secretuse-composite")
 	ctx := context.Background()

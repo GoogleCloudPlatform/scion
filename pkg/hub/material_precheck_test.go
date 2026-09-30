@@ -628,8 +628,10 @@ func TestAgentSecretRead_HubAdminWithoutMembershipDenied(t *testing.T) {
 // is admitted, because super-admin holds every registry permission
 // (including secret.use) and SystemAuthorityProof admits a
 // target-applicable exact permission held through an active system-scope
-// role. Super-admin also holds project.secret_read, so check 7 admits the
-// item too and the value is delivered end to end.
+// role. Check 7 then decides project.secret_read for the agent, which
+// holds it through its project:secret:read scope; this test records no
+// delegation edge and no backfill marker, so the ceiling's pre-backfill
+// exception applies and the value is delivered end to end.
 func TestAgentSecretRead_SuperAdminExactPermissionAdmitted(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))

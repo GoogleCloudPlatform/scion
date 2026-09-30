@@ -139,7 +139,8 @@ type materialFailingStore struct {
 	listRoleBindingsForPrincipalErr error
 	// listRoleBindingsForPrincipalsErr injects a failure into the plural
 	// ListRoleBindingsForPrincipals, which CheckEffectiveMembership calls for
-	// group-derived bindings.
+	// group-derived bindings and SystemAuthorityProof calls for the
+	// principal's system-scope bindings.
 	listRoleBindingsForPrincipalsErr error
 	getDelegationEdgesForDelegateErr error
 	delegationEdgesOverride          []*store.DelegationEdge
