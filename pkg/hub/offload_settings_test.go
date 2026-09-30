@@ -93,7 +93,7 @@ func TestOffloadThresholdRunes_HotReload(t *testing.T) {
 	// Explicit null resets to the compiled default via the admin PUT path
 	// (see handlePutMessaging); Update itself just writes whatever doc it's
 	// given, so simulate the reset doc directly here.
-	rev, err = ops.Update(context.Background(), "messaging",
+	_, err = ops.Update(context.Background(), "messaging",
 		[]byte(`{"conversation_envelope_switch":true,"offload_threshold_runes":0}`), "test", rev, "managed")
 	require.NoError(t, err)
 	assert.Equal(t, 0, ops.OffloadThresholdRunes())
