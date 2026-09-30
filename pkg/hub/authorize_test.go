@@ -249,9 +249,19 @@ func TestAuthorize_DenialIsLogged(t *testing.T) {
 }
 
 func TestAuthorize_NoDenialLogWhenAllowed(t *testing.T) {
+	// authzHelperCaptureLogs must run before testServer: testServer's New()
+	// call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by buf.
+	buf := authzHelperCaptureLogs(t)
 	srv, s := testServer(t)
 	authzHelperSeedAdmin(t, s)
-	buf := authzHelperCaptureLogs(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// the capture must have observed something. This guards against a
+	// misrouted capture making the "no denial" check below pass vacuously.
+	requireLogCaptureLive(t, buf, "Control channel manager initialized")
 
 	rec := httptest.NewRecorder()
 	if !srv.authorize(rec, authzHelperRequest(authzHelperAdmin()), Resource{Type: "agent", ID: "x"}, ActionRead) {

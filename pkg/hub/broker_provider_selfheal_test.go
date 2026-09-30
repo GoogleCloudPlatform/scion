@@ -649,8 +649,23 @@ func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
 // TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed covers ptone/scion#2356:
 // a tick that heals nothing must not emit the restamp Info line.
 func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
+	// captureDefaultCapturingHandler must run before testServer: testServer's
+	// New() call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by the capture.
+	capture := captureDefaultCapturingHandler(t)
 	ctx := context.Background()
 	srv, s := testServer(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// the capture must have observed something. This guards against a
+	// misrouted capture making the "no restamp log" check below pass
+	// vacuously.
+	_, liveOK := findRecord(capture.all(), "Control channel manager initialized")
+	require.True(t, liveOK, "log capture positive control failed: expected construction to log "+
+		"\"Control channel manager initialized\"; the capture may be misrouted, so the absence "+
+		"check below would be vacuous")
 
 	broker, project := newProviderSelfHealFixture(t, s, "lognoop")
 
@@ -664,8 +679,6 @@ func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.BrokerStatusOnline, provider.Status, "precondition")
-
-	capture := captureDefaultCapturingHandler(t)
 
 	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
 
