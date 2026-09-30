@@ -40,14 +40,15 @@ cd /tmp/scion-repo
 |------|---------------|------------------|
 | Terraform | `terraform version` | `>= 1.9` (cross-variable `validation` blocks require it) |
 | gcloud CLI | `gcloud --version` | Version string (any version) |
-| `gcloud alpha` component | `gcloud components list --filter='id:alpha' --format='value(state.name)'` | `Installed` (needed for step 6's IAP client discovery) |
-| `gsutil` **or** `gcloud storage` | `gcloud storage --help` | Prefer `gcloud storage` throughout this runbook; do not mix it with `gsutil` on the same bucket. |
+| `gcloud alpha` component | `gcloud components list --filter='id:alpha' --format='value(state.name)'` | `Installed`; used for step 6's IAP client discovery as a convenience only — **do not stop on this check failing.** If it's missing, fall back to the console (Security → Identity-Aware Proxy) for that step. |
+| `gcloud storage` | `gcloud storage --help` | Use `gcloud storage` throughout this runbook; do not mix in `gsutil` on the same bucket. |
 | `python3` | `python3 --version` | Needed by `check-broker.sh` (step 8). |
 | `git` | `git --version` | Needed for step 0 and the teardown branch in §13. |
 | An authenticated GCP identity | `gcloud auth list --filter=status:ACTIVE --format='value(account)'` | An email or service account |
-| The `scion` CLI, authenticated to the new hub | `scion hub whoami` (or equivalent) | Only available after step 7's first hub apply — see step 9's gate below. |
+| The `scion` CLI, authenticated to the new hub | `scion hub status` | Only available after step 7's first hub apply — see step 9's gate below. |
 
-If any check fails, stop and tell the user what is missing.
+If any check fails, stop and tell the user what is missing — except the
+`gcloud alpha` component, which is a convenience only (see its row above).
 
 ### Operator role set
 
@@ -68,10 +69,21 @@ gcloud projects get-iam-policy <project> --flatten=bindings \
   --filter="bindings.members:<account>" --format='value(bindings.role)'
 ```
 
-Compare the output against the list above (remembering that `Owner` or
-`Editor` alone covers everything except `roles/iap.admin`, which is never
-implied by either). **Stop and ask** if anything is missing, rather than
-discovering it as a partial-apply failure later.
+Compare the output against the list above. `Owner` covers the whole list.
+`Editor` does **not** — `roles/editor` carries no `setIamPolicy`
+permissions, so it covers neither `roles/resourcemanager.projectIamAdmin`
+(the module makes many `google_project_iam_member` grants) nor
+`roles/iam.serviceAccountAdmin`'s IAM-policy permissions, in addition to
+never covering `roles/iap.admin`. With `Editor`, every role listed above
+must also appear explicitly in the `get-iam-policy` output. **Stop and ask**
+if anything is missing, rather than discovering it as a partial-apply
+failure later.
+
+This command only shows grants made directly to `<account>` at the project
+level — it does **not** show grants that come through a group membership,
+or inherited from a folder or organization policy. A role missing from its
+output is not proof the identity lacks it; if in doubt, stop and ask rather
+than asserting the role is absent.
 
 ---
 
@@ -88,11 +100,12 @@ prompting one at a time.
 | 2 | Region (and zone) | e.g. `us-central1` / `us-central1-a`. Used by both roots. |
 | 3 | Name prefix (shared layer) | e.g. `tfha`. 2–8 chars, lowercase letters/digits, no hyphens (`^[a-z][a-z0-9]{1,7}$`, `configurations/shared-infra/variables.tf`'s `name_prefix` validation). Every shared resource name derives from this. |
 | 4 | Hub name(s) | One per hub. Must be `<name_prefix>-<suffix>`, 3–16 chars total, `^[a-z][a-z0-9-]{2,15}$` (`configurations/hub/variables.tf`'s `hub_name` validation), e.g. `tfha-h1`. |
-| 5 | IAP members (users/groups) | `iap_members`, default `[]`. Granted `roles/iap.httpsResourceAccessor` on this hub's Cloud Run service only — it is the *only* grant of that role on the service. Leaving it empty means nobody can reach the hub through IAP, and step 8's checks cannot pass. Ask for at least one user or group. |
+| 5 | IAP members (users/groups) | `iap_members`, default `[]`. Granted `roles/iap.httpsResourceAccessor` on this hub's Cloud Run service only — it is the only *human* grant of that role on the service (the transport service account has its own, separate grant). Leaving it empty means nobody can use the hub, and step 9 (a hub admin logging in) cannot happen. Ask for at least one user or group. |
 | 6 | Hub admin email(s) | `admin_emails`, default `[]`. Seeded as hub admins on first boot. Leaving it empty means no hub admin exists once the hub is up, and step 9's `scion hub env set --scope hub` work needs an authenticated hub admin. |
 | 7 | SQL availability (shared layer) | `sql_availability_type`, module default `REGIONAL` (automatic Cloud SQL failover) — **recommend `REGIONAL` for production.** `shared-infra/terraform.tfvars.example` sets `ZONAL`; that file is an example value for a smaller/cheaper dev footprint, not a recommendation. Converting `ZONAL` → `REGIONAL` later is in place but restarts the shared instance (~7 minute outage across every hub attached to it) — see §11. |
 | 8 | IAP OAuth client ID | **Not required for a first apply.** See step 6 below — this is normally discovered read-only *after* the first shared-infra apply, not gathered up front. Only ask now if the user already has one (e.g. a cross-org custom client). |
 | 9 | Hub image | Full image reference (`<registry>/hub:<tag-or-digest>`), built from the same commit as the agent images. If the user hasn't built one yet, this comes after step 5 below, not before. |
+| 10 | `max_instances` (per hub) | `hub/terraform.tfvars.example` sets `3`. That value is only safe on a hub image built from a commit containing `GoogleCloudPlatform/scion#2046`; on an older hub image it must be `1` (README "Scaling") — otherwise an affinity-owner scale-in can leave providers offline ("Default runtime broker is unavailable"). Ask the user whether the hub image in question 9 contains `#2046`; if unsure, use `1`. |
 
 **Do not** ask for a GCS state bucket name as a free-text answer without
 checking it exists first — see step 3.
@@ -142,17 +155,20 @@ committed.
      match the shared tfvars exactly), `shared_prefix` (must equal
      `name_prefix` above), `hub_name`, `state_prefix` (=
      `<name_prefix>/hubs/<hub_name>`), `hub_image`, `iap_members`,
-     `admin_emails`.
+     `admin_emails`, `max_instances` (`3` only if `hub_image` is built from a
+     commit containing `GoogleCloudPlatform/scion#2046`, otherwise `1` — ask
+     the user if unsure; see question 10).
 3. Leave `iap_oauth_client_id` unset (commented out) in the hub tfvars for a
    first apply — see step 6. Leave `hub_image` blank until step 5 produces
    one.
 4. **Stop and tell the user** the tfvars content before running `init` —
    confirm the project, region, prefix, hub name(s), `iap_members`,
-   `admin_emails`, and `sql_availability_type` are correct. A wrong
-   `name_prefix` or `hub_name` here is expensive to unwind later (state
-   prefixes and IAM conditions are derived from them); an empty
+   `admin_emails`, `sql_availability_type`, and `max_instances` are correct.
+   A wrong `name_prefix` or `hub_name` here is expensive to unwind later
+   (state prefixes and IAM conditions are derived from them); an empty
    `iap_members` or `admin_emails` deploys a hub nobody can reach or
-   administer.
+   administer; `max_instances = 3` on a pre-`#2046` hub image can leave
+   providers offline under scale-in.
 
 ---
 
@@ -234,38 +250,73 @@ terraform -chdir=deploy/terraform/configurations/shared-infra output \
   -raw artifact_registry_repo_url
 ```
 
-Follow the project's image pipeline for the actual build — the hub image's
-source is `scripts/cloudrun/Dockerfile` — and **ask the user** for the
-build/push command or credentials if it isn't already scripted in this
-environment. **Ask the user before running any build/push command
-regardless** — this stage pushes to a registry other hubs may already be
-pulling from.
+**Hub image.** Its source is `scripts/cloudrun/Dockerfile` — **not**
+`image-build/hub/Dockerfile`. The latter builds the GKE-oriented `scion-hub`
+image produced by `image-build/scripts/build-images.sh --target hub` (and
+pulled in by `--target common`/`--target all`); it runs as root and is the
+wrong hub image for this Cloud Run pattern. **Ask the user** for the
+build/push command or credentials if building `scripts/cloudrun/Dockerfile`
+isn't already scripted in this environment. Push it under a **new immutable
+tag or digest** (never `:latest`) and set `hub_image` to that reference —
+this never moves a tag anything else resolves against, so it needs no
+`:latest` ack.
 
-**Never push, retag, or move `:latest` (or any other existing tag) in the
-shared registry without an explicit user ack — no exceptions.** Agent
-harness images are resolved as `<image_registry>/scion-<harness>:latest` by
-*every* hub on this shared infra (README "Harness images"); there is no
-per-hub or per-harness tag override in this module set today (upstream
-settings-based agent image pinning exists as `ptone/scion#2156`, but this
-module set does not expose it yet). That means:
+**Agent harness images.** Build these with
+`image-build/scripts/build-images.sh --target harnesses` (per-image
+builders) or `--target harnesses --builder cloud-build` (submits
+`cloudbuild-harnesses.yaml`) — not `--target common`/`--target all`, both of
+which also build the wrong `scion-hub` image described above.
 
-- **In a registry already shared with other hubs, moving `:latest` changes
-  the agent image every one of those hubs' agents will pull next** — this
-  is a cross-hub change, not a change scoped to the hub you're deploying.
-  Stop and ask before doing it; only the user decides whether and when.
-- **For a first deployment into an empty registry** (no hub has ever run
-  against it), pushing the *initial* `:latest` is still a stop-and-ask
-  gate, not something to do implicitly as part of "build and push" — it
-  establishes the tag every future hub on this registry will inherit.
-- The **hub image** itself is not subject to this: it is pinned by the
-  `hub_image` tfvars value to whatever specific tag or digest you push it
-  under, so build and push it under a **new immutable tag or digest** (not
-  `:latest`) and set `hub_image` to that reference. This does not require
-  the ack above, because it never moves a tag anything else resolves
-  against.
-- Agent harness images (`scion-<harness>`) should likewise be pushed under
-  a new immutable tag when possible; only move `:latest` for them after the
-  explicit ack above.
+Both `build-images.sh --tag` and every `image-build/cloudbuild-*.yaml`'s
+`_TAG` substitution **default to `latest`.** Agent harness images are
+resolved as `<image_registry>/scion-<harness>:latest` by *every* hub on this
+shared infra (each `harnesses/<h>/config.yaml` pins `image:
+scion-<h>:latest`; README "Harness images"). There is no per-hub or
+per-harness image pin in this module set today (upstream settings-based
+agent image pinning exists as `ptone/scion#2156`, but this module set does
+not expose it yet). **Running the build with its defaults therefore moves
+`:latest` in the shared registry implicitly — never do this.** Always pass
+an explicit immutable tag:
+
+```bash
+# per-image builders (local-docker / local-podman)
+image-build/scripts/build-images.sh --target harnesses --registry <registry> \
+  --tag <immutable-tag> --push
+# cloud-build builder (submits cloudbuild-harnesses.yaml with _TAG=<immutable-tag>)
+image-build/scripts/build-images.sh --target harnesses --builder cloud-build \
+  --registry <registry> --tag <immutable-tag>
+```
+
+(If invoking Cloud Build directly instead of through `build-images.sh`, pass
+`--substitutions=_TAG=<immutable-tag>,...` — the config's own default is
+also `latest`.)
+
+**Before asking for the build ack, show the user the exact list of tags the
+command will push** — run the same command first with `--dry-run`:
+- `--builder local-docker`/`local-podman` prints the `-t <ref>` flag for
+  every tag of every image it would build.
+- `--builder cloud-build` only prints the `gcloud builds submit`
+  command and its `_TAG` substitution; the per-image tag list itself is
+  hardcoded in `cloudbuild-harnesses.yaml` (each step's `-t
+  $_REGISTRY/<image>:$_TAG` and `:$_SHORT_SHA`), so also read that file to
+  show the actual list.
+
+Then **ask the user**, and make the question state explicitly whether
+`:latest` will move, e.g.: *"This pushes `scion-<harness>:<immutable-tag>`
+(and `:<short-sha>`) for [list of harnesses] to `<registry>`. It will
+**not** move `scion-<harness>:latest`. Do you also want `:latest` moved to
+this build?"* This applies equally to a first deployment into an empty
+registry — pushing the *initial* `:latest` establishes the tag every future
+hub on this registry inherits, so it is the same explicit ack, not something
+to do implicitly as part of "build and push."
+
+If the user declines moving `:latest`, tell them plainly what that means:
+every hub on this shared infra keeps pulling the **current** `:latest` for
+new agents, so the freshly built agent harness images and the `hub_image`
+you're about to set are no longer at the same commit — contradicting
+question 9's "same commit" requirement — until `:latest` is moved later.
+Get an explicit acknowledgment of that skew before proceeding; do not move
+`:latest` yourself later without asking again.
 
 See "Image Rolls and Rollback" (§10) for how a `hub_image` roll differs
 from moving `:latest`.
@@ -573,7 +624,7 @@ Read this section before touching an existing (not brand-new) deployment.
 | `403` on `scion-hub-<hash>-...` shortly after a hub's first apply | IAM condition propagation delay | Re-apply. Do not widen the condition. |
 | Agent starts but can't reach Vertex despite Workload Identity being wired | GCP identity is still Block | Set Passthrough — see step 9. |
 | Agent pod fails with image-pull `NotFound` on `workspace-provision` | Harness image not published to `image_registry` | Publish the image, or pick a different harness. See the README's "Harness images" section. |
-| Agent create returns `503` but the agent goes on to start | Cold Autopilot node exceeding the hub's client timeout to the runtime broker | Not a failure — retry the check. See step 8. |
+| Agent create returns `503` but the agent goes on to start | Cold Autopilot node exceeding the hub's client timeout to the runtime broker | Not necessarily a failure. Confirm whether the agent started (step 8.4) before retrying the *create* — a blind retry on an agent that did start risks creating a duplicate. |
 | Creating a user or project secret fails with a hint to grant `roles/secretmanager.admin` | Hub image predates hub-prefixed secret names | Do not follow the hint in a shared project (see "Operational traps"). Roll a hub image with hub-prefixed secret support instead. |
 | Second plan on any root is not clean | Real drift, or a genuinely intended config change not yet applied everywhere | Read the diff. Don't assume it's benign; only refresh-only notes with no planned action are. |
 | Hub apply fails partway through with a permission error | Operator role set was incomplete | Check the role list in step 1 was granted in full before the apply started; grant the missing role and re-apply. |
@@ -614,14 +665,17 @@ tearing anything down; do not improvise a shortcut. In outline:
      -var-file=terraform.tfvars -var deletion_protection=false \
      -out=/tmp/shared-unprotect.tfplan
    ```
-   Go through the plan-review gate, then:
+   The `destroy_guard` precondition is checked at **plan** time (it's a
+   `terraform_data` precondition), so a failure shows up on the `plan`
+   command above, before you ever reach the gate or an apply. **If the plan
+   fails on `destroy_guard`**, that means a hub database still exists — step
+   1 wasn't completed for every hub. **Stop** and go back to step 1; do not
+   proceed past this by any other means. Otherwise, go through the
+   plan-review gate, then:
    ```bash
    terraform -chdir=deploy/terraform/configurations/shared-infra apply /tmp/shared-unprotect.tfplan
    ```
-   This **succeeds once every hub is gone.** If it instead fails on
-   `destroy_guard`, that means a hub database still exists — step 1 wasn't
-   completed for every hub. **Stop** and go back to step 1; do not proceed
-   past this failure by any other means.
+   This apply **succeeds once every hub is gone.**
 3. **Stop: only proceed here when the user has explicitly directed a full
    shared-infra teardown** — this step removes the safety net for every
    piece of shared, stateful infrastructure. On a dedicated teardown branch
@@ -639,8 +693,9 @@ tearing anything down; do not improvise a shortcut. In outline:
    deployment's prefix was touched.
 
 **Never** run `terraform destroy -var deletion_protection=false` against
-`shared-infra` outside step 2 of that exact sequence, and **never** combine
-`-target` with `deletion_protection` on `shared-infra` — both bypass the
-guard and can leave a partial, inconsistent destroy behind. Every destroy
-step above is itself a plan-review gate: get an explicit human ack before
-running any of them, the same as an apply.
+`shared-infra`, at any step — step 2 above is an ordinary `plan`/`apply`,
+not a `destroy`, and is not an exception to this rule. Likewise **never**
+combine `-target` with `deletion_protection` on `shared-infra` — both bypass
+the guard and can leave a partial, inconsistent destroy behind. Every
+destroy step above is itself a plan-review gate: get an explicit human ack
+before running any of them, the same as an apply.

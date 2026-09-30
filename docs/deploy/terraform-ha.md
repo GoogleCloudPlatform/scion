@@ -55,10 +55,10 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
   -var-file=<hub_name>.tfvars
 ```
 
-— see the README for the shared-infra pair, expected timing (the GKE
-cluster create dominates; roughly 10 minutes total), and the first-hub-apply
+— see the README for the shared-infra pair and the first-hub-apply
 403-on-secrets note (IAM propagation; re-apply rather than widening
-anything).
+anything). The GKE cluster create dominates the shared-infra apply; expect
+roughly 10 minutes total.
 
 ## Verify
 
@@ -101,5 +101,4 @@ never touches the others.
 README's "Destroy runbook" section in full before tearing anything down —
 it is the only source for the compliant step-by-step sequence, the
 prohibited commands, and why the `destroy_guard` precondition alone isn't
-sufficient. Do not improvise from the outline above; follow that section
-exactly.
+sufficient. Do not improvise; follow that section exactly.
