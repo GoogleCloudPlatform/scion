@@ -21,23 +21,36 @@
  * frontmost) from the Hub when the terminal viewer opens, and saves it back
  * on open, close, reorder and frontmost change, debounced.
  *
- * Phase 1 scope (this file, as landed): the bare `/terminals` (no query)
- * restore case only — GET, the "no write before read" invariant, the
- * snapshot, the debounce, and keepalive PUTs. There is no unload listener
- * (design section 3.4: every PUT is keepalive, and a change still in the
- * debounce window at unload is an accepted loss). Phase 2 adds urlIntent
- * (the URL-driven table in design section 3.5.3), the first-attempt restore
- * budget with late merge, and the rate-limited background retry after a
- * failed GET (section 3.5.1).
+ * Scope: GET, the "no write before read" invariant, the snapshot, the
+ * debounce, and keepalive PUTs; `urlIntent` and the URL-driven merge table
+ * (design section 3.5.3); the first-attempt restore budget with late merge,
+ * and the rate-limited background retry after a failed GET (section 3.5.1).
+ * There is no unload listener (design section 3.4: every PUT is keepalive,
+ * and a change still in the debounce window at unload is an accepted loss).
  */
 
 import { apiFetch, type ApiFetchOptions } from './api.js';
 import type { TerminalCoordinator } from './terminal-coordinator.js';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { parseLayoutUrl } from './terminal-layout.js';
 
 const TERMINAL_WORKSPACE_PATH = '/api/v1/users/me/terminal-workspace';
 const MAX_AGENT_IDS = 32;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TERMINAL_AGENT_PATH =
+  /^\/terminals\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Pure helper (design section 3.5.3): true when the URL names an agent path
+ * or parses to a layout query (even one naming a preset but no slots). In
+ * either case an explicit URL decides what is visible and connected, so
+ * restore() must not auto-connect the saved frontmost — every restored
+ * entry stays idle, and the URL-driven code that runs after restore() is
+ * what connects something.
+ */
+export function restoreUrlIntent(pathname: string, search: string): boolean {
+  return TERMINAL_AGENT_PATH.test(pathname) || parseLayoutUrl(search) !== null;
+}
 
 /** The document shape the client sends and compares against its baseline. */
 interface TerminalWorkspaceDoc {
@@ -80,6 +93,13 @@ export interface TerminalWorkspacePersistenceDeps {
   fetchImpl?: typeof apiFetch;
   /** Trailing debounce over snapshot changes. Default 1000ms. */
   debounceMs?: number;
+  /** How long the first restore() call in a generation waits for its GET
+   *  before returning regardless (design section 3.5.1). Default 1500ms. */
+  restoreBudgetMs?: number;
+  /** Minimum gap between GET attempts after a failure (design section
+   *  3.5.1). GET only; PUTs have no retry timer (section 3.5.4). Default
+   *  10000ms. */
+  retryIntervalMs?: number;
 }
 
 function isValidDoc(body: unknown): body is {
@@ -119,6 +139,32 @@ function sameDoc(a: TerminalWorkspaceDoc, b: TerminalWorkspaceDoc): boolean {
   );
 }
 
+/**
+ * Resolves after `p` settles or after `ms`, whichever comes first — never
+ * rejects (design section 3.5.1's restore budget: the first restore() call
+ * in a generation returns whether or not the GET has finished). Clears the
+ * timeout once `p` settles first, so a fast GET does not leave a dangling
+ * timer running under fake timers in tests.
+ */
+function raceWithTimeout(p: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    }, ms);
+    void p.finally(() => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+  });
+}
+
 /** TerminalWorkspacePersistence — see the file doc comment. */
 export class TerminalWorkspacePersistence {
   private readonly coordinator: TerminalCoordinator;
@@ -126,11 +172,24 @@ export class TerminalWorkspacePersistence {
   private readonly onRestoredSelection: (agentId: string) => void;
   private readonly fetchImpl: typeof apiFetch;
   private readonly debounceMs: number;
+  private readonly restoreBudgetMs: number;
+  private readonly retryIntervalMs: number;
 
   /** The owner generation this instance's state applies to. */
   private generation: string | null = null;
   private state: GenerationState | null = null;
   private inflightGet: Promise<void> | null = null;
+  /** When the current or most recent GET attempt in this generation
+   *  started, for the retryIntervalMs gate (design section 3.5.1). Reset on
+   *  a new generation. */
+  private lastAttemptAt: number | null = null;
+  /** Set once the very first restore() call in this generation has started
+   *  its attempt: a race between the GET and the restore budget, shared by
+   *  every restore() call in the generation so none of them, including the
+   *  first, waits on the network more than once (design section 3.5.1,
+   *  "every later call returns at once"). Awaiting it after it has already
+   *  settled resolves in a microtask, not a network round trip. */
+  private firstAttemptGate: Promise<void> | null = null;
 
   private unsubscribeSessions: (() => void) | null = null;
   private unsubscribeLayout: (() => void) | null = null;
@@ -149,13 +208,20 @@ export class TerminalWorkspacePersistence {
     this.onRestoredSelection = deps.onRestoredSelection;
     this.fetchImpl = deps.fetchImpl ?? apiFetch;
     this.debounceMs = deps.debounceMs ?? 1000;
+    this.restoreBudgetMs = deps.restoreBudgetMs ?? 1500;
+    this.retryIntervalMs = deps.retryIntervalMs ?? 10000;
   }
 
   /**
-   * Restores the saved list for the current owner generation. urlIntent is
-   * accepted now (matching the eventual interface) but Phase 1's only caller
-   * passes false for the bare `/terminals` route; Phase 2 wires it from the
-   * URL. Never rejects.
+   * Restores the saved list for the current owner generation (design
+   * section 3.5.1). The first call in a generation starts the GET and waits
+   * for it for at most restoreBudgetMs; it returns whether or not the GET
+   * has finished by then; a GET that finishes later still merges on
+   * arrival. Every later call in the same generation returns at once and
+   * never waits on the network: if the previous attempt failed, is not in
+   * flight, and at least retryIntervalMs has passed since it started, this
+   * call starts one new GET in the background (not awaited) and returns;
+   * that GET merges and enables saving if it succeeds. Never rejects.
    */
   async restore(urlIntent: boolean): Promise<void> {
     if (this.disposed) return;
@@ -173,12 +239,44 @@ export class TerminalWorkspacePersistence {
       this.generation = generation;
       this.state = { status: 'loading' };
       this.inflightGet = null;
+      this.lastAttemptAt = null;
+      this.firstAttemptGate = null;
       this.putFailureLogged = false;
       this.installNotificationListeners(generation);
     }
-    if (this.state?.status !== 'loading') return; // already merged or failed this generation
-    if (!this.inflightGet) this.inflightGet = this.performRestore(generation, urlIntent);
-    await this.inflightGet;
+
+    if (this.state?.status === 'merged') return;
+
+    if (this.state?.status === 'failed') {
+      // Not the first attempt in this generation (that always leaves
+      // status 'loading' or 'merged', never 'failed', without also setting
+      // firstAttemptGate — see below): rate-limited background retry only,
+      // never awaited.
+      const now = Date.now();
+      if (
+        !this.inflightGet &&
+        (this.lastAttemptAt === null || now - this.lastAttemptAt >= this.retryIntervalMs)
+      ) {
+        this.lastAttemptAt = now;
+        this.state = { status: 'loading' };
+        this.inflightGet = this.performRestore(generation, urlIntent);
+      }
+      return;
+    }
+
+    // status === 'loading'
+    if (!this.inflightGet) {
+      // The very first attempt in this generation.
+      this.lastAttemptAt = Date.now();
+      this.inflightGet = this.performRestore(generation, urlIntent);
+    }
+    if (!this.firstAttemptGate) {
+      this.firstAttemptGate = raceWithTimeout(this.inflightGet, this.restoreBudgetMs);
+    }
+    // Shared by every call in the generation: once the first attempt's
+    // budget has elapsed (or the GET has completed), this is already
+    // settled, so a later call resolves in a microtask, not a network wait.
+    await this.firstAttemptGate;
   }
 
   /** Tears down listeners and timers. Does not touch the saved server state. */
@@ -256,10 +354,13 @@ export class TerminalWorkspacePersistence {
   }
 
   /**
-   * Merge algorithm (design section 3.5.2), restricted to the bare-path
-   * case this phase implements: with urlIntent false and nothing already
-   * open, the saved frontmost (or the last saved entry) connects; every
-   * other restored entry stays idle.
+   * Merge algorithm (design section 3.5.2). With urlIntent false and
+   * nothing already open (the bare `/terminals` case), the saved frontmost
+   * (or the last saved entry) connects. With urlIntent true, or when the
+   * caller (main.ts's URL/path-open code, running either before a late
+   * merge or after this one) already has entries open, nothing here
+   * connects: every restored entry stays idle, and the URL-driven code is
+   * what selects and connects something (design section 3.5.3).
    */
   private merge(generation: string, doc: ServerTerminalWorkspace, urlIntent: boolean): void {
     const alreadyOpen = this.coordinator.sessions.map((session) => session.state.agentId);

@@ -1,14 +1,16 @@
 /**
- * Tests for TerminalWorkspacePersistence (design ptone/scion#2278), Phase 1
- * scope: restore for the bare /terminals route, the "no write before read"
- * invariant, the snapshot, the debounce, and keepalive PUTs. Uses a fake
- * fetch and fake timers, a minimal fake workspace, and the REAL
- * TerminalCoordinator with a stubbed navigator.locks, so the coordinator's
- * own pagehide listener is installed first, as in the browser.
+ * Tests for TerminalWorkspacePersistence (design ptone/scion#2278): restore
+ * for the bare /terminals route and the URL-driven cases (urlIntent, the
+ * restore budget with late merge, and the rate-limited background retry),
+ * the "no write before read" invariant, the snapshot, the debounce, and
+ * keepalive PUTs. Uses a fake fetch and fake timers, a minimal fake
+ * workspace, and the REAL TerminalCoordinator with a stubbed
+ * navigator.locks, so the coordinator's own pagehide listener is installed
+ * first, as in the browser.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TerminalCoordinator } from './terminal-coordinator.js';
-import { TerminalWorkspacePersistence } from './terminal-persistence.js';
+import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import type { apiFetch, ApiFetchOptions } from './api.js';
@@ -17,6 +19,7 @@ const scope = { hubUrl: 'https://hub.example/team/', accountId: 'account-1' };
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
 const agentC = '33333333-3333-4333-8333-333333333333';
+const agentD = '44444444-4444-4444-8444-444444444444';
 
 /** A distinct canonical UUID per index, for tests that need many agents. */
 function makeUuid(i: number): string {
@@ -252,7 +255,11 @@ function serverDoc(
   };
 }
 
-function fixture(opts?: { locks?: ReturnType<typeof createLockMock> }): {
+function fixture(opts?: {
+  locks?: ReturnType<typeof createLockMock>;
+  restoreBudgetMs?: number;
+  retryIntervalMs?: number;
+}): {
   coordinator: TerminalCoordinator;
   workspace: TerminalWorkspaceRoot;
   selectCalls: TerminalSession[];
@@ -302,6 +309,8 @@ function fixture(opts?: { locks?: ReturnType<typeof createLockMock> }): {
     onRestoredSelection,
     fetchImpl,
     debounceMs: 1000,
+    restoreBudgetMs: opts?.restoreBudgetMs ?? 1500,
+    retryIntervalMs: opts?.retryIntervalMs ?? 10000,
   });
 
   return {
@@ -319,6 +328,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe('restoreUrlIntent()', () => {
+  it('is false for the bare /terminals route', () => {
+    expect(restoreUrlIntent('/terminals', '')).toBe(false);
+  });
+
+  it('is true for an agent path', () => {
+    expect(restoreUrlIntent(`/terminals/${agentA}`, '')).toBe(true);
+  });
+
+  it('is true for a layout query naming a preset but no slots (design section 3.5.3)', () => {
+    expect(restoreUrlIntent('/terminals', '?lv=1&lp=two-columns')).toBe(true);
+  });
+
+  it('is true for a layout query naming slots', () => {
+    expect(restoreUrlIntent('/terminals', `?lv=1&lp=two-columns&s0=${agentA}&s1=${agentB}`)).toBe(
+      true
+    );
+  });
+
+  it('is false for a query that fails to parse as a layout (unknown version)', () => {
+    expect(restoreUrlIntent('/terminals', '?lv=99&lp=two-columns')).toBe(false);
+  });
+
+  it('is false for an unrelated path', () => {
+    expect(restoreUrlIntent('/terminals-not-really', '')).toBe(false);
+  });
 });
 
 describe('restore()', () => {
@@ -498,6 +535,68 @@ describe('restore()', () => {
     expect(f.fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it('the first restore() call in a generation waits at most the restore budget, even if the GET is still pending; a later call never waits on the network', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ restoreBudgetMs: 1500 });
+    let resolveGet!: (r: Response) => void;
+    f.fetchImpl.mockReturnValueOnce(new Promise((resolve) => (resolveGet = resolve)));
+
+    let firstSettled = false;
+    void f.persistence.restore(false).then(() => {
+      firstSettled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(firstSettled).toBe(false); // the budget has not elapsed yet
+    await vi.advanceTimersByTimeAsync(1);
+    expect(firstSettled).toBe(true); // the budget elapsed; restore() returned even though the GET is still pending
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+    expect(f.coordinator.sessions).toHaveLength(0); // nothing merged yet
+
+    // A second call, with the same GET still pending, must not wait on the
+    // network either (design section 3.5.1: "no navigation lag").
+    await expect(f.persistence.restore(false)).resolves.toBeUndefined();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1); // no new GET
+
+    // The pending GET arrives late and merges (a late merge).
+    resolveGet(jsonResponse(serverDoc([agentA], agentA)));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA]);
+  });
+
+  it('after a GET failure, a restore() call within the retry interval starts no new GET; one after it starts exactly one background GET without waiting for it, and its success enables saving', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ retryIntervalMs: 10000 });
+    f.fetchImpl.mockRejectedValueOnce(new Error('network'));
+
+    await f.persistence.restore(false);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(9999);
+    await f.persistence.restore(false); // still within the interval: no new GET
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1); // now exactly retryIntervalMs since the failed attempt
+    let resolveRetryGet!: (r: Response) => void;
+    f.fetchImpl.mockReturnValueOnce(new Promise((resolve) => (resolveRetryGet = resolve)));
+    // Resolves without waiting on the still-pending retry GET: if restore()
+    // awaited it, this would hang until the test times out.
+    await expect(f.persistence.restore(false)).resolves.toBeUndefined();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(2);
+    expect(f.coordinator.sessions).toHaveLength(0); // the retry GET has not resolved yet
+
+    resolveRetryGet(jsonResponse(serverDoc([agentA], agentA)));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA]);
+
+    // Saving is enabled again: a further change writes back.
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA, 0, 2)));
+    const keyB = f.coordinator.restoreEntries([agentB], { connectAgentId: null })[0].state.key;
+    f.setFrontmostKey(keyB);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it('no write before read: a change while the GET is pending sends nothing; the merge appends it and writes back once', async () => {
     vi.useFakeTimers();
     const f = fixture();
@@ -565,6 +664,120 @@ describe('restore()', () => {
       expect(f.coordinator.sessions).toHaveLength(0); // no entries created from an invalid/failed response
     }
   );
+});
+
+describe('URL intent (design section 3.5.3)', () => {
+  it('restore(true) creates every restored entry idle, selects nothing, and does not call onRestoredSelection', async () => {
+    const f = fixture();
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB], agentB)));
+
+    await f.persistence.restore(true);
+
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA, agentB]);
+    for (const session of f.coordinator.sessions) expect(session.state.connection).toBe('idle');
+    expect(f.selectCalls).toHaveLength(0);
+    expect(f.onRestoredSelection).not.toHaveBeenCalled();
+  });
+
+  it('/terminals/<saved frontmost>: the URL agent is already the saved frontmost, so re-selecting it sends zero PUTs after 2x the debounce', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB, agentC], agentB)));
+    await f.persistence.restore(true);
+
+    // Simulate main.ts's path-open code, which runs after restore() merges:
+    // it finds B already restored (idle) and selects it, which is what the
+    // real coordinator.open()/adapter.select path does for an id that
+    // already has a session.
+    const sessionB = f.coordinator.sessions.find((s) => s.state.agentId === agentB)!;
+    f.workspace.select(sessionB);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1); // the GET only: snapshot equals the baseline
+  });
+
+  it('/terminals/<X> with X not saved: appending X as frontmost sends exactly one PUT, [A,B,C,X]/X', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB, agentC], agentB)));
+    await f.persistence.restore(true);
+
+    // Simulate main.ts's path-open code opening and selecting a NEW agent
+    // (X = agentD), not among the saved ids.
+    const [sessionX] = f.coordinator.restoreEntries([agentD], { connectAgentId: agentD });
+    f.workspace.select(sessionX);
+
+    f.fetchImpl.mockResolvedValueOnce(
+      jsonResponse(serverDoc([agentA, agentB, agentC, agentD], agentD, 0, 2))
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const putCalls = f.fetchImpl.mock.calls.filter(([, o]) => o?.method === 'PUT');
+    expect(putCalls).toHaveLength(1);
+    const body = JSON.parse((putCalls[0][1] as ApiFetchOptions).body as string) as {
+      agentIds: string[];
+      frontmostAgentId: string | null;
+    };
+    expect(body.agentIds).toEqual([agentA, agentB, agentC, agentD]);
+    expect(body.frontmostAgentId).toBe(agentD);
+  });
+
+  it('a layout query naming already-saved slots sends zero PUTs', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB, agentC], agentA)));
+    await f.persistence.restore(true);
+
+    // Simulate the #1715 layout-restore block opening the URL's slot agents
+    // (A and C, both already saved) and setting single[0] to the first
+    // occupied slot (A), matching layoutManager.restore's behaviour.
+    const sessionA = f.coordinator.sessions.find((s) => s.state.agentId === agentA)!;
+    f.workspace.select(sessionA);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1); // the GET only
+  });
+
+  it('a late merge (GET past the restore budget) with the URL agent already open appends the saved entries after it, exactly one PUT', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ restoreBudgetMs: 1500 });
+    let resolveGet!: (r: Response) => void;
+    f.fetchImpl.mockReturnValueOnce(new Promise((resolve) => (resolveGet = resolve)));
+
+    const restorePromise = f.persistence.restore(true);
+    // The URL/path-open code runs while the GET is still pending (design
+    // section 3.5.3: "when a GET is slower than the budget, the URL/path
+    // code runs first"): it opens and selects agent X (not saved) directly,
+    // before the merge sees it.
+    const [sessionX] = f.coordinator.restoreEntries([agentD], { connectAgentId: agentD });
+    f.workspace.select(sessionX);
+
+    await vi.advanceTimersByTimeAsync(1500); // the restore budget elapses; the GET is still pending
+    await restorePromise;
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentD]);
+
+    f.fetchImpl.mockResolvedValueOnce(
+      jsonResponse(serverDoc([agentD, agentA, agentB, agentC], agentD, 0, 2))
+    );
+    resolveGet(jsonResponse(serverDoc([agentA, agentB, agentC], agentB)));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([
+      agentD,
+      agentA,
+      agentB,
+      agentC,
+    ]);
+    const putCalls = f.fetchImpl.mock.calls.filter(([, o]) => o?.method === 'PUT');
+    expect(putCalls).toHaveLength(1);
+    const body = JSON.parse((putCalls[0][1] as ApiFetchOptions).body as string) as {
+      agentIds: string[];
+      frontmostAgentId: string | null;
+    };
+    expect(body.agentIds).toEqual([agentD, agentA, agentB, agentC]);
+    expect(body.frontmostAgentId).toBe(agentD);
+  });
 });
 
 describe('write-back and debounce', () => {
