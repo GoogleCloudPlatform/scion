@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -243,14 +244,53 @@ def _is_toml_key_line(line: str, key: str) -> bool:
     return len(rest) > 0 and rest[0] in (" ", "=", "\t")
 
 
+# Matches a table header ([table] / ["quoted.table"]) or array-of-tables
+# header ([[table]]), with an optional trailing comment, and nothing else on
+# the line. Used together with _toml_entering_array_depths: a line can only
+# be a genuine header if it also has zero open-bracket depth entering it —
+# see that function's docstring for why the shape check alone isn't enough.
+_TOML_TABLE_HEADER_RE = re.compile(r'^\s*\[\[?[^\]=]*\]\]?\s*(#.*)?$')
+
+
+def _toml_entering_array_depths(lines: list[str]) -> list[int]:
+    """Per-line count of unmatched `[` brackets carried in from prior lines.
+
+    A line inside a multi-line array can itself be a bracketed value (e.g.
+    a nested single-element array `["x"]`, or a table header spelled with a
+    quoted key, `["x"]`, are syntactically indistinguishable by shape alone)
+    — so a naive "line starts with `[`" check misidentifies an array
+    continuation line as a table header. Tracking bracket depth resolves the
+    ambiguity: a `[`-shaped line only means "table header" when depth is
+    zero entering it, i.e. no multi-line array is still open.
+
+    Deliberately naive (does not understand TOML strings/comments, so a
+    string value containing a literal `[`/`]` would throw the count off) to
+    match this module's other line-oriented TOML edits (_is_toml_key_line,
+    strip_toml_sections) — adequate for the machine-written config.toml this
+    script edits, not a general-purpose TOML tokenizer.
+    """
+    depths = []
+    depth = 0
+    for line in lines:
+        depths.append(depth)
+        depth = max(0, depth + line.count("[") - line.count("]"))
+    return depths
+
+
+def _is_toml_table_header(line: str, depth: int) -> bool:
+    """True if `line` is a top-level table header, given the bracket-nesting
+    `depth` entering it (0 means no multi-line array is currently open)."""
+    return depth == 0 and _TOML_TABLE_HEADER_RE.match(line) is not None
+
+
 def _strip_toml_top_level_key(content: str, key: str) -> str:
     """Remove a top-level TOML key = value line from content."""
     lines = content.split("\n")
+    depths = _toml_entering_array_depths(lines)
     kept = []
     in_section = False
-    for line in lines:
-        s = line.strip()
-        if s.startswith("["):
+    for line, depth in zip(lines, depths):
+        if _is_toml_table_header(line, depth):
             in_section = True
         if not in_section and _is_toml_key_line(line, key):
             continue
@@ -274,9 +314,10 @@ def _insert_toml_top_level_line(content: str, line: str) -> str:
     before a fresh copy is inserted in the same place.
     """
     lines = content.split("\n")
+    depths = _toml_entering_array_depths(lines)
     insert_at = len(lines)
-    for i, existing in enumerate(lines):
-        if existing.strip().startswith("["):
+    for i, (existing, depth) in enumerate(zip(lines, depths)):
+        if _is_toml_table_header(existing, depth):
             insert_at = i
             break
     lines.insert(insert_at, line)

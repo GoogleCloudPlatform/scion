@@ -477,6 +477,58 @@ class CodexProvisionTest(unittest.TestCase):
         section_idx = lines.index("[features]")
         self.assertLess(model_idx, section_idx)
 
+    def test_insert_toml_top_level_line_ignores_nested_array_line_with_trailing_comma(self) -> None:
+        # Regression test for ptone/scion#2365 review round 2 (N2): a
+        # top-level multi-line array whose element is itself an array on its
+        # own line (e.g. `["x"],`) is syntactically indistinguishable by
+        # shape alone from a quoted-key table header (`["x"]`). Without
+        # bracket-depth tracking, this line was misidentified as a header
+        # and the inserted key landed inside the array, breaking the file.
+        content = 'notify = [\n  "sh",\n  ["x"],\n]\n[features]\nhooks = true\n'
+        result = provision._insert_toml_top_level_line(content, 'model = "y"')
+        lines = result.split("\n")
+        self.assertLess(lines.index('model = "y"'), lines.index("[features]"))
+
+    def test_insert_toml_top_level_line_ignores_nested_array_line_without_trailing_comma(self) -> None:
+        # Same as above, but the nested-array line is the array's last
+        # element (no trailing comma) — the shape most easily confused with
+        # a real `["x"]` table header, since only bracket depth (not a
+        # regex on the line's own shape) distinguishes the two.
+        content = 'notify = [\n  "sh",\n  ["x"]\n]\n[features]\nhooks = true\n'
+        result = provision._insert_toml_top_level_line(content, 'model = "y"')
+        lines = result.split("\n")
+        self.assertLess(lines.index('model = "y"'), lines.index("[features]"))
+
+    def test_strip_toml_top_level_key_ignores_nested_array_line(self) -> None:
+        # Mirrors the _insert_toml_top_level_line regression above: a
+        # top-level key placed after a multi-line array (but before any
+        # real table header) must still be recognized and stripped, not
+        # treated as already "in a section" because of the array's nested
+        # bracketed element.
+        content = 'notify = [\n  "sh",\n  ["x"],\n]\nmodel = "stale"\n[features]\nhooks = true\n'
+        result = provision._strip_toml_top_level_key(content, "model")
+        self.assertNotIn('model = "stale"', result)
+
+    def test_reconcile_codex_toml_handles_nested_array_in_notify(self) -> None:
+        # End-to-end version of the N2 regression: a config.toml whose
+        # `notify` array contains a nested single-element array must still
+        # reconcile to valid, parseable TOML with `model` at the top level.
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write('notify = [\n  "sh",\n  ["x"],\n]\n\n[features]\nhooks = true\n')
+
+                provision._reconcile_codex_toml(None, None, model="gpt-6.1-sol")
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+
+        self.assertEqual(data["model"], "gpt-6.1-sol")
+        self.assertEqual(data["notify"], ["sh", ["x"]])
+
     def test_strip_toml_top_level_key_section_safety(self) -> None:
         content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
         result = provision._strip_toml_top_level_key(content, "reasoning_effort")
