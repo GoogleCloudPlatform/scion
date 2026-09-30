@@ -274,9 +274,12 @@ func execAuditRiskyPackageDirs() map[string]bool {
 }
 
 // execAuditFuncInfo is what execAuditRiskyFuncNames records per top-level,
-// non-method function and per package-level var (with an initializer)
-// declared in an execAuditFileAllowlist file, before the fixpoint below
-// turns it into a plain risky/not-risky verdict.
+// non-method function and per package-level var declared with an
+// initializer in an execAuditFileAllowlist file, before the fixpoint below
+// turns it into a plain risky/not-risky verdict. A var declared without an
+// initializer and assigned its value elsewhere (e.g. in an `init` function)
+// has no expression here to inspect, so it is never recorded at all — see
+// execAuditRiskyFuncNames's doc comment for that limit.
 type execAuditFuncInfo struct {
 	// direct is true if the function's body, or the var's initializer
 	// expression, references os/exec, or references a not-explicitly-
@@ -341,25 +344,36 @@ func inspectExecAuditRefs(n ast.Node, execAlias string, aliasToRiskyDir map[stri
 // closes across package boundaries, just within one. Keyed by directory,
 // since an unqualified reference is only ever resolved within its own
 // package: two different directories reusing a name isn't a collision here.
-// `init` functions are excluded from the candidate set entirely: Go forbids
-// referencing `init` by name, so it can never be the target of an
-// unqualified reference, and several allowlisted files each declare one —
-// without this exclusion, whichever file's `init` a map iteration visited
-// last would silently win the `byDir[dir]["init"]` entry, making the result
-// depend on random map order the moment any allowlisted `init` became risky.
+// `init` and `_` can never be referenced by name, so both are excluded from
+// the candidate set entirely: Go forbids referencing `init` by name, and `_`
+// (the blank identifier, e.g. a `var _ = someType(nil)` interface-
+// satisfaction assertion) can never be the target of an unqualified
+// reference either. Several allowlisted files each declare an `init`, and a
+// future one could declare a blank-identifier var — without this exclusion,
+// whichever file's entry a map iteration visited last would silently win
+// the shared `byDir[dir]["init"]` (or `byDir[dir]["_"]`) slot, making the
+// result depend on random map order the moment any allowlisted `init`/`_`
+// became risky.
 //
-// This is a fixpoint over bare-identifier references, not a call graph:
-// methods are excluded from the risky set itself (an unqualified reference
-// can never resolve to one), but a plain function's body, or a var's
-// initializer, referencing a risky name in *any* position — not just as a
-// call — is enough, so a function value (`f := riskyFunc`), a wrapper (`func
-// w() { riskyFunc() }`), or a var referencing one in its initializer (`var v
-// = &cobra.Command{RunE: riskyFunc}`) is still caught. The only way this can
-// over- or under-count is a local variable, parameter, or struct field that
-// happens to share a name with a risky same-package function or var (a
-// "shadow"); none exist in this codebase today, and if one is ever added,
-// the failure mode is a false positive (something extra to justify), never a
-// silent miss.
+// This is a fixpoint over bare-identifier references, not a call graph: a
+// plain function's body, or a var's initializer, referencing a risky name in
+// *any* position — not just as a call — is enough, so a function value (`f
+// := riskyFunc`), a wrapper (`func w() { riskyFunc() }`), or a var
+// referencing one in its initializer (`var v = &cobra.Command{RunE:
+// riskyFunc}`) is still caught.
+//
+// Known limits, none of which exist in this codebase today: methods, and
+// types whose methods reach exec, are excluded from the risky set itself (an
+// unqualified reference can never resolve to either — Go can only resolve a
+// bare identifier to a package-level function or var); a package-level var
+// declared without an initializer and assigned its value elsewhere (e.g. in
+// an `init` function) is invisible too, since there is no initializer
+// expression for `inspectExecAuditRefs` to inspect at the declaration site.
+// A reference through any of these would be a silent miss. Separately, a
+// local variable, parameter, or struct field that happens to share a name
+// with a risky same-package function or var (a "shadow") would be a false
+// positive (something extra to justify) rather than a miss — also not
+// present today.
 func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[string]bool {
 	t.Helper()
 	riskyPkgDirs := execAuditRiskyPackageDirs()
@@ -426,6 +440,12 @@ func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[strin
 						continue // no initializer to inspect, e.g. `var x int`
 					}
 					for i, name := range vs.Names {
+						if name.Name == "_" {
+							// `var _ = ...` (e.g. an interface-satisfaction
+							// assertion) can't be referenced by name either —
+							// same reason init is excluded above.
+							continue
+						}
 						valueIdx := i
 						if len(vs.Values) != len(vs.Names) {
 							// e.g. `var a, b = f()`: a single multi-value
