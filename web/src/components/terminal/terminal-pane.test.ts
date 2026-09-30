@@ -3,6 +3,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 
+const showToast = vi.fn();
+vi.mock('../../utils/toast.js', () => ({ showToast }));
+
 const terminal = vi.hoisted(() => ({
   instances: [] as Array<{ dispose: ReturnType<typeof vi.fn>; reset: ReturnType<typeof vi.fn> }>,
 }));
@@ -721,5 +724,193 @@ describe('theme', () => {
       .map((el) => el.getAttribute('style') ?? '')
       .filter((style) => LITERAL_COLOR.test(style.replace(SCION_VAR, '')));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
+  const noAuthAgent = {
+    id: agentId,
+    name: 'test',
+    phase: 'running',
+    harnessAuth: 'none',
+    resolvedHarness: 'claude',
+  };
+
+  /** Makes showCaptureAuth true without going through the metadata registry's fetch. */
+  async function makeCaptureEligible() {
+    await mountToFrame();
+    (page as unknown as { agent: unknown }).agent = noAuthAgent;
+    await page.updateComplete;
+  }
+
+  function captureAuthButton(): HTMLButtonElement | null {
+    return page.shadowRoot?.querySelector<HTMLButtonElement>('.capture-auth-btn') ?? null;
+  }
+
+  function scopeDialog(): HTMLElement | null {
+    return (
+      page.shadowRoot?.querySelector<HTMLElement>('sl-dialog[label="Capture Auth — Choose Scope"]') ??
+      null
+    );
+  }
+
+  function radio(value: 'project' | 'user'): HTMLElement | null {
+    return scopeDialog()?.querySelector<HTMLElement>(`sl-radio[value="${value}"]`) ?? null;
+  }
+
+  async function openDialog() {
+    captureAuthButton()!.click();
+    await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
+    await vi.waitFor(() => {
+      const state = page as unknown as { captureAuthSettingsLoading: boolean };
+      expect(state.captureAuthSettingsLoading).toBe(false);
+    });
+    await page.updateComplete;
+  }
+
+  function clickCapture() {
+    scopeDialog()
+      ?.querySelector<HTMLElement>('sl-button[variant="primary"]')
+      ?.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+  }
+
+  beforeEach(() => {
+    showToast.mockClear();
+  });
+
+  // Design §10 test 6: setting off — both radios enabled, default is
+  // project, and exec sends --scope project.
+  it('setting off: both radios enabled, default project, exec sends --scope project', async () => {
+    await makeCaptureEligible();
+    let execBody: { command: string[] } | null = null;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(json({ output: '', exitCode: 0 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+
+    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+    expect(
+      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
+    ).toBe('project');
+
+    fetcher.mockImplementation((url, init) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/exec')) {
+        execBody = JSON.parse(init!.body as string) as { command: string[] };
+        return Promise.resolve(json({ output: '', exitCode: 0 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+    clickCapture();
+    await vi.waitFor(() => expect(execBody).not.toBeNull());
+    expect(execBody!.command).toContain('--scope');
+    expect(execBody!.command[execBody!.command.indexOf('--scope') + 1]).toBe('project');
+  });
+
+  // Design §10 test 7: setting on — Project disabled with helper text, the
+  // selection is forced to user even if project was selected before, and
+  // exec sends --scope user.
+  it('setting on: Project disabled with helper text, selection forced to user, exec sends --scope user', async () => {
+    await makeCaptureEligible();
+    (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope = 'project';
+    let execBody: { command: string[] } | null = null;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: true }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(json({ output: '', exitCode: 0 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true);
+    expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+    expect(
+      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
+    ).toBe('user');
+    expect(scopeDialog()?.textContent ?? '').toContain(
+      'Disabled by your hub administrator: captured credentials can only be stored in'
+    );
+
+    fetcher.mockImplementation((url, init) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/exec')) {
+        execBody = JSON.parse(init!.body as string) as { command: string[] };
+        return Promise.resolve(json({ output: '', exitCode: 0 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+    clickCapture();
+    await vi.waitFor(() => expect(execBody).not.toBeNull());
+    expect(execBody!.command[execBody!.command.indexOf('--scope') + 1]).toBe('user');
+  });
+
+  // Design §10 test 8: the settings fetch fails — the dialog shows today's
+  // (unrestricted) state, failing open. The server still enforces.
+  it('settings fetch fails: dialog shows unrestricted state (fail open)', async () => {
+    await makeCaptureEligible();
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(new Response('', { status: 500 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+
+    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    expect(radio('user')?.hasAttribute('disabled')).toBe(false);
+    expect(
+      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
+    ).toBe('project');
+  });
+
+  // Design §10 test 9: a secret_scope_restricted rejection shows the policy
+  // toast, not "Capture failed", and does not open the conflict dialog.
+  it('rejection: secret_scope_restricted shows the policy toast, not the conflict dialog', async () => {
+    await makeCaptureEligible();
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url.toString();
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(
+          json({
+            output:
+              'hub returned error 403: {"error":{"code":"secret_scope_restricted","message":"..."}}',
+            exitCode: 1,
+          })
+        );
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+    clickCapture();
+
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
+    expect(showToast.mock.calls[0][0]).toContain(
+      'Your hub administrator only allows capturing credentials to your profile.'
+    );
+    expect(showToast.mock.calls[0][0]).not.toContain('Capture failed');
+
+    const conflicts = (page as unknown as { captureAuthConflicts: string[] | null })
+      .captureAuthConflicts;
+    expect(conflicts).toBeNull();
   });
 });

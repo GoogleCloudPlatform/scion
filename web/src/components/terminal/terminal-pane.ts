@@ -148,6 +148,19 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private captureAuthSelectedScope: 'project' | 'user' = 'project';
 
+  /**
+   * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
+   * /api/v1/settings/public each time the capture scope dialog opens
+   * (design ptone/scion#2291 §7). When true, Project is disabled and
+   * Profile is preselected. Fails open (false) if the fetch fails.
+   */
+  @state()
+  private agentSecretsUserScopeOnly = false;
+
+  /** True while the settings/public fetch that gates the scope dialog is in flight. */
+  @state()
+  private captureAuthSettingsLoading = false;
+
   // --- Drag-and-drop file upload state ---
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
@@ -348,6 +361,12 @@ export class ScionTerminalPane extends LitElement {
 
     #capture-scope-group sl-radio:not(:last-of-type) {
       margin-bottom: 0.5rem;
+    }
+
+    .capture-scope-restricted-hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-secondary, #64748b);
+      margin: -0.25rem 0 0.5rem 1.5rem;
     }
 
     /* Window switcher toggle group: two rectangular icon buttons */
@@ -1630,6 +1649,43 @@ export class ScionTerminalPane extends LitElement {
 
   private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
 
+  /** Matches the 403 error code the hub returns when agent_secrets.user_scope_only
+   * blocks a project-scope write (pkg/hub/errors.go ErrCodeSecretScopeRestricted). */
+  private static readonly SECRET_SCOPE_RESTRICTED_RE = /secret_scope_restricted/;
+
+  /**
+   * Opens the capture scope dialog and fetches /api/v1/settings/public fresh
+   * (design ptone/scion#2291 §7), so an admin toggling the policy while the
+   * terminal is open takes effect the next time the dialog opens — this is
+   * also how the "retry after a rejection" flow picks up a since-changed
+   * policy. Fails open (today's dialog, unrestricted) if the fetch fails.
+   */
+  private async openCaptureAuthScopeDialog(): Promise<void> {
+    this.captureAuthScopeDialogOpen = true;
+    this.captureAuthSettingsLoading = true;
+    try {
+      const response = await fetch('/api/v1/settings/public', { credentials: 'include' });
+      if (response.ok) {
+        const data = (await response.json()) as { agentSecretsUserScopeOnly?: boolean };
+        this.agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
+      } else {
+        this.agentSecretsUserScopeOnly = false;
+      }
+    } catch (err) {
+      console.error('Failed to fetch public settings for capture auth dialog:', err);
+      this.agentSecretsUserScopeOnly = false;
+    } finally {
+      // The setting forces the profile scope whatever was previously
+      // selected — it must win even if the dialog was already open with
+      // "project" chosen when an admin flipped it (§7: "forced to 'user'
+      // when the dialog opens, whatever the previous selection was").
+      if (this.agentSecretsUserScopeOnly) {
+        this.captureAuthSelectedScope = 'user';
+      }
+      this.captureAuthSettingsLoading = false;
+    }
+  }
+
   private async handleCaptureAuth(
     force = false,
     scope: 'project' | 'user' = 'project'
@@ -1661,6 +1717,15 @@ export class ScionTerminalPane extends LitElement {
         await this.refreshAgentData();
       } else if (result.exitCode === 2) {
         showToast('No credentials found yet. Authenticate first, then try again.', 'neutral');
+        if (result.output) console.log('Capture auth output:', result.output);
+      } else if (ScionTerminalPane.SECRET_SCOPE_RESTRICTED_RE.test(result.output)) {
+        // Checked before the conflict regex (design §7): a policy rejection
+        // is not a conflict, and must not open the conflict/force-update
+        // dialog. Covers the race where an admin turns the setting on while
+        // this dialog was already open with "project" selected.
+        showToast(
+          'Your hub administrator only allows capturing credentials to your profile. Choose Profile and try again.'
+        );
         if (result.output) console.log('Capture auth output:', result.output);
       } else {
         const conflicts: string[] = [];
@@ -1965,9 +2030,7 @@ export class ScionTerminalPane extends LitElement {
               <button
                 class="capture-auth-btn"
                 ?disabled=${this.captureAuthLoading}
-                @click=${() => {
-                  this.captureAuthScopeDialogOpen = true;
-                }}
+                @click=${() => void this.openCaptureAuthScopeDialog()}
                 title="Capture credentials from inside the container"
               >
                 ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
@@ -2069,11 +2132,20 @@ export class ScionTerminalPane extends LitElement {
         <sl-radio-group
           id="capture-scope-group"
           .value=${this.captureAuthSelectedScope}
+          ?disabled=${this.captureAuthSettingsLoading}
           @sl-change=${(e: any) => {
             this.captureAuthSelectedScope = e.target.value;
           }}
         >
-          <sl-radio value="project">Project secret (all project agents)</sl-radio>
+          <sl-radio value="project" ?disabled=${this.agentSecretsUserScopeOnly}
+            >Project secret (all project agents)</sl-radio
+          >
+          ${this.agentSecretsUserScopeOnly
+            ? html`<div class="capture-scope-restricted-hint">
+                Disabled by your hub administrator: captured credentials can only be stored in your
+                profile.
+              </div>`
+            : nothing}
           <sl-radio value="user">Profile secret (your personal credential)</sl-radio>
         </sl-radio-group>
         <sl-button
@@ -2087,6 +2159,7 @@ export class ScionTerminalPane extends LitElement {
         <sl-button
           slot="footer"
           variant="primary"
+          ?disabled=${this.captureAuthSettingsLoading}
           @click=${() => {
             this.captureAuthScopeDialogOpen = false;
             void this.handleCaptureAuth(false, this.captureAuthSelectedScope);
