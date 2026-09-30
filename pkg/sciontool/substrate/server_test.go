@@ -1088,12 +1088,12 @@ func TestBootstrap_RejectsNonDirComponentWith422(t *testing.T) {
 // handleBootstrap's own comment claims but nothing else exercises:
 // PrivilegeDropChecker must run *after* req.Env has been applied to the
 // process environment, not before — checkPrivilegeDropFeasible's real
-// SCION_HOST_UID/GID checks depend on this. A mutation that moved the
-// checker call earlier (before the req.Env loop) would still "fail safe"
-// against every other test here (nothing would be configured yet, so a
-// real checker would just reject), which is why that mutation survived
-// without this test: it makes the ordering itself the assertion, not a
-// side effect of some other check happening to fail either way.
+// SCION_HOST_UID/GID checks depend on this. If the checker call were placed
+// earlier (before the req.Env loop) it would still "fail safe" against
+// every other test here (nothing would be configured yet, so a real
+// checker would just reject), so only a test that makes the ordering
+// itself the assertion — rather than relying on some other check happening
+// to fail either way — catches the misordering.
 func TestBootstrap_PrivilegeDropCheckerSeesReqEnv(t *testing.T) {
 	const testVar = "SCION_SUBSTRATE_CHECKER_ORDERING_TEST_VAR"
 	t.Setenv(testVar, "")
