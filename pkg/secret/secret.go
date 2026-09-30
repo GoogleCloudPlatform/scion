@@ -187,9 +187,13 @@ type SecretBackend interface {
 	// have not yet switched to FetchValues. On the GCP backend, when no Hub
 	// database record exists, Get still falls back to a Secret Manager
 	// lookup by a computed name, to recover from a database reset; that
-	// fallback is exactly what FetchValues does not do. Anything selected
-	// for delivery to an agent should use FetchValues, which resolves a
-	// specific recorded metadata version and never falls back by name.
+	// fallback is exactly what FetchValues does not do for a *missing*
+	// record. Anything selected for delivery to an agent should use
+	// FetchValues, which resolves a specific recorded metadata version and
+	// never falls back to a by-name lookup when the record is missing or
+	// mismatched (a matched GCP record with no stored ref is read by its
+	// computed name — hub-prefixed, then legacy with a WARN; see
+	// GCPBackend.FetchValues).
 	//
 	// A new caller must be written using one of the receiver names
 	// TestSecretBackendGet_CallersAreHubInternal (backend_test.go) matches —
@@ -199,10 +203,11 @@ type SecretBackend interface {
 
 	// FetchValues returns values for exactly the given metadata records,
 	// matched by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed
-	// by each record's ID in the returned map. There is no name-based
-	// fallback: a record that is no longer in the store, or whose current
-	// ID, Version, AllowProgeny, CreatedBy or SecretType no longer matches
-	// the recorded metadata, is reported as store.ErrNotFound for that item.
+	// by each record's ID in the returned map. There is no fallback for a
+	// missing or mismatched record: a record that is no longer in the
+	// store, or whose current ID, Version, AllowProgeny, CreatedBy or
+	// SecretType no longer matches the recorded metadata, is reported as
+	// store.ErrNotFound for that item.
 	// The extra AllowProgeny/CreatedBy/SecretType comparison catches a
 	// same-Version metadata race that ID+Version alone would miss, since
 	// UpdateSecretMeta is a read-modify-write with no version predicate (see

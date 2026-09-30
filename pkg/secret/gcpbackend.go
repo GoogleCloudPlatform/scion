@@ -208,7 +208,7 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		// with a WARN log) rather than looking up the prefixed name alone,
 		// so a record that predates ref-tracking and hasn't yet been
 		// touched by `migrate-names` or hub-boot copy-forward still
-		// resolves (ptone/scion#2152/#2085 interaction).
+		// resolves (ptone/scion#2152 / GoogleCloudPlatform/scion#2085 interaction).
 		value, _, err = b.accessSecretByComputedName(ctx, s.Key, s.Scope, s.ScopeID)
 	}
 	if err != nil {
