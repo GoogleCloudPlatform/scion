@@ -168,6 +168,10 @@ type idFixtures struct {
 	integrationName         string
 	lifecycleHook           string
 	chatTopic               string
+	agentLifecycle          string
+	agentRestore            string
+	agentRestoreProject     string
+	agentProvisioning       string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -222,6 +226,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		integrationName:      "telegram",
 		lifecycleHook:        tid("li-lifecycle-hook"),
 		chatTopic:            tid("li-chat-topic"),
+		agentLifecycle:       tid("li-agent-lifecycle"),
+		agentRestore:         tid("li-agent-restore"),
+		agentRestoreProject:  tid("li-agent-restore-project"),
+		agentProvisioning:    tid("li-agent-provisioning"),
 	}
 
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.project, Name: "LI Project", Slug: "li-project"}))
@@ -230,6 +238,39 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agent, Slug: "li-agent", Name: "LI Agent", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDel, Slug: "li-agent-del", Name: "LI Agent Del", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
 	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agent, []store.ExposedPort{{Port: 18080, Host: "127.0.0.1", Label: "li", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
+
+	// agent.lifecycle.control dispatches start/stop/suspend/restart through
+	// handleAgentLifecycle, which persists a real phase change to the store
+	// (checkBrokerAvailability lets an agent with no RuntimeBrokerID
+	// through, and GetDispatcher() is nil in testServer, so start/stop/
+	// restart never reach a broker). A dedicated fixture, not f.agent, keeps
+	// that phase churn (and stop's port clearing) off the agent every other
+	// family's checks (e.g. agent.portaccess's proxy entries) still depend
+	// on.
+	//
+	// Expected per-form sequence (start, stop, suspend, restart, in catalog
+	// declaration order): start/stop/restart each 200. suspend runs third,
+	// after stop already set phase=stopped, so its own phase=running guard
+	// 400s before it would reach suspendAgent — still a real, non-404/405
+	// result read from the seeded row, not a placeholder artifact.
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentLifecycle, Slug: "li-agent-lifecycle", Name: "LI Agent Lifecycle", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+
+	// agent.lifecycle.restore requires the target to already be
+	// soft-deleted (restoreAgent 400s "Agent is not in deleted state"
+	// otherwise); seeded pre-deleted here so the positive check exercises a
+	// genuine restore (200) rather than that guard. Two separate instances,
+	// one per path form, so the by-id form's restore consuming its fixture's
+	// DeletedAt does not turn the project-scoped form's restore into that
+	// same 400.
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentRestore, Slug: "li-agent-restore", Name: "LI Agent Restore", ProjectID: f.project, Phase: string(state.PhaseStopped), DeletedAt: now.Add(-time.Hour)}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentRestoreProject, Slug: "li-agent-restore-project", Name: "LI Agent Restore Project", ProjectID: f.project, Phase: string(state.PhaseStopped), DeletedAt: now.Add(-time.Hour)}))
+
+	// agent.lifecycle.env 409s unless the agent is phase=provisioning
+	// or phase=created (submitAgentEnv); shared by both path forms since
+	// GetDispatcher() is nil in testServer, so submitAgentEnv always 400s
+	// "no runtime broker available" before persisting anything, for either
+	// form, leaving this fixture's phase untouched.
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentProvisioning, Slug: "li-agent-provisioning", Name: "LI Agent Provisioning", ProjectID: f.project, Phase: string(state.PhaseProvisioning)}))
 
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.group, Slug: "li-group", Name: "LI Group"}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.groupDel, Slug: "li-group-del", Name: "LI Group Del"}))
@@ -449,6 +490,26 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
 
+		// --- agent lifecycle family ---
+		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},
+		"/api/v1/agents/{id}/stop":                             {"id": f.agentLifecycle},
+		"/api/v1/agents/{id}/suspend":                          {"id": f.agentLifecycle},
+		"/api/v1/agents/{id}/restart":                          {"id": f.agentLifecycle},
+		"/api/v1/projects/{projectId}/agents/{id}/start":       {"projectId": f.project, "id": f.agentLifecycle},
+		"/api/v1/projects/{projectId}/agents/{id}/stop":        {"projectId": f.project, "id": f.agentLifecycle},
+		"/api/v1/projects/{projectId}/agents/{id}/suspend":     {"projectId": f.project, "id": f.agentLifecycle},
+		"/api/v1/projects/{projectId}/agents/{id}/restart":     {"projectId": f.project, "id": f.agentLifecycle},
+		"/api/v1/agents/{id}/restore":                          {"id": f.agentRestore},
+		"/api/v1/projects/{projectId}/agents/{id}/restore":     {"projectId": f.project, "id": f.agentRestoreProject},
+		"/api/v1/agents/{id}/exec":                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/exec":        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/env":                              {"id": f.agentProvisioning},
+		"/api/v1/projects/{projectId}/agents/{id}/env":         {"projectId": f.project, "id": f.agentProvisioning},
+		"/api/v1/agents/{id}/reset-auth":                       {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/reset-auth":  {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/reincarnate":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/reincarnate": {"projectId": f.project, "id": f.agent},
+
 		// --- project family ---
 		"/api/v1/projects/{id}":                    {"id": f.project},
 		"/api/v1/projects/{id}/members":            {"id": f.project},
@@ -578,6 +639,22 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// handleAdminLimitByID's parts[0] extraction (see the exclusion
 		// reason above), not rejected.
 		{"quota.update", "/api/v1/admin/limits/{id}"}: {"name": "li-limit-ud-updated", "resourceType": "agent", "unit": "count", "defaultValue": 10},
+		// handleAgentExec (handlers_agents_core.go) 400s "command is
+		// required" on the generic empty body before its own agent lookup
+		// and dispatcher check; a real command lets the positive check
+		// reach GetDispatcher()'s nil check (503) instead. Both callers
+		// (handleAgentAction, handleProjectAgentAction) resolve the agent
+		// before calling handleAgentExec, so this override is about the
+		// body check, not the agent lookup.
+		{"agent.lifecycle.exec", "/api/v1/agents/{id}/exec"}:                      {"command": []interface{}{"echo", "li-inventory-probe"}},
+		{"agent.lifecycle.exec", "/api/v1/projects/{projectId}/agents/{id}/exec"}: {"command": []interface{}{"echo", "li-inventory-probe"}},
+		// submitAgentEnv (handlers_agents_core.go) 400s "env map is required"
+		// on the generic empty body before its own agent lookup (both
+		// callers have already resolved the agent); a real env map lets the
+		// positive check reach the phase gate and then GetDispatcher()'s nil
+		// check (400 "no runtime broker available").
+		{"agent.lifecycle.env", "/api/v1/agents/{id}/env"}:                      {"env": map[string]interface{}{"LI_ENV_VAR": "1"}},
+		{"agent.lifecycle.env", "/api/v1/projects/{projectId}/agents/{id}/env"}: {"env": map[string]interface{}{"LI_ENV_VAR": "1"}},
 	}
 }
 
