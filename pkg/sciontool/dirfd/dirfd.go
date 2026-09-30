@@ -136,6 +136,96 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 	return OpenAt(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
 }
 
+// EnsureDirNoFollowUnderRoot ensures that path exists as a directory,
+// anchored under root: it reports underRoot=false (with a nil error) without
+// touching anything when path does not resolve under root at all — root
+// itself, a ".."-relative escape, or anything relUnderRoot cannot express as
+// a descendant of root — so a caller with a legitimate reason to create a
+// directory outside root (e.g. an operator-configured absolute path) can
+// fall back to its own handling for that case.
+//
+// When path DOES resolve under root, this walks from root (opened once via
+// OpenDirNoFollow, so a symlink at root's own leaf or any of root's own
+// ancestors is refused too) down to path one component at a time, exactly
+// like OpenParentNoFollow's walk: each component is opened with
+// O_DIRECTORY|O_NOFOLLOW relative to the previous component's own already-
+// open fd, never by re-parsing a path string. A missing component is
+// created with mkdirat (so nothing can be planted there as a side effect of
+// the create itself) and then reopened no-follow; a component that already
+// exists as a symlink or as any non-directory is refused before anything —
+// including a chown — happens to it. Only a component this call itself
+// creates is fchowned (via AT_EMPTY_PATH on that component's own open fd,
+// never a path-based os.Chown) to uid:gid, when uid > 0; a pre-existing
+// component's ownership is left exactly as it was. mode is the permission
+// bits used for any component this call creates.
+//
+// This is what closes the gap a path-based os.MkdirAll + os.Chown leaves
+// open for a directory chain under a directory the WORKLOAD controls (e.g.
+// $HOME): os.MkdirAll silently succeeds when a component is a symlink to an
+// existing directory, and a subsequent os.Chown follows it — so a workload
+// that plants, say, $HOME/.scion -> /etc ahead of a restart can have root
+// chown /etc to the workload's own uid before this package's own leaf-write
+// guards ever run. Once every component is confirmed real and either
+// pre-existing (untouched) or freshly created (owned by uid:gid), there is
+// nothing left along the chain for a symlink swap to redirect.
+func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid int) (underRoot bool, err error) {
+	rel, rerr := relUnderRoot(root, path)
+	if rerr != nil {
+		return false, nil
+	}
+
+	rootFile, oerr := OpenDirNoFollow(root)
+	if oerr != nil {
+		return true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
+	}
+	defer func() { _ = rootFile.Close() }()
+
+	curFd := int(rootFile.Fd())
+	var owned *os.File
+	defer func() {
+		if owned != nil {
+			_ = owned.Close()
+		}
+	}()
+
+	for _, name := range strings.Split(rel, string(filepath.Separator)) {
+		child, operr := unix.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		created := false
+		switch {
+		case operr == nil:
+			// A real, pre-existing directory: leave its ownership alone.
+		case operr == syscall.ENOENT:
+			if merr := unix.Mkdirat(curFd, name, uint32(mode)); merr != nil && merr != syscall.EEXIST {
+				return true, fmt.Errorf("dirfd: mkdir %s: %w", name, merr)
+			}
+			child, operr = unix.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+			if operr != nil {
+				return true, fmt.Errorf("dirfd: open %s after create: %w", name, operr)
+			}
+			created = true
+		case operr == syscall.ELOOP:
+			return true, fmt.Errorf("dirfd: refusing %s: existing entry is a symlink", name)
+		case operr == syscall.ENOTDIR:
+			return true, fmt.Errorf("dirfd: refusing %s: existing entry is not a directory", name)
+		default:
+			return true, fmt.Errorf("dirfd: open %s: %w", name, operr)
+		}
+
+		if owned != nil {
+			_ = owned.Close()
+		}
+		owned = os.NewFile(uintptr(child), name)
+		curFd = child
+
+		if created && uid > 0 {
+			if cerr := unix.Fchownat(curFd, "", uid, gid, unix.AT_EMPTY_PATH); cerr != nil {
+				return true, fmt.Errorf("dirfd: chown %s: %w", name, cerr)
+			}
+		}
+	}
+	return true, nil
+}
+
 // RenameAt renames oldName to newName, both resolved relative to dirFd via
 // renameat(2). Both names live in the same directory in every caller today.
 func RenameAt(dirFd int, oldName, newName string) error {
