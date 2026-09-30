@@ -947,16 +947,6 @@ go test ./pkg/config ./pkg/agent -count=1
 go test ./pkg/hub -count=1          # slow (~3 min); do not add -race, it hangs
 ```
 
-:::caution[A whole-repo `go test ./...` is not currently green]
-`internal/fixturegen`'s `TestFixtureCoverage` is **failing on `main`** for reasons unrelated to
-settings precedence — the schema has one more domain table than the expected count, and one table
-has no fixture row. This is tracked as
-[issue #625](https://github.com/ptone/scion/issues/625) and is **excluded** from the checks above.
-
-Do not treat a whole-repo green as an achievable baseline right now, and do not "fix" it as part
-of a settings change.
-:::
-
 ## See also
 
 - [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/) — the field reference for
