@@ -160,3 +160,37 @@ func TestUATCeilingStep1_NoWideningDespiteLiveProjectAuthority(t *testing.T) {
 	controlDecision := authz.CheckAccess(ctx, base, resource, ActionDelete)
 	assert.True(t, controlDecision.Allowed, "sanity: the user's live role does grant agent.delete outside any UAT")
 }
+
+// TestCreateTokenWithParams_DeniedSelectorLeavesNoTokenRow pins the binding
+// condition on CreateTokenWithParams's mint path: CanMintSelector (the
+// eligibility gate) and BuildCeilingFromSelectors (the persisted-ceiling
+// resolver) are called with the exact same expanded-selector slice — no
+// separate re-derivation — and both run, and can fail closed, strictly
+// before the WithTx token-insert transaction. A denied selector must
+// therefore never reach the insert: no row is created for the attempt, not
+// even a revoked/expired one.
+func TestCreateTokenWithParams_DeniedSelectorLeavesNoTokenRow(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	memberID := tid("no-row-on-denial-member")
+	project := &store.Project{ID: tid("no-row-on-denial-project"), Name: "p", Slug: "no-row-on-denial-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	// A plain project member: projectMemberCuratedPermissionIDs does not
+	// include agent.delete (owner/admin only), and the member has no
+	// relationship candidacy for it either (agent.delete is not a
+	// relationship-mintable selector).
+	createTestUserWithProjectRole(t, s, memberID, "no-row-on-denial@example.com", project.ID, store.ProjectRoleMember)
+
+	before, err := s.ListUserAccessTokens(ctx, memberID)
+	require.NoError(t, err)
+	require.Empty(t, before, "precondition: no tokens exist yet for this user")
+
+	_, _, mintErr := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "denied-mint",
+		project.ID, []string{"agent:delete"}, nil)
+	require.Error(t, mintErr, "a plain member must not be able to mint agent:delete")
+
+	after, err := s.ListUserAccessTokens(ctx, memberID)
+	require.NoError(t, err)
+	assert.Empty(t, after, "a denied selector must leave no token row — CanMintSelector's denial must be reached before WithTx, never rolled back after an insert")
+}
