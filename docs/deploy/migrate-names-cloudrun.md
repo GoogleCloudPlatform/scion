@@ -352,21 +352,29 @@ FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$
   || echo "STOP: services/jobs describe failed or returned nothing, REVISION/ROLLOUT_OK_JQ/JOB_IMG are empty, rollout not complete, revision changed, traffic is pinned to a non-latest revision, a traffic tag exists, or the job's image no longer matches the serving revision's digest; remove any traffic tag (see below), otherwise see §8 step 3 — delete the job and restart from §2, don't hand-patch the image"
 ```
 
-The `[ -n ... ]` checks keep this gate fail-closed on every `jq` version: jq 1.6
-treats a missing or empty program as `.` and exits 0 under `-e` even with no input,
-so without these checks a failed `describe` or an empty
-`$REVISION`/`$ROLLOUT_OK_JQ`/`$JOB_IMG` would print `OK` instead of `STOP`. The
-`$JOB_IMG` comparison makes the gate check the job's actual pin instead of trusting
-the shell's `$REVISION`: the job resource outlives the shell, so a lost-and-resumed
-session (a new terminal, a Cloud Shell timeout, or leaving the `bash` subshell §1
-asks for) can otherwise re-derive `REVISION` from live traffic while the job stays
-pinned to an older digest — the gate would then check the wrong revision against
-the right one and print a false `OK`. If `REVISION`, `ROLLOUT_OK_JQ`, or `JOB_IMG`
-come back empty, or the job's image doesn't match the serving revision's digest —
-see §8 step 3: delete the job and restart from §2. Don't hand-patch the job's image
-to make it match; the whole point of the digest pin (§2) is that the job runs the
-exact binary the service does, and hand-patching only hides a mismatch that means
-something else already went wrong.
+The `[ -n "$FRESH_SVC" ]`, `[ -n "$REVISION" ]`, and `[ -n "$ROLLOUT_OK_JQ" ]` checks
+keep this gate fail-closed on every `jq` version: jq 1.6 treats a missing or empty
+program as `.` and exits 0 under `-e` even with no input, so without these checks a
+failed `describe` or an empty `$REVISION`/`$ROLLOUT_OK_JQ` would print `OK` instead of
+`STOP`. The `[ -n "$JOB_IMG" ]` check instead guards the string comparison below it: an
+empty value must never compare as a match, so without it a failed `jobs describe` (empty
+`$JOB_IMG`) alongside a failed `revisions describe` (empty `status.imageDigest`) would
+compare `"" = ""` and print `OK`. That comparison makes the gate check the job's image
+instead of trusting the shell's `$REVISION`: the job resource outlives the shell, so a
+lost-and-resumed session (a new terminal, a Cloud Shell timeout, or leaving the `bash`
+subshell §1 asks for) can otherwise re-derive `REVISION` from live traffic while the job
+stays pinned to an older digest — the gate would then check the wrong revision against
+the right one and print a false `OK`. The gate checks only the job's image, though, not
+its secret versions, Cloud SQL connection or network, so it can't detect a config-only
+revision with the same image digest — a DSN secret-version bump or a settings change
+through Terraform, with no new build — which is why, if you lose §2's shell, you must
+not re-derive its variables by hand in a new shell: go straight to §8 step 3, delete the
+job, and restart from §2. If `REVISION`, `ROLLOUT_OK_JQ`, or `JOB_IMG` come back empty,
+or the job's image doesn't match the serving revision's digest — see §8 step 3: delete
+the job and restart from §2. Don't hand-patch the job's image to make it match; the
+whole point of the digest pin (§2) is that the job runs the exact binary the service
+does, and hand-patching only hides a mismatch that means something else already went
+wrong.
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
 the job to in §2, and that revision must also be both `latestReadyRevisionName` and
@@ -652,6 +660,8 @@ runbook doesn't cover:
      the module's normal Terraform apply, then roll forward as above.
    - A **traffic tag**: remove it — `gcloud run services update-traffic "$HUB"
      --project "$PROJECT" --region "$REGION" --remove-tags=<tag>`.
+   - A **job-image mismatch** or lost shell state with traffic otherwise converged:
+     nothing more to clear; deleting the job above is the fix.
 
    Resolve the underlying blocker (org policy, IAM, quota) first if that's what's
    stopping the redeploy or roll-forward. The module declares no `traffic` block, so a
