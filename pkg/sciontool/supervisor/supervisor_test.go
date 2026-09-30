@@ -5,13 +5,42 @@ Copyright 2025 The Scion Authors.
 package supervisor
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it. log.write always writes to whatever os.Stderr
+// currently is (read fresh on each call, never cached), so this needs no
+// change to the log package itself. Not safe to run with t.Parallel().
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	log.SetQuiet(false)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
+	return buf.String()
+}
 
 func TestSupervisor_RunSuccessfulCommand(t *testing.T) {
 	config := DefaultConfig()
@@ -435,7 +464,9 @@ func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
 
 // TestChownRecursive_Enforced_SkipsHardlinkedRegularFile proves the
 // hard-link guard is enabled when requirePrivilegeDrop is true: a regular
-// file with more than one hard link is left unchowned.
+// file with more than one hard link is left unchowned, and the skip is
+// logged at the real WARN level (log.Warn), not Info with an inline "WARN:"
+// substring standing in for a level pkg/sciontool/log always had.
 func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
@@ -449,11 +480,21 @@ func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 
 	uid, gid := os.Getuid(), os.Getgid()
-	if err := chownRecursive(root, uid, gid, true); err != nil {
-		t.Fatalf("chownRecursive: %v", err)
+	var runErr error
+	output := captureStderr(t, func() {
+		runErr = chownRecursive(root, uid, gid, true)
+	})
+	if runErr != nil {
+		t.Fatalf("chownRecursive: %v", runErr)
 	}
 	if lstatCtime(t, target) != before {
 		t.Error("hard-linked file was chowned despite requirePrivilegeDrop=true")
+	}
+	if !strings.Contains(output, "[sciontool] WARN:") {
+		t.Errorf("expected the hard-link skip to be logged at WARN level, got: %s", output)
+	}
+	if strings.Contains(output, "INFO: WARN:") {
+		t.Errorf("expected a real WARN log line, not Info with an inline WARN substring, got: %s", output)
 	}
 }
 

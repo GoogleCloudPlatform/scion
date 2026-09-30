@@ -469,9 +469,7 @@ func indexByte(s string, c byte) int {
 func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
 	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
 		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
-			// pkg/sciontool/log has no dedicated Warn level; Info is the
-			// closest non-fatal level it offers.
-			log.Info("chownRecursive: WARN: skipping %s: %v", name, cerr)
+			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
 			return
 		}
 		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
