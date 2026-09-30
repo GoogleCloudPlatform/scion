@@ -53,6 +53,64 @@ func TestTokenBoundary_Valid(t *testing.T) {
 	}
 }
 
+// TestUATBoundary_StoreAndHubValidityAgree pins that pkg/hub's
+// TokenBoundary.Valid() and pkg/store's UserAccessToken.ValidateBoundary
+// agree on the shared kind/project-id-presence rule (permissions.
+// ValidBoundary) they both call — store cannot import pkg/hub, so this is
+// the one place able to import and compare both, per the F-2 requirement
+// that boundary validity be reachable, and agree, below pkg/hub. store's
+// ValidateBoundary additionally requires ProjectID to parse as a UUID for a
+// "project" boundary, since pkg/store owns that ID's wire representation;
+// that extra requirement is not part of TokenBoundary.Valid() and is
+// verified as a strict narrowing, not a disagreement: whenever store
+// accepts, hub accepts too.
+func TestUATBoundary_StoreAndHubValidityAgree(t *testing.T) {
+	validUUID := "3f8e2b0a-6c1d-4a2f-9e77-9d3b1c5a2e10"
+	cases := []struct {
+		name          string
+		kind          string
+		projectID     string
+		wantHubValid  bool
+		wantStoreOK   bool
+		storeIsStrict bool // true: store enforces a stricter rule than hub (UUID format)
+	}{
+		{"project with valid uuid", "project", validUUID, true, true, false},
+		{"project with empty id", "project", "", false, false, false},
+		{"project with non-uuid id", "project", "not-a-uuid", true, false, true},
+		{"hub with no id", "hub", "", true, true, false},
+		{"hub with id", "hub", validUUID, false, false, false},
+		{"unknown kind", "bogus", "", false, false, false},
+		{"empty kind", "", "", false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hubValid := TokenBoundary{Kind: BoundaryKind(c.kind), ProjectID: c.projectID}.Valid()
+			if hubValid != c.wantHubValid {
+				t.Errorf("TokenBoundary.Valid() = %v, want %v", hubValid, c.wantHubValid)
+			}
+
+			storeTok := &store.UserAccessToken{BoundaryKind: c.kind, ProjectID: c.projectID}
+			storeErr := storeTok.ValidateBoundary()
+			storeOK := storeErr == nil
+			if storeOK != c.wantStoreOK {
+				t.Errorf("store.ValidateBoundary() ok = %v (err=%v), want %v", storeOK, storeErr, c.wantStoreOK)
+			}
+
+			// The relationship the two validators must maintain: store
+			// acceptance implies hub acceptance always. Hub acceptance
+			// implies store acceptance UNLESS this case is documented as
+			// one where store's extra UUID-format check is the reason for
+			// the gap (storeIsStrict).
+			if storeOK && !hubValid {
+				t.Errorf("store accepted but hub rejected: kind=%q projectID=%q — validators disagree", c.kind, c.projectID)
+			}
+			if hubValid && !storeOK && !c.storeIsStrict {
+				t.Errorf("hub accepted but store rejected without being marked as a stricter case: kind=%q projectID=%q", c.kind, c.projectID)
+			}
+		})
+	}
+}
+
 func TestTargetScope_Valid(t *testing.T) {
 	cases := []struct {
 		name string

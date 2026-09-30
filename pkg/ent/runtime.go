@@ -1789,20 +1789,26 @@ func init() {
 	useraccesstokenDescKeyHash := useraccesstokenFields[4].Descriptor()
 	// useraccesstoken.KeyHashValidator is a validator for the "key_hash" field. It is called by the builders before save.
 	useraccesstoken.KeyHashValidator = useraccesstokenDescKeyHash.Validators[0].(func(string) error)
+	// useraccesstokenDescBoundaryKind is the schema descriptor for boundary_kind field.
+	useraccesstokenDescBoundaryKind := useraccesstokenFields[6].Descriptor()
+	// useraccesstoken.DefaultBoundaryKind holds the default value on creation for the boundary_kind field.
+	useraccesstoken.DefaultBoundaryKind = useraccesstokenDescBoundaryKind.Default.(string)
+	// useraccesstoken.BoundaryKindValidator is a validator for the "boundary_kind" field. It is called by the builders before save.
+	useraccesstoken.BoundaryKindValidator = useraccesstokenDescBoundaryKind.Validators[0].(func(string) error)
 	// useraccesstokenDescScopes is the schema descriptor for scopes field.
-	useraccesstokenDescScopes := useraccesstokenFields[6].Descriptor()
+	useraccesstokenDescScopes := useraccesstokenFields[7].Descriptor()
 	// useraccesstoken.ScopesValidator is a validator for the "scopes" field. It is called by the builders before save.
 	useraccesstoken.ScopesValidator = useraccesstokenDescScopes.Validators[0].(func(string) error)
 	// useraccesstokenDescCeilingVersion is the schema descriptor for ceiling_version field.
-	useraccesstokenDescCeilingVersion := useraccesstokenFields[7].Descriptor()
+	useraccesstokenDescCeilingVersion := useraccesstokenFields[8].Descriptor()
 	// useraccesstoken.DefaultCeilingVersion holds the default value on creation for the ceiling_version field.
 	useraccesstoken.DefaultCeilingVersion = useraccesstokenDescCeilingVersion.Default.(int32)
 	// useraccesstokenDescRevoked is the schema descriptor for revoked field.
-	useraccesstokenDescRevoked := useraccesstokenFields[9].Descriptor()
+	useraccesstokenDescRevoked := useraccesstokenFields[10].Descriptor()
 	// useraccesstoken.DefaultRevoked holds the default value on creation for the revoked field.
 	useraccesstoken.DefaultRevoked = useraccesstokenDescRevoked.Default.(bool)
 	// useraccesstokenDescCreated is the schema descriptor for created field.
-	useraccesstokenDescCreated := useraccesstokenFields[12].Descriptor()
+	useraccesstokenDescCreated := useraccesstokenFields[13].Descriptor()
 	// useraccesstoken.DefaultCreated holds the default value on creation for the created field.
 	useraccesstoken.DefaultCreated = useraccesstokenDescCreated.Default.(func() time.Time)
 	// useraccesstokenDescID is the schema descriptor for id field.

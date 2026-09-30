@@ -475,6 +475,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillUATCeilings(ctx); err != nil {
 		return fmt.Errorf("user access token ceiling backfill: %w", err)
 	}
+	if err := c.ValidateUserAccessTokenBoundaries(ctx); err != nil {
+		return fmt.Errorf("user access token boundary validation: %w", err)
+	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.
 	// Runs after schema migration (which adds the "invited" status enum value)
