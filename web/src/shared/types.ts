@@ -801,14 +801,16 @@ export interface RuntimeBroker {
   agentLimit?: number;
   /**
    * The number of active max_agents_per_broker reservations held by this
-   * broker. Absent under the same conditions as agentLimit; a zero count is
-   * reported as 0, not omitted.
+   * broker. Absent only when resolution didn't run or failed. Unlike
+   * agentLimit, it is still present (possibly non-zero) when the broker is
+   * unlimited — agentLimit's absence there means "no cap", not "no count".
    */
   agentCount?: number;
   /**
    * The precedence step that produced agentLimit: "broker" | "entitlement" |
    * "hub_default" | "unlimited". Present under the same condition as
-   * agentLimit/agentCount.
+   * agentCount, not agentLimit — it is still "unlimited" exactly when
+   * agentLimit is absent because the broker has no cap.
    */
   agentLimitSource?: string;
 }

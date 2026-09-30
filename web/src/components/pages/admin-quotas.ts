@@ -85,8 +85,10 @@ interface UsageReservation {
   brokerAgentLimit?: number;
   /**
    * The precedence step that produced brokerAgentLimit: "broker" |
-   * "entitlement" | "hub_default" | "unlimited". Present under the same
-   * condition as brokerAgentLimit.
+   * "entitlement" | "hub_default" | "unlimited". Present for every
+   * broker-scoped reservation under that limit, including when the broker is
+   * unlimited (source "unlimited") — unlike brokerAgentLimit, which is then
+   * absent.
    */
   brokerAgentLimitSource?: string;
 }
@@ -938,8 +940,16 @@ export class ScionPageAdminQuotas extends LitElement {
   private renderLimitRow(limit: LimitDefinition) {
     const activeCount = this.usageSummary.get(limit.id) ?? 0;
     const isExpanded = this.expandedLimitId === limit.id;
+    // max_agents_per_broker's activeCount is a sum across every broker
+    // (ptone/scion#2061 P2.2), while defaultValue is the *per-broker* cap —
+    // dividing one by the other (e.g. "36 / 30" for three brokers at 12
+    // each) reads as a breached quota when no single broker is near its
+    // cap, and ignores per-broker overrides/entitlements entirely. Render
+    // just the count for this one limit; the per-broker expansion below
+    // still shows each broker's real effective cap and source.
+    const isPerBrokerLimit = limit.name === 'max_agents_per_broker';
     const pct =
-      limit.defaultValue > 0
+      !isPerBrokerLimit && limit.defaultValue > 0
         ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
         : 0;
 
@@ -970,10 +980,21 @@ export class ScionPageAdminQuotas extends LitElement {
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            <span>${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span>
-            ${limit.defaultValue > 0
-              ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
-              : nothing}
+            ${isPerBrokerLimit
+              ? html`
+                  <span>${activeCount}</span>
+                  <span class="meta-text" style="font-size: 0.75rem"
+                    >across all brokers; cap is per broker</span
+                  >
+                `
+              : html`
+                  <span
+                    >${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span
+                  >
+                  ${limit.defaultValue > 0
+                    ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
+                    : nothing}
+                `}
           </div>
         </td>
         <td class="hide-mobile">
@@ -1117,9 +1138,11 @@ export class ScionPageAdminQuotas extends LitElement {
                                         ? this.formatValue(r.brokerAgentLimit)
                                         : 'unlimited'}</span
                                     >
-                                    <span title="Precedence source"
-                                      >(${r.brokerAgentLimitSource})</span
-                                    >
+                                    ${r.brokerAgentLimitSource === 'unlimited'
+                                      ? nothing
+                                      : html`<span title="Precedence source"
+                                          >(${r.brokerAgentLimitSource})</span
+                                        >`}
                                   </div>
                                 `
                               : nothing}

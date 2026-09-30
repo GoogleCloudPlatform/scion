@@ -20,7 +20,7 @@
  * Displays all runtime brokers with their status, version, and capabilities
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
@@ -246,17 +246,15 @@ export class ScionPageBrokers extends LitElement {
    * absent — e.g. the caller lacks visibility, or capacity resolution didn't
    * run.
    */
-  private renderAgentCapacity(broker: RuntimeBroker) {
+  private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
     if (broker.agentCount === undefined) {
       return html`<span class="meta-text">—</span>`;
     }
     const capLabel = broker.agentLimit !== undefined ? String(broker.agentLimit) : 'unlimited';
-    const sourceLabel = broker.agentLimitSource ? ` (${broker.agentLimitSource})` : '';
     return html`
       <span class="mono-cell" title="Source: ${broker.agentLimitSource || 'unknown'}"
         >${broker.agentCount} / ${capLabel}</span
       >
-      <span class="meta-text" style="font-size: 0.75rem">${sourceLabel}</span>
     `;
   }
 
