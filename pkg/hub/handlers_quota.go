@@ -633,7 +633,9 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 // ---------------------------------------------------------------------------
 
 func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
-	defs, err := s.store.ListLimitDefinitions(r.Context())
+	ctx := r.Context()
+
+	defs, err := s.store.ListLimitDefinitions(ctx)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -641,11 +643,24 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]usageSummaryEntry, 0, len(defs))
 	for _, def := range defs {
-		reservations, err := s.store.ListActiveReservations(r.Context(), def.ID, store.QuotaScopeSystem, "")
+		// max_agents_per_broker reservations are stored at
+		// store.QuotaScopeBroker scoped to each individual broker
+		// (broker_quota.go), never at store.QuotaScopeSystem, so the
+		// system-scope query below always returns none for it — the summary
+		// row showed 0 active agents regardless of real usage. Sum across
+		// every broker instead, the same way getUsageByLimit and
+		// ReconcileStaleBrokerQuotaReservations do (ptone/scion#2061 P2.2).
+		var reservations []*store.UsageReservation
+		var listErr error
+		if def.Name == store.LimitMaxAgentsPerBroker {
+			reservations, listErr = s.listBrokerScopedActiveReservations(ctx, def.ID)
+		} else {
+			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
+		}
 		activeCount := 0
-		if err != nil {
+		if listErr != nil {
 			slog.Error("failed to list active reservations for usage summary",
-				"limit_id", def.ID, "error", err)
+				"limit_id", def.ID, "error", listErr)
 		} else {
 			activeCount = len(reservations)
 		}

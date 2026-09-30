@@ -187,3 +187,84 @@ func TestGetUsageByLimit_MaxAgentsPerBroker_NoActiveReservations(t *testing.T) {
 	assert.Equal(t, 0, resp.TotalActive)
 	assert.Empty(t, resp.Reservations)
 }
+
+// TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers proves the admin
+// usage summary (GET /api/v1/admin/usage) reports the real active count for
+// max_agents_per_broker by summing reservations across every runtime broker,
+// the same way getUsageByLimit and ReconcileStaleBrokerQuotaReservations
+// enumerate brokers (ptone/scion#2061 P2.2). Before this fix, the summary's
+// activeCount for this limit always queried store.QuotaScopeSystem — a scope
+// max_agents_per_broker reservations are never stored at — so the admin
+// quotas page always showed 0 active agents for it regardless of real usage.
+func TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	brokerA := mkCapacityTestBroker(t, s, "summary-broker-a")
+	brokerB := mkCapacityTestBroker(t, s, "summary-broker-b")
+
+	// Two reservations on brokerA, one on brokerB: the summary must report 3
+	// total, not 0 (the pre-fix behaviour) and not just one broker's count.
+	for _, res := range []*store.UsageReservation{
+		{LimitDefinitionID: def.ID, SubjectID: brokerA.ID, ScopeType: store.QuotaScopeBroker, ScopeID: brokerA.ID, ResourceID: "agent-a1", Reserved: 1},
+		{LimitDefinitionID: def.ID, SubjectID: brokerA.ID, ScopeType: store.QuotaScopeBroker, ScopeID: brokerA.ID, ResourceID: "agent-a2", Reserved: 1},
+		{LimitDefinitionID: def.ID, SubjectID: brokerB.ID, ScopeType: store.QuotaScopeBroker, ScopeID: brokerB.ID, ResourceID: "agent-b1", Reserved: 1},
+	} {
+		_, err := s.CreateUsageReservation(ctx, res)
+		require.NoError(t, err)
+	}
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp usageSummaryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	var found *usageSummaryEntry
+	for i := range resp.Items {
+		if resp.Items[i].LimitDefinition.ID == def.ID {
+			found = &resp.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "summary must include the max_agents_per_broker limit")
+	assert.Equal(t, 3, found.ActiveCount, "activeCount must sum reservations across every broker, not just query system scope")
+}
+
+// TestGetUsageSummary_NonBrokerLimit_Unaffected proves the broker-scoped
+// enumeration in getUsageSummary is opt-in by limit name: a system-scoped
+// limit must keep using the original system-scope query.
+func TestGetUsageSummary_NonBrokerLimit_Unaffected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	def := seedLimit(t, s, "usage_summary_non_broker_limit", 5)
+	_, err := s.CreateUsageReservation(ctx, &store.UsageReservation{
+		LimitDefinitionID: def.ID,
+		SubjectID:         "some-user",
+		ScopeType:         store.QuotaScopeSystem,
+		ScopeID:           "",
+		ResourceID:        "agent-1",
+		Reserved:          1,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp usageSummaryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	var found *usageSummaryEntry
+	for i := range resp.Items {
+		if resp.Items[i].LimitDefinition.ID == def.ID {
+			found = &resp.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, 1, found.ActiveCount)
+}
