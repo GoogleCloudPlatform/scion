@@ -32,6 +32,17 @@ import { PROJECT_ID } from './mock-api.js';
 
 import type { PageData } from '../../src/shared/types.js';
 
+// ?spacer=1 pushes the component below the fold, so the Files section's
+// IntersectionObserver-based deferral (see project-detail.ts's
+// observeFilesSection()) can be exercised in a real viewport instead of
+// always intersecting immediately.
+if (new URLSearchParams(location.search).get('spacer')) {
+  const spacer = document.createElement('div');
+  spacer.style.height = '2000px';
+  spacer.dataset.testSpacer = 'true';
+  document.body.append(spacer);
+}
+
 const el = document.createElement('scion-page-project-detail') as HTMLElement & {
   projectId: string;
   pageData: PageData | null;

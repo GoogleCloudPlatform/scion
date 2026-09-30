@@ -25,8 +25,12 @@
  * emission. This spec runs the real, compiled component against a real,
  * registered Shoelace `<sl-tab-group>` in a real browser to close that gap:
  * one listing request for the initially-active tab, a real click switching
- * to a second tab (mounting and loading it), and the file editor's
- * open/Back round trip.
+ * to a second tab (mounting and loading it), the never-opened third tab
+ * staying untouched throughout (including across the editor round trip,
+ * which remounts every *previously visited* tab), the file editor's
+ * open/Back round trip, and the Files section's viewport-deferred reveal
+ * (a below-the-fold placeholder that mounts nothing and requests nothing
+ * until scrolled near).
  *
  * This spec does not replay the round-1 SSE active-shared-dir-removal
  * regression. normalizeActiveFileTab() corrects `activeFileTab` in
@@ -39,7 +43,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { installApiMocks, SHARED_DIR_A } from './mock-api.js';
+import { installApiMocks, SHARED_DIR_A, SHARED_DIR_B } from './mock-api.js';
 
 test.describe('project-detail Files tabs — real Shoelace tab-group', () => {
   test('loads the active tab once, switches tabs via a real click, and round-trips the editor', async ({
@@ -101,5 +105,49 @@ test.describe('project-detail Files tabs — real Shoelace tab-group', () => {
         .locator(`scion-file-browser[data-tab="${SHARED_DIR_A}"]`)
         .locator('.file-name', { hasText: sharedAFileName })
     ).toBeVisible({ timeout: 10_000 });
+
+    // The never-opened third tab (shared-b) still made no request and is
+    // still unmounted, through the entire flow above — including the
+    // editor round trip, which remounts every *previously visited* tab but
+    // must not touch this one.
+    expect(counts.sharedDirListings[SHARED_DIR_B]).toBe(0);
+    await expect(page.locator(`scion-file-browser[data-tab="${SHARED_DIR_B}"]`)).toHaveCount(0);
+  });
+
+  test('defers the Files section until it nears the viewport, then reveals and loads it', async ({
+    page,
+  }) => {
+    const counts = await installApiMocks(page);
+    await page.goto('/e2e/project-files-tabs/fixture.html?spacer=1', {
+      waitUntil: 'domcontentloaded',
+    });
+
+    // The 2000px spacer (see fixture.ts) pushes the whole component below
+    // the fold. The placeholder is in the DOM, but nothing has mounted or
+    // requested anything yet.
+    const placeholder = page.locator('.files-section-placeholder');
+    await expect(placeholder).toBeAttached({ timeout: 10_000 });
+    await expect(page.locator('scion-file-browser')).toHaveCount(0);
+    expect(counts.workspaceListings).toBe(0);
+    expect(counts.sharedDirListings[SHARED_DIR_A]).toBe(0);
+    expect(counts.sharedDirListings[SHARED_DIR_B]).toBe(0);
+
+    // Give the IntersectionObserver a moment to have observed and reported
+    // "not intersecting" at least once, so the reveal below is caused by
+    // the scroll, not a race on the observer's first callback.
+    await page.waitForTimeout(300);
+    await expect(placeholder).toBeAttached();
+    expect(counts.workspaceListings).toBe(0);
+
+    // Scroll the placeholder into view — this is what crosses the
+    // rootMargin threshold and triggers observeFilesSection()'s reveal.
+    await placeholder.scrollIntoViewIfNeeded();
+
+    await expect(placeholder).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator('scion-file-browser[data-tab="workspace"]')).toBeAttached();
+    await expect.poll(() => counts.workspaceListings).toBe(1);
+    // Only the active tab reveals — the shared dirs are still untouched.
+    expect(counts.sharedDirListings[SHARED_DIR_A]).toBe(0);
+    expect(counts.sharedDirListings[SHARED_DIR_B]).toBe(0);
   });
 });
