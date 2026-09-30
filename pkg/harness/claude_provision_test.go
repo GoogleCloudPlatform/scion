@@ -285,6 +285,9 @@ func TestClaudeProvisionScript_Integration_HappyPath(t *testing.T) {
 	if envOverlay["ANTHROPIC_API_KEY"] != "${ANTHROPIC_API_KEY}" {
 		t.Errorf("env.json ANTHROPIC_API_KEY=%v want ${ANTHROPIC_API_KEY}", envOverlay["ANTHROPIC_API_KEY"])
 	}
+	if envOverlay["DISABLE_AUTOUPDATER"] != "1" {
+		t.Errorf("env.json DISABLE_AUTOUPDATER=%v want 1", envOverlay["DISABLE_AUTOUPDATER"])
+	}
 
 	// Verify .claude.json was updated with project paths.
 	claudeData, err := os.ReadFile(filepath.Join(home, ".claude.json"))

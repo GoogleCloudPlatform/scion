@@ -1,0 +1,487 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Reusable file/attachment preview dialog, shared by the thread's path-link
+ * overlay and the message attachment overlay.
+ *
+ * A single `<scion-chat-file-preview>` instance renders an `sl-dialog` for
+ * either an attachment (`GET /api/v1/chat/attachments/{id}`) or a resolved
+ * container path (`buildFileApiUrl`), with one shared image/text/markdown/code
+ * renderer for both. It owns its own loading/error/download state so callers
+ * only ever set or clear `.target`.
+ *
+ * Each `target` change starts a new "generation" and a fresh
+ * `AbortController`; a response for a superseded generation is discarded
+ * without ever touching state — never rewritten into an error, since a
+ * cancelled or superseded load is not a failure of the load the user is
+ * currently waiting on. Object URLs created for image previews are revoked
+ * on replacement, close and disconnect.
+ */
+
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { apiFetch, extractApiError } from '../../../client/api.js';
+import { getLanguageFromPath } from '../code-editor.js';
+import {
+  buildAttachmentApiUrl,
+  buildFileApiUrl,
+  isImageFileName,
+  isMarkdownFileName,
+  TEXT_PREVIEW_MAX_BYTES,
+  type PathLinkTarget,
+} from '../../../utils/chat-file-links.js';
+import '../code-editor.js';
+import '../markdown-preview.js';
+
+/** An attachment target, addressed by its opaque attachment ID. */
+export interface AttachmentPreviewTarget {
+  kind: 'attachment';
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+/** A resolved container-path target, addressed by project + parsed location. */
+export interface PathPreviewTarget {
+  kind: 'path';
+  projectId: string;
+  containerPath: string;
+  location: PathLinkTarget;
+  name: string;
+}
+
+/** What `<scion-chat-file-preview>` renders: an attachment or a resolved path, plus its display name. */
+export type PreviewTarget = AttachmentPreviewTarget | PathPreviewTarget;
+
+/** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
+const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+
+interface LoadState {
+  status: 'loading' | 'ready' | 'error';
+  isImage: boolean;
+  isMarkdown: boolean;
+  isBinary: boolean;
+  content?: string;
+  objectUrl?: string;
+  error?: string;
+}
+
+const IDLE_STATE: LoadState = {
+  status: 'loading',
+  isImage: false,
+  isMarkdown: false,
+  isBinary: false,
+};
+
+/**
+ * The URL used to fetch/download a target's raw bytes (no `?view=` /
+ * `?format=` suffix). Throws for an unsafe target — see
+ * `buildAttachmentApiUrl`/`buildFileApiUrl` — so every caller must be
+ * prepared for that, not just the ones already inside a try/catch.
+ */
+function downloadUrlFor(target: PreviewTarget): string {
+  return target.kind === 'attachment'
+    ? buildAttachmentApiUrl(target.id)
+    : buildFileApiUrl(target.projectId, target.location);
+}
+
+/** Classify a non-OK response into a short, actionable message. */
+async function describeHttpError(res: Response): Promise<string> {
+  if (res.status === 403) return "You don't have permission to view this file.";
+  if (res.status === 404) return 'This file could not be found.';
+  return extractApiError(res, `Failed to load file (HTTP ${res.status})`);
+}
+
+@customElement('scion-chat-file-preview')
+export class ScionChatFilePreview extends LitElement {
+  /** The attachment or path to preview, or null to render nothing. */
+  @property({ attribute: false })
+  target: PreviewTarget | null = null;
+
+  @state() private loadState: LoadState = IDLE_STATE;
+
+  /** Markdown source/preview toggle, per target (only ever one target open at a time). */
+  @state() private showSource = false;
+
+  @state() private copied = false;
+
+  /** Bumped on every target change; a response is applied only if it still matches. */
+  private generation = 0;
+
+  private controller: AbortController | null = null;
+
+  private copyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  override willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('target')) {
+      this.showSource = false;
+      this.copied = false;
+      // `copied` is already reset above, so a timer still pending from the
+      // previous target no longer has anything of its own to reset — clear
+      // it anyway so it doesn't linger as a scheduled callback for a target
+      // that's no longer showing.
+      this.clearCopyTimer();
+      void this.load();
+    }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.controller?.abort();
+    this.revokeObjectUrl();
+    // A copy-feedback timer is a plain JS timer, not tied to the element's
+    // connection state, so it keeps running after disconnect regardless.
+    // Clearing it alone isn't enough: once cleared, nothing would ever
+    // reset `copied` back to false, so a reconnect of this same instance
+    // (its state, including `copied`, survives a disconnect) would show
+    // "Copied!" indefinitely, however soon or late that reconnect happens.
+    // Resetting `copied` here directly is the state that's safe no matter
+    // when — or whether — a reconnect follows.
+    this.clearCopyTimer();
+    this.copied = false;
+  }
+
+  private revokeObjectUrl(): void {
+    if (this.loadState.objectUrl) {
+      URL.revokeObjectURL(this.loadState.objectUrl);
+    }
+  }
+
+  private clearCopyTimer(): void {
+    if (this.copyTimer) {
+      clearTimeout(this.copyTimer);
+      this.copyTimer = null;
+    }
+  }
+
+  private async load(): Promise<void> {
+    this.controller?.abort();
+    this.revokeObjectUrl();
+    const gen = ++this.generation;
+    const target = this.target;
+
+    if (!target) {
+      this.loadState = IDLE_STATE;
+      return;
+    }
+
+    const isImage =
+      target.kind === 'attachment' ? IMAGE_MIMES.has(target.mime) : isImageFileName(target.name);
+    const isMarkdown = !isImage && isMarkdownFileName(target.name);
+    this.loadState = { status: 'loading', isImage, isMarkdown, isBinary: false };
+
+    const controller = new AbortController();
+    this.controller = controller;
+
+    // Resolved in its own try/catch, separate from the network try/catch
+    // below: a thrown target-URL builder error (see `downloadUrlFor`) is an
+    // internal detail (e.g. "buildFileApiUrl: unsafe project id") that must
+    // never reach the user directly — it's mapped to the same generic,
+    // fixed message a broken/malicious link always gets, never the raw
+    // builder message.
+    let baseUrl: string;
+    try {
+      baseUrl = downloadUrlFor(target);
+    } catch {
+      this.loadState = {
+        status: 'error',
+        isImage,
+        isMarkdown,
+        isBinary: false,
+        error: "This file link can't be opened.",
+      };
+      return;
+    }
+
+    try {
+      if (isImage) {
+        const res = await apiFetch(`${baseUrl}?view=true`, {
+          signal: controller.signal,
+        });
+        if (gen !== this.generation) return; // superseded — discard silently
+        if (!res.ok) {
+          this.loadState = {
+            status: 'error',
+            isImage,
+            isMarkdown,
+            isBinary: false,
+            error: await describeHttpError(res),
+          };
+          return;
+        }
+        const blob = await res.blob();
+        if (gen !== this.generation) return; // superseded while reading the body
+        this.loadState = {
+          status: 'ready',
+          isImage,
+          isMarkdown,
+          isBinary: false,
+          objectUrl: URL.createObjectURL(blob),
+        };
+        return;
+      }
+
+      // Text/markdown/code path. Attachments serve the raw body directly;
+      // container paths use the existing `?format=json` contract, which also
+      // reports size so an oversized file can fall back to download-only.
+      const url = target.kind === 'attachment' ? baseUrl : `${baseUrl}?format=json`;
+      const res = await apiFetch(url, { signal: controller.signal });
+      if (gen !== this.generation) return;
+      if (!res.ok) {
+        this.loadState = {
+          status: 'error',
+          isImage,
+          isMarkdown,
+          isBinary: false,
+          error: await describeHttpError(res),
+        };
+        return;
+      }
+
+      let content: string;
+      let size: number;
+      if (target.kind === 'attachment') {
+        content = await res.text();
+        size = target.size;
+      } else {
+        const data = (await res.json()) as { content: string; size: number };
+        content = data.content;
+        size = data.size;
+      }
+      if (gen !== this.generation) return;
+
+      if (size > TEXT_PREVIEW_MAX_BYTES) {
+        this.loadState = { status: 'ready', isImage, isMarkdown, isBinary: true };
+        return;
+      }
+      this.loadState = { status: 'ready', isImage, isMarkdown, isBinary: false, content };
+    } catch (err) {
+      if (gen !== this.generation) return; // superseded — never publish a stale error
+      if (err instanceof DOMException && err.name === 'AbortError') return; // intentional cancel
+      this.loadState = {
+        status: 'error',
+        isImage,
+        isMarkdown,
+        isBinary: false,
+        error: err instanceof Error ? err.message : 'Could not reach the server.',
+      };
+    }
+  }
+
+  private retry(): void {
+    void this.load();
+  }
+
+  private close(): void {
+    this.dispatchEvent(
+      new CustomEvent('chat-file-preview-close', { bubbles: true, composed: true })
+    );
+  }
+
+  private toggleSource(): void {
+    this.showSource = !this.showSource;
+  }
+
+  private async copyContent(): Promise<void> {
+    const text = this.loadState.content;
+    if (text === undefined) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      this.copied = true;
+      this.clearCopyTimer();
+      this.copyTimer = setTimeout(() => {
+        this.copied = false;
+        this.copyTimer = null;
+      }, 1500);
+    } catch {
+      // Clipboard write may fail in insecure contexts; silently ignore.
+    }
+  }
+
+  private renderBody() {
+    const target = this.target;
+    const state = this.loadState;
+    if (!target) return nothing;
+
+    if (state.status === 'loading') {
+      return html`
+        <div class="file-preview-placeholder">
+          <sl-spinner></sl-spinner>
+          Loading file…
+        </div>
+      `;
+    }
+    if (state.status === 'error') {
+      return html`
+        <div class="file-preview-placeholder error">
+          <p>${state.error}</p>
+          <sl-button size="small" @click=${() => this.retry()}>
+            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            Retry
+          </sl-button>
+        </div>
+      `;
+    }
+    if (state.isImage) {
+      return html`<img
+        class="file-preview-image"
+        src=${state.objectUrl ?? ''}
+        alt=${target.name}
+      />`;
+    }
+    if (state.isBinary) {
+      return html`
+        <div class="file-preview-placeholder">
+          This file is too large to preview inline. Use the Download button.
+        </div>
+      `;
+    }
+    if (state.isMarkdown && !this.showSource) {
+      return html`<scion-markdown-preview
+        .content=${state.content ?? ''}
+      ></scion-markdown-preview>`;
+    }
+    return html`
+      <scion-code-editor
+        .content=${state.content ?? ''}
+        language=${getLanguageFromPath(target.name)}
+        readonly
+      ></scion-code-editor>
+    `;
+  }
+
+  override render() {
+    const target = this.target;
+    if (!target) return nothing;
+    const state = this.loadState;
+    // Computed inside a try, exactly like `load()`'s own call to the same
+    // function: an unsafe target makes this throw rather than being
+    // normalized into a guessed URL, and `render()` must never propagate
+    // that. `load()` hits the identical throw and already puts `state` into
+    // `'error'` with a Retry action, so the only thing this component owns
+    // here is not also crashing the *rest* of this render over the Download
+    // button's href — sl-dialog's own header close button and the error
+    // placeholder's Retry stay available either way.
+    let downloadUrl: string | null;
+    try {
+      downloadUrl = downloadUrlFor(target);
+    } catch {
+      downloadUrl = null;
+    }
+    const secondary = target.kind === 'path' ? target.containerPath : target.name;
+
+    return html`
+      <sl-dialog
+        class="file-preview-dialog"
+        open
+        label=${target.name}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.close();
+        }}
+      >
+        ${this.renderBody()}
+        <div slot="footer" class="footer">
+          <span class="path" title=${secondary}>${secondary}</span>
+          ${state.status === 'ready' && state.isMarkdown
+            ? html`
+                <sl-button size="small" @click=${() => this.toggleSource()}>
+                  <sl-icon slot="prefix" name=${this.showSource ? 'eye' : 'code'}></sl-icon>
+                  ${this.showSource ? 'Preview' : 'Source'}
+                </sl-button>
+              `
+            : nothing}
+          ${state.status === 'ready' && state.isMarkdown && this.showSource
+            ? html`
+                <sl-button size="small" @click=${() => this.copyContent()}>
+                  <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
+                  ${this.copied ? 'Copied!' : 'Copy'}
+                </sl-button>
+              `
+            : nothing}
+          ${downloadUrl !== null
+            ? html`
+                <sl-button href=${downloadUrl} download=${target.name} size="small">
+                  <sl-icon slot="prefix" name="download"></sl-icon>
+                  Download
+                </sl-button>
+              `
+            : nothing}
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  static override styles = css`
+    :host {
+      display: contents;
+    }
+    /* One dialog serves both a path preview (code/markdown panel) and an
+     * attachment preview (full-height image), so its width policy must be
+     * generous enough for either content type. */
+    .file-preview-dialog::part(panel) {
+      width: min(90vw, 900px);
+      max-height: 85vh;
+    }
+    .file-preview-dialog::part(body) {
+      padding: 0;
+      overflow: auto;
+    }
+    .file-preview-dialog scion-code-editor {
+      --editor-max-height: 70vh;
+    }
+    .file-preview-placeholder {
+      padding: 2rem;
+      text-align: center;
+      color: var(--scion-text-muted, #64748b);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .file-preview-placeholder.error {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+    .file-preview-image {
+      display: block;
+      margin: 0 auto;
+      max-width: 100%;
+      max-height: 75vh;
+      object-fit: contain;
+    }
+    .footer {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      width: 100%;
+    }
+    .footer .path {
+      flex: 1;
+      font-size: var(--chat-fs-base, 0.875rem);
+      color: var(--scion-text-muted, #64748b);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  `;
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'scion-chat-file-preview': ScionChatFilePreview;
+  }
+}

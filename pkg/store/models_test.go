@@ -229,3 +229,21 @@ func TestGCPServiceAccount_ReachableFromProject(t *testing.T) {
 		})
 	}
 }
+
+// TestMessageExpiredStuckPendingReason_Value pins the exact string value of
+// MessageExpiredStuckPendingReason (nc-promote-busy round 4 Consider).
+// Production messages.dispatch_failure_reason rows already carry this exact
+// literal, written by pkg/hub/sweep.go before this constant existed. Do not
+// "fix" a failure here by updating this expected value: changing the
+// constant silently strands every existing row outside
+// BackfillNonAgentDispatchState's exact-match predicate. A real change to
+// this string must ship together with a data migration for existing rows,
+// and this test's expected literal must be updated only as part of that
+// migration.
+func TestMessageExpiredStuckPendingReason_Value(t *testing.T) {
+	const shipped = "expired: stuck in pending state beyond TTL"
+	if MessageExpiredStuckPendingReason != shipped {
+		t.Fatalf("MessageExpiredStuckPendingReason changed value: got %q, want %q (see this test's doc comment before changing either)",
+			MessageExpiredStuckPendingReason, shipped)
+	}
+}

@@ -222,3 +222,99 @@ func TestExecuteAgentDM_RawFlagRespectsMessageModeNone(t *testing.T) {
 			"authorization denial must prevent persistence, raw or not")
 	}
 }
+
+// TestHandleAgentMessage_TopLevelRawAndPlainFlags verifies that REST callers
+// posting top-level {"message": "...", "raw": true} or {"message": "...", "plain": true}
+// (or combining top-level "raw": true with "structured_message") propagate the
+// Raw/Plain flags onto the dispatched StructuredMessage instead of silently
+// dropping them and wrapping keystrokes in ---BEGIN SCION MESSAGE---.
+func TestHandleAgentMessage_TopLevelRawAndPlainFlags(t *testing.T) {
+	t.Run("top-level message with raw=true from agent sender", func(t *testing.T) {
+		srv, _, _, sender, target, _, dispatcher := deliverySetup(t)
+		enableReadSwitch(t, srv)
+
+		reqBody, err := json.Marshal(map[string]any{
+			"message": "/model claude-opus-4-8",
+			"raw":     true,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message",
+			bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: sender.ID},
+			ProjectID: sender.ProjectID,
+			Ancestry:  sender.Ancestry,
+		}}))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		calls := dispatcher.getCalls()
+		require.Len(t, calls, 1)
+		require.NotNil(t, calls[0].StructuredMessage)
+		assert.True(t, calls[0].StructuredMessage.Raw, "top-level raw=true must propagate to StructuredMessage.Raw")
+		assert.False(t, calls[0].StructuredMessage.Plain)
+		assert.Equal(t, "/model claude-opus-4-8", calls[0].StructuredMessage.DeliveryText)
+	})
+
+	t.Run("top-level message with plain=true from user sender", func(t *testing.T) {
+		srv, _, _, _, target, _, dispatcher := deliverySetup(t)
+		enableReadSwitch(t, srv)
+
+		reqBody, err := json.Marshal(map[string]any{
+			"message": "PLAIN-TOP-LEVEL",
+			"plain":   true,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+target.ID+"/message",
+			bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser(tid("user-1"), "alice@example.com", "Alice", "admin", "cli")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		calls := dispatcher.getCalls()
+		require.Len(t, calls, 1)
+		require.NotNil(t, calls[0].StructuredMessage)
+		assert.True(t, calls[0].StructuredMessage.Plain, "top-level plain=true must propagate to StructuredMessage.Plain")
+		assert.False(t, calls[0].StructuredMessage.Raw)
+		assert.Equal(t, "PLAIN-TOP-LEVEL", calls[0].StructuredMessage.DeliveryText)
+	})
+
+	t.Run("top-level raw=true merges onto structured_message", func(t *testing.T) {
+		srv, _, _, _, target, _, dispatcher := deliverySetup(t)
+		enableReadSwitch(t, srv)
+
+		reqBody, err := json.Marshal(map[string]any{
+			"structured_message": map[string]any{
+				"msg": "Enter",
+			},
+			"raw": true,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/v1/agents/"+target.ID+"/message",
+			bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser(tid("user-1"), "alice@example.com", "Alice", "admin", "cli")))
+
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+		calls := dispatcher.getCalls()
+		require.Len(t, calls, 1)
+		require.NotNil(t, calls[0].StructuredMessage)
+		assert.True(t, calls[0].StructuredMessage.Raw, "top-level raw=true must merge onto StructuredMessage.Raw")
+		assert.Equal(t, "Enter", calls[0].StructuredMessage.DeliveryText)
+	})
+}

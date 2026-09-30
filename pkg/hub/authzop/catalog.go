@@ -1269,7 +1269,13 @@ var Catalog = []OperationSpec{
 		Description: "Read diagnostic logs and messaging divergence data",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
+			// The live handler (handleDiagnosticsLogsStream,
+			// pkg/hub/handlers_diagnostics.go) sets
+			// "Content-Type: text/event-stream" and streams incrementally;
+			// it is an SSE entry point, not a plain HTTP route. Pinned by
+			// TestDiagnosticsLogsStreamCatalogMatchesRoute
+			// (authzop/drift_test.go).
+			{Kind: EntryPointSSE, Pattern: "/api/v1/admin/diagnostics/logs/stream", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/messaging/divergence", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -1536,7 +1542,12 @@ var Catalog = []OperationSpec{
 		Domain:      "agent",
 		Description: "Attach to an agent session via WebSocket",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/attach", Method: "GET"},
+			// The live route dispatches on /pty (pkg/hub/pty_handlers.go
+			// handleAgentPTY, invoked from handlers_agents_core.go's
+			// action == "pty" branch), not /attach.
+			// TestAgentAttachCatalogMatchesRoute (authzop/drift_test.go)
+			// pins this entry point to the live route.
+			{Kind: EntryPointWebSocket, Pattern: "/api/v1/agents/{id}/pty", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1554,9 +1565,28 @@ var Catalog = []OperationSpec{
 		Description: "Access forwarded ports on an agent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
+			// port_forward_handlers.go's proxyAgentPort (invoked from
+			// handleAgentPorts for the "{port}/proxy" and "{port}/proxy/*"
+			// suffixes) authorizes via authorizePortAccess for EVERY HTTP
+			// method and any subpath after "/proxy" — there is no
+			// method-based routing before that authorization check. Entry
+			// points are representative, not exhaustive: the schema has no
+			// wildcard method or pattern, and this route accepts every
+			// HTTP method on ".../proxy" and any subpath. GET/POST/PUT/
+			// DELETE and one subpath are listed as representatives.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		// authorizePortAccess (port_forward_handlers.go) also admits an agent
+		// identity directly, without calling CheckAccess, when the agent
+		// matches the target agent's own ID/project (self-access) — a second
+		// principal/credential this route genuinely accepts, distinct from
+		// the CheckAccess-gated user path BasePermission describes.
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.port_access",
 		Effects:          []SecurityEffect{EffectReadOne},
@@ -2633,7 +2663,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/useraccesstoken.go — user access token CRUD
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/useraccesstoken.go", Function: "CreateToken", Symbol: "CreateUserAccessToken", OperationID: "credential.token.create"},
+	{File: "pkg/hub/useraccesstoken.go", Function: "CreateTokenWithMetadata", Symbol: "CreateUserAccessToken", OperationID: "credential.token.create"},
 	{File: "pkg/hub/useraccesstoken.go", Function: "RevokeToken", Symbol: "RevokeUserAccessToken", OperationID: "credential.token.revoke"},
 	{File: "pkg/hub/useraccesstoken.go", Function: "DeleteToken", Symbol: "DeleteUserAccessToken", OperationID: "credential.token.revoke"},
 
@@ -2709,7 +2739,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_auth.go — auth flow user provisioning
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_auth.go", Function: "provisionUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User provisioning during auth login flow, pre-authorization", Scope: "pkg/hub/handlers_auth.go"}},
-	{File: "pkg/hub/handlers_auth.go", Function: "provisionUser", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User record update during auth login flow", Scope: "pkg/hub/handlers_auth.go"}},
+	{File: "pkg/hub/sign_in_policy.go", Function: "applyLiveSignInPolicy", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User record update during sign-in; shared by every sign-in path (web login, GE exchange, external bearer) via provisionUser and the Google identity resolver", Scope: "pkg/hub/sign_in_policy.go"}},
 	{File: "pkg/hub/handlers_auth.go", Function: "ensureSuperAdminRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Idempotent super-admin binding during authorized user provisioning", Scope: "pkg/hub/handlers_auth.go"}},
 	{File: "pkg/hub/handlers_auth.go", Function: "handleAuthRefresh", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "User last-login update during token refresh", Scope: "pkg/hub/handlers_auth.go"}},
 	{File: "pkg/hub/handlers_auth.go", Function: "deleteSuperAdminRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Super-admin self-demotion, hub-admin operation", Scope: "pkg/hub/handlers_auth.go"}},
@@ -2720,8 +2750,6 @@ var MutationClassifications = []MutationClassification{
 	// external-bearer auth path (auth_external_bearer.go). Extracted from
 	// ge_exchange.go's former resolveLocalUser/provisionNewUser.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user email update on binding match", Scope: "pkg/hub/google_identity_resolver.go"}},
-	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: user profile update (displayName/avatar)", Scope: "pkg/hub/google_identity_resolver.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: orphan user cleanup after concurrent binding race", Scope: "pkg/hub/google_identity_resolver.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: new user provisioning (GE exchange and external-bearer)", Scope: "pkg/hub/google_identity_resolver.go"}},
 

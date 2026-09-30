@@ -183,6 +183,74 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertNotIn("secret", section)
         self.assertNotIn("statsig", section)
 
+    def test_native_metrics_off_on_gcp_via_configured_provider(self) -> None:
+        # ptone/scion#2053 design §3.7 "codex" bullet: native metrics stay
+        # off on GCP, the same as claude, because the GCP admission
+        # allowlist rejects codex's raw metric attributes. Logs and traces
+        # are unaffected (narrow to metrics).
+        telemetry = {"enabled": True, "cloud": {"provider": "gcp"}}
+        env = {"SCION_OTEL_GRPC_PORT": "14317"}
+        section = provision._build_otel_section(telemetry, env)
+        self.assertIn('metrics_exporter = "none"', section)
+        self.assertNotIn('metrics_exporter."otlp-grpc"', section)
+        self.assertIn('exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+        self.assertIn('trace_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+
+    def test_native_metrics_off_on_gcp_via_env_override(self) -> None:
+        # The env override (SCION_TELEMETRY_CLOUD_PROVIDER) wins over the
+        # staged telemetry config, mirroring claude's provider resolution.
+        telemetry = {"enabled": True, "cloud": {"provider": "generic-otlp"}}
+        env = {"SCION_TELEMETRY_CLOUD_PROVIDER": "gcp", "SCION_OTEL_GRPC_PORT": "14317"}
+        section = provision._build_otel_section(telemetry, env)
+        self.assertIn('metrics_exporter = "none"', section)
+
+    def test_native_metrics_stay_on_for_non_gcp_provider(self) -> None:
+        telemetry = {"enabled": True, "cloud": {"provider": "generic-otlp"}}
+        env = {"SCION_OTEL_GRPC_PORT": "14317"}
+        section = provision._build_otel_section(telemetry, env)
+        self.assertIn('metrics_exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', section)
+
+    def test_telemetry_output_env_sets_usage_source_native_when_enabled(self) -> None:
+        env = provision._telemetry_output_env({"enabled": True})
+        self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "enabled")
+        self.assertEqual(env["SCION_USAGE_SOURCE"], "native")
+
+    def test_telemetry_output_env_omits_usage_source_when_disabled(self) -> None:
+        env = provision._telemetry_output_env({"enabled": False})
+        self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "disabled")
+        self.assertNotIn("SCION_USAGE_SOURCE", env)
+
+    def test_telemetry_output_env_omits_usage_source_when_unset(self) -> None:
+        env = provision._telemetry_output_env(None)
+        self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "disabled")
+        self.assertNotIn("SCION_USAGE_SOURCE", env)
+
+    def test_telemetry_enabled_treats_non_dict_as_disabled(self) -> None:
+        # A non-dict truthy value used to crash `.get()`. The production
+        # writer (ApplyTelemetrySettings) never produces one, but this pins
+        # the defensive fallback instead of relying on that invariant.
+        for value in (True, "enabled", [1, 2, 3]):
+            with self.subTest(value=value):
+                self.assertFalse(provision._telemetry_enabled(value))
+                # And the callers that gate on it don't crash either.
+                env = provision._telemetry_output_env(value)
+                self.assertEqual(env["SCION_NATIVE_TELEMETRY_POLICY"], "disabled")
+                self.assertNotIn("SCION_USAGE_SOURCE", env)
+        # False (a falsy non-dict) and {} (an empty config) are both not
+        # enabled and must not crash.
+        self.assertFalse(provision._telemetry_enabled(False))
+        self.assertFalse(provision._telemetry_enabled({}))
+
+    def test_telemetry_provider_treats_non_dict_telemetry_and_cloud_as_absent(self) -> None:
+        # (telemetry or {}).get("cloud") used to crash on a truthy non-dict
+        # telemetry. Also covers a dict telemetry whose "cloud" key is
+        # itself a non-dict value.
+        for value in (True, "enabled", [1, 2, 3]):
+            with self.subTest(value=value):
+                self.assertEqual(provision._telemetry_provider(value, None), "")
+        self.assertEqual(provision._telemetry_provider({"cloud": "gcp"}, None), "")
+        self.assertEqual(provision._telemetry_provider({"cloud": {"provider": "gcp"}}, None), "gcp")
+
     def test_disabled_otel_disables_all_exporters(self) -> None:
         with tempfile.TemporaryDirectory() as home, temporary_home(home):
             os.makedirs(os.path.join(home, ".codex"), exist_ok=True)

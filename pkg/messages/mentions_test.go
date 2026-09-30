@@ -50,6 +50,136 @@ func TestExtractMentions(t *testing.T) {
 	}
 }
 
+func TestExtractProseMentions(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{name: "plain mention unaffected", text: "hey @alice check this", want: []string{"alice"}},
+		{name: "email not mention", text: "send to user@example.com", want: nil},
+		{name: "trailing punctuation stripped", text: "hey @alice, @bob! @charlie.", want: []string{"alice", "bob", "charlie"}},
+		{
+			name: "closed triple-backtick fence removed",
+			text: "see the log:\n```\n@builder failed to start\n```\nplease look",
+			want: nil,
+		},
+		{
+			name: "unclosed triple-backtick fence removed through EOF",
+			text: "see the log:\n```\n@builder failed to start",
+			want: nil,
+		},
+		{
+			name: "tilde fence removed",
+			text: "output:\n~~~\n@builder crashed\n~~~\ndone",
+			want: nil,
+		},
+		{
+			name: "mention outside fence still extracted",
+			text: "```\n@ignored\n```\n@alice please look",
+			want: []string{"alice"},
+		},
+		{
+			name: "inline backtick span removed",
+			text: "run `@builder --help` to see options",
+			want: nil,
+		},
+		{
+			name: "inline backtick span does not hide mention outside it",
+			text: "run `@builder --help`, then ping @alice",
+			want: []string{"alice"},
+		},
+		{
+			name: "blockquote line removed",
+			text: "> @builder said this already\nnothing new @alice",
+			want: []string{"alice"},
+		},
+		{
+			name: "indented blockquote line removed",
+			text: "  > @builder quoted\nfresh text @alice",
+			want: []string{"alice"},
+		},
+		{name: "no mentions", text: "hello world", want: nil},
+
+		// Fence-closing and inline-span edge cases.
+		{
+			// A naive HasPrefix("```") close-check would treat "```go" as
+			// closing the block, so "@alice" on the next line would wrongly
+			// end up outside the fence and get extracted. It must not: an
+			// info string on the line rules it out as a closing fence.
+			name: "language-tagged fence line inside the block does not close it",
+			text: "```\n@builder\n```go\n@alice still inside\n```\nafter @carol",
+			want: []string{"carol"},
+		},
+		{
+			name: "shorter nested fence does not close a longer one",
+			text: "````\n```\n@builder\n```\n````\n@alice after",
+			want: []string{"alice"},
+		},
+		{
+			name: "longer closing fence closes a shorter opener",
+			text: "```\n@builder\n````\n@alice after",
+			want: []string{"alice"},
+		},
+		{
+			name: "closing fence with trailing whitespace still closes",
+			text: "```\n@builder\n```   \n@alice after",
+			want: []string{"alice"},
+		},
+		{
+			name: "double-backtick span wrapping a literal backtick is not mis-closed by it",
+			text: "see `` `@builder` `` for the syntax, then ping @alice",
+			want: []string{"alice"},
+		},
+		{
+			name: "unmatched backtick run is literal text, not a code span",
+			text: "use a ` here, @builder please",
+			want: []string{"builder"},
+		},
+		{
+			// CommonMark treats 4+ spaces of indentation as an indented code
+			// block, not a fence opener; a backtick run there is literal
+			// text, so it does not start a fence and swallow what follows.
+			name: "fence opener indented 4+ spaces is not a fence, mention after it is extracted",
+			text: "    ```\n@alice please look",
+			want: []string{"alice"},
+		},
+		{
+			// A backtick fence's info string may not itself contain a
+			// backtick per CommonMark; a line shaped like one is not a
+			// valid opener, so it does not swallow the next line's mention.
+			name: "backtick fence opener whose info string contains a backtick is not a fence",
+			text: "``` `weird` ```\n@alice please look",
+			want: []string{"alice"},
+		},
+		{
+			// A candidate closing run indented 4+ spaces is an indented
+			// code block, not a valid closer, per CommonMark — the fence
+			// stays open through it, so a mention on that still-fenced line
+			// is not extracted; only the next properly unindented closer
+			// actually ends the fence.
+			name: "closing fence indented 4+ spaces does not close it",
+			text: "```\n@builder failed\n    ```\n@alice still inside\n```\nafter @carol",
+			want: []string{"carol"},
+		},
+		{
+			// A tab expands to the next 4-column tab stop, so a
+			// tab-indented backtick run is 4+ columns of indentation — an
+			// indented code block, not a fence opener, per CommonMark.
+			name: "tab-indented fence opener is not a fence (tab counts as 4 columns)",
+			text: "\t```\n@alice please look",
+			want: []string{"alice"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractProseMentions(tc.text)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestIsLeadingMention(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -150,6 +280,29 @@ func TestResolveMentions(t *testing.T) {
 		delivered := DeliveredSlugs(results)
 		assert.Equal(t, MaxMentionRecipients, len(delivered))
 	})
+}
+
+func TestDedupMentionNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		lists [][]string
+		want  []string
+	}{
+		{name: "no lists", lists: nil, want: nil},
+		{name: "single list dedup", lists: [][]string{{"alice", "Alice", "bob"}}, want: []string{"alice", "bob"}},
+		{
+			name:  "earlier list wins position, cross-list dedup case-insensitive",
+			lists: [][]string{{"alice", "Bob"}, {"ALICE", "carol"}},
+			want:  []string{"alice", "Bob", "carol"},
+		},
+		{name: "blank and whitespace-only entries skipped", lists: [][]string{{" ", "", "alice"}}, want: []string{"alice"}},
+		{name: "whitespace trimmed", lists: [][]string{{"  alice  "}}, want: []string{"alice"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, DedupMentionNames(tc.lists...))
+		})
+	}
 }
 
 func TestDeliveredSlugs(t *testing.T) {

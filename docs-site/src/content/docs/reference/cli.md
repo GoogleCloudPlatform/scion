@@ -111,6 +111,8 @@ Connects to the interactive session of a running agent.
 
 When connecting to a Hub behind Google Identity-Aware Proxy (IAP), `scion attach` automatically attempts to resolve transport-layer authentication (Google OIDC ID tokens) *before* evaluating the application-level access token gate. If transport auth can be successfully established (e.g., using your local Google Cloud SDK identity or GKE Workload Identity), the application token check is bypassed, enabling seamless attachment in proxy-auth/IAP mode.
 
+If the agent is stopped, the attach ends immediately rather than waiting and retrying (see [PTY close codes](/scion/reference/api/#pty-close-codes)).
+
 **Usage:** `scion attach <agent-name>`
 
 - **Key Bindings:**
@@ -191,7 +193,7 @@ This command replaces the removed `--broadcast` / `--all` flags on `scion messag
 
 ### `scion keys`
 
-Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. This command replaces the deprecated `--raw` flag on `scion message`.
+Sends raw keystrokes to an agent's terminal via tmux `send-keys` with no trailing Enter. Supports control keys like arrows and Escape. Works for Hub-managed agents as well as local ones. When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused; a human operator using `--project` can still target other projects. This command replaces the deprecated `--raw` flag on `scion message`.
 
 **Usage:** `scion keys <agent-name> <keys>`
 
@@ -335,6 +337,13 @@ the new generation cannot be provisioned, the Hub restores the previous generati
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
 progress. When migrating another agent, the handoff is optional.
+
+Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
+Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
+checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
+worktree-per-agent projects are not yet supported; the Hub rejects the request with
+`400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+as stop, start, and restart); an agent can always reincarnate itself.
 
 **Usage:** `scion reincarnate [agent-name] [flags]`
 
@@ -556,6 +565,8 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--name <string>`: Token name/label (required).
             - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
+            - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
+            - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.

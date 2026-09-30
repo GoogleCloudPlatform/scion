@@ -165,6 +165,36 @@ func TestDEF126_AC_A2_ExactEmailResolves(t *testing.T) {
 	require.Equal(t, 1, result.TotalCount, "expected 1 message for the recipient")
 }
 
+// TestDEF126_AgentToUserSend_StampsDispatchStateDispatched is a regression
+// test for nc-promote-busy: def126Setup wires no message broker proxy, so
+// this exercises handleAgentOutboundMessage's deliveryUserDirect fallback
+// (handlers_agent_messaging.go), which persists its own storeMsg directly.
+// An unset DispatchState there would default to Ent's "pending" and never
+// transition, putting the row on the sweep-then-purge deletion path. See
+// TestDEF126_GroupMessage_UserRecipient_StampsDispatchStateDispatched for
+// the separate handleGroupMessage user-recipient literal.
+func TestDEF126_AgentToUserSend_StampsDispatchStateDispatched(t *testing.T) {
+	srv, s, projectID, _, agentID := def126Setup(t)
+	ctx := context.Background()
+
+	userID := tid("def126-dispatch-state")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "dispatch-state@example.com", DisplayName: "Dispatch State User",
+	}))
+
+	rr := postOutboundTo(t, srv, projectID, agentID, "user:dispatch-state@example.com", "hello")
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	result, err := s.ListMessages(ctx,
+		store.MessageFilter{RecipientID: userID},
+		store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TotalCount, "expected 1 message for the recipient")
+	require.Equal(t, store.MessageDispatchDispatched, result.Items[0].DispatchState,
+		"an unset DispatchState defaults to \"pending\" and is never transitioned, "+
+			"so the sweep would eventually delete this message")
+}
+
 // ---------------------------------------------------------------------------
 // AC-A3: Mutation gate — reverting the guard to len(result.Items) == 1
 // must turn AC-A1 red (and the mutation must compile).
@@ -567,6 +597,69 @@ func TestDEF126_AC_A4b_GroupValidEmail_Resolves(t *testing.T) {
 	var resp GroupMessageResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Equal(t, 2, resp.Delivered, "both recipients should be delivered")
+}
+
+// TestDEF126_GroupMessage_UserRecipient_StampsDispatchStateDispatched is a
+// regression test for nc-promote-busy: handleGroupMessage's RecipientUser
+// branch persists its own storeMsg directly (a distinct literal from
+// handleAgentOutboundMessage's), and that persist is itself the delivery.
+// Same shape as TestDEF126_AC_A4b_GroupValidEmail_Resolves, plus the
+// persisted-state assertion that test doesn't make.
+func TestDEF126_GroupMessage_UserRecipient_StampsDispatchStateDispatched(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("def126-groupdispatch-project")
+	agentSlug := "groupdispatch-agent"
+	agentID := tid("def126-groupdispatch-agent")
+	userID := tid("def126-groupdispatch-user")
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "def126-groupdispatch-project", Slug: "def126-groupdispatch-project",
+	}))
+	brokerID := tid("def126-groupdispatch-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "groupdispatch-broker", Slug: "groupdispatch-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID,
+		BrokerName: "groupdispatch-broker", Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Name: "groupdispatch-agent", Slug: agentSlug,
+		ProjectID: projectID, RuntimeBrokerID: brokerID,
+		Phase: "running",
+	}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "groupdispatch@example.com", DisplayName: "Group Dispatch User",
+	}))
+
+	srv.SetDispatcher(&recordingDispatcher{})
+
+	rec := doRequest(t, srv, http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+agentSlug+"/message",
+		MessageRequest{
+			StructuredMessage: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "user:Group Dispatch User",
+				SenderID:  userID,
+				Recipient: "group[agent:" + agentSlug + ",user:groupdispatch@example.com]",
+				Msg:       "group message to a user recipient",
+				Type:      messages.TypeInstruction,
+			},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	result, err := s.ListMessages(ctx,
+		store.MessageFilter{RecipientID: userID},
+		store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.TotalCount, "expected 1 message for the user recipient")
+	require.Equal(t, store.MessageDispatchDispatched, result.Items[0].DispatchState,
+		"an unset DispatchState defaults to \"pending\" and is never transitioned, "+
+			"so the sweep would eventually delete this message")
 }
 
 // ---------------------------------------------------------------------------

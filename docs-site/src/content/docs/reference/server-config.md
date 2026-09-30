@@ -56,7 +56,7 @@ Controls the central Hub API server.
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). |
 | `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
 | `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
-| `gcp_iam_check_mode` | string | `"off"` | Controls whether IAM `actAs` permission is checked when binding a GCP service account to an agent. Supported values: `"off"` (no check; default) or `"enforce"` (uses Policy Troubleshooter to enforce `iam.serviceAccounts.actAs`). See the security/permissions reference for details on roles and caches. |
+| `gcp_iam_check_mode` | string | `"off"` | Controls whether IAM `actAs` permission is checked when binding a GCP service account to an agent. Supported values: `"off"` (no check; default) or `"enforce"` (uses Policy Troubleshooter to enforce `iam.serviceAccounts.actAs`). `"enforce"` is strongly recommended for any Hub where agents receive GCP identities; see the caution under [GCP IAM Check Mode](#gcp-iam-check-mode) for what `"off"` permits. See the security/permissions reference for details on roles and caches. |
 | `gcp_iam_deny_unknown_policy` | string | `"fail-open"` | Behavior when Policy Troubleshooter cannot evaluate deny policies (e.g. if the Hub lacks org-level reviewer roles). Supported values: `"fail-open"` (allow if no explicit deny is found; default) or `"fail-closed"` (treat as indeterminate and deny). |
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
 | `write_timeout` | duration | `"60s"` | HTTP write timeout. |
@@ -720,11 +720,15 @@ When these fields are explicitly set to `false` in the DB, they are correctly ap
 
 The `gcp_iam_check_mode` setting controls whether the Hub verifies that a caller holds the `iam.serviceAccounts.actAs` IAM permission on a GCP service account before allowing it to be assigned to an agent. This uses the [GCP Policy Troubleshooter v3 API](https://cloud.google.com/policy-intelligence/docs/troubleshoot-access).
 
+:::caution[Use enforce when agents receive GCP identities]
+Set `gcp_iam_check_mode: enforce` on any Hub where agents receive GCP identities. In the default `"off"` mode, Scion roles alone decide which project-scoped service accounts a user can assign: the `project-owner`, `project-admin` and `project-member` roles hold `gcp_service_account.assign`, so every owner, admin and member of a project can assign any verified project-scoped service account in that project to an agent, with no GCP IAM `iam.serviceAccounts.actAs` check on the caller. In `"enforce"` mode the Hub also requires the caller's own `actAs` grant on the target service account.
+:::
+
 ### Values
 
 | Value | Behaviour |
 | :--- | :--- |
-| `"off"` (default) | No IAM check. Any member who can see a service account can assign it. Assignment is gated by Hub policy only. |
+| `"off"` (default) | No GCP IAM check. Project owners, admins and members can assign any **verified project-scoped** service account in their project to an agent on Scion role authority alone, with no GCP IAM `iam.serviceAccounts.actAs` check on the caller. Hub-scoped service accounts remain unassignable in `"off"`. See the caution above. |
 | `"enforce"` | The Hub calls Policy Troubleshooter to verify the caller has `actAs`. Denials are enforced. |
 
 ### Configuration

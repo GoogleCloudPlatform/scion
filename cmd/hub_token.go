@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -125,6 +126,8 @@ var (
 	tokenCreateProject string
 	tokenCreateScopes  []string
 	tokenCreateExpires string
+	tokenCreatePurpose string
+	tokenCreateLabels  []string
 	tokenListProject   string
 )
 
@@ -140,6 +143,11 @@ func init() {
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
+	// E.1 descriptive credential metadata: optional, bounded, immutable
+	// after issuance (there is no update command). Requires a hub connection,
+	// like the rest of `scion hub token`.
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreatePurpose, "purpose", "", "Optional bounded description of what this token is for")
+	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateLabels, "label", nil, "Optional bounded label as key=value (repeatable)")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
 	_ = hubTokenCreateCmd.MarkFlagRequired("project")
@@ -178,11 +186,18 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		expiresAt = &t
 	}
 
+	labels, err := parseLabelFlags(tokenCreateLabels)
+	if err != nil {
+		return err
+	}
+
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
 		ProjectID: project.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
+		Purpose:   tokenCreatePurpose,
+		Labels:    labels,
 	}
 
 	resp, err := client.Tokens().Create(ctx, req)
@@ -202,6 +217,12 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
 		fmt.Printf("  Expires: %s\n", resp.AccessToken.ExpiresAt.Format(time.RFC3339))
+	}
+	if resp.AccessToken.Purpose != "" {
+		fmt.Printf("  Purpose: %s\n", resp.AccessToken.Purpose)
+	}
+	if len(resp.AccessToken.Labels) > 0 {
+		fmt.Printf("  Labels:  %s\n", formatLabels(resp.AccessToken.Labels))
 	}
 	fmt.Println()
 	fmt.Printf("Token: %s\n", resp.Token)
@@ -322,6 +343,44 @@ func runTokenDelete(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Token %s deleted.\n", tokenID)
 	return nil
+}
+
+// parseLabelFlags parses repeated --label key=value flags into a map,
+// rejecting a repeated key rather than silently keeping the last value
+// (review finding F12). It does not otherwise enforce the bounded label
+// schema; the hub validates and rejects out-of-schema labels server-side
+// (E.1), so the CLI reports the server's error rather than duplicating the
+// rule set.
+func parseLabelFlags(labels []string) (map[string]string, error) {
+	if len(labels) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(labels))
+	for _, l := range labels {
+		key, value, ok := strings.Cut(l, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid --label %q: expected key=value", l)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate --label key %q", key)
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+// formatLabels renders labels as a stable, comma-separated key=value list.
+func formatLabels(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+labels[k])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // parseExpiry parses an expiry string as either a duration shorthand (30d, 90d, 1y)

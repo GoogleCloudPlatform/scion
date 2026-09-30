@@ -158,6 +158,19 @@ const (
 	// window (Server.Config.FailedMessageRetentionDays).
 	LockFailedMessageRetention AdvisoryLockKey = 0x5C100019
 
+	// LockAgentLaunchDeadline guards RunLaunchReaperTick, the T1 async-create
+	// launch reaper (design t1-async-create-v11.md §3.7). Unlike every other
+	// key in this block it is NOT taken through the AdvisoryLocker interface:
+	// the reaper needs a transaction-scoped pg_try_advisory_xact_lock (so the
+	// lock and every statement of the tick share one connection and are
+	// released together at commit/rollback), which AdvisoryLocker's
+	// session-level, dedicated-connection TryAdvisoryLock cannot express. The
+	// constant is registered here only so the numeric key is allocated
+	// centrally and cannot collide with another lock; RunLaunchReaperTick
+	// issues `SELECT pg_try_advisory_xact_lock($1)` against it directly on its
+	// own hand-built *sql.Tx.
+	LockAgentLaunchDeadline AdvisoryLockKey = 0x5C10001A
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

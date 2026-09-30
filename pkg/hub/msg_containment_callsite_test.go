@@ -118,6 +118,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "messagebroker.go", function: "publishDeliveryFailed", symbol: "DispatchAgentMessage",
 		class: "exempt", reason: "derivative: delivery-failure notice to original sender"},
 
+	// messagebroker.go: publishDeliveryDeferred — derivative notice (design
+	// agent-reincarnate §3.7, O2 p2a-r1 review). Same shape as
+	// publishDeliveryFailed above: tells the original sender their message
+	// was deferred, not dropped, while the recipient is mid-migration.
+	{file: "messagebroker.go", function: "publishDeliveryDeferred", symbol: "DispatchAgentMessage",
+		class: "exempt", reason: "derivative: delivery-deferred notice to original sender"},
+
 	// notifications.go: dispatchToAgent — UNGUARDED notification fan-out.
 	// Subscription-only authorization; revocation not re-evaluated.
 	{file: "notifications.go", function: "dispatchToAgent", symbol: "dispatchWithBrokerRetry",

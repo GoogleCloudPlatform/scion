@@ -134,6 +134,26 @@ type AgentDMInput struct {
 	// before dispatching. Wake runs after all admission checks so that
 	// denied requests cannot resume an agent (#1691 AC-2).
 	Wake bool
+
+	// SkipPhaseGate bypasses the target-phase admission check (Phase 1b)
+	// that otherwise rejects delivery to a non-running target when Wake is
+	// false. It has effect ONLY when Type is messages.TypeMention and Wake
+	// is false — set it only from the agent mention fan-out path
+	// (agent_mention_fanout.go), never from a primary send. Every other
+	// admission check (rate budget, message length, authorization, foreign
+	// attachment/raw rejection, dispatch availability) and every side
+	// effect (persistence, SSE, audit, dispatch) is unaffected: a mention to
+	// a non-running agent — stopped, suspended, errored, or any other
+	// not-yet-running phase (created, provisioning, starting, etc.) — still
+	// gets its row and a buffered dispatch attempt, matching how
+	// processMentions and chat v2 secondaries have always treated
+	// unreachable mention recipients: they dispatch through the broker
+	// without ever checking phase at all, relying on the broker to buffer,
+	// for every non-running phase alike. There is no product reason to
+	// distinguish stopped/suspended/errored from any other non-running
+	// phase here — an agent that merely hasn't finished starting yet is
+	// exactly as unable to see the mention right now as a stopped one.
+	SkipPhaseGate bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -161,6 +181,14 @@ const (
 	// must NOT assume delivery and must NOT automatically replay.
 	// No blind retry guidance is returned.
 	AgentDMAmbiguous AgentDMOutcome = "ambiguous"
+
+	// AgentDMDeferred: the target agent is mid-`scion reincarnate` (design
+	// agent-reincarnate §3.7, migration gate). The message was persisted
+	// with DispatchState "deferred" — visible in conversation history and
+	// on the new generation's catch-up — but dispatch was deliberately
+	// never attempted. Not a failure: callers should tell the sender the
+	// message is saved and will be seen on catch-up, not that it failed.
+	AgentDMDeferred AgentDMOutcome = "deferred"
 )
 
 // AgentDMResult is the typed result of the shared agent DM operation.
@@ -314,6 +342,31 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
+	// 4b. Foreign raw keystroke-injection rejection.
+	//
+	// Raw skips the wrapped envelope and is delivered as literal
+	// keystrokes with no automatic Enter — the same isolation boundary
+	// concern that #1687 raised for attachments. Refuse it cross-project
+	// the same way, rather than downgrading the message or extending
+	// cross-project capabilities.
+	//
+	// This check is intentionally isolated (its own step, its own denial
+	// code) pending confirmation of the final cross-project policy for
+	// keystroke injection; it does not touch Plain, which is unaffected by
+	// this decision.
+	if input.Raw && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
+			"cross-project raw keystroke delivery not supported"))
+		return nil, &AgentDMError{
+			Code:       ErrCodeUnsupportedCapability,
+			Message:    "cross-project raw message delivery is not supported",
+			HTTPStatus: http.StatusUnprocessableEntity,
+			Details: map[string]interface{}{
+				"reason": string(MessageDenialCrossProjectRawUnsupported),
+			},
+		}
+	}
+
 	// 5. Dispatch availability pre-check (#1689).
 	// Verify dispatch infrastructure before persistence so that missing
 	// dispatcher/broker does not leave orphaned pending rows or falsely
@@ -323,19 +376,34 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		return nil, dmErr
 	}
 
+	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
+	// while the target is mid-`scion reincarnate`, the message is persisted
+	// below (visible on catch-up) but never dispatched — the old container
+	// may already be stopped and the new one may not be listening yet.
+	// Computed here, before Phase 1b, so a migrating target — necessarily
+	// non-"running" for most of the migration — skips both the wake attempt
+	// (resuming a mid-migration agent makes no sense) and the ordinary
+	// phase-conflict error below, in favor of the deferred outcome.
+	deferred := reincarnationInFlight(input.TargetAgent)
+
 	// ── Phase 1b: Wake handling (#1691) ─────────────────────────────────
 	// Wake runs after all admission checks so that denied, oversized, or
 	// unauthorized requests cannot resume an agent (AC-2). Resume failure
 	// or readiness timeout returns an explicit error and no message is
 	// dispatched (AC-4).
-	if input.Wake {
-		_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
-		if wakeErr != nil {
-			return nil, wakeErr
-		}
-	} else {
-		if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
-			return nil, phaseErr
+	if !deferred {
+		if input.Wake {
+			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			if wakeErr != nil {
+				return nil, wakeErr
+			}
+		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
+			// SkipPhaseGate applies only to mention deliveries — a non-mention
+			// send always gets the phase gate, regardless of the flag, so a
+			// caller cannot use it to bypass phase checks for a primary send.
+			if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
+				return nil, phaseErr
+			}
 		}
 	}
 
@@ -347,9 +415,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 7. Build store message.
 	// DispatchState is set to "pending" — the message row is its own
 	// durable dispatch intent. It transitions to "dispatched" only after
-	// broker/managed-runtime acceptance (AC-1, #1689).
+	// broker/managed-runtime acceptance (AC-1, #1689). For a migrating
+	// target it is set to "deferred" instead, since dispatch (step 11
+	// below) is deliberately skipped rather than merely pending.
 	msgID := api.NewUUID()
 	now := time.Now()
+
+	initialDispatchState := store.MessageDispatchPending
+	if deferred {
+		initialDispatchState = store.MessageDispatchDeferred
+	}
 
 	storeMsg := &store.Message{
 		ID:             msgID,
@@ -367,7 +442,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		ConversationID: input.ConversationID,
 		GroupID:        input.GroupID,
 		CreatedAt:      now,
-		DispatchState:  store.MessageDispatchPending,
+		DispatchState:  initialDispatchState,
 	}
 
 	// 7a. Stamp server-derived provenance (#1690).
@@ -377,6 +452,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// 7b. Build structured message for dispatch and observer publication.
 	structuredMsg := &messages.StructuredMessage{
+		Version:              messages.Version,
+		Timestamp:            storeMsg.CreatedAt.UTC().Format(time.RFC3339),
 		Sender:               storeMsg.Sender,
 		SenderID:             storeMsg.SenderID,
 		Recipient:            storeMsg.Recipient,
@@ -437,17 +514,33 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// 9. Publish SSE event.
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
-	// 10. Render delivery text envelope.
+	// 10. Render delivery text envelope. IsMention marks the envelope as a
+	// mention (not a message) for Type mention deliveries, matching how chat
+	// v2 and broker-inbound already render their secondary/fan-out
+	// recipients.
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
 			ConvResult: input.ConvResult,
 			Msg:        structuredMsg,
 			CreatedAt:  storeMsg.CreatedAt,
+			IsMention:  input.Type == messages.TypeMention,
 		})
 	}
 
 	// 11. Dispatch to target agent runtime (#1689).
+	// Migration gate: skip dispatch entirely for a migrating target — the
+	// message is already persisted (step 8) with DispatchState "deferred".
+	if deferred {
+		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchDeferred, nil)
+		return &AgentDMResult{
+			Outcome:     AgentDMDeferred,
+			MessageID:   msgID,
+			Recipient:   storeMsg.Recipient,
+			RecipientID: storeMsg.RecipientID,
+		}, nil
+	}
+
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
@@ -589,21 +682,36 @@ func WriteAgentDMError(w http.ResponseWriter, dmErr *AgentDMError) {
 // Ambiguous outcomes (dispatch succeeded but state tracking failed) use
 // HTTP 202 Accepted with status "ambiguous" and the stable message ID
 // for caller correlation. No blind retry guidance is returned (AC-4).
-func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult) {
+// mentionResults is included in the response when non-empty; pass nil when
+// there are none to report.
+func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionResults []messages.MentionResult) {
+	status := "dispatched"
+	httpStatus := http.StatusOK
+	var deferredNote string
 	switch result.Outcome {
 	case AgentDMAmbiguous:
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
-			"message_id":   result.MessageID,
-			"status":       "ambiguous",
-			"recipient":    result.Recipient,
-			"recipient_id": result.RecipientID,
-		})
-	default:
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"message_id":   result.MessageID,
-			"status":       "dispatched",
-			"recipient":    result.Recipient,
-			"recipient_id": result.RecipientID,
-		})
+		status = "ambiguous"
+		httpStatus = http.StatusAccepted
+	case AgentDMDeferred:
+		// Design agent-reincarnate §3.7: the target is mid-migration. The
+		// literal "deferred" field is the contract callers key on; the
+		// envelope also carries message_id/recipient for correlation, same
+		// as every other outcome.
+		status = "deferred"
+		httpStatus = http.StatusAccepted
+		deferredNote = "agent is reincarnating"
 	}
+	body := map[string]interface{}{
+		"message_id":   result.MessageID,
+		"status":       status,
+		"recipient":    result.Recipient,
+		"recipient_id": result.RecipientID,
+	}
+	if deferredNote != "" {
+		body["deferred"] = deferredNote
+	}
+	if len(mentionResults) > 0 {
+		body["mention_results"] = mentionResults
+	}
+	writeJSON(w, httpStatus, body)
 }
