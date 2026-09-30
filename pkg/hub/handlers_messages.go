@@ -196,7 +196,11 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+	if action == "read" {
+		MethodNotAllowed(w, http.MethodPost)
+	} else {
+		MethodNotAllowed(w, http.MethodGet)
+	}
 }
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.

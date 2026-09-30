@@ -706,7 +706,14 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete)
+		switch {
+		case subID == "":
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		case subID == "bulk" || subID == "bulk-delete":
+			MethodNotAllowed(w, http.MethodPost, http.MethodPatch, http.MethodDelete)
+		default:
+			MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
+		}
 	}
 }
 
@@ -809,6 +816,10 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodDelete)
+		if templateID == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodDelete)
+		}
 	}
 }

@@ -421,7 +421,11 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleProjectWorkspaceDelete(w, root, filePath)
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete)
+		if filePath == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		}
 	}
 }
 
@@ -1047,7 +1051,11 @@ func (s *Server) handleSharedDirFiles(w http.ResponseWriter, r *http.Request, pr
 	case r.Method == http.MethodDelete && filePath != "":
 		s.handleProjectWorkspaceDelete(w, root, filePath)
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete)
+		if filePath == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		}
 	}
 }
 
