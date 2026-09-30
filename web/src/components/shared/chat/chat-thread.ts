@@ -51,9 +51,17 @@ import './chat-system-line.js';
 import './chat-composer.js';
 import './chat-interagent-marker.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
-import { getLanguageFromPath } from '../code-editor.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import './chat-file-preview.js';
+import type { PreviewTarget } from './chat-file-preview.js';
+import {
+  parseContainerPath,
+  buildFileApiUrl,
+  resolveMessageProjectId,
+  type PathLinkTarget,
+} from '../../../utils/chat-file-links.js';
+import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -283,115 +291,12 @@ function withDispatchFailure(
 /** Typing send throttle in ms. */
 const TYPING_SEND_THROTTLE_MS = 4000;
 
-// ---------------------------------------------------------------------------
-// Path-link utilities (#1148) — parse container paths into API parameters.
-// ---------------------------------------------------------------------------
-
-/** Encode each segment of a file path for use in API URLs. */
-function encodeFilePath(filePath: string): string {
-  return filePath
-    .split('/')
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
-}
-
-interface PathLinkTarget {
-  kind: 'workspace' | 'shared-dir';
-  /** Shared-directory name (only for kind === 'shared-dir'). */
-  dirName?: string;
-  /** File path within the workspace or shared directory. */
-  filePath: string;
-}
-
-/**
- * Parse a container path into the API type and parameters.
- *
- * Supported patterns:
- *   /scion-volumes/{dirName}/{filePath}       -> shared-dir
- *   /workspace/.scion-volumes/{dirName}/{fp}   -> shared-dir (in-workspace mount)
- *   /workspace/{filePath}                      -> workspace
- */
-function parseContainerPath(containerPath: string): PathLinkTarget | null {
-  // /scion-volumes/{dirName}/...
-  const sharedDirMatch = containerPath.match(/^\/scion-volumes\/([^/]+)(?:\/(.+))?$/);
-  if (sharedDirMatch) {
-    return {
-      kind: 'shared-dir',
-      dirName: sharedDirMatch[1],
-      filePath: sharedDirMatch[2] || '',
-    };
-  }
-
-  // /workspace/.scion-volumes/{dirName}/...
-  const inWorkspaceMatch = containerPath.match(
-    /^\/workspace\/\.scion-volumes\/([^/]+)(?:\/(.+))?$/
-  );
-  if (inWorkspaceMatch) {
-    return {
-      kind: 'shared-dir',
-      dirName: inWorkspaceMatch[1],
-      filePath: inWorkspaceMatch[2] || '',
-    };
-  }
-
-  // /workspace/...
-  const workspaceMatch = containerPath.match(/^\/workspace\/(.+)$/);
-  if (workspaceMatch) {
-    return {
-      kind: 'workspace',
-      filePath: workspaceMatch[1],
-    };
-  }
-
-  return null;
-}
-
-/**
- * Build the API URL for a parsed path-link target.
- */
-function buildFileApiUrl(projectId: string, target: PathLinkTarget): string {
-  if (target.kind === 'shared-dir') {
-    return `/api/v1/projects/${encodeURIComponent(projectId)}/shared-dirs/${encodeURIComponent(target.dirName!)}/files/${encodeFilePath(target.filePath)}`;
-  }
-  return `/api/v1/projects/${encodeURIComponent(projectId)}/workspace/files/${encodeFilePath(target.filePath)}`;
-}
-
-/** Known image extensions for path-link preview. */
-const PATH_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico']);
-
-/** Known markdown extensions for path-link preview. */
-const PATH_MD_EXTS = new Set(['.md', '.markdown']);
-
-/** Maximum file size for inline text preview (512 KB). */
-const PATH_PREVIEW_MAX = 512 * 1024;
-
 /** Error shown when a path-link click cannot resolve any project id. */
 const PATH_LINK_NO_PROJECT_ERROR =
   'Cannot open file: could not determine which project this file belongs to';
 
-/** State for the file-path viewer dialog. */
-interface FilePreviewState {
-  /** The raw container path from the link. */
-  containerPath: string;
-  /** Resolved filename for display. */
-  fileName: string;
-  /** Loading / ready / error state. */
-  status: 'loading' | 'ready' | 'error';
-  /** File content (text) when ready. */
-  content?: string;
-  /** Error message when status is 'error'. */
-  error?: string;
-  /** Whether this is an image file. */
-  isImage?: boolean;
-  /** Whether this is a markdown file. */
-  isMarkdown?: boolean;
-  /** Whether this is a binary/unknown file (download-only). */
-  isBinary?: boolean;
-  /** API URL for download. */
-  downloadUrl?: string;
-}
-
-// Export the parse function for testing.
+// Re-exported for existing tests/consumers (#1148); the implementation now
+// lives in utils/chat-file-links.ts so the recorder can share it.
 export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
 
 @customElement('scion-chat-thread')
@@ -532,8 +437,12 @@ export class ScionChatThread extends LitElement {
 
   // ---- Path-link file preview state (#1148) ----
 
-  /** Current file preview dialog state, or null when closed. */
-  @state() private filePreview: FilePreviewState | null = null;
+  /**
+   * Current path preview target, or null when closed. Loading/error/download
+   * state lives inside the reusable `<scion-chat-file-preview>`; this
+   * component only owns which path is currently being previewed.
+   */
+  @state() private filePreview: PreviewTarget | null = null;
 
   /** Message extensions keyed by message ID. */
   private v2MessageExtMap = new Map<
@@ -1071,42 +980,6 @@ export class ScionChatThread extends LitElement {
         color: var(--scion-danger-600, #dc2626);
       }
 
-      /* Path-link file preview dialog (#1148) */
-      .file-preview-dialog::part(panel) {
-        width: min(90vw, 800px);
-        max-height: 85vh;
-      }
-
-      .file-preview-dialog::part(body) {
-        padding: 0;
-        overflow: auto;
-      }
-
-      .file-preview-placeholder {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 0.5rem;
-        padding: 3rem 2rem;
-        color: var(--scion-text-muted, #64748b);
-        font-size: var(--chat-fs-lg);
-      }
-
-      .file-preview-placeholder.error {
-        color: var(--scion-danger-600, #dc2626);
-      }
-
-      .file-preview-image {
-        max-width: 100%;
-        max-height: 70vh;
-        display: block;
-        margin: 0 auto;
-      }
-
-      .file-preview-dialog scion-code-editor {
-        --editor-max-height: 70vh;
-      }
-
       /* Phase-5: Slash command system message */
       .system-info-message {
         padding: 0.5rem 1rem;
@@ -1554,6 +1427,10 @@ export class ScionChatThread extends LitElement {
 
   private async fetchHistoryV2(cursor?: string): Promise<void> {
     const currentId = this.fetchId;
+    // Captured before the request starts: a response landing after the user
+    // has logged out (or switched accounts) must not repopulate a store that
+    // is no longer this identity's.
+    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
     const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
     if (cursor) {
       params.set('cursor', cursor);
@@ -1611,6 +1488,12 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
+    // Re-checked here, not just before the fetch/json-parse awaits above: a
+    // conversation switch that lands during `res.json()` must not attribute
+    // this page's items to the new conversation/project.
+    if (currentId === this.fetchId) {
+      this.recordRecentFilesForHistory(items, recentFilesGeneration);
+    }
   }
 
   /** Start listening for v2 messages via stateManager instead of per-thread EventSource. */
@@ -1767,6 +1650,15 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages([msg]);
+      // A payload with no real createdAt would otherwise record (or, worse,
+      // "correct" a pending provisional record with) a fabricated
+      // viewing-time timestamp — the recent-files record must use the
+      // message's own send time, never a value invented at capture time.
+      // Skip capture here; the next history/backfill merge carries the
+      // server's authoritative createdAt for the same message.
+      if (eventData.createdAt) {
+        this.recordRecentFiles(msg, this.getMessageAttachmentRefs(msg.id));
+      }
 
       // Play a chime for messages from others — never for our own echoed
       // back to this tab.
@@ -1868,6 +1760,7 @@ export class ScionChatThread extends LitElement {
 
   private async runBackfillV2(): Promise<void> {
     const currentId = this.fetchId;
+    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
     const params = new URLSearchParams({
       limit: String(HISTORY_PAGE_SIZE),
     });
@@ -1911,6 +1804,12 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
+    // See fetchHistoryV2's identical re-check: a conversation switch during
+    // `res.json()` must not attribute this page's items to the new
+    // conversation/project.
+    if (currentId === this.fetchId) {
+      this.recordRecentFilesForHistory(items, recentFilesGeneration);
+    }
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
@@ -2147,6 +2046,12 @@ export class ScionChatThread extends LitElement {
       .filter((m) => m.type !== 'mention')
       .sort(compareMessageOrder);
     this.scrollToBottomAfterRender();
+    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
+    // Snapshotted before the POST's `await`s below: a conversation switch
+    // while the send is in flight must not attribute this message's files to
+    // whatever conversation/project the thread has since moved on to.
+    const sendConversationKey = this.conversationKey;
+    const sendProjectId = this.resolvePathLinkProjectId(optimisticMsg);
 
     try {
       const body: Record<string, unknown> = {
@@ -2281,6 +2186,20 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
+
+        // The send response never carries the server's authoritative
+        // createdAt, so this is recorded "provisional": the client's own
+        // send time stands in until the SSE echo or backfill (both
+        // non-provisional) correct it — even if the corrected time is
+        // earlier.
+        if (resData?.id) {
+          this.recordRecentFiles({ ...optimisticMsg, id: resData.id }, resData.attachments ?? [], {
+            provisional: true,
+            scopeGeneration: recentFilesGeneration,
+            conversationKey: sendConversationKey,
+            projectId: sendProjectId,
+          });
+        }
 
         onSuccess();
         // Backfill to get the full server-enriched message. The optimistic
@@ -2978,6 +2897,7 @@ export class ScionChatThread extends LitElement {
     if (!this.conversationKey) return;
 
     const currentId = this.fetchId;
+    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
     const params = new URLSearchParams({
       around: messageId,
       limit: String(HISTORY_PAGE_SIZE),
@@ -3023,6 +2943,7 @@ export class ScionChatThread extends LitElement {
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
       this.mergeMessages(items);
+      this.recordRecentFilesForHistory(items, recentFilesGeneration);
     } catch (err) {
       console.error('Failed to fetch around message:', err);
     }
@@ -3410,9 +3331,81 @@ export class ScionChatThread extends LitElement {
    *      which project" error instead of guessing at an unrelated project.
    */
   private resolvePathLinkProjectId(msg: Message | undefined): string {
-    const fromMsg = msg?.senderProjectId || msg?.projectId || '';
-    if (!this.isDM) return this.projectId || fromMsg;
-    return fromMsg || this.peerAgentProjectId();
+    return resolveMessageProjectId({
+      isDM: this.isDM,
+      threadProjectId: this.projectId,
+      ...(msg?.senderProjectId ? { senderProjectId: msg.senderProjectId } : {}),
+      ...(msg?.projectId ? { messageProjectId: msg.projectId } : {}),
+      peerAgentProjectId: this.peerAgentProjectId(),
+    });
+  }
+
+  /**
+   * Feed one admitted message's attachments and detected container paths to
+   * the recent-files recorder. `refs` are the modern (W7) attachment refs
+   * already resolved for this message; historical wave-1 paths live on
+   * `msg.attachments`.
+   *
+   * Never called for drafts, failed sends, or the client's own optimistic
+   * placeholder — every call site below only reaches this once a message is
+   * either loaded from history or accepted by the server.
+   */
+  private recordRecentFiles(
+    msg: Message,
+    refs: import('./chat-message.js').AttachmentRefInfo[],
+    opts: {
+      provisional?: boolean;
+      scopeGeneration?: number;
+      /**
+       * Conversation key to record under, snapshotted by the caller before
+       * an `await` that could let `this.conversationKey` move on to a
+       * different conversation. Defaults to the live value for callers with
+       * no such gap (e.g. the synchronous SSE hook).
+       */
+      conversationKey?: string;
+      /**
+       * Resolved project id to record under, snapshotted the same way (and
+       * for the same reason) as `conversationKey`. `''` is a valid, explicit
+       * "no project resolved" — distinct from omitting the option, which
+       * falls back to resolving fresh from `msg`.
+       */
+      projectId?: string;
+    } = {}
+  ): void {
+    const conversationKey = opts.conversationKey ?? this.conversationKey;
+    const projectId =
+      opts.projectId !== undefined ? opts.projectId : this.resolvePathLinkProjectId(msg);
+    chatRecentFiles.ingest(
+      {
+        id: msg.id,
+        conversationKey,
+        sentAt: msg.createdAt,
+        text: msg.msg,
+        ...(msg.attachments && msg.attachments.length > 0
+          ? { legacyAttachmentPaths: msg.attachments }
+          : {}),
+      },
+      refs,
+      {
+        ...(projectId ? { projectId } : {}),
+        ...(opts.provisional ? { provisional: true } : {}),
+      },
+      opts.scopeGeneration !== undefined ? { scopeGeneration: opts.scopeGeneration } : {}
+    );
+  }
+
+  /**
+   * Apply {@link recordRecentFiles} to every message in a history/backfill/
+   * around-message page. Excludes `type === 'mention'` fan-out copies — the
+   * same filter `mergeMessages`/the message getters apply before display —
+   * so a recorded file's provenance never points at a message id the thread
+   * itself never shows.
+   */
+  private recordRecentFilesForHistory(items: Message[], scopeGeneration: number): void {
+    for (const msg of items) {
+      if (msg.type === 'mention') continue;
+      this.recordRecentFiles(msg, this.getMessageAttachmentRefs(msg.id), { scopeGeneration });
+    }
   }
 
   /**
@@ -3426,11 +3419,12 @@ export class ScionChatThread extends LitElement {
     return (peerAgentId && stateManager.getAgent(peerAgentId)?.projectId) || '';
   }
 
-  /** Handle path-link-click event from a chat message. */
-  private async handlePathLinkClick(
-    e: CustomEvent<{ path: string }>,
-    msg?: Message
-  ): Promise<void> {
+  /**
+   * Handle path-link-click event from a chat message. Resolution and
+   * validation are synchronous now that loading/error state moved into
+   * <scion-chat-file-preview>; this only ever sets which path to preview.
+   */
+  private handlePathLinkClick(e: CustomEvent<{ path: string }>, msg?: Message): void {
     const containerPath = e.detail.path;
     const resolvedProjectId = this.resolvePathLinkProjectId(msg);
 
@@ -3456,61 +3450,17 @@ export class ScionChatThread extends LitElement {
     }
 
     const fileName = containerPath.split('/').pop() || containerPath;
-    const ext = fileName.includes('.') ? '.' + fileName.split('.').pop()!.toLowerCase() : '';
-    const isImage = PATH_IMAGE_EXTS.has(ext);
-    const isMarkdown = PATH_MD_EXTS.has(ext);
-    const downloadUrl = buildFileApiUrl(resolvedProjectId, target);
 
+    // Loading/error/image/binary state lives inside the reusable
+    // <scion-chat-file-preview>; this component only owns which path is
+    // being previewed.
     this.filePreview = {
+      kind: 'path',
+      projectId: resolvedProjectId,
       containerPath,
-      fileName,
-      status: 'loading',
-      isImage,
-      isMarkdown,
-      downloadUrl,
+      location: target,
+      name: fileName,
     };
-
-    if (isImage) {
-      // Images are loaded directly by the browser via URL.
-      this.filePreview = { ...this.filePreview, status: 'ready' };
-      return;
-    }
-
-    try {
-      const res = await apiFetch(`${downloadUrl}?format=json`);
-      // Staleness guard: user closed dialog or clicked a different file link.
-      if (this.filePreview?.containerPath !== containerPath) return;
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, `HTTP ${res.status}`);
-        this.filePreview = { ...this.filePreview, status: 'error', error: errMsg };
-        return;
-      }
-      const data = (await res.json()) as { content: string; size: number };
-      // Staleness guard: user navigated away while parsing response.
-      if (this.filePreview?.containerPath !== containerPath) return;
-      if (data.size > PATH_PREVIEW_MAX) {
-        // Too large for inline preview, show download-only.
-        this.filePreview = {
-          ...this.filePreview,
-          status: 'ready',
-          isBinary: true,
-        };
-        return;
-      }
-      this.filePreview = {
-        ...this.filePreview,
-        status: 'ready',
-        content: data.content,
-      };
-    } catch (err) {
-      // Staleness guard: user navigated away while request was in-flight.
-      if (this.filePreview?.containerPath !== containerPath) return;
-      this.filePreview = {
-        ...this.filePreview,
-        status: 'error',
-        error: err instanceof Error ? err.message : 'Failed to load file',
-      };
-    }
   }
 
   /** Close the file preview dialog. */
@@ -3520,66 +3470,12 @@ export class ScionChatThread extends LitElement {
 
   /** Render the file preview overlay dialog. */
   private renderFilePreview() {
-    const fp = this.filePreview;
-    if (!fp) return nothing;
-
-    let body;
-    if (fp.status === 'loading') {
-      body = html`
-        <div class="file-preview-placeholder">
-          <sl-spinner></sl-spinner>
-          Loading file…
-        </div>
-      `;
-    } else if (fp.status === 'error') {
-      body = html`<div class="file-preview-placeholder error">${fp.error}</div>`;
-    } else if (fp.isImage) {
-      body = html`<img
-        class="file-preview-image"
-        src="${fp.downloadUrl}?view=true"
-        alt=${fp.fileName}
-      />`;
-    } else if (fp.isBinary) {
-      body = html`
-        <div class="file-preview-placeholder">
-          This file is too large to preview inline. Use the Download button.
-        </div>
-      `;
-    } else if (fp.isMarkdown) {
-      body = html`<scion-markdown-preview .content=${fp.content ?? ''}></scion-markdown-preview>`;
-    } else {
-      body = html`
-        <scion-code-editor
-          .content=${fp.content ?? ''}
-          language=${getLanguageFromPath(fp.fileName)}
-          readonly
-        ></scion-code-editor>
-      `;
-    }
-
+    if (!this.filePreview) return nothing;
     return html`
-      <sl-dialog
-        class="file-preview-dialog"
-        open
-        label=${fp.fileName}
-        @sl-after-hide=${(e: Event) => {
-          if (e.target === e.currentTarget) this.closeFilePreview();
-        }}
-      >
-        ${body}
-        <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          <span
-            style="flex:1;font-size:var(--chat-fs-base);color:var(--scion-text-muted,#64748b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-            title=${fp.containerPath}
-          >
-            ${fp.containerPath}
-          </span>
-          <sl-button href="${fp.downloadUrl}" download=${fp.fileName} size="small">
-            <sl-icon slot="prefix" name="download"></sl-icon>
-            Download
-          </sl-button>
-        </div>
-      </sl-dialog>
+      <scion-chat-file-preview
+        .target=${this.filePreview}
+        @chat-file-preview-close=${() => this.closeFilePreview()}
+      ></scion-chat-file-preview>
     `;
   }
 
