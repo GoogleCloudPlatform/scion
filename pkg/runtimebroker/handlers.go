@@ -2267,6 +2267,14 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		AgentLookupUnavailable(w, err, id, "exec", "")
 		return
 	}
+	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
+	// ambiguous match) reflects a real problem resolving the agent and must
+	// be surfaced as an error rather than reported as "not found", mirroring
+	// projectScopedTarget's use by stopAgent and restartAgent.
+	if err != nil && !errors.Is(err, ErrAgentNotFound) {
+		RuntimeError(w, "Failed to execute command: "+err.Error())
+		return
+	}
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
 		return
@@ -2319,6 +2327,14 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		// agent" — tell the caller to retry rather than reporting the agent
 		// missing (mirrors the PTY attach path in pty_handlers.go).
 		AgentLookupUnavailable(w, err, id, "reset_auth", "")
+		return
+	}
+	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
+	// ambiguous match) reflects a real problem resolving the agent and must
+	// be surfaced as an error rather than reported as "not found", mirroring
+	// projectScopedTarget's use by stopAgent and restartAgent.
+	if err != nil && !errors.Is(err, ErrAgentNotFound) {
+		RuntimeError(w, "Failed to reset auth: "+err.Error())
 		return
 	}
 	if err != nil || target == "" {

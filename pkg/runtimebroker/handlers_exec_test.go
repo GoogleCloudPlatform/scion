@@ -419,6 +419,63 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 	}
 }
 
+// TestExecCommand_AmbiguousMatchReturns500 is a regression test for
+// GoogleCloudPlatform/scion#2098: when LookupContainerID finds more than one
+// distinct container matching the slug (uniqueAgentEntry's ambiguous case),
+// that is a real lookup failure, not a "not found," so execCommand must
+// return a 500 runtime_error and must NOT exec — a lookup that can't tell
+// which container to target must not guess and run against one of them
+// anyway. Mirrors TestStopAgent_AmbiguousMatchAbortsWithoutStop.
+//
+// The status and code are pinned exactly (500 runtime_error, not just "some
+// 5xx") because an ambiguous match is NOT ErrAgentListUnavailable: the
+// runtime answered fine, it just returned two entries. A mutation that widens
+// the list-unavailable branch to catch every lookup error (turning this into
+// a 503 runtime_unavailable) must fail this test.
+func TestExecCommand_AmbiguousMatchReturns500(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	execCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected exactly 500 for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
+	}
+	if execCalled {
+		t.Error("exec must not run when the lookup found an ambiguous match")
+	}
+}
+
 // TestRestartAgent_LookupErrorAbortsWithoutStart is a regression test for
 // #1985: when resolving the project-scoped stop target during a restart
 // fails for a reason other than genuine "not found" (here, the runtime
