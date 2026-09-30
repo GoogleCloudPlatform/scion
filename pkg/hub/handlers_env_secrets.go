@@ -2177,10 +2177,13 @@ type projectProviderView struct {
 	// AgentLimitSource reports which precedence step produced AgentLimit
 	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
 	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
-	// "hub_default" (the limit definition's default value), or "unlimited"
-	// (resolved with no cap). Omitted whenever resolution didn't run or
-	// failed — the same conditions that leave AgentLimit and AgentCount
-	// unset.
+	// "hub_default" (the limit definition's default value), "unlimited"
+	// (resolved with no cap), or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch, GoogleCloudPlatform/scion#2115, is off — AgentLimit
+	// is then informational only: it is still the resolved cap from whichever
+	// step would otherwise apply, but Reserve does not reject agent creates
+	// against it). Omitted whenever resolution didn't run or failed — the
+	// same conditions that leave AgentLimit and AgentCount unset.
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 

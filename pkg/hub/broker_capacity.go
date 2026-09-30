@@ -23,11 +23,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Broker capacity precedence sources (ptone/scion#2061 P2, design.md §5.9).
-// "not_enforced" is reserved for PR ptone/scion#2270 (P1b, the enforcement
-// switch): effectiveBrokerLimit does not produce it yet, and it is added
-// here as documentation for that future rebase, not because anything
-// returns it today.
+// Broker capacity precedence sources (ptone/scion#2061 P2, design.md §5.9,
+// Amendment A1). "not_enforced" is produced by effectiveBrokerLimit when the
+// P1b enforcement switch (GoogleCloudPlatform/scion#2115,
+// Server.brokerQuotasEnforced) is off: the resolved value (whichever of
+// broker/entitlement/hub_default would otherwise apply) is kept, but the
+// source is reported as not_enforced instead of its usual label, since
+// Amendment A1 requires every surface that shows the limit to also show that
+// it is not enforced — a value shown without its source is a defect
+// (AC-P2-10).
 const (
 	BrokerLimitSourceBroker      = "broker"
 	BrokerLimitSourceEntitlement = "entitlement"
@@ -37,27 +41,36 @@ const (
 )
 
 // effectiveBrokerLimit resolves the effective max_agents_per_broker limit for
-// brokerID and reports which precedence step produced it (design.md §5.2):
+// brokerID and reports which precedence step produced it (design.md §5.2,
+// Amendment A1):
 //
-//  1. (not yet wired — P1b/PR ptone/scion#2270) the enforcement switch is
-//     off: "not_enforced".
-//  2. The broker's own settings.maxAgents, if set: "broker". It can be
+//  1. The broker's own settings.maxAgents, if set: "broker". It can be
 //     lower than the hub-wide default and lower than any system-scoped
 //     entitlement binding.
-//  3. An entitlement binding (bindings, most generous wins): "entitlement".
-//  4. The limit definition's hub-wide default value: "hub_default".
+//  2. An entitlement binding (bindings, most generous wins): "entitlement".
+//  3. The limit definition's hub-wide default value: "hub_default".
+//  4. If the P1b enforcement switch (Server.brokerQuotasEnforced) is off,
+//     the value from whichever of steps 1-3 applies is kept, but the source
+//     is reported as "not_enforced" instead — this step takes precedence
+//     over the broker/entitlement/hub_default label, per Amendment A1.
 //
 // limitDef is looked up once by the caller and shared across a whole
 // listing (lookupAgentLimitDefinition, handlers_env_secrets.go), the same
 // convention resolveBrokerCapacity uses. A nil limitDef, or no configured
-// quota service, means no limit exists at all: (0, "unlimited", nil).
+// quota service, means no limit exists at all: (0, "unlimited", nil) — this
+// is unaffected by the enforcement switch, matching Amendment A1 ("when
+// limitDef or quotaService is nil it stays unlimited").
 //
 // This is the effective-limit half of the one read model shared by
 // enforcement and every read path (AC-P2-10): Reserve reaches the same
 // broker-settings override through QuotaService.limitOverride, wired in
 // server.go to brokerSettingLimitOverride below, so Reserve and every read
 // path (this function, the providers listing, the broker settings GET,
-// `scion hub projects info`) always agree.
+// `scion hub projects info`) always agree. Reserve and limitOverride
+// themselves are unchanged by Amendment A1 — the switch's effect on
+// enforcement is entirely QuotaService.enforced's concern (quota.go); this
+// function only changes what value/source pair is reported, never what
+// Reserve admits or rejects.
 func (s *Server) effectiveBrokerLimit(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (value int64, source string, err error) {
 	if limitDef == nil || s.quotaService == nil {
 		return 0, BrokerLimitSourceUnlimited, nil
@@ -68,10 +81,18 @@ func (s *Server) effectiveBrokerLimit(ctx context.Context, brokerID string, limi
 		return 0, "", fmt.Errorf("effective broker limit: broker settings: %w", err)
 	}
 	if ok {
-		return overrideValue, BrokerLimitSourceBroker, nil
+		value, source = overrideValue, BrokerLimitSourceBroker
+	} else {
+		value, source, err = s.inheritedBrokerLimit(ctx, brokerID, limitDef)
+		if err != nil {
+			return 0, "", err
+		}
 	}
 
-	return s.inheritedBrokerLimit(ctx, brokerID, limitDef)
+	if !s.brokerQuotasEnforced() {
+		return value, BrokerLimitSourceNotEnforced, nil
+	}
+	return value, source, nil
 }
 
 // inheritedBrokerLimit resolves what the effective limit and source would be
