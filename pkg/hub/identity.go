@@ -293,6 +293,53 @@ type localAncestryProvenanceIdentity interface {
 	localAncestryProvenance() ancestryProvenance
 }
 
+// isNilIdentity reports whether identity is nil at the interface level, or is
+// a non-nil Identity interface value holding a nil pointer of one of the
+// concrete identity types this package classifies. The distinction matters
+// because a typed-nil interface — for example an Identity holding
+// (*ScopedUserIdentity)(nil) — is never == nil, yet a type assertion or type
+// switch against it still succeeds with a nil concrete value; calling a
+// method or reading a field on that value then dereferences a nil pointer.
+// Every classifier in this package (principalContextForIdentity,
+// credentialContextForIdentity, AncestryIsHubAttested) and decide's entry
+// check must treat that case identically to a nil interface, before doing
+// anything else with identity.
+//
+// The concrete set enumerated here is the same closed set tracked by
+// identityInventoryExpectation (identity_classification_test.go); a new
+// production Identity type needs a case here as well as a row there.
+func isNilIdentity(identity Identity) bool {
+	if identity == nil {
+		return true
+	}
+	switch v := identity.(type) {
+	case *AuthenticatedUser:
+		return v == nil
+	case *ScopedUserIdentity:
+		return v == nil
+	case *DevUser:
+		return v == nil
+	case *agentIdentityWrapper:
+		return v == nil
+	case *storedAgentIdentity:
+		return v == nil
+	case *peerAgentIdentity:
+		return v == nil
+	case *explainAgentIdentity:
+		return v == nil
+	case *brokerIdentityImpl:
+		return v == nil
+	case *FederatedUserIdentity:
+		return v == nil
+	case *FederatedAgentIdentity:
+		return v == nil
+	case *FederatedServiceIdentity:
+		return v == nil
+	default:
+		return false
+	}
+}
+
 // AncestryIsHubAttested returns true when the identity's ancestry chain has
 // recognized local provenance: signed by this hub (agent JWT) or persisted
 // by this hub (store-derived wrappers), or is itself the root of the chain
@@ -309,9 +356,11 @@ type localAncestryProvenanceIdentity interface {
 // cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
 // identity types all return false (fail closed): an identity is attested
 // only if it implements localAncestryProvenanceIdentity, which — unlike
-// Type() — cannot be satisfied by an arbitrary or future type string.
+// Type() — cannot be satisfied by an arbitrary or future type string. A
+// typed-nil concrete identity is treated the same as a nil interface: see
+// isNilIdentity.
 func AncestryIsHubAttested(identity Identity) bool {
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return false
 	}
 	// All FederatedIdentity types (FederatedAgentIdentity,
