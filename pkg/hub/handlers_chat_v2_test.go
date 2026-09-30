@@ -915,8 +915,8 @@ func TestChatV2_ConversationRead(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// The watermark must name a real, persisted message (R1 defence in
-	// depth) — "msg-42" would now be rejected as not found.
+	// The watermark must name a real, persisted message — "msg-42" would
+	// now be rejected as not found.
 	msg := &store.Message{ID: tid("read-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
 		Recipient: "thread:topic-read", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-read", CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, msg); err != nil {
@@ -1034,10 +1034,10 @@ func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
 	}
 }
 
-// TestChatV2_ConversationRead_Monotonic pins FYI 2: a stale /read POST for an
-// older message must not roll the watermark backward once a newer one has
-// already been recorded (e.g. by autoAdvanceSenderReadState on send, or a
-// later user-triggered advance).
+// TestChatV2_ConversationRead_Monotonic: a stale /read POST for an older
+// message must not roll the watermark backward once a newer one has already
+// been recorded (e.g. by autoAdvanceSenderReadState on send, or a later
+// user-triggered advance).
 func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
 	srv, s, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
