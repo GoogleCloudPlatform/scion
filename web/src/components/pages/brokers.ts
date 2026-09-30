@@ -242,9 +242,9 @@ export class ScionPageBrokers extends LitElement {
   /**
    * Renders the broker's effective agent capacity as "7 / 30" or
    * "7 / unlimited", with the precedence source in a tooltip
-   * (ptone/scion#2061 P2.2, design.md §5.6). Renders '-' when the fields are
-   * absent — e.g. the caller lacks visibility, or capacity resolution didn't
-   * run.
+   * (ptone/scion#2061 P2.2, design.md §5.6). Renders an em dash "—" when the
+   * fields are absent — e.g. the caller lacks visibility, or capacity
+   * resolution didn't run.
    */
   private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
     if (broker.agentCount === undefined) {
