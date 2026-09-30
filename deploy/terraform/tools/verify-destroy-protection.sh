@@ -59,6 +59,15 @@
 
 set -uo pipefail
 
+# Global cleanup: every mktemp'd file/dir in this script is appended to
+# TEMPS, and this trap removes them all on any exit path (normal, error, or
+# an early `return`/`exit` from a helper). Declaring TEMPS=() before the
+# trap means "${TEMPS[@]}" is always an empty-but-defined array expansion,
+# not an unset one, so it is safe under `set -u` even before anything has
+# been added to it.
+TEMPS=()
+trap 'rm -f "${TEMPS[@]}"' EXIT
+
 PROG="$(basename "$0")"
 MODE=""
 PROJECT=""
@@ -833,6 +842,7 @@ do_attempt4() {
 
   local before after
   before="$(mktemp)"; after="$(mktemp)"
+  TEMPS+=("$before" "$after")
   # Fail CLOSED on a blind before-snapshot. Without a trustworthy
   # "before" there is no way to detect a partial destroy, so the destroy
   # attempts must not run at all.
@@ -842,7 +852,6 @@ do_attempt4() {
       "the before-sweep errored or found no ${NAME_PREFIX} resources; attempt 4 NOT run, since a partial destroy would be undetectable")")
     RED=$((RED+1))
     { printf '### Estate snapshot (before) — BLIND\n\n```\n'; cat "$before"; printf '```\n\n'; } >> "$OUT"
-    rm -f "$before" "$after"
     return
   fi
 
@@ -896,7 +905,6 @@ do_attempt4() {
     printf '%s\n' "${diffout:-(identical)}"
     printf '%s\n\n' '```'
   } >> "$OUT"
-  rm -f "$before" "$after"
 }
 
 do_run() {

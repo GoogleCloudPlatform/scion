@@ -73,6 +73,7 @@ if [[ -z "$PROJECT" || -z "$SERVICE" || -z "$REV" ]]; then
 fi
 
 J=$(mktemp)
+trap 'rm -f "$J"' EXIT
 gcloud logging read \
   "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\" AND resource.labels.revision_name=\"${REV}\"" \
   --project="$PROJECT" --order=asc --limit=5000 --format=json > "$J" || exit 2
@@ -100,4 +101,4 @@ for e in app:
         print("  note:",e['timestamp'][11:23],e.get('severity'),t[:200])
 sys.exit(1 if bad else 0)
 PY
-rc=$?; rm -f "$J"; exit $rc
+exit $?
