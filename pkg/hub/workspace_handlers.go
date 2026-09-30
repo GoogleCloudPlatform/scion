@@ -117,28 +117,28 @@ func (s *Server) handleWorkspaceRoutes(w http.ResponseWriter, r *http.Request, a
 		if r.Method == http.MethodGet {
 			s.handleWorkspaceStatus(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 		}
 	case "sync-from":
 		// POST /api/v1/agents/{id}/workspace/sync-from - Initiate sync from agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncFrom(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to":
 		// POST /api/v1/agents/{id}/workspace/sync-to - Initiate sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncTo(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to/finalize":
 		// POST /api/v1/agents/{id}/workspace/sync-to/finalize - Finalize sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncToFinalize(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	default:
 		NotFound(w, "Workspace action")

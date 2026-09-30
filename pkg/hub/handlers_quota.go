@@ -170,7 +170,7 @@ func (s *Server) handleAdminLimits(w http.ResponseWriter, r *http.Request) {
 		}
 		s.createLimitDefinition(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -207,7 +207,7 @@ func (s *Server) handleAdminLimitByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.deleteLimitDefinition(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -228,7 +228,7 @@ func (s *Server) handleLimitEntitlements(w http.ResponseWriter, r *http.Request,
 		}
 		s.createEntitlement(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -257,7 +257,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 		}
 		s.deleteEntitlement(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -268,7 +268,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 // handleAdminUsage handles GET on /api/v1/admin/usage.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getUsageSummary(w, r)
@@ -277,7 +277,7 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 // handleAdminUsageByLimit handles GET on /api/v1/admin/usage/:limitID.
 func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	limitID := extractID(r, "/api/v1/admin/usage")
@@ -291,7 +291,7 @@ func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request)
 // handleUsageMe handles GET on /api/v1/usage/me.
 func (s *Server) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getMyUsage(w, r)

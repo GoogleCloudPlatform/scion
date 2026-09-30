@@ -271,7 +271,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createAgent(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -2354,7 +2354,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteAgent(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -2958,7 +2958,7 @@ func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, action string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

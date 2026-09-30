@@ -3162,7 +3162,7 @@ type BroadcastMessageRequest struct {
 // which fans out to all running agents in the project.
 func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

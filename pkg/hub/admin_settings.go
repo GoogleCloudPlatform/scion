@@ -188,7 +188,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -217,7 +217,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -229,7 +229,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
