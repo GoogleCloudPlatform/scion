@@ -140,6 +140,17 @@ const (
 	CloseReasonAttachUnsupported = "attach_unsupported"
 )
 
+// ErrCodeRuntimeAttachUnsupported is the JSON error code
+// (ErrorResponse.Error.Code) a broker's direct-connect PTY endpoint returns
+// with HTTP 501, before any WebSocket upgrade, for the same attach-support
+// pre-check ClosePTYAttachUnsupported/CloseReasonAttachUnsupported cover
+// once a connection is already upgraded. pkg/runtimebroker writes this
+// value; pkg/wsclient reads it back to map a failed handshake to the same
+// fixed, actionable message the post-upgrade close code produces, so a
+// caller sees one consistent "attach is not supported" outcome regardless
+// of which of the two points rejected it.
+const ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
+
 // MaxCloseReasonBytes is the largest reason RFC 6455 allows in a close frame
 // (125-byte control payload minus the 2-byte code).
 const MaxCloseReasonBytes = 123

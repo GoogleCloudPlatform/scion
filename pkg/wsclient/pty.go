@@ -18,6 +18,7 @@ package wsclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,6 +44,16 @@ const (
 	// This helps detect when the server-side PTY stream fails silently
 	initialDataTimeout = 30 * time.Second
 )
+
+// attachUnsupportedMessage is the one fixed, actionable error text a caller
+// sees when the target runtime has no exec/attach/TTY primitive at all,
+// regardless of which of the two points where the broker can learn that
+// rejects the attempt: the pre-upgrade HTTP 501/runtime_attach_unsupported
+// response Connect checks for below, or the post-upgrade
+// 4501/attach_unsupported close code readFromWebSocket checks for. Kept as
+// one constant so the two call sites can never drift into two different
+// wordings for the same outcome.
+const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
 
 // PTYClientConfig holds configuration for the PTY client.
 type PTYClientConfig struct {
@@ -128,7 +139,7 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 	if err != nil {
 		// gorilla/websocket returns a non-nil resp (with an unread body) on a
 		// failed handshake so callers can inspect the status/body. Close it
-		// once attachFailureDetail has had a chance to read it, or it leaks.
+		// once parseAttachFailureBody has had a chance to read it, or it leaks.
 		if resp != nil && resp.Body != nil {
 			defer func() { _ = resp.Body.Close() }()
 		}
@@ -136,7 +147,11 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 			return fmt.Errorf("connection timed out after %v", connectTimeout)
 		}
 		if resp != nil && resp.StatusCode >= 400 {
-			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, attachFailureDetail(resp, err))
+			code, detail := parseAttachFailureBody(resp, err)
+			if resp.StatusCode == http.StatusNotImplemented && code == wsprotocol.ErrCodeRuntimeAttachUnsupported {
+				return errors.New(attachUnsupportedMessage)
+			}
+			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, detail)
 		}
 		return fmt.Errorf("connection failed: %w", err)
 	}
@@ -146,33 +161,36 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 }
 
 // attachErrorBody mirrors the shape of runtimebroker's JSON error envelope
-// (APIError/ErrorResponse) closely enough to pull out the human-readable
-// message without importing the broker package.
+// (APIError/ErrorResponse) closely enough to pull out the machine-readable
+// code and human-readable message without importing the broker package.
 type attachErrorBody struct {
 	Error struct {
+		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-// attachFailureDetail extracts an actionable message from a failed
-// WebSocket handshake response. Without this, a caller only ever sees
-// "websocket: bad handshake" — the broker's actual explanation (e.g. "agent
-// not found" vs. "container runtime temporarily unavailable, retry") is in
-// the response body, which gorilla/websocket buffers but does not surface.
-func attachFailureDetail(resp *http.Response, fallback error) string {
+// parseAttachFailureBody reads resp's body once and returns the parsed error
+// code (empty if the body isn't the runtimebroker error envelope shape) and
+// a best-effort human-readable detail: the envelope's message when present,
+// otherwise the raw body, otherwise fallback's own text. Centralizing the
+// single body read here (rather than letting each caller drain it) avoids
+// handing back an empty detail to a second reader of an already-consumed
+// body.
+func parseAttachFailureBody(resp *http.Response, fallback error) (code, detail string) {
 	if resp == nil || resp.Body == nil {
-		return fallback.Error()
+		return "", fallback.Error()
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil || len(body) == 0 {
-		return fallback.Error()
+		return "", fallback.Error()
 	}
 
 	var parsed attachErrorBody
 	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
-		return parsed.Error.Message
+		return parsed.Error.Code, parsed.Error.Message
 	}
-	return strings.TrimSpace(string(body))
+	return "", strings.TrimSpace(string(body))
 }
 
 // buildWebSocketURL constructs the WebSocket URL.
@@ -440,7 +458,7 @@ func (c *PTYClient) readFromWebSocket() error {
 				return nil
 			}
 			if websocket.IsCloseError(err, wsprotocol.ClosePTYAttachUnsupported) {
-				return fmt.Errorf("attach is not supported for this agent's runtime")
+				return errors.New(attachUnsupportedMessage)
 			}
 			// Check if this is a timeout on initial data
 			if !c.receivedData {

@@ -144,12 +144,13 @@ func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource,
 }
 
 // attachUnsupportedErr returns a fixed, explicit error for an agent that has
-// no exec/attach/TTY primitive to dial, or nil when attach is supported. It
-// covers managed agents (a `managed:`-prefixed runtime) and any agent whose
-// runtime broker advertises its profile — or, failing that, the broker as a
-// whole — as not supporting attach (see attachSupportedByBroker). A runtime
-// whose broker would otherwise reject the PTY stream only after the
-// WebSocket upgrade has already happened is rejected here instead, so that
+// no exec/attach/TTY primitive to dial, or nil when attach should proceed to
+// dial. It covers managed agents (a `managed:`-prefixed runtime) and any
+// agent whose runtime broker advertises its profile — or, failing that, the
+// broker as a whole — as EXPLICITLY not supporting attach (see
+// attachSupportedByBroker). A runtime whose broker would otherwise reject
+// the PTY stream only after the WebSocket upgrade has already happened is
+// rejected here instead when the broker's own record is readable, so that
 // rejection never reaches the CLI process. Every attach entry point (both
 // the direct `scion attach` path and the `scion start -a` / `scion resume
 // -a` paths) must call this before dialing.
@@ -160,10 +161,16 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 	supported, unreadable := attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile)
 	if unreadable {
 		// The broker record could not be read at all (point-GET and the LIST
-		// fallback both failed): this is not "the broker said no", it is "we
-		// could not find out". An unreadable record refuses, never assumes
-		// supported. No raw server error text goes into this message.
-		return fmt.Errorf("cannot determine whether this agent's runtime supports attach (broker record unavailable)")
+		// fallback both failed, e.g. a 403/404 the CLI's own principal
+		// doesn't have read access to). That is not "the broker said no", it
+		// is "this client doesn't know" — a hub-member principal without
+		// broker-record read access must not be refused attach client-side
+		// for a runtime that does support it. Proceed to dial: the broker's
+		// own gate on the dial path (the 4501 close or the 501
+		// runtime_attach_unsupported pre-upgrade response) stays the
+		// authoritative check and still refuses a genuinely unsupported
+		// runtime, with this same fixed message, before any PTY data flows.
+		return nil
 	}
 	if !supported {
 		if agentRuntime == "" {
@@ -208,11 +215,13 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 // No broker ID on the agent record defaults to supported: there is nothing
 // to read in that case, unlike a broker that answered but had nothing to
 // say about that particular profile, and the server-side gate stays the
-// authoritative check regardless. But a broker ID that neither the
-// point-GET nor the LIST fallback could resolve to a record comes back as
-// unreadable — the caller (attachUnsupportedErr) refuses instead of
-// defaulting to supported, because there is no longer a "nothing to read"
-// excuse once a broker ID is present: something should have answered.
+// authoritative check regardless. A broker ID that neither the point-GET
+// nor the LIST fallback could resolve to a record also comes back
+// unreadable, for the same reason a 403/404 on either read does: the caller
+// (attachUnsupportedErr) treats "could not find out" as unknown and lets
+// the dial proceed, rather than refusing client-side on a signal that is
+// about this principal's read access, not about the runtime's own attach
+// support.
 func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBrokerID, profile string) (supported bool, unreadable bool) {
 	if hubCtx == nil || hubCtx.Client == nil || runtimeBrokerID == "" {
 		return true, false
@@ -264,9 +273,11 @@ const findRuntimeBrokerListMaxPages = 50
 // RuntimeBrokers().List — the fallback attachSupportedByBroker uses when the
 // point-GET can't be read — scoped to hubCtx.ProjectID when known. It
 // returns (nil, nil) when the list pages are exhausted without a match, the
-// page cap is hit, or a cursor repeats; the caller treats all three the
-// same as an error: either way, the record could not be found, so it stays
-// fail-closed rather than guessing.
+// page cap is hit, or a cursor repeats; the caller (attachSupportedByBroker)
+// treats all three the same as unreadable, which attachUnsupportedErr in
+// turn treats as unknown and lets the dial proceed, rather than refusing
+// client-side on a signal that is about this principal's read access, not
+// about the runtime's own attach support.
 func findRuntimeBrokerByIDViaList(ctx context.Context, hubCtx *HubContext, runtimeBrokerID string) (*hubclient.RuntimeBroker, error) {
 	opts := &hubclient.ListBrokersOptions{ProjectID: hubCtx.ProjectID}
 	seenCursors := map[string]bool{}

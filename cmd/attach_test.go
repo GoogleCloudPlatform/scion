@@ -265,7 +265,8 @@ func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *test
 // widening anything), and the LIST response is
 // either listBrokers or a 403 when listFails is set. The returned *bool
 // flips true if the PTY WebSocket path is ever requested, so callers can
-// prove attachViaHub refused before dialing.
+// prove either that attachViaHub refused before dialing, or that it
+// proceeded to dial.
 func newAttachGateFallbackServer(t *testing.T, projectID, agentName, agentID, brokerID string, listBrokers []hubclient.RuntimeBroker, listFails bool) (*httptest.Server, *bool) {
 	t.Helper()
 	dialed := false
@@ -333,12 +334,14 @@ func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *t
 	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the gate refuses")
 }
 
-// TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage
-// covers the "record unreadable" case: neither the point-GET nor the LIST
-// fallback can produce the broker record, so attachViaHub must refuse with
-// the fixed message and never dial — and that message must not leak the
-// raw 403 server text.
-func TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage(t *testing.T) {
+// TestAttachViaHub_PointGETForbidden_ListAlsoFails_ProceedsToDial covers a
+// UAT (non-hub-member) principal: neither the point-GET nor the LIST
+// fallback can produce the broker record (both 403), which is this client's
+// read access, not the runtime's own attach support. attachViaHub must
+// treat that as unknown and proceed to dial rather than refuse client-side
+// — the broker's own dial-path gate stays authoritative for a runtime that
+// genuinely doesn't support attach.
+func TestAttachViaHub_PointGETForbidden_ListAlsoFails_ProceedsToDial(t *testing.T) {
 	clearAppTokenSources(t)
 	attachTransportFakeAllowsDial(t)
 
@@ -355,10 +358,10 @@ func TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage(t 
 	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
 
 	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
-	assert.NotContains(t, err.Error(), "403", "the fixed message must not leak raw server error text")
-	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the broker record is unreadable")
+	require.Error(t, err, "expected a WS dial error — the gate must not have refused pre-dial")
+	assert.NotContains(t, err.Error(), "attach is not supported")
+	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
+	assert.True(t, *dialed, "the PTY WebSocket must be dialed when the broker record is unreadable — the broker's own gate is authoritative")
 }
 
 // TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate covers
@@ -475,19 +478,19 @@ func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFa
 	assert.True(t, *dialed, "the target's own attach=true must win over a false decoy")
 }
 
-// TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_RefusesWithFixedMessage
+// TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_ProceedsToDial
 // covers a successful LIST response that simply never includes the target
 // broker at all — a decoy with attach=true is present, so a match that
 // ignored ID entirely (or matched the first/only entry) would read it as
-// supported and proceed to dial. attachViaHub must still refuse before
-// dialing, with the same fixed "record unavailable" message a wholly
-// failed LIST produces, not the named-runtime message a broker record
-// that was actually read would produce. Reaching this path through
-// attachViaHub (rather than calling findRuntimeBrokerByIDViaList directly)
-// is what pins the caller's own broker == nil check in
-// attachSupportedByBroker: without it, attachSupportedFromBrokerRecord
-// would be called with a nil broker and panic.
-func TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_RefusesWithFixedMessage(t *testing.T) {
+// supported for the wrong reason. The target being absent from LIST is
+// still "unreadable" (nothing to read FOR THIS agent's broker, whatever the
+// reason), so attachViaHub must proceed to dial rather than refuse
+// client-side. Reaching this path through attachViaHub (rather than calling
+// findRuntimeBrokerByIDViaList directly) is what pins the caller's own
+// broker == nil check in attachSupportedByBroker: without it,
+// attachSupportedFromBrokerRecord would be called with a nil broker and
+// panic.
+func TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_ProceedsToDial(t *testing.T) {
 	clearAppTokenSources(t)
 	attachTransportFakeAllowsDial(t)
 
@@ -508,10 +511,10 @@ func TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_RefusesWithFix
 	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
 
 	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
-	assert.NotContains(t, err.Error(), "403", "the fixed message must not leak raw server error text")
-	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the target is absent from a successful LIST")
+	require.Error(t, err, "expected a WS dial error — the gate must not have refused pre-dial")
+	assert.NotContains(t, err.Error(), "attach is not supported")
+	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
+	assert.True(t, *dialed, "the PTY WebSocket must be dialed when the target is absent from a successful LIST — the broker's own gate is authoritative")
 }
 
 // TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor pins that

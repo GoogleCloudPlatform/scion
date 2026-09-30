@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // APIError represents a standardized error response.
@@ -66,8 +68,11 @@ const (
 	// pkg/runtime/capabilities.go), rather than one that failed. Rejecting
 	// here — instead of upgrading and only failing once the runtime's own
 	// PTY dial rejects the stream — gives the caller a clean, pre-upgrade
-	// error instead of an abnormal WebSocket close.
-	ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
+	// error instead of an abnormal WebSocket close. Shares its wire value
+	// with wsprotocol.ErrCodeRuntimeAttachUnsupported, which pkg/wsclient
+	// reads back to map this to the same fixed message the post-upgrade
+	// 4501 close code produces.
+	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
 )
 
 // writeError writes a JSON error response.
