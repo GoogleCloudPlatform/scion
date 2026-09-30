@@ -1128,6 +1128,268 @@ describe('scion-chat-thread receipt expiry', () => {
   });
 });
 
+/**
+ * Mark-unread sets the caller's own watermark backwards. If this conversation
+ * is open when that happens, the normal auto-advance (viewing = read) must
+ * not immediately undo it — Slack-like behaviour — until the user navigates
+ * away and back, or sends a message here. The signal for "this just
+ * happened" is a self-targeted read-state event: the same SSE event a DM
+ * peer's "seen" tick uses, just addressed to the reader instead.
+ */
+describe('scion-chat-thread mark-unread auto-advance suppression', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  type Internals = {
+    mergeMessages(messages: Message[]): void;
+    maybeAdvanceReadWatermark(): void;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    _autoAdvanceSuppressed: boolean;
+    peerReadMessageId: string;
+  };
+
+  function aMessage(id: string): Message {
+    return {
+      id,
+      projectId: '',
+      sender: 'them@example.com',
+      senderId: 'user-them',
+      recipient: '',
+      msg: 'hi',
+      type: 'chat',
+      agentId: '',
+      dispatchState: 'dispatched',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /** Was a POST to /read issued? */
+  function sawReadPost(): boolean {
+    return apiFetch.mock.calls.some(
+      (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+  }
+
+  it("suppresses auto-advance once this tab's own watermark moves backward via SSE with unread:true", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(true);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  /**
+   * The discriminator for "this is mark-unread" is the event's `unread`
+   * field, not merely a self-targeted userId. A self event lacking it — e.g.
+   * a hypothetical future self-notifying /read — must not suppress, and must
+   * not be misapplied as a peer's seen tick either.
+   */
+  it('does not suppress a self-targeted event without unread:true', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: CONVERSATION_KEY, userId: 'user-me', messageId: 'm1' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+    expect(internals.peerReadMessageId).toBe('');
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(true);
+  });
+
+  /**
+   * The debounced callback re-checks suppression when it *fires*, not only
+   * when maybeAdvanceReadWatermark schedules it. Exercised directly here
+   * (flip the flag after scheduling, without going through
+   * suppressAutoAdvance's own clearTimeout) so this covers the guard even if
+   * some future suppression path ever sets the flag without also clearing
+   * the timer.
+   */
+  it('re-checks suppression when the debounced callback fires, not only when it was scheduled', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals.mergeMessages([aMessage('m1')]);
+
+    vi.useFakeTimers();
+    internals.maybeAdvanceReadWatermark();
+    internals._autoAdvanceSuppressed = true;
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(sawReadPost()).toBe(false);
+  });
+
+  it("still applies a DM peer's seen tick for a different user id", async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-them',
+            messageId: 'm-99',
+            readAt: new Date().toISOString(),
+          },
+        },
+      })
+    );
+
+    expect(internals.peerReadMessageId).toBe('m-99');
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('ignores a self-targeted read-state event for a different conversation', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: { data: { conversationKey: 'some-other-topic', userId: 'user-me', messageId: '' } },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the user sends a message', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'sent-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  it('lifts the suppression when the conversation is switched away from and back', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals._autoAdvanceSuppressed = true;
+
+    el.conversationKey = 'some-other-topic';
+    await el.updateComplete;
+    expect(internals._autoAdvanceSuppressed).toBe(false);
+  });
+
+  /**
+   * A dedicated test for the initial-load watermark timer's suppression
+   * guard, independent of mount()'s "first apiFetch call" resolution
+   * heuristic: mount() returns while loadHistory() may still be in flight,
+   * so relying on that resolution order to imply the timer is already armed
+   * would be fragile. This test instead waits for `loading` to go false —
+   * set in the same synchronous finally block, immediately before the timer
+   * is armed — so the timer is armed (on the real clock, since fake timers
+   * are never installed here) before the self event is dispatched and before
+   * the real-time wait past
+   * its delay.
+   */
+  it('suppresses the initial-load watermark timer directly, independent of mount() timing', async () => {
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: unknown) => {
+      if (String(url).includes('/messages?')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ items: [aMessage('m1')] }),
+        } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({}),
+      } as unknown as Response);
+    });
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.currentUserId = 'user-me';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const internals = el as unknown as Internals & { loading: boolean };
+    await vi.waitFor(() => expect(internals.loading).toBe(false));
+
+    apiFetch.mockClear();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-read-state-updated', {
+        detail: {
+          data: {
+            conversationKey: CONVERSATION_KEY,
+            userId: 'user-me',
+            messageId: '',
+            unread: true,
+          },
+        },
+      })
+    );
+
+    // Real-time wait past the initial timer's delay (500ms with no prior
+    // read state to show a divider for). Deliberately not vi.useFakeTimers()
+    // — the timer was armed on the real clock before this test could have
+    // installed a fake one.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(sawReadPost()).toBe(false);
+  }, 8000);
+});
+
 describe('scion-chat-thread SSE message filtering', () => {
   beforeEach(() => {
     apiFetch.mockReset();

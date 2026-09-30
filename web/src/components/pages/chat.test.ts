@@ -546,6 +546,249 @@ describe('chat page — muted DMs raise no unread dot', () => {
   });
 });
 
+/**
+ * Page-level coverage for mark-unread's SSE unread gate, mute check, and
+ * same-tab suppression. These tests exercise `_handleOwnReadStateSSE`,
+ * `handleMemberMarkedUnread` and `_handleConversationMarkedUnread` directly,
+ * stubbing the rail/thread elements `shadowRoot.querySelector` would
+ * otherwise find, rather than mounting the full page (which would fire its
+ * own network calls).
+ */
+describe('chat page — mark-unread page-level handling', () => {
+  /** A page with an open DM conversation with the given peer. */
+  function pageOnDM(peerId: string, conversationKey: string): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey,
+      projectId: 'proj-1',
+      threadName: '',
+      peerName: 'Peer',
+      peerId,
+      peerKind: 'user',
+      isDM: true,
+    };
+    return el;
+  }
+
+  /**
+   * These pages are never appended to the document (by this file's own
+   * design — see the file header — so connectedCallback's network calls
+   * never fire), which means Lit never creates a real shadowRoot to query.
+   * Replace the accessor with a fake one backed by a selector→element map, so
+   * more than one stub (rail and thread) can coexist on the same page — a
+   * single-selector version would silently resolve every other selector to
+   * null, letting a test assert less than its title claims.
+   */
+  function stubShadowRoot(el: any, found: Record<string, unknown>): void {
+    const fakeShadowRoot = { querySelector: (sel: string) => found[sel] ?? null };
+    Object.defineProperty(el, 'shadowRoot', { value: fakeShadowRoot, configurable: true });
+  }
+
+  /** Stub the open thread element so suppressOpenThreadAutoAdvance has something to call. */
+  function stubThread(el: any): { suppressAutoAdvance: ReturnType<typeof vi.fn> } {
+    const thread = { suppressAutoAdvance: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-thread': thread });
+    return thread;
+  }
+
+  /** Stub the rail element so markThreadUnread calls are observable. */
+  function stubRail(el: any): { markThreadUnread: ReturnType<typeof vi.fn> } {
+    const rail = { markThreadUnread: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail });
+    return rail;
+  }
+
+  /**
+   * Stub both the rail and the open thread on the same page — needed for the
+   * topic branch of _handleOwnReadStateSSE, which looks up both: the rail to
+   * mark the thread unread, and (if it is the open conversation) the thread
+   * to suppress its auto-advance.
+   */
+  function stubRailAndThread(el: any): {
+    rail: { markThreadUnread: ReturnType<typeof vi.fn> };
+    thread: { suppressAutoAdvance: ReturnType<typeof vi.fn> };
+  } {
+    const rail = { markThreadUnread: vi.fn() };
+    const thread = { suppressAutoAdvance: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail, 'scion-chat-thread': thread });
+    return { rail, thread };
+  }
+
+  describe('_handleOwnReadStateSSE unread gate', () => {
+    it('a self event without unread:true adds no dot and does not mark the rail thread unread', () => {
+      const el = createPage();
+      el.v2UnreadFromIds = [];
+      const rail = stubRail(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: { data: { conversationKey: 'topic-1', userId: 'user-me', messageId: 'm1' } },
+        })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual([]);
+      expect(rail.markThreadUnread).not.toHaveBeenCalled();
+    });
+
+    it('a self event with unread:true for a topic marks the rail thread unread and suppresses the open thread', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const { rail, thread } = stubRailAndThread(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: {
+            data: { conversationKey: 'topic-1', userId: 'user-me', messageId: '', unread: true },
+          },
+        })
+      );
+
+      expect(rail.markThreadUnread).toHaveBeenCalledWith('topic-1');
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('a self event with unread:true for a DM updates the dot, hasUnread, and suppresses if open', () => {
+      const dmKey = 'dm:user:user-me:user:user-1';
+      const el = pageOnDM('user-1', dmKey);
+      el.v2DMInfoByPeerId = { 'user-1': { key: dmKey, muted: false, hasUnread: false } };
+      const thread = stubThread(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: {
+            data: { conversationKey: dmKey, userId: 'user-me', messageId: '', unread: true },
+          },
+        })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('applyDMMarkedUnread mute check and hasUnread state', () => {
+    it('a muted peer gets no dot, but hasUnread flips so the members item hides', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: true, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual([]);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+    });
+
+    it('an unmuted peer gets a dot, and hasUnread flips so the members item hides', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: false, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+    });
+
+    it('leaves the info map alone for a peer with no existing entry', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {};
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2DMInfoByPeerId).toEqual({});
+      // No mute info to check against, so the dot still goes on — a peer
+      // loadUnreadDMPeers hasn't captured yet is self-correcting on the next load.
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+    });
+
+    // Pins the `v2UnreadFromIds.includes(peerId)` duplicate guard. Not
+    // user-visible (a Set-like list either way), but cheap to pin: the local
+    // click and the SSE echo of the same mark-unread both call this, and a
+    // duplicate id would be a real (if harmless) bug.
+    it('does not duplicate the dot when applied twice for the same peer', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: false, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+    });
+  });
+
+  describe('same-tab suppression calls', () => {
+    it('member-marked-unread for the open conversation suppresses its auto-advance', () => {
+      const dmKey = 'dm:user:user-me:user:user-1';
+      const el = pageOnDM('user-1', dmKey);
+      const thread = stubThread(el);
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId: 'user-1', conversationKey: dmKey },
+        })
+      );
+
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('member-marked-unread for a DM that is not open does not suppress', () => {
+      const el = pageOnDM('user-1', 'dm:user:user-me:user:user-1');
+      const thread = stubThread(el);
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId: 'user-2', conversationKey: 'dm:user:user-me:user:user-2' },
+        })
+      );
+
+      expect(thread.suppressAutoAdvance).not.toHaveBeenCalled();
+    });
+
+    it('conversation-marked-unread for the open conversation suppresses its auto-advance', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const thread = stubThread(el);
+
+      el._handleConversationMarkedUnread(
+        new CustomEvent('conversation-marked-unread', { detail: { conversationKey: 'topic-1' } })
+      );
+
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('conversation-marked-unread for a different conversation does not suppress', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const thread = stubThread(el);
+
+      el._handleConversationMarkedUnread(
+        new CustomEvent('conversation-marked-unread', { detail: { conversationKey: 'topic-2' } })
+      );
+
+      expect(thread.suppressAutoAdvance).not.toHaveBeenCalled();
+    });
+  });
+});
+
 describe('chat page — promote DM dialog', () => {
   function pageOnAgentDM(): any {
     const el = createPage();
