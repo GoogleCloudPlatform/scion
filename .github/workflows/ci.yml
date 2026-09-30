@@ -74,6 +74,9 @@ jobs:
       - name: Vet Code
         run: make lint
 
+      - name: Vet Integration-Tagged Code
+        run: make vet-integration
+
       - name: Install ripgrep
         run: |
           if ! command -v rg &> /dev/null; then

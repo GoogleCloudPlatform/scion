@@ -440,6 +440,7 @@ func TestRelationshipTypeForResource(t *testing.T) {
 	}{
 		{"secret", RelProgenySecretRead},
 		{"envvar", RelProgenyEnvVarRead},
+		{"env_var", RelProgenyEnvVarRead},
 		{"skill_injection", RelProgenySkillInjectionRead},
 		{"project", ""},
 		{"agent", ""},

@@ -281,7 +281,7 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		}
 		// Hub-off guard: deny agent callers from reading cross-project DMs
 		// when the feature is disabled (design §7).
-		if !s.enforceCrossProjectReadGate(w, r, conv) {
+		if !s.enforceCrossProjectReadGate(w, r, conv, nil) {
 			return
 		}
 	} else {
@@ -346,7 +346,7 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		}
 		// Hub-off guard: deny agent callers from reading cross-project DMs
 		// when the feature is disabled (design §7).
-		if !s.enforceCrossProjectReadGate(w, r, conv) {
+		if !s.enforceCrossProjectReadGate(w, r, conv, nil) {
 			return
 		}
 	} else {
@@ -427,11 +427,6 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 			Forbidden(w)
 			return
 		}
-		// Hub-off guard: deny agent callers from reading cross-project DMs
-		// when the feature is disabled (design §7).
-		if !s.enforceCrossProjectReadGate(w, r, conv) {
-			return
-		}
 	} else {
 		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
 			return
@@ -446,6 +441,17 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 	if msg.ConversationID != conversationID {
 		NotFound(w, "Message")
 		return
+	}
+
+	// Hub-off guard: deny agent callers from reading cross-project DMs when
+	// the feature is disabled (design §7). Reordered to run after GetMessage
+	// (design auto-offload-large-dm §4.3, R3 #2 / R4 #1) so the row's own
+	// stamped project can be used for a DM-key peer that has since been
+	// deleted, instead of depending only on a live agent lookup that 500s.
+	if conv.Kind == "direct" {
+		if !s.enforceCrossProjectReadGate(w, r, conv, msg) {
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, msg)
@@ -1021,66 +1027,82 @@ func authorizeDMRead(conv *store.Conversation, principalKind, principalID string
 	return true
 }
 
+// dmKeyPeer parses conv's canonical DM key and returns the slot that is NOT
+// callerID — the peer. inKey is false when callerID is not named in the key
+// at all (kind/id are then ""), which every caller of this helper treats as
+// "allow through; some earlier, authoritative check already covers this
+// case" (authorizeDMRead for the read gates, authorizeDMRead itself for
+// recipientCanReadConversation, isCanonicalDMParticipant for listing). err is
+// non-nil only for an unparseable key (fail closed).
+//
+// Factored out (impl review r1 nit 5) so the "parse the key, pick the slot
+// that isn't the caller" logic exists in exactly one place, shared by
+// isCrossProjectReadAllowed, enforceCrossProjectReadGate, and
+// recipientCanReadConversation.
+func dmKeyPeer(conv *store.Conversation, callerID string) (peerKind, peerID string, inKey bool, err error) {
+	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(conv.ExternalRef)
+	if parseErr != nil {
+		return "", "", false, parseErr
+	}
+	switch {
+	case kindA == "agent" && idA == callerID:
+		return kindB, idB, true, nil
+	case kindB == "agent" && idB == callerID:
+		return kindA, idA, true, nil
+	default:
+		return "", "", false, nil
+	}
+}
+
 // isCrossProjectReadAllowed is the non-response-writing predicate form
 // of enforceCrossProjectReadGate. It returns true if the conversation
 // should be visible to the given agent identity, false if it should be
 // silently filtered out (e.g. from list results). Human callers are
 // never passed to this function — the caller must check.
+//
+// Since crossProjectPeerAllowed's ptone/scion#2282 refinement (design §19
+// IF2), this now follows the exact same deleted-peer/flag rule as the read
+// gates below, rather than "any lookup error excludes": a deleted peer with
+// no stamp is visible when cross-project messaging is on (every possible
+// peer project would be allowed anyway) and hidden when it is off or on any
+// other lookup error. This is a deliberate, policy-neutral consequence of
+// unifying on crossProjectPeerAllowed, not a listing-specific decision.
 func (s *Server) isCrossProjectReadAllowed(ctx context.Context, conv *store.Conversation, agentIdent AgentIdentity) bool {
 	if conv.Kind != "direct" {
 		return true
 	}
 
-	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	peerKind, peerID, inKey, err := dmKeyPeer(conv, agentIdent.ID())
 	if err != nil {
-		// Unparseable key — fail closed: exclude from list.
-		return false
+		return false // unparseable key — fail closed: exclude from list.
+	}
+	if !inKey {
+		return true // caller not in key — prior isCanonicalDMParticipant check handles this.
 	}
 
-	// Find the peer.
-	var peerKind, peerID string
-	callerID := agentIdent.ID()
-	switch {
-	case kindA == "agent" && idA == callerID:
-		peerKind, peerID = kindB, idB
-	case kindB == "agent" && idB == callerID:
-		peerKind, peerID = kindA, idA
-	default:
-		// Caller not in key — prior isCanonicalDMParticipant check handles this.
-		return true
-	}
-
-	if peerKind != "agent" {
-		return true // human-agent DM — always visible.
-	}
-
-	peerAgent, err := s.store.GetAgent(ctx, peerID)
-	if err != nil {
-		slog.Error("isCrossProjectReadAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
-		return false
-	}
-	if peerAgent == nil {
-		return false
-	}
-
-	if agentIdent.ProjectID() == peerAgent.ProjectID {
-		return true // Same project — always visible.
-	}
-
-	// Cross-project: check Hub gate.
-	return s.crossProjectMessagingEnabled()
+	decision, _ := s.crossProjectPeerAllowed(ctx, agentIdent.ProjectID(), peerKind, peerID, nil)
+	return decision == peerAllowed
 }
 
-// enforceCrossProjectReadGate denies agent callers from reading
-// conversations that cross project boundaries when the Hub-level
-// cross-project messaging switch is disabled. Returns true if access
-// is allowed; writes a 403 and returns false if denied.
+// enforceCrossProjectReadGate denies agent callers from reading a direct
+// conversation that crosses project boundaries when the Hub-level
+// cross-project messaging switch is disabled. Returns true if access is
+// allowed; writes a 403 or 500 and returns false if denied.
 //
-// Human callers are always allowed (authorized audit survives Hub
-// disable per design §7). Same-project conversations and human-agent
-// DMs are always allowed. The peer is derived from the canonical DM
-// key (ExternalRef), not from mutable participant rows.
-func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Request, conv *store.Conversation) bool {
+// msg is optional. Pass nil for the conversation-level callers below, which
+// have no specific row and always look the peer up live. Pass the loaded row
+// for the message-level caller (handleGetConversationMessage, after
+// GetMessage): peerProjectFromRow then supplies the row's own stamped
+// project for a peer that is a party to that row, so a deleted peer never
+// falls back to a live lookup that 500s if the row itself already proves the
+// project (design auto-offload-large-dm §4.3). This collapses what were two
+// near-identical functions (impl review r1 nit 5).
+//
+// Human callers are always allowed (authorized audit survives Hub disable
+// per design §7). Same-project conversations and human-agent DMs are always
+// allowed. The peer is derived from the canonical DM key (ExternalRef), not
+// from mutable participant rows.
+func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Request, conv *store.Conversation, msg *store.Message) bool {
 	agentIdent := GetAgentIdentityFromContext(r.Context())
 	if agentIdent == nil {
 		// Human callers always pass — authorized audit survives Hub disable.
@@ -1091,61 +1113,185 @@ func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Requ
 		return true
 	}
 
-	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	peerKind, peerID, inKey, err := dmKeyPeer(conv, agentIdent.ID())
 	if err != nil {
-		// Unparseable key — fail closed.
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"cross-project read denied: unparseable conversation key", nil)
 		return false
 	}
-
-	// Find the peer: the slot whose (kind, id) does not match the caller.
-	var peerKind, peerID string
-	callerID := agentIdent.ID()
-	switch {
-	case kindA == "agent" && idA == callerID:
-		peerKind, peerID = kindB, idB
-	case kindB == "agent" && idB == callerID:
-		peerKind, peerID = kindA, idA
-	default:
+	if !inKey {
 		// Caller is not named in the key — authorizeDMRead should have
 		// caught this already. Allow through; the prior check is
 		// authoritative.
 		return true
 	}
 
-	// If the peer is not an agent, it's a human-agent DM — always allowed.
-	if peerKind != "agent" {
-		return true
+	var stampedPeerProject *string
+	if msg != nil {
+		stampedPeerProject = peerProjectFromRow(msg, peerKind, peerID)
 	}
 
-	// Look up the peer agent to compare project IDs.
-	peerAgent, err := s.store.GetAgent(r.Context(), peerID)
-	if err != nil {
-		slog.Error("enforceCrossProjectReadGate: database error looking up peer agent", "peer_id", peerID, "error", err)
+	decision, reason := s.crossProjectPeerAllowed(r.Context(), agentIdent.ProjectID(), peerKind, peerID, stampedPeerProject)
+	switch decision {
+	case peerAllowed:
+		return true
+	case peerDenied403:
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, reason, nil)
+		return false
+	default:
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Internal server error verifying peer agent", nil)
 		return false
 	}
-	if peerAgent == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"cross-project read denied: peer agent not found", nil)
+}
+
+// peerDecision is the outcome of crossProjectPeerAllowed.
+type peerDecision int
+
+const (
+	peerAllowed peerDecision = iota
+	peerDenied403
+	peerErr500
+)
+
+// crossProjectPeerAllowed is the exact cross-project read predicate, shared
+// by every caller that decides whether callerProjectID may read a row (or
+// conversation) whose other DM-key party is (peerKind, peerID). See design
+// auto-offload-large-dm §4.3.
+//
+//  1. callerProjectID always comes from the caller's token, never from the row.
+//  2. A non-agent peer (a human) is always allowed.
+//  3. For an agent peer, the peer's project is stampedPeerProject when
+//     non-nil. Otherwise it is looked up live: a deleted peer
+//     (errors.Is(err, store.ErrNotFound)) allows when
+//     crossProjectMessagingEnabled() is on — with no stamp, same-project
+//     can't be told apart from cross-project, but when the flag is on every
+//     possible peer project is allowed anyway, so the missing project
+//     doesn't matter (msg-attach-arch, ptone/scion#2282) — and otherwise
+//     denies with peerDenied403. This also fixes the pre-existing
+//     unreachable "peerAgent == nil" branch, which intended 403 but the code
+//     always took the generic error branch (500) instead, since GetAgent
+//     returns (nil, ErrNotFound) for a missing row, never (nil, nil). Any
+//     other store error is peerErr500.
+//  4. Same project always allows. Different project allows only when
+//     crossProjectMessagingEnabled() is on, else peerDenied403.
+//
+// The second return value is a caller-facing reason string, populated only
+// when the decision is peerDenied403 — the two denial causes need different
+// wording, which the decision enum alone does not carry.
+func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, peerKind, peerID string, stampedPeerProject *string) (peerDecision, string) {
+	if peerKind != "agent" {
+		return peerAllowed, "" // human peer: always allowed.
+	}
+
+	var peerProjectID string
+	if stampedPeerProject != nil {
+		peerProjectID = *stampedPeerProject
+	} else {
+		peerAgent, err := s.store.GetAgent(ctx, peerID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Refinement (msg-attach-arch, 2026-09-30, in response to
+				// ptone/scion#2282 — SenderProjectID/RecipientProjectID are
+				// never persisted, so stampedPeerProject is always nil in
+				// practice today): with no stamp we cannot tell same-project
+				// from cross-project for a deleted peer. But when the flag is
+				// ON, every possible peer project would be allowed anyway, so
+				// the missing project doesn't matter — allow. When the flag
+				// is OFF, assuming same-project would be a flag-off bypass
+				// for a genuinely cross-project deleted sender, so deny.
+				// This is exact under the current policy in both cases, and
+				// needs no change once the stamp is actually persisted
+				// (peerProjectFromRow will simply stop returning nil).
+				if s.crossProjectMessagingEnabled() {
+					return peerAllowed, ""
+				}
+				return peerDenied403, "cross-project read denied: peer agent not found"
+			}
+			slog.Error("crossProjectPeerAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
+			return peerErr500, ""
+		}
+		if peerAgent == nil {
+			// Defensive: GetAgent should not return (nil, nil), but if it
+			// does, treat it the same as ErrNotFound.
+			if s.crossProjectMessagingEnabled() {
+				return peerAllowed, ""
+			}
+			return peerDenied403, "cross-project read denied: peer agent not found"
+		}
+		peerProjectID = peerAgent.ProjectID
+	}
+
+	if callerProjectID == peerProjectID {
+		return peerAllowed, ""
+	}
+	if s.crossProjectMessagingEnabled() {
+		return peerAllowed, ""
+	}
+	return peerDenied403, "cross-project messaging is disabled"
+}
+
+// peerProjectFromRow returns the stamped project for the DM key's peer
+// (peerKind, peerID) when the row's OWN data authoritatively carries it —
+// i.e. the key peer IS a party to this row, by kind AND ID. Otherwise it
+// returns nil, meaning "look the peer up live" with today's semantics.
+//
+// Deriving the stamp from "the row party that is not the caller" is
+// forbidden (design auto-offload-large-dm §4.3): DEF-49 checks only that the
+// SENDER is in the key, so a row A -> Z can carry conversation_id =
+// K(A<->B), and B can read it. Using Z's stamp would let B bypass A's
+// cross-project check. This function only ever returns SenderProjectID when
+// the sender IS the key peer, and RecipientProjectID when the recipient IS
+// the key peer.
+func peerProjectFromRow(msg *store.Message, peerKind, peerID string) *string {
+	if peerKind != "agent" {
+		return nil // human peer: predicate rule 2 allows; stamp unused.
+	}
+	if messages.SenderPrefix(msg.Sender) == "agent" && msg.SenderID == peerID {
+		return msg.SenderProjectID
+	}
+	if messages.SenderPrefix(msg.Recipient) == "agent" && msg.RecipientID == peerID {
+		return msg.RecipientProjectID
+	}
+	return nil // key peer is not a party to this row -> live GetAgent(peerID).
+}
+
+// recipientCanReadConversation computes, for target, the decision the fetch
+// route (handleGetConversationMessage direct branch, or
+// authorizeGroupConversationAccess for a group) will make for conv — the
+// same check performed at send time, so a sender cannot stamp a stub naming
+// a conversation the recipient will not actually be able to fetch it from
+// (design auto-offload-large-dm §4.3). A missing conversation or a lookup
+// error returns false.
+func (s *Server) recipientCanReadConversation(ctx context.Context, conv *store.Conversation, target *store.Agent) bool {
+	if conv == nil || target == nil {
 		return false
 	}
 
-	// Same-project DMs are always allowed regardless of Hub setting.
-	if agentIdent.ProjectID() == peerAgent.ProjectID {
-		return true
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, "agent", target.ID) {
+			return false
+		}
+		peerKind, peerID, inKey, err := dmKeyPeer(conv, target.ID)
+		if err != nil || !inKey {
+			// Unparseable key, or target not named in it — authorizeDMRead
+			// above already denies the latter case for direct conversations.
+			return false
+		}
+		decision, _ := s.crossProjectPeerAllowed(ctx, target.ProjectID, peerKind, peerID, nil)
+		return decision == peerAllowed
 	}
 
-	// Cross-project: check the Hub gate.
-	if !s.crossProjectMessagingEnabled() {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"cross-project messaging is disabled", nil)
+	// Group: legacy project-less groups fail safe (false) — the route's
+	// participant fallback is deliberately not mirrored here. Otherwise
+	// mirror the route's strict agent-project rule
+	// (authorizeGroupConversationAccess). The route's final
+	// authorize(..., ActionRead) is not mirrored: agents always hold project
+	// read through the baseline role.
+	if conv.ProjectID == nil || *conv.ProjectID == "" {
 		return false
 	}
-
-	return true
+	return *conv.ProjectID == target.ProjectID
 }
 
 // isCanonicalDMParticipant checks whether a (kind, id) pair is named in a

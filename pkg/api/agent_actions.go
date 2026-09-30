@@ -40,6 +40,23 @@ const (
 	AgentActionMetrics           = "metrics"
 	AgentActionSetMessageMode    = "set_message_mode"
 	AgentActionReincarnate       = "reincarnate"
+
+	// AgentActionKeys names the dedicated terminal-keystroke-injection route
+	// (POST /api/v1/agents/{id}/keys and the project-scoped equivalent),
+	// frozen by the agent-keys contract (.design/agent-keys-contract.md,
+	// ptone/scion#2191). It is a route/action name, not an independently
+	// grantable authorization permission — see agentActionPermission in
+	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
+	//
+	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
+	// the runtime broker's own dedicated keys handler
+	// (pkg/runtimebroker/handlers.go). The Hub-side action-dispatch switches
+	// (handlers_agents_core.go, handlers_projects_core.go) do not yet have a
+	// case for this constant — that is task 2.1/2.2's job — so a live public
+	// POST /api/v1/agents/{id}/keys request still 404s at the Hub today; only
+	// the internal Hub-to-broker route this constant also names is reachable
+	// once 1.2 implements a Dispatcher/BrokerClient that calls it.
+	AgentActionKeys = "keys"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed
@@ -49,7 +66,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth, AgentActionKeys:
 		return http.MethodPost, true
 	default:
 		return "", false

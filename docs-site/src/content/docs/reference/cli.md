@@ -325,6 +325,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
 
+While the migration is in progress, messages to the agent are saved to its history rather than
+delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
+instead. The new generation's preamble tells it to catch up with `scion conversation catch-up`.
+
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
 progress. When migrating another agent, the handoff is optional.
@@ -566,6 +570,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
 - `scion hub projects`: List all projects registered on the Hub.
+    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its broker's capacity as `(agents: count/limit)`, or `(agents: count)` when the broker has no limit.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
@@ -618,17 +623,20 @@ Manages notifications and notification subscriptions. Requires Hub mode.
 
 ## Infrastructure
 
-### `scion broker`
+### `scion runtime-broker`
 
-Manages the local host as a Runtime Broker.
+Manages the local host as a Runtime Broker. The old name `scion broker` still works as a deprecated alias.
 
-- `scion broker status`: Show status of the local broker server.
-- `scion broker start`: Start the broker server as a background daemon.
-- `scion broker stop`: Stop the broker daemon.
-- `scion broker register`: Register this host as a Runtime Broker with the Hub.
-- `scion broker deregister`: Remove this broker's registration from the Hub.
-- `scion broker provide`: Add this broker as a provider for a project.
-- `scion broker withdraw`: Remove this broker as a provider from a project.
+- `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away.
+- `scion runtime-broker start`: Start the broker server as a background daemon.
+    - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
+    - `--port <port>`: Listen on a custom port.
+    - `--auto-provide`: Automatically add this broker as a provider for new projects.
+- `scion runtime-broker stop`: Stop the broker daemon.
+- `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)).
+- `scion runtime-broker deregister`: Remove this broker's registration from the Hub.
+- `scion runtime-broker provide`: Add this broker as a provider for a project.
+- `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
 
 ### `scion server`
 

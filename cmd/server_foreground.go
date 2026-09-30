@@ -72,6 +72,49 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// isRootWorkingDir reports whether wd is the filesystem root. A daemon
+// supervisor started without an explicit working directory (for example a
+// systemd unit with no WorkingDirectory=) leaves its child process here,
+// which is rarely a sane base for cwd-derived path resolution. On Windows
+// os.Getwd always returns a volume-qualified path (C:\ or \\server\share\),
+// never a bare separator, so this never matches there and the fallback
+// below is a no-op on that platform.
+func isRootWorkingDir(wd string) bool {
+	return wd == string(filepath.Separator)
+}
+
+// chdirHomeIfAtFilesystemRoot changes the process's working directory to the
+// user's home directory when (and only when) the current working directory
+// is the filesystem root ("/"). It is called after logging, config loading,
+// and the global-directory setup above it in runServerStart have already
+// run, so it does not affect any of those -- only the cwd-dependent
+// resolution later in runServerStart (from the FindProjectRoot check right
+// below its call site onward) and in code called after it. This is
+// therefore not a substitute for --global, which sets the project path
+// before those earlier steps run; it only catches the narrower case of a
+// daemon supervisor that left the process at "/" (for example a systemd
+// unit with no WorkingDirectory=) for whatever runs afterward.
+//
+// It is a best-effort fallback, not a hard requirement: a failure to read
+// $HOME or to chdir into it is logged, not fatal, so it can never turn a
+// previously-working invocation into a startup failure.
+func chdirHomeIfAtFilesystemRoot() {
+	wd, err := os.Getwd()
+	if err != nil || !isRootWorkingDir(wd) {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		log.Printf("Working directory was %s; could not determine home directory: %v", wd, err)
+		return
+	}
+	if err := os.Chdir(home); err != nil {
+		log.Printf("Working directory was %s; failed to change to home directory %s: %v", wd, home, err)
+		return
+	}
+	log.Printf("Working directory was %s; changed to home directory %s", wd, home)
+}
+
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// 1. Initialize logging
 	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
@@ -137,6 +180,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to change to home directory: %w", err)
 		}
 		log.Printf("Global mode: changed working directory to %s", home)
+	} else {
+		chdirHomeIfAtFilesystemRoot()
 	}
 
 	// Warn if running from within a project directory instead of the global (~/.scion) context.

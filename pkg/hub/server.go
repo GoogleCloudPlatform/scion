@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -168,6 +169,10 @@ type ServerConfig struct {
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. nil means unset — the
+	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
+	EnforceBrokerQuotas *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -314,6 +319,13 @@ type ServerConfig struct {
 	// the AuditRetentionDays pattern. Zero or negative falls back to the
 	// default rather than disabling the sweep.
 	FailedMessageRetentionDays int
+
+	// Experiments is the compiled experiments registry used to resolve
+	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
+	// every reader goes through the nil-safe Server.experimentRegistry(),
+	// which falls back to experiments.Default(). Tests that need a
+	// server-layer experiment inject their own registry here (ptone/scion#2217).
+	Experiments *experiments.Registry
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -387,6 +399,22 @@ func DefaultServerConfig() ServerConfig {
 		StalledThreshold: 5 * time.Minute,
 		BrokerAuthConfig: DefaultBrokerAuthConfig(),
 	}
+}
+
+// brokerQuotasEnforced reports whether the per-broker agent quota cap
+// (max_agents_per_broker) is enforced on create. Fail-safe default: an
+// absent (nil) switch means enforced (design P1-D4/P1-D5).
+//
+// Thread-safe: s.config.EnforceBrokerQuotas is written under s.mu.Lock() by
+// ApplySnapshot (on the admin PUT path, and on every replica via the
+// LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it must be
+// read under s.mu.RLock() here — this is called on every QuotaService.Reserve,
+// for every limit, on every create/start/restart/resume/wake.
+func (s *Server) brokerQuotasEnforced() bool {
+	s.mu.RLock()
+	v := s.config.EnforceBrokerQuotas
+	s.mu.RUnlock()
+	return v == nil || *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
@@ -1148,6 +1176,11 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+
+	// experiments is the compiled feature-flag registry (pkg/experiments).
+	// Nil in production and in most tests; always read through the
+	// nil-safe experimentRegistry() accessor, never directly.
+	experiments *experiments.Registry
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1261,9 +1294,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
+	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
+	// override (design.md §5.2): see brokerSettingLimitOverride.
 	srv.quotaService = &QuotaService{
 		store:  s,
 		logger: slog.Default().With("component", "quota"),
+		enforced: func(limitName string) bool {
+			return limitName != store.LimitMaxAgentsPerBroker || srv.brokerQuotasEnforced()
+		},
+		limitOverride: srv.brokerSettingLimitOverride,
 	}
 
 	// Per-sender chat send rate limiter (#1054).
@@ -1844,6 +1883,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
 
+	srv.experiments = cfg.Experiments
+
 	srv.registerRoutes()
 
 	return srv, nil
@@ -1923,6 +1964,21 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 
 	// Try to load from the secret backend if configured
 	if hasSecretBackend {
+		// Hub-scope signing keys created before ptone/scion#2152 only exist
+		// under the legacy (pre hub-prefix) GCP SM name. Copy the value
+		// forward to the current hub-prefixed name so it is reachable once an
+		// operator narrows IAM to the new prefix, without waiting for an
+		// explicit `migrate-names` run — losing a signing key invalidates
+		// every live session/agent token, so this can't wait on an operator's
+		// schedule the way ordinary secrets can. Idempotent; the legacy
+		// secret is left in place. Best-effort: a failure here just means the
+		// existing (legacy-ref) resolution below is used instead.
+		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+			if copyErr := gcpBackend.CopyHubSecretForward(ctx, keyName); copyErr != nil && copyErr != store.ErrNotFound {
+				slog.Warn("Failed to copy hub signing key forward to hub-prefixed GCP SM name", "key", keyName, "error", copyErr)
+			}
+		}
+
 		sv, err := s.secretBackend.Get(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil {
 			slog.Info("Loaded existing signing key from secret backend", "key", keyName)
@@ -4905,6 +4961,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.guarded("/api/v1/admin/server-config", s.handleAdminServerConfig))
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
+	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
@@ -4997,6 +5054,9 @@ func (s *Server) registerRoutes() {
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
+
+	// Resolved experiments map for signed-in callers (ptone/scion#2217).
+	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))
 
 	// GitHub App integration endpoints: method-aware permission enforcement.
 	// Read operations use hub.github_app.read; mutations use hub.github_app.update.

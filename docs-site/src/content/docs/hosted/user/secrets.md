@@ -230,7 +230,8 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
 *   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
-*   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
+*   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still an active member, then progeny sharing. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected.
+*   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Each retrieval request logs one audit event (`agent_secret_read`) identifying the calling agent, the requested keys, and the outcome.
 
 ---
 
@@ -377,6 +378,27 @@ When this field is non-empty, Scion creates secrets with **user-managed** replic
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
+
+#### IAM Permissions and Secret Naming
+
+Every secret name in GCP Secret Manager is prefixed with a hash derived from the hub's instance ID: `scion-<h12>-<scope>-<hash>-<name>`, where `<h12>` is the first 12 hex characters of `sha256(hub_id)`. This lets you grant a hub's service account access to only its own secrets, instead of every secret in a shared GCP project.
+
+In a project used by a single hub, `roles/secretmanager.admin` on the whole project is simplest. In a project shared by multiple hubs (or by a hub and other workloads), grant a **conditioned** binding scoped to the hub's prefix instead:
+
+```
+role: roles/secretmanager.admin
+condition: resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h12>-")
+```
+
+Note that the condition uses the GCP **project number**, not the project ID. `<h12>` is stable for the life of the hub's instance ID; deployment tooling (e.g. Terraform) computes the same value from `hub_id` to keep the grant in sync.
+
+:::caution[Deploy ordering]
+Grant the new hub-prefixed IAM condition **before** deploying a Hub binary that writes hub-prefixed names — every secret write targets the prefixed name immediately, so writes fail with a permission error otherwise. Keep the legacy grant (conditioned or project-wide — whichever this hub previously had) in place until `--delete-legacy` (below) has been run and verified; only then remove it. Once the legacy grant is removed, `migrate-names` can no longer read legacy names at all, so run a final `--dry-run --delete-legacy` pass to confirm zero pending items **before** removing it — afterward, a clean dry-run only proves IAM is narrowed, not that migration finished.
+
+Run `--delete-legacy` itself only after **every** replica of this hub is running a binary that includes this change — i.e. no replica is still writing legacy names. GCP Secret Manager has no conditional delete: if an older binary is still a live writer during a mixed-version rolling deploy, its write can land between `--delete-legacy`'s safety check and the actual delete, and the delete then destroys that write's only copy along with the legacy container it lived in.
+:::
+
+Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name until migrated — existing secrets keep resolving through their stored reference until an administrator (or, for the built-in signing keys, the hub itself at boot) rewrites it to the prefixed name. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); it is safe to run repeatedly, so a plain run followed later by a separate `--delete-legacy` run is the expected two-step workflow. Until that command's `--delete-legacy` step has run for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
 
 ---
 

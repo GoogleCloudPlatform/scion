@@ -15,12 +15,16 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 - **Agent Tokens**: Issued to agents at startup for state reporting.
 - **Broker Tokens**: Used for broker-to-hub communication, often combined with HMAC request signing.
 
+### Pagination
+
+List endpoints for templates, harness configs and groups return an opaque `nextCursor`. Cursors are encrypted and bound to the endpoint, the filter and the caller that received them, so pass them back unchanged to the same endpoint with the same filter. A cursor that is malformed, tampered with, reused in a different context, or sealed with a key the Hub no longer holds (for example after a key rotation) is rejected with a uniform `400 Bad Request` and error code `invalid_cursor`; restart the listing from the first page.
+
 ### Core Resources
 
 #### Agents (`/api/v1/agents`)
 - `GET /`: List agents (filterable by project, user, phase).
 - `POST /`: Dispatch a new agent.
-- `GET /:id`: Get detailed agent state (phase, activity, detail).
+- `GET /:id`: Get detailed agent state (phase, activity, detail). An agent can always read its own record with its agent token.
 - `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
 - `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session. To continue the interrupted session of an `error` agent instead, send `{"forceResume": true}` as the `start` body (best effort). `forceResume` has no effect in other phases.
 - `POST /:id/reincarnate`: Migrate the agent to a new generation with the same ID and slug and a freshly resolved config (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)). Body: `handoff` (optional text for the new generation's first task, max 256 KiB) and `dryRun`. Returns `202 Accepted` with the pending plan, or `200 OK` with the plan only for a dry run. The migration runs in the background. Requires `agent.lifecycle`; returns `400` for agents in worktree-per-agent projects. Also available as `POST /api/v1/projects/:projectId/agents/:agentIdOrSlug/reincarnate`.
@@ -48,14 +52,53 @@ The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/grov
 - `POST /register`: Register or link a project repository. If the request resolves to an existing project, the caller needs update access to that project; without it, the request is rejected before anything changes. The same check applies to creating a project that resolves to an existing one and to linking a provider.
 - `GET /:id`: Get project metadata and statistics.
 - `GET /:id/secrets`: Manage environment secrets for the project.
+- `GET /:id/providers`: List the Runtime Brokers that provide compute for the project. Each provider reports broker-wide capacity: `agentLimit` (the effective `max_agents_per_broker` limit; omitted when the broker is unlimited or no limit applies) and `agentCount` (running agents on that broker from any project; omitted when no limit is configured). `scion hub projects info` shows these as `(agents: count/limit)`.
 - `GET /:id/settings/resolved`: Get project settings indicating whether a Hub default exists per-setting (non-admin gated).
 - `POST /:id/clone`: Deep-copy settings, labels, env vars, skills, hooks, harness configs, and templates to a new project with rollback protection. Supports an optional `gitRemote` field in the request body to override the source project's git repository (carrying configurations over while using a different repository).
 
 #### Runtime Brokers (`/api/v1/brokers`)
 - `GET /`: List registered runtime brokers.
-- `POST /register`: Register a new compute node. The caller becomes the broker's owner. Re-registering an existing broker requires ownership (see [Broker Ownership](/scion/hosted/ha/runtime-broker/#broker-ownership)).
+- `POST /`: Register a new compute node, or re-mint its join token. Requires `broker.create` (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)). The caller becomes the broker's owner. Re-registering an existing broker requires ownership (see [Broker Ownership](/scion/hosted/ha/runtime-broker/#broker-ownership)).
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
+
+#### Broker Settings (`/api/v1/runtime-brokers/:id/settings`)
+
+A general per-broker settings mechanism. `maxAgents`, a per-broker override of the `max_agents_per_broker` cap, is the first registered key.
+
+- `GET /:id/settings`: Read the broker's stored settings document plus the effective (resolved) value for each key. Requires `broker.read`. `404` if the broker doesn't exist. If the broker has no settings row yet, `settings` is `{}` and `revision` is `0`.
+- `PUT /:id/settings`: Replace the settings document. Body: `{"settings": {"maxAgents": 30}, "expectedRevision": 3}`. This is a full replace, not a merge: a key omitted from `settings` (or sent as `null`) is cleared back to "inherit". Each key's own permission gates writing it — `maxAgents` requires `quota.update` — checked only against keys whose value actually changes, so re-sending the current document needs no permission at all.
+
+Response shape (both verbs):
+
+```json
+{
+  "brokerId": "…",
+  "settings": { "maxAgents": 30 },
+  "effective": {
+    "maxAgents": {
+      "value": 30,
+      "source": "broker",
+      "count": 7,
+      "inherited": { "value": 100, "source": "hub_default" }
+    }
+  },
+  "revision": 3,
+  "updatedBy": "admin@example.com",
+  "updated": "2026-01-01T00:00:00Z",
+  "_capabilities": { "update": true }
+}
+```
+
+`effective.maxAgents.source` is one of `broker` (this broker's own setting), `entitlement` (an entitlement binding), `hub_default` (the limit definition's default value), or `unlimited` (no limit definition exists, or no quota service is configured); it is `null`/`""` only if resolution itself fails. `inherited` reports what the value and source would be if the broker's own setting were cleared, so the UI can always show what "use the default" means without having to clear it first to find out. `count` is the current active-reservation count against the same limit `Reserve` counts.
+
+Status codes: `400` for an unknown key or an invalid value (`maxAgents` must be `>= 0`; `0` means unlimited); `403` if the caller lacks the permission a changed key requires; `404` if the broker doesn't exist; `409` on a stale `expectedRevision` (the response body carries the current record under `current`, same shape as a normal `GET`).
+
+**Precedence for `max_agents_per_broker`** (most specific wins): a broker's own `maxAgents` setting, if set, is the effective limit — it can be lower than the hub-wide default *and* lower than any system-scoped entitlement binding. Otherwise, the existing entitlement-engine resolution applies: bindings (most generous wins), falling back to the limit definition's hub-wide default value. In both layers, `0` means unlimited.
+
+**Migration from entitlement bindings.** Earlier releases had no per-broker settings API, so operators worked around it with a broker-scoped entitlement binding on `max_agents_per_broker` — either a `system_default` binding with a non-empty `subjectId`, or a user binding whose `subjectId` is set to the broker's own ID (the "user-subject hack" — see [`ptone/scion#2063`](https://github.com/ptone/scion/issues/2063)). On upgrade, a one-shot migration copies **every** broker-scoped binding on this limit into a `maxAgents` setting (`0` if any binding was `0`, otherwise the largest value), regardless of subject — including bindings the entitlement engine never actually enforced (a `system_default` row needed an *empty* subject to be picked up, so a non-empty-subject row was previously a silent no-op; a user binding scoped to the broker but owned by some other user was likewise never matched). Sweeping these up anyway restores what the operator evidently intended when they scoped a binding to that broker. **This means an upgrade can newly impose, or tighten, a broker's effective cap** for a broker that previously had no effective per-broker limit at all (or was really being capped by a more generous system-scoped binding, since the engine used to merge broker- and system-scoped bindings with "most generous wins" — the migrated setting no longer merges with anything). The migration is attributed as `updatedBy: "migration:ptone/scion#2061"`, and it only fills in brokers that don't already have a `maxAgents` setting.
+It never deletes the old bindings — they are shadowed by the new setting per the precedence above, and their IDs are logged at migration time so an operator can find and remove them. **Removing them matters**: if the migrated `maxAgents` setting is later cleared ("use hub default"), the precedence rule falls through to the entitlement engine, and any leftover binding the entitlement engine matches (a user binding with `subjectId` equal to the broker ID, or a `system_default` binding with an empty subject — i.e. the shapes the migration actually inherited enforcement from) becomes live again. The never-enforced shapes described above stay inert either way. Clearing the setting does not by itself restore the hub-wide default if a matching binding is still there. Legacy broker-scoped bindings can still be deleted (`DELETE /entitlements/:id`) or read normally; they just can't be created fresh or edited while staying broker-scoped — see the 400 below.
+Because of this, creating a **new** broker-scoped binding on `max_agents_per_broker`, or editing an existing one while keeping it broker-scoped (`POST` on `/limits/:id/entitlements`, or `PUT` on `/entitlements/:id` with `scopeType: "broker"`), now returns `400` with the message `per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings`. System-scoped bindings for this limit are unaffected and continue to work as the hub-wide override.
 
 #### Chat Attachments (`/api/v1/chat/attachments`)
 - `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each. Text files containing unusual control characters (e.g., vertical tab `0x0B`) are supported and correctly identified as text.
@@ -107,7 +150,9 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /gcp-quota`: View GCP quota status.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
 
-The Hub seeds a `max_agents_per_broker` limit (default **12**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. To change the default for every broker, update the limit definition with `PUT /limits/:id`. To override it for one broker, add an entitlement binding with `POST /limits/:id/entitlements` whose `subjectType` is `system_default`, `scopeType` is `broker`, and `scopeId` is the broker ID.
+The Hub seeds a `max_agents_per_broker` limit (default **100**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. This default is a single hub-wide value shared by every broker on the hub; to override it for one broker, set that broker's `maxAgents` setting instead — see [Broker Settings](#broker-settings-apiv1runtime-brokersidsettings) above.
+
+To change the hub-wide value, `PUT /limits/:id` on the `max_agents_per_broker` limit definition. `PUT` replaces the whole definition, so send the current `name`, `resourceType`, `unit`, and `description` (for example, from `GET /limits/:id`) along with the new `defaultValue` — omitting `description` clears it. For this system-seeded limit, `name`, `resourceType`, and `unit` must be sent unchanged; changing any of them returns `403`. This is also the recommended step after deploying a single-node Cloud Run hub — see the Cloud Run operator docs for the recommended value for that tier.
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 

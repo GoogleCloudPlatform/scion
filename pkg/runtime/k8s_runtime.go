@@ -2122,6 +2122,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			Kubernetes: &api.AgentK8sMetadata{
 				Namespace: p.Namespace,
 				PodName:   p.Name,
+				UID:       string(p.UID),
 			},
 		})
 	}
@@ -2446,6 +2447,27 @@ func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []
 	return r.execWithOptionalStdin(ctx, id, cmd, stdin)
 }
 
+// wrapExecStreamError builds the error execWithOptionalStdin returns for a
+// failed exec stream. It normally embeds stderr for diagnostics, but when
+// ctx is marked via WithSensitiveExec it omits stderr entirely: the target
+// process's stderr, or (for a stdin-delivered call such as SendKeys's tmux
+// invocation) its stdin, can carry caller-supplied content, and embedding it
+// here would defeat suppression done anywhere else in the stack. Factored
+// out from execWithOptionalStdin so it can be unit-tested without a real
+// Kubernetes API server (see TestWrapExecStreamError_SensitiveOmitsStderr).
+//
+// execWithOptionalStdin's own call site is not separately covered: driving
+// a real failing exec stream through remotecommand.NewSPDYExecutor needs a
+// server speaking the Kubernetes exec subprotocol, not just a fake
+// clientset, and that scaffolding was judged not worth adding for one call
+// site that does nothing but forward to this already-tested helper.
+func wrapExecStreamError(ctx context.Context, err error, stderr string) error {
+	if IsSensitiveExec(ctx) {
+		return fmt.Errorf("exec failed: %w", err)
+	}
+	return fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr)
+}
+
 // execWithOptionalStdin is the shared implementation behind Exec and
 // ExecWithStdin. stdin may be nil, in which case the exec has no stdin
 // stream attached (the historical Exec behaviour).
@@ -2505,7 +2527,7 @@ func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string
 	})
 
 	if err != nil {
-		return stdout.String(), fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr.String())
+		return stdout.String(), wrapExecStreamError(ctx, err, stderr.String())
 	}
 
 	return stdout.String(), nil

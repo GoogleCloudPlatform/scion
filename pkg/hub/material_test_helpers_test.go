@@ -131,9 +131,17 @@ type materialFailingStore struct {
 	// getUserErrAfterCalls, if > 0, makes getUserErr apply starting with that
 	// call number (e.g. 1 lets the first GetUser call through and fails the
 	// second onward). 0 (the default) fails every call, as before.
-	getUserErrAfterCalls             int
-	getUserCalls                     int
-	listRoleBindingsForPrincipalErr  error
+	getUserErrAfterCalls int
+	getUserCalls         int
+	// listRoleBindingsForPrincipalErr injects a failure into the singular
+	// ListRoleBindingsForPrincipal, which CheckEffectiveMembership calls for
+	// a principal's direct bindings.
+	listRoleBindingsForPrincipalErr error
+	// listRoleBindingsForPrincipalsErr injects a failure into the plural
+	// ListRoleBindingsForPrincipals, which CheckEffectiveMembership calls for
+	// group-derived bindings and SystemAuthorityProof calls for the
+	// principal's system-scope bindings.
+	listRoleBindingsForPrincipalsErr error
 	getDelegationEdgesForDelegateErr error
 	delegationEdgesOverride          []*store.DelegationEdge
 	listProgenySecretsErr            error
@@ -159,6 +167,13 @@ func (f *materialFailingStore) ListRoleBindingsForPrincipal(ctx context.Context,
 		return nil, f.listRoleBindingsForPrincipalErr
 	}
 	return f.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+func (f *materialFailingStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if f.listRoleBindingsForPrincipalsErr != nil {
+		return nil, f.listRoleBindingsForPrincipalsErr
+	}
+	return f.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
 }
 
 func (f *materialFailingStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {

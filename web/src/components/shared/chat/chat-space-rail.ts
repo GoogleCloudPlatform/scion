@@ -1835,6 +1835,53 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
+   * Mark a thread unread from the context menu. Hidden/disabled by the
+   * render guard for an already-unread or empty thread, but this also
+   * no-ops defensively for the same reasons handleMarkRead does.
+   */
+  private async handleMarkUnread(thread: ChatSpaceThread, _projectId: string): Promise<void> {
+    this.contextMenuTarget = null;
+    if (thread.hasUnread || !thread.lastMessageId) return;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(thread.id)}/unread`,
+        { method: 'POST' }
+      );
+      if (!res.ok) return;
+      this.markThreadUnread(thread.id);
+      // Same-tab suppression must not wait on the SSE round trip: if this
+      // thread is the one currently open, the page needs to know right now,
+      // not once its own echo comes back.
+      this.dispatchEvent(
+        new CustomEvent('conversation-marked-unread', {
+          detail: { conversationKey: thread.id },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /**
+   * Set a thread's unread markers locally without talking to the server —
+   * the inverse of markThreadRead. Called once the server confirms
+   * "Mark unread" here, and by the chat page when another of this user's
+   * tabs reports the same change over the read-state SSE event (see
+   * chat.ts's _handleOwnReadStateSSE).
+   */
+  markThreadUnread(threadId: string): void {
+    for (const [projectId, threads] of this.threadsBySpace) {
+      const target = threads.find((t) => t.id === threadId);
+      if (!target || target.hasUnread) continue;
+      this.updateThread(projectId, threadId, { hasUnread: true });
+      if (!target.muted) this.adjustSpaceUnread(projectId, 1);
+      return;
+    }
+  }
+
+  /**
    * Apply a mute decision locally, keeping the space badge in step with it.
    * The server's rollup does not count muted threads, so an unread thread
    * leaves the badge when it is muted and rejoins it when it is unmuted —
@@ -2843,6 +2890,19 @@ export class ScionChatSpaceRail extends LitElement {
           <sl-icon name="check-circle"></sl-icon>
           Mark as read
         </div>
+        ${
+          !thread.hasUnread && thread.lastMessageId
+            ? html`
+                <div
+                  class="context-menu-item"
+                  @click=${() => void this.handleMarkUnread(thread, projectId)}
+                >
+                  <sl-icon name="envelope"></sl-icon>
+                  Mark unread
+                </div>
+              `
+            : nothing
+        }
         <div class="context-menu-item" @click=${() => this.handleMarkSpaceRead(projectId)}>
           <sl-icon name="check-lg"></sl-icon>
           Mark space read

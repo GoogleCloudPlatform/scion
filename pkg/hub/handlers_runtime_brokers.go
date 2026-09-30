@@ -158,6 +158,12 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Looked up once and reused for every broker in this listing (design.md
+	// §5.9, AC-P2-10): the same convention listProjectProviders uses via
+	// lookupAgentLimitDefinition, so a per-broker cap never costs more than
+	// one extra limit-definition lookup for the whole page.
+	limitDef := s.lookupAgentLimitDefinition(ctx)
+
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
@@ -167,6 +173,11 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
 		}
+		// Capacity fields carry no visibility check beyond the ActionRead
+		// filter above: whoever can already see this broker row sees its
+		// capacity too, matching the providers listing's rule
+		// (ptone/scion#2061 P2.2, design.md §5.6).
+		resp.AgentLimit, resp.AgentCount, resp.AgentLimitSource = s.resolveBrokerCapacity(ctx, broker.ID, limitDef)
 		brokersWithCaps = append(brokersWithCaps, resp)
 	}
 
@@ -219,6 +230,15 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 		} else {
 			s.handleBrokerSecretByKey(w, r, brokerID, secretPath)
 		}
+		return
+	}
+
+	// Check for the /settings path (ptone/scion#2061 P2, ptone/scion#2177,
+	// design.md §5.4). A dedicated subresource, not an extension of PATCH on
+	// the broker itself: it keeps settings out of the heartbeat-contended
+	// row and gives a clean per-key authorization point (design.md §5.4).
+	if subPath == "settings" {
+		s.handleBrokerSettings(w, r, brokerID)
 		return
 	}
 

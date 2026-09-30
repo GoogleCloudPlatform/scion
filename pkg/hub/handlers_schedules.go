@@ -220,6 +220,14 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	// C1 containment: validate target agent project scope for message schedules.
 	if req.EventType == "message" {
+		// Phase 0.2 (ptone/scion#2192): recurring schedules accept the same
+		// advanced Payload JSON as one-shot scheduled events and must be
+		// tombstoned the same way (see createScheduledEvent).
+		if err := rejectRawScheduledPayload(req.Payload); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+				map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+			return
+		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, "", req.AgentName) {
 			return
 		}
@@ -398,6 +406,16 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		effectivePayload := schedule.Payload
 		if req.Payload != "" {
 			effectivePayload = req.Payload
+			// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw"
+			// key in the advanced Payload JSON. Only checked when the caller
+			// is setting/changing Payload in this request — an update that
+			// leaves Payload untouched must not retroactively fail on an
+			// existing stored value.
+			if err := rejectRawScheduledPayload(req.Payload); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+					map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+				return
+			}
 		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
 			return
