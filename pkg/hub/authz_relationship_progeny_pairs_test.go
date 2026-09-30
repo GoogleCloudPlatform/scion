@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // Tests for the progeny exact-pair branch (ptone/scion#2119 follow-up for
