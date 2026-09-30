@@ -212,6 +212,7 @@ type Decision struct {
 	MatchedGrant   string // Audit-ready matched grant identifier
 	MatchedPolicy  string // Audit-ready matched policy identifier
 	PrincipalKind  PrincipalKind
+	PrincipalID    string
 	CredentialID   string
 	CredentialType string
 	CredentialKind string
@@ -1708,6 +1709,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 // auditPermissionID(request), never independently derived here.
 func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permID string) Decision {
 	decision.PrincipalKind = principal.Kind
+	decision.PrincipalID = principal.ID
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)

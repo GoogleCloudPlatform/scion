@@ -102,10 +102,21 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		result = "allow"
 	}
 
+	// principalID prefers decision.PrincipalID, which decorateDecision sets
+	// from the derived principal Decide actually evaluated. request.Principal.ID
+	// is the caller-supplied AuthzRequest field, which most callers leave
+	// empty (they set only Principal.Identity) and which can otherwise carry
+	// a rejected, unverified claim. Fall back to it only for a Decision built
+	// without decorateDecision (e.g. a non-Decide caller of this function).
+	principalID := decision.PrincipalID
+	if principalID == "" {
+		principalID = request.Principal.ID
+	}
+
 	record := &store.DecisionAuditRecord{
 		Timestamp:      time.Now(),
 		PrincipalKind:  string(decision.PrincipalKind),
-		PrincipalID:    request.Principal.ID,
+		PrincipalID:    principalID,
 		CredentialID:   decision.CredentialID,
 		CredentialType: decision.CredentialKind,
 		ResourceType:   request.Resource.Type,
