@@ -542,26 +542,43 @@ Key API surface:
   `[table]`/`[[table]]` sections whose (comment-stripped,
   whitespace-normalized) header matches the predicate; it tracks
   bracket-nesting depth so a nested-array element line isn't mistaken for a
-  header, but it is still not a full TOML tokenizer — a header-shaped line
-  inside a *multi-line* string is a known residual gap. That gap (and any
-  other line-oriented editing mistake) is why every TOML writer must
-  validate before persisting: parse the original and the edited content
-  with `tomllib` and require every top-level key you don't own to be
+  header, and it tracks multi-line (`"""`/`'''`) strings across lines —
+  including escaped closing-delimiter sequences inside a multi-line *basic*
+  string — so a header-shaped line, or an unbalanced bracket in ordinary
+  prose, inside one of those is correctly treated as string content rather
+  than TOML structure. It is still not a full TOML tokenizer, so every TOML
+  writer must still validate before persisting: parse the original and the
+  edited content with `tomllib` and require everything you don't own to be
   unchanged. Use `toml_edit_preserves(original, content, managed_keys)` for
   the check alone, or `write_toml_if_preserves(ctx, path, original,
-  content, managed_keys)` to check-and-write-or-warn-and-leave-untouched in
-  one call — pass the set of top-level table/key names your write is
-  allowed to add, remove, or change (e.g. `{"mcp_servers"}` for an MCP
-  writer). `strip_toml_top_level_key(content, key)` and
-  `insert_toml_top_level_line(content, line)` do the equivalent surgery for
-  bare top-level `key = value` lines rather than whole sections (codex uses
-  these for `model`/`model_reasoning_effort`). See
+  content, managed_keys, what=...)` to check-and-write-or-warn-and-leave-
+  untouched in one call. `managed_keys` accepts two kinds of entries:
+  a bare top-level key (`str`), exempting the whole top-level table or
+  value (e.g. `{"mcp_servers"}` for an MCP writer that fully replaces that
+  table each time); or a key-path (`tuple[str, ...]`, e.g.
+  `("model", "vertex-grok")`), exempting only that one nested subtree while
+  still requiring every sibling under the same parent to stay unchanged —
+  use a key-path whenever your write owns only one sub-table of a larger,
+  potentially-shared top-level table, so it can't be fooled into accepting
+  damage to an unrelated sibling (e.g. another tool's `[model.custom]`).
+  `what` is a short label (e.g. `"vertex-ai auth/model config"`) included
+  in the warning on a rejected write, alongside the managed keys, so the
+  log names which step failed and what it owned. `strip_toml_top_level_key
+  (content, key)` and `insert_toml_top_level_line(content, line)` do the
+  equivalent surgery for bare top-level `key = value` lines rather than
+  whole sections (codex uses these for `model`/`model_reasoning_effort`);
+  both also skip lines inside a multi-line string. The one documented
+  residual gap: an escaped closing-delimiter sequence's backslash-escaping
+  is only understood inside a `"""` (basic) string, since `'''` (literal)
+  strings have no escapes in TOML at all — the `tomllib` round-trip check
+  above is what catches anything past that. See
   `harnesses/scion_harness_test.py`'s `TestStripTomlSections` /
-  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` for worked examples,
-  including the fragility repro cases (trailing comments on headers, nested
-  arrays, header-shaped lines in multi-line strings, header whitespace
-  variants like `[ models ]`) this API was hardened against
-  (ptone/scion#2426).
+  `TestTomlEnteringArrayDepths` / `TestTomlEditPreserves` /
+  `TestWriteTomlIfPreserves` for worked examples, including the fragility
+  repro cases (trailing comments on headers, nested arrays, multi-line
+  strings with header-shaped lines or unbalanced brackets, header
+  whitespace variants like `[ models ]`) this API was hardened against
+  (ptone/scion#2426, ptone/scion#2427).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).

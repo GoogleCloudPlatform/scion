@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from typing import Any, Iterable
+from typing import Any, Collection
 
 # ---------------------------------------------------------------------------
 # Version contract (§3.3)
@@ -1002,18 +1002,38 @@ def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | No
     left unmasked from the opening quote onward, matching
     toml_mask_strings_and_comments' single-line contract — that shape is
     already invalid TOML the tomllib backstop (toml_edit_preserves) will
-    reject regardless, so there's no multi-line state to track for it. A
-    multi-line *basic* string that escapes its own closing-delimiter
-    sequence (backslash followed by three double quotes, to embed a
-    literal triple-quote in the string body) is not specially recognized —
-    the first raw occurrence of the delimiter closes the string — a
-    narrower, rarer residual gap than the one this closes, and one the
-    tomllib backstop still catches.
+    reject regardless, so there's no multi-line state to track for it.
+
+    A multi-line *basic* string (`\"\"\"`) supports backslash escapes, so a
+    backslash-escaped quote is skipped while searching for the closing
+    delimiter — otherwise an escaped closing-delimiter sequence embedded in
+    the string body (TOML's way to write a literal triple-quote inside one)
+    would close the string early (ptone/scion#2427 review round 2,
+    "Consider 2"). A multi-line *literal* string (`'''`) has no escapes at
+    all in TOML, so no such handling applies there — a `'''` can never
+    legally appear in a literal multi-line string's body at all, escaped or
+    not.
     """
     out: list[str] = []
     i, n = 0, len(line)
     state = in_ml
     while i < n:
+        if state == '"""':
+            j = i
+            found = -1
+            while j < n:
+                if line[j] == "\\":
+                    j += 2
+                    continue
+                if line[j:j + 3] == state:
+                    found = j
+                    break
+                j += 1
+            if found == -1:
+                return "".join(out), state
+            i = found + 3
+            state = None
+            continue
         if state is not None:
             j = line.find(state, i)
             if j == -1:
@@ -1093,10 +1113,13 @@ def toml_entering_array_depths(lines: list[str]) -> list[int]:
     previously-documented gap where a header-shaped line *inside* such a
     string (with balanced brackets, so it wouldn't have corrupted depth
     either way) was mistaken for a real header — is_toml_table_header now
-    correctly excludes it via the same sentinel. The remaining gap is
-    narrower: an escaped triple-quote delimiter inside a multi-line basic
-    string is not specially recognized (see _toml_code_and_ml_state); that
-    is still caught by the tomllib backstop, toml_edit_preserves.
+    correctly excludes it via the same sentinel. _toml_code_and_ml_state
+    also understands backslash-escaped delimiters inside a multi-line
+    *basic* string (ptone/scion#2427 review round 2, "Consider 2"), so a
+    delimiter sequence embedded in the string body via escaping doesn't
+    close it early either. The tomllib backstop, toml_edit_preserves,
+    remains the last line of defense for anything past that — this is
+    still a line-oriented scanner, not a full TOML tokenizer.
     """
     depths: list[int] = []
     depth = 0
@@ -1152,18 +1175,17 @@ def strip_toml_sections(content: str, header_predicate: Any) -> str:
     toml_entering_array_depths), so a line that is really a nested-array
     element on its own line (e.g. `["a", "b"]` inside a still-open
     multi-line array) is never mistaken for a table header, and it tracks
-    multi-line ('\"\"\"'/"'''") strings across lines, so a header-shaped
-    line — or an unbalanced bracket in ordinary prose — inside one of those
-    is correctly treated as string content, not TOML structure, however
-    many lines the string spans.
+    multi-line ('\"\"\"'/"'''") strings across lines — including
+    backslash-escaped closing-delimiter sequences inside a multi-line
+    *basic* string — so a header-shaped line, or an unbalanced bracket in
+    ordinary prose, inside one of those is correctly treated as string
+    content, not TOML structure, however many lines the string spans.
 
-    This is still line-oriented, not a full TOML tokenizer: an escaped
-    closing-delimiter sequence inside a multi-line *basic* string (see
-    _toml_code_and_ml_state) is not specially recognized. Callers that
-    write the result back to disk should validate it with
-    toml_edit_preserves (or write_toml_if_preserves) before persisting, so
-    that narrower residual gap is caught rather than silently corrupting
-    the file.
+    This is still line-oriented, not a full TOML tokenizer, so callers that
+    write the result back to disk should still validate it with
+    toml_edit_preserves (or write_toml_if_preserves) before persisting, as
+    defense-in-depth against any other case this scanner doesn't
+    understand.
 
     Also consumes blank lines immediately preceding a removed header.
     """
@@ -1201,7 +1223,16 @@ def _is_toml_key_line(line: str, key: str) -> bool:
 
 
 def strip_toml_top_level_key(content: str, key: str) -> str:
-    """Remove a top-level TOML key = value line from content."""
+    """Remove a top-level TOML key = value line from content.
+
+    A line whose entering depth is `_TOML_IN_MULTILINE_STRING` is string
+    content, not TOML syntax, regardless of what it looks like — a prose
+    line like "model choice matters." inside a multi-line string must not
+    be mistaken for a real `model = ...` assignment and stripped from the
+    string's body (ptone/scion#2427 review round 2, "Consider 1"). This
+    mirrors is_toml_table_header's `depth == 0` check, which already
+    excludes such lines from header detection the same way.
+    """
     lines = content.split("\n")
     depths = toml_entering_array_depths(lines)
     kept = []
@@ -1209,7 +1240,7 @@ def strip_toml_top_level_key(content: str, key: str) -> str:
     for line, depth in zip(lines, depths):
         if is_toml_table_header(line, depth):
             in_section = True
-        if not in_section and _is_toml_key_line(line, key):
+        if not in_section and depth >= 0 and _is_toml_key_line(line, key):
             continue
         kept.append(line)
     return "\n".join(kept)
@@ -1255,7 +1286,7 @@ def _drop_toml_path(data: dict[str, Any], path: tuple[str, ...]) -> None:
 def toml_edit_preserves(
     original: str,
     content: str,
-    managed_keys: Iterable[str | tuple[str, ...]] = (),
+    managed_keys: Collection[str | tuple[str, ...]] = (),
 ) -> bool:
     """True if `content` is a safe edit of `original`.
 
@@ -1283,18 +1314,24 @@ def toml_edit_preserves(
     (strip_toml_sections, strip_toml_top_level_key,
     insert_toml_top_level_line), which — despite the string/comment/
     multi-line-string masking and bracket-depth tracking they use — are
-    still not a full TOML tokenizer. A header- or key-shaped line inside an
-    *escaped* multi-line string delimiter can still get spliced into or
-    deleted from that string's body while the file stays valid TOML;
-    comparing everything the caller doesn't own closes that whole class of
-    edit, not just one shape. Callers should leave the existing file
-    untouched (logging a warning) when this returns False — see
-    write_toml_if_preserves.
+    still not a full TOML tokenizer. Comparing everything the caller
+    doesn't own (at whatever key-path granularity it declares) catches any
+    class of line-oriented editing mistake, not just the specific shapes
+    those helpers are already hardened against. Callers should leave the
+    existing file untouched (logging a warning) when this returns False —
+    see write_toml_if_preserves.
 
     If `original` doesn't parse (missing, empty, or already-invalid file),
     there's no baseline to diff against, so only "does `content` parse" is
     checked.
+
+    `managed_keys` is iterated more than once, so it is materialized into a
+    tuple immediately — a one-shot generator would otherwise be silently
+    exhausted after the first pass, and every managed key after that would
+    look unmanaged, over-rejecting the edit (ptone/scion#2427 review round
+    2). Typed as `Collection` rather than `Iterable` for the same reason.
     """
+    managed_keys = tuple(managed_keys)
     try:
         after = tomllib.loads(content)
     except tomllib.TOMLDecodeError:
@@ -1333,7 +1370,7 @@ def write_toml_if_preserves(
     path: str,
     original: str,
     content: str,
-    managed_keys: Iterable[str | tuple[str, ...]] = (),
+    managed_keys: Collection[str | tuple[str, ...]] = (),
     *,
     what: str = "",
     mode: int | None = None,
@@ -1348,7 +1385,12 @@ def write_toml_if_preserves(
     caller's source. Returns whether the write happened — a change this
     fatal to skip (e.g. vertex-ai routing) should have its caller check the
     return value rather than assume success.
+
+    `managed_keys` is materialized into a tuple immediately (see
+    toml_edit_preserves) since it is iterated again below to build the
+    warning message.
     """
+    managed_keys = tuple(managed_keys)
     if not toml_edit_preserves(original, content, managed_keys):
         managed_desc = ", ".join(
             k if isinstance(k, str) else ".".join(k) for k in managed_keys

@@ -604,6 +604,31 @@ class TestStripTomlSections(unittest.TestCase):
         data = tomllib.loads(appended)
         self.assertEqual(data["models"]["default"], "vertex-grok")
 
+    def test_strip_toml_sections_handles_escaped_closing_delimiter(self):
+        # ptone/scion#2427 review round 2, "Consider 2": an escaped closing-
+        # delimiter sequence inside a multi-line *basic* string (TOML's way
+        # to embed a literal triple-quote in the string body) must not
+        # close the string early — a header-shaped line genuinely still
+        # inside the string ("[cli]") must stay recognized as string
+        # content, and only the real header after the string closes gets
+        # stripped.
+        content = (
+            'note = """\n'
+            'literal triple quote: \\"""\n'
+            "[cli]\n"
+            "more text\n"
+            '"""\n'
+            "[cli]\n"
+            "auto_update = true\n"
+        )
+        result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
+        data = tomllib.loads(result)
+        self.assertNotIn("cli", data)
+        self.assertEqual(
+            data["note"],
+            'literal triple quote: """\n[cli]\nmore text\n',
+        )
+
 
 class TestTomlMaskStringsAndComments(unittest.TestCase):
     def test_blanks_basic_string(self):
@@ -698,6 +723,44 @@ class TestTomlEnteringArrayDepths(unittest.TestCase):
         self.assertNotIn("cli", data)
         self.assertEqual(data["other"]["k"], 1)
 
+    # --- ptone/scion#2427 review round 2, "Consider 2": escaped
+    # closing-delimiter handling in a multi-line basic string. -----------
+
+    def test_escaped_closing_delimiter_does_not_close_basic_multiline_string(self):
+        lines = [
+            'note = """',
+            'literal triple quote: \\"""',
+            "[cli]",
+            '"""',
+            "[other]",
+            "k = 1",
+        ]
+        depths = sh.toml_entering_array_depths(lines)
+        # Line 1 (the escaped delimiter) and line 2 (the fake header) are
+        # both still inside the open string; only line 4 ([other]) is a
+        # real header.
+        self.assertEqual(depths[0], 0)
+        self.assertEqual(depths[1], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[2], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[4], 0)
+        self.assertTrue(sh.is_toml_table_header(lines[4], depths[4]))
+
+    def test_escaped_delimiter_handling_is_specific_to_basic_strings(self):
+        # Literal multi-line strings ('''...''') have no escapes at all in
+        # TOML — a backslash there is just a literal backslash character,
+        # not an escape, so the same handling must not apply to them.
+        lines = [
+            "note = '''",
+            "a backslash: \\",
+            "'''",
+            "[other]",
+            "k = 1",
+        ]
+        depths = sh.toml_entering_array_depths(lines)
+        self.assertEqual(depths[1], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[3], 0)
+        self.assertTrue(sh.is_toml_table_header(lines[3], depths[3]))
+
 
 class TestIsTomlTableHeader(unittest.TestCase):
     def test_recognizes_simple_header_at_depth_zero(self):
@@ -778,6 +841,26 @@ class TestStripTomlTopLevelKey(unittest.TestCase):
         self.assertEqual(data["notify"], ["sh", ["x"]])
         self.assertEqual(data["features"], {"hooks": True})
 
+    def test_ignores_prose_line_inside_multiline_string_that_starts_with_the_key(self):
+        # ptone/scion#2427 review round 2, "Consider 1": a prose line like
+        # "model choice matters." inside a multi-line string must not be
+        # mistaken for a top-level `model = ...` assignment and stripped
+        # from the string's body, just because is_toml_key_line only looks
+        # at the line's own text. The line's entering depth is the
+        # multi-line-string sentinel, which now gates the key-line check
+        # the same way it already gates header detection.
+        content = (
+            'developer_instructions = """\n'
+            "model choice matters.\n"
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+        result = sh.strip_toml_top_level_key(content, "model")
+        data = tomllib.loads(result)
+        self.assertEqual(data["developer_instructions"], "model choice matters.\n")
+        self.assertEqual(data["features"], {"hooks": True})
+
 
 class TestInsertTomlTopLevelLine(unittest.TestCase):
     def test_appends_when_no_table_header(self):
@@ -814,6 +897,36 @@ class TestInsertTomlTopLevelLine(unittest.TestCase):
 
 
 class TestTomlEditPreserves(unittest.TestCase):
+    def test_accepts_generator_managed_keys_with_multiple_entries(self):
+        # ptone/scion#2427 review round 2 (typing nit): managed_keys is
+        # iterated more than once internally, so a one-shot generator must
+        # not be silently exhausted after the first pass — that would make
+        # every managed key after the first look unmanaged and over-reject
+        # the edit.
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                "other_key = 1\n",
+                'other_key = 1\nmodel = "x"\n[otel]\nenabled = true\n',
+                (k for k in ("model", "otel")),
+            )
+        )
+
+    def test_accepts_generator_managed_keys_mixing_bare_key_and_key_path(self):
+        # A generator mixing a bare top-level key (consumed while building
+        # the internal `top_level` set on the first pass) and a key-path
+        # (only found on the later `paths` pass): without materializing
+        # managed_keys up front, the bare-string comprehension alone
+        # exhausts a one-shot generator, so the key-path is silently
+        # dropped from `paths` and its subtree looks unmanaged, causing an
+        # otherwise-safe edit to be over-rejected.
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                "[model.a]\nx = 1\n",
+                '[model.a]\nx = 1\n[model.b]\ny = 2\n[otel]\nenabled = true\n',
+                (k for k in ("otel", ("model", "b"))),
+            )
+        )
+
     def test_accepts_valid_content_with_managed_keys_changed(self):
         self.assertTrue(
             sh.toml_edit_preserves(
@@ -990,6 +1103,30 @@ class TestWriteTomlIfPreserves(unittest.TestCase):
             self.assertIn("auth_provider.vertex-grok", warnings[0])
             self.assertIn("NOT applied", warnings[0])
 
+    def test_warning_names_all_managed_keys_when_given_a_generator(self):
+        # ptone/scion#2427 review round 2 (typing nit): write_toml_if_preserves
+        # iterates managed_keys again (separately from toml_edit_preserves)
+        # to build the warning message on a rejected write — a one-shot
+        # generator must not come out already exhausted by that point.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            original = 'other_key = "before"\n'
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(original)
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(
+                ctx,
+                path,
+                original,
+                'other_key = "corrupted"\nmodel = "x"\n',
+                managed_keys=(k for k in ("model", ("auth_provider", "vertex-grok"))),
+                what="vertex-ai auth/model config",
+            )
+            self.assertFalse(wrote)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("model", warnings[0])
+            self.assertIn("auth_provider.vertex-grok", warnings[0])
+
     def test_warning_has_a_sensible_default_when_what_is_omitted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.toml")
@@ -1004,33 +1141,27 @@ class TestWriteTomlIfPreserves(unittest.TestCase):
             self.assertEqual(len(warnings), 1)
             self.assertIn(path, warnings[0])
 
-    def test_repro_3_end_to_end_escaped_delimiter_rejected_not_corrupted(self):
-        # End-to-end version of the narrower residual gap that remains after
-        # ptone/scion#2427 review round 1 (R1): _toml_code_and_ml_state
-        # doesn't special-case an escaped closing-delimiter sequence inside
-        # a multi-line *basic* string, so the raw (unescaped-for-our-
-        # purposes) `"""` it contains closes the string early. That makes
-        # strip_toml_sections' output invalid TOML — the write_toml_if_preserves
-        # backstop must catch it (via toml_edit_preserves failing to parse)
-        # and leave the original file on disk untouched rather than write
-        # garbage.
-        original = (
-            'note = """\n'
-            'literal triple quote: \\"""\n'
-            "[cli]\n"
-            "more text\n"
-            '"""\n'
-            "[cli]\n"
-            "auto_update = true\n"
-        )
-        self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
-        content = sh.strip_toml_sections(original, lambda h: h == "[cli]")
+    def test_backstop_rejects_edit_that_drops_an_unmanaged_section(self):
+        # Defense-in-depth, independent of any specific strip_toml_sections
+        # gap: both previously-documented residual gaps are closed as of
+        # ptone/scion#2427 review rounds 1 and 2 (multi-line-string bracket
+        # tracking, and escaped closing-delimiter handling — see
+        # TestTomlEnteringArrayDepths and
+        # test_strip_toml_sections_handles_escaped_closing_delimiter below).
+        # Even so, if a future bug in the line-oriented editor ever dropped
+        # more than a caller's predicate asked for, the tomllib round-trip
+        # backstop must still catch it and leave the file on disk untouched
+        # rather than write the damage.
+        original = 'note = "keep me"\n[cli]\nauto_update = true\n[otel]\nenabled = true\n'
+        # Simulates a hypothetical strip bug: stripping [otel] also (wrongly)
+        # dropped the unrelated [cli] section.
+        content = 'note = "keep me"\n[otel]\nenabled = false\n'
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.toml")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(original)
             ctx, warnings = self._ctx()
-            wrote = sh.write_toml_if_preserves(ctx, path, original, content, managed_keys={"cli"})
+            wrote = sh.write_toml_if_preserves(ctx, path, original, content, managed_keys={"otel"})
             self.assertFalse(wrote)
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), original)
