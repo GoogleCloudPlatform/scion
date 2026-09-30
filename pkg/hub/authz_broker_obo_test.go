@@ -130,9 +130,9 @@ func TestBrokerOnBehalfOf_BothMiddlewareVariantsGrantEffectiveUserAccess(t *test
 
 // TestBrokerOnBehalfOf_BrokerWithoutOBOStaysBrokerBroker: a broker request
 // with no X-Scion-On-Behalf-Of header installs the broker itself as the
-// request identity, with no OBO marker, and Decide denies it exactly as it
-// denies any broker principal today (the unsupported-principal-kind switch),
-// under BOTH middleware variants. It also installs the broker
+// request identity, with no OBO marker, and Decide denies it through the
+// unsupported-principal-kind switch, under BOTH middleware variants. It also
+// installs the broker
 // CredentialContext, identically under both variants: the broker-only branch
 // of applyOnBehalfOf must not skip the credential just because there is no
 // on-behalf-of user to substitute.

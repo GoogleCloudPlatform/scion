@@ -810,9 +810,8 @@ func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
 // =============================================================================
 
 // TestSessionGates_DenyNonSessionCredentials: the token-management
-// and project-deletion session gates deny an unrecognized identity exactly as
-// they deny a UAT or agent JWT today, and keep admitting interactive/dev
-// sessions unchanged.
+// and project-deletion session gates deny an unrecognized identity, as they
+// deny a UAT or agent JWT, and admit interactive/dev sessions.
 func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	userID := tid("session-gate-user")
 	interactiveUser := NewAuthenticatedUser(userID, "u@example.com", "U", "member", "cli")

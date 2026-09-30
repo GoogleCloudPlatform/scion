@@ -280,9 +280,8 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// with, and audits, the DERIVED principal and credential — never the
 	// caller's rejected claim — and emits exactly one audit record.
 	//
-	// A request with an omitted Principal.Kind/Credential.Kind still derives
-	// from the identity via the adapter below, so established callers that
-	// supply only an identity keep working — an omitted kind never reaches
+	// A request with an omitted Principal.Kind/Credential.Kind derives both
+	// from the identity via the adapter below; an omitted kind never reaches
 	// either check.
 	//
 	// A supplied Credential is independent of Principal.Identity in the
