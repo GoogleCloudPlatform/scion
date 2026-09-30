@@ -514,6 +514,16 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	if redirected, ok := redirectEnforcedHooksPath(path); ok {
 		path = redirected
 		chownUID, chownGID = -1, -1
+	} else if !isWithinAgentHome(path) {
+		// Every other bootstrap file target must resolve inside the agent
+		// home: a root-written, workload-chowned file at an arbitrary
+		// absolute path (e.g. "/etc/ld.so.preload" paired with a
+		// workload-writable ".so" it names) is a root code-execution
+		// primitive, not a legitimate bootstrap target. Fails closed before
+		// any directory is created or anything is written — never root-
+		// written, even transiently. The error names only the target's own
+		// leaf component, never the full path or content.
+		return &bootstrapPathError{code: codeBootstrapPathOutsideHome, path: filepath.Base(path), detail: "target does not resolve inside the agent home"}
 	}
 
 	dir := filepath.Dir(path)

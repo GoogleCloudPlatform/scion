@@ -57,6 +57,20 @@ func realTempDir(t *testing.T) string {
 	return dir
 }
 
+// withAgentHomeFixture points agentHomeDir at dir for the duration of the
+// test, restoring the original value afterward — the same seam
+// withEnforcedHooksFixture provides for enforcedHooksHomePrefix/
+// enforcedHooksDir, needed here so a fixture built under a throwaway
+// realTempDir() satisfies isWithinAgentHome's containment check without a
+// test writing to a real "/home/scion". Production never reassigns
+// agentHomeDir.
+func withAgentHomeFixture(t *testing.T, dir string) {
+	t.Helper()
+	orig := agentHomeDir
+	agentHomeDir = dir
+	t.Cleanup(func() { agentHomeDir = orig })
+}
+
 func doJSON(t *testing.T, h http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
@@ -269,6 +283,7 @@ func TestBootstrap_SingleShot_SecondCallGets409(t *testing.T) {
 
 func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 	dir := realTempDir(t)
+	withAgentHomeFixture(t, dir)
 	filePath := filepath.Join(dir, "nested", "deep", "config.json")
 
 	content := []byte(`{"hello":"world"}`)
@@ -320,6 +335,7 @@ func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 // a file that already exists; it only truncates and rewrites contents.
 func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	dir := realTempDir(t)
+	withAgentHomeFixture(t, dir)
 	filePath := filepath.Join(dir, "credential.json")
 
 	// Pre-create the file at a looser mode, as if baked into the image.
@@ -398,6 +414,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 
 	t.Run("fresh file", func(t *testing.T) {
 		dir := realTempDir(t)
+		withAgentHomeFixture(t, dir)
 		filePath := filepath.Join(dir, "fresh.json")
 
 		srv := NewServer(WithChownOwner(uid, gid))
@@ -414,6 +431,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 
 	t.Run("pre-existing file at a different mode", func(t *testing.T) {
 		dir := realTempDir(t)
+		withAgentHomeFixture(t, dir)
 		filePath := filepath.Join(dir, "existing.json")
 		if err := os.WriteFile(filePath, []byte("stale"), 0o644); err != nil {
 			t.Fatalf("failed to pre-create file: %v", err)
@@ -442,6 +460,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
 	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
@@ -506,6 +525,7 @@ func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.
 func TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyExists(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
 	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
@@ -589,14 +609,16 @@ func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T
 // TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse proves
 // a ".." segment in the bootstrap file's Path lands exactly where
 // filepath.Clean says it should, and never touches the lexical component the
-// ".." walks back through. Per substrate-runtime.md §5.5, serve accepts
-// arbitrary absolute paths (auth/secret targets can legitimately be outside
-// home), so this deliberately does not add any "reject paths outside home"
-// behavior — it only proves the lexical Clean plus the symlink walk agree
-// with each other on where a dotdot-bearing path resolves.
+// ".." walks back through — it only proves the lexical Clean plus the
+// symlink walk agree with each other on where a dotdot-bearing path
+// resolves. The path Cleans to a location under home, so this is unaffected
+// by isWithinAgentHome's containment check; see
+// TestWriteBootstrapFile_RefusesTargetOutsideAgentHome for that check's own
+// dotdot case.
 func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -644,6 +666,7 @@ func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *tes
 func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -730,38 +753,82 @@ func TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget(t *testi
 	}
 }
 
-// TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally is the positive
-// counterpart to the test above: an outside-home absolute target with no
-// symlinks anywhere in its ancestry must be written normally, proving the
-// generic guard doesn't accidentally reject legitimate outside-home
-// auth/secret targets.
-func TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally(t *testing.T) {
+// TestWriteBootstrapFile_RefusesTargetOutsideAgentHome proves a file
+// secret's target must resolve inside the agent home, or the bootstrap
+// fails closed before anything is written — a root-written,
+// workload-chowned file at an arbitrary absolute path (e.g.
+// "/etc/ld.so.preload" paired with a workload-writable ".so" it names) is a
+// root code-execution primitive, not a legitimate bootstrap target.
+func TestWriteBootstrapFile_RefusesTargetOutsideAgentHome(t *testing.T) {
 	root := realTempDir(t)
-	targetPath := filepath.Join(root, "etc", "app", "x")
-
-	srv := NewServer(WithChownOwner(-1, -1))
-	if err := srv.writeBootstrapFile(BootstrapFile{
-		Path:       targetPath,
-		Mode:       0o640,
-		ContentB64: base64.StdEncoding.EncodeToString([]byte("config-value")),
-	}); err != nil {
-		t.Fatalf("writeBootstrapFile for a clean outside-home target: %v", err)
+	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	got, err := os.ReadFile(targetPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", targetPath, err)
-	}
-	if string(got) != "config-value" {
-		t.Errorf("content = %q, want %q", got, "config-value")
-	}
-	info, err := os.Stat(targetPath)
-	if err != nil {
-		t.Fatalf("stat %s: %v", targetPath, err)
-	}
-	if info.Mode().Perm() != 0o640 {
-		t.Errorf("mode = %v, want 0640", info.Mode().Perm())
-	}
+	t.Run("outside-home target refused and untouched", func(t *testing.T) {
+		targetPath := filepath.Join(root, "etc", "ld.so.preload")
+		srv := NewServer(WithChownOwner(-1, -1))
+		err := srv.writeBootstrapFile(BootstrapFile{
+			Path:       targetPath,
+			Mode:       0o644,
+			ContentB64: base64.StdEncoding.EncodeToString([]byte("/home/scion/evil.so\n")),
+		})
+		var pathErr *bootstrapPathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("err = %v (%T), want a *bootstrapPathError", err, err)
+		}
+		if pathErr.code != codeBootstrapPathOutsideHome {
+			t.Errorf("code = %q, want %q", pathErr.code, codeBootstrapPathOutsideHome)
+		}
+		if _, statErr := os.Stat(targetPath); statErr == nil {
+			t.Error("ld.so.preload was written despite being outside the agent home")
+		}
+	})
+
+	t.Run("home-relative target still works", func(t *testing.T) {
+		targetPath := filepath.Join(fakeHome, "app", "x")
+		srv := NewServer(WithChownOwner(-1, -1))
+		if err := srv.writeBootstrapFile(BootstrapFile{
+			Path:       targetPath,
+			Mode:       0o640,
+			ContentB64: base64.StdEncoding.EncodeToString([]byte("config-value")),
+		}); err != nil {
+			t.Fatalf("writeBootstrapFile for a home-relative target: %v", err)
+		}
+		got, err := os.ReadFile(targetPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", targetPath, err)
+		}
+		if string(got) != "config-value" {
+			t.Errorf("content = %q, want %q", got, "config-value")
+		}
+	})
+
+	t.Run("symlink escape from home refused", func(t *testing.T) {
+		outsideTarget := filepath.Join(root, "outside-escape")
+		if err := os.MkdirAll(outsideTarget, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		escapeLink := filepath.Join(fakeHome, "escape")
+		if err := os.Symlink(outsideTarget, escapeLink); err != nil {
+			t.Fatal(err)
+		}
+		targetPath := filepath.Join(escapeLink, "payload")
+		srv := NewServer(WithChownOwner(-1, -1))
+		err := srv.writeBootstrapFile(BootstrapFile{
+			Path:       targetPath,
+			Mode:       0o644,
+			ContentB64: base64.StdEncoding.EncodeToString([]byte("payload")),
+		})
+		if err == nil {
+			t.Fatal("writeBootstrapFile through a symlink escaping home: expected an error, got nil")
+		}
+		if _, statErr := os.Stat(filepath.Join(outsideTarget, "payload")); statErr == nil {
+			t.Error("the bootstrap file was written through the symlink into outsideTarget")
+		}
+	})
 }
 
 // TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode proves the
@@ -773,6 +840,7 @@ func TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally(t *testing.T) {
 func TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
+	withAgentHomeFixture(t, fakeHome)
 	outsideTarget := filepath.Join(root, "etc")
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
@@ -986,6 +1054,7 @@ func TestBootstrap_WriteFailureLogLineIsSingleLineEvenWithEmbeddedNewline(t *tes
 // case above, and also a distinct code from codeBootstrapPathSymlink.
 func TestBootstrap_RejectsNonDirComponentWith422(t *testing.T) {
 	root := realTempDir(t)
+	withAgentHomeFixture(t, root)
 	// "plain" is a regular file; a bootstrap file targeting a path below it
 	// needs to be created there, but it can't become a directory.
 	plain := filepath.Join(root, "plain")

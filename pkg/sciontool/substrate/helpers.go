@@ -21,7 +21,33 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
+
+// agentHomeDir is the scion workload's home directory ("/home/scion" by
+// convention — the same util.GetHomeDir("scion") convention
+// enforcedHooksHomePrefix uses), the containment boundary writeBootstrapFile
+// requires an ordinary (non-redirected) file secret's target to resolve
+// inside. A package var, not a const, purely so a test can point it at a
+// throwaway directory instead of the real "/home/scion".
+var agentHomeDir = util.GetHomeDir("scion")
+
+// isWithinAgentHome reports whether the already-filepath.Clean-ed absolute
+// path resolves inside agentHomeDir: equal to it, or naming a descendant.
+// Comparison is component-wise via filepath.Rel, not a bare string prefix,
+// so a sibling directory that merely starts with the same characters (e.g.
+// "/home/scion-other") is correctly treated as outside.
+func isWithinAgentHome(path string) bool {
+	rel, err := filepath.Rel(agentHomeDir, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
 
 var (
 	errInvalidBootstrapPath    = errors.New("bootstrap file path must be a non-empty absolute path")
@@ -42,6 +68,13 @@ const (
 	// empty or non-absolute Path, or a path component that exists but is
 	// not a directory (errNonDirComponent).
 	codeBootstrapPathInvalid = "bootstrap_path_invalid"
+	// codeBootstrapPathOutsideHome names a file secret whose target does
+	// not resolve inside the agent home (util.GetHomeDir("scion")) and is
+	// not the enforced-hooks redirect case: a root-written, workload-chowned
+	// file at an arbitrary absolute path (e.g. "/etc/ld.so.preload" paired
+	// with a workload-writable ".so" it names) is a root code-execution
+	// primitive, not a legitimate bootstrap target.
+	codeBootstrapPathOutsideHome = "bootstrap_path_outside_home"
 )
 
 // bootstrapPathError is returned by writeBootstrapFile for a bootstrap file

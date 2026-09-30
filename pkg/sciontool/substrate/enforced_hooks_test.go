@@ -168,6 +168,7 @@ func TestWriteBootstrapFile_NonHooksPathStillChowned(t *testing.T) {
 	}
 	_, _ = withEnforcedHooksFixture(t)
 	dir := realTempDir(t)
+	withAgentHomeFixture(t, dir)
 
 	self := os.Getuid()
 	srv := NewServer(WithChownOwner(self, os.Getgid()))

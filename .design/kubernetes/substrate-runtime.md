@@ -374,11 +374,17 @@ a path under `$HOME/.scion/hooks/`, which it instead redirects to a
 dedicated, never-chowned, root-owned directory. See §8's "Lifecycle hook
 privilege enforcement" for why.
 
-### 5.5 Path safety: the symlink guard
+### 5.5 Path safety: the symlink guard and the agent-home containment check
 
-`writeBootstrapFile` (serve side, `pkg/sciontool/substrate/`) accepts
-arbitrary absolute paths, creates parent directories, and chowns what it
-created for the scion user.
+`writeBootstrapFile` (serve side, `pkg/sciontool/substrate/`) requires every
+bootstrap file's target to resolve inside the agent home
+(`util.GetHomeDir("scion")`) — except the enforced-hooks redirect target
+under `hooks.EnforcedHooksDir`, which is root-owned by design (§5.3) — then
+creates parent directories and chowns what it created for the scion user.
+An outside-home target (e.g. `/etc/ld.so.preload` paired with a
+workload-writable `.so` it names) is a root code-execution primitive, not a
+legitimate bootstrap target, and is rejected before anything is created or
+written.
 
 - `mkdirAllTracked` Lstats **every existing component** of
   `filepath.Clean(dir)`, top-down from the first component to `dir` itself —
@@ -402,31 +408,33 @@ created for the scion user.
   walk and the final write target, so a `..` segment can never resolve
   differently between the two.
 
-**The guard applies to every bootstrap `Path`, not just home files** —
-including auth/secret targets that legitimately live outside home. A target
-under a *system* symlink (e.g. `/var/run -> /run` on Debian-based images, or
-a merged-`/usr` layout) is rejected exactly like a symlinked path under
-home. **Workaround:** use the resolved form of the target, e.g.
-`/run/secrets/...` instead of `/var/run/secrets/...`. No real target is
-known to need an exemption (§11).
+**The symlink guard applies to every bootstrap `Path` that resolves inside
+the agent home.** A target under a *system* symlink (e.g. `/var/run ->
+/run` on Debian-based images, or a merged-`/usr` layout) is rejected exactly
+like a symlinked path under home. **Workaround:** use the resolved form of
+the target, e.g. `/run/secrets/...` instead of `/var/run/secrets/...`. No
+real target is known to need an exemption (§11).
 
-**Two stable error codes**, carried by a `*bootstrapPathError`
+**Three stable error codes**, carried by a `*bootstrapPathError`
 (`pkg/sciontool/substrate/helpers.go`) and returned as `422`:
 
 - `bootstrap_path_symlink` — a path component is a symlink.
 - `bootstrap_path_invalid` — an empty/relative path, or a path component
   that exists but is not a directory.
+- `bootstrap_path_outside_home` — the target does not resolve inside the
+  agent home (and is not the enforced-hooks redirect case). Only the
+  target's own leaf component is named, never its full path or content.
 
-Both carry only the rejected file's own `path`, never an internal ancestor
-or content. `postBootstrap` (broker side) parses a `422` body into a
-`*bootstrapPathRejectedError` with the same code and path, and `Run` logs
+The first two carry the rejected file's own `path`, never an internal
+ancestor or content. `postBootstrap` (broker side) parses a `422` body into
+a `*bootstrapPathRejectedError` with the same code and path, and `Run` logs
 both explicitly before returning the redacted error — paths are
 configuration and safe to log; file content stays secret-grade and is never
 part of this error on either side. No new wire fields exist: the body is
 still the pre-existing unstructured string `/bootstrap` has always returned
 for every rejection, just with a stable, parseable
 `"<code>: bootstrap file <quoted path> rejected: <detail>"` shape for this
-one class of error.
+class of error.
 
 ### 5.6 SIGTERM and eviction
 
