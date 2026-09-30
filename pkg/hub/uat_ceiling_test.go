@@ -120,7 +120,10 @@ func TestUATCeiling_Decide_LegacyManageAliasAllowsLifecycle(t *testing.T) {
 	storedScopes := permissions.UATManageScopesFor(permissions.ResourceAgent)
 	scoped := legacyScopedIdentity(base, project.ID, storedScopes)
 
-	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: project.ID}
+	// OwnerID is set so the attach denial below comes from the token's
+	// ceiling, not from the absence of the resource-owner relationship grant
+	// (see the comment at the attach-only test above).
+	resource := Resource{Type: "agent", ID: agent.ID, OwnerID: ownerID, ParentType: "project", ParentID: project.ID}
 	decision := authz.CheckAccess(ctx, scoped, resource, ActionLifecycle)
 	assert.True(t, decision.Allowed, "an agent:manage token must keep its explicitly-expanded lifecycle scope")
 
@@ -512,8 +515,11 @@ func TestCreateTokenWithParams_PersistsCeiling_ManageAlias(t *testing.T) {
 }
 
 // TestValidateToken_UsesPersistedCeiling confirms the full round trip:
-// ValidateToken builds a ScopedUserIdentity whose Ceiling() matches what was
-// persisted at mint time, not a re-derivation from Scopes.
+// ValidateToken builds a ScopedUserIdentity whose Ceiling() is the row's
+// PERSISTED ceiling, not one re-derived from Scopes. The row is seeded
+// directly (as TestBackfillUATCeilings_LeavesExistingV1RowsUntouched does),
+// with Scopes normalizing to a DIFFERENT permission than the persisted V1
+// ceiling, so the assertions cannot pass by the two coincidentally agreeing.
 func TestValidateToken_UsesPersistedCeiling(t *testing.T) {
 	srv, s := testServer(t)
 	ownerID := tid("validate-ceiling-owner")
@@ -521,15 +527,26 @@ func TestValidateToken_UsesPersistedCeiling(t *testing.T) {
 	require.NoError(t, s.CreateProject(context.Background(), project))
 	createTestUserWithProjectRole(t, s, ownerID, "vc@example.com", project.ID, store.ProjectRoleOwner)
 
-	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
-		UserID: ownerID, Name: "validate", ProjectID: project.ID, Scopes: []string{"agent:read"},
-	})
+	randomBytes := make([]byte, UATRandomBytes)
+	_, err := rand.Read(randomBytes)
 	require.NoError(t, err)
+	keyBody := base64.RawURLEncoding.EncodeToString(randomBytes)
+	fullKey := store.UATPrefix + keyBody
+	hash := sha256.Sum256([]byte(fullKey))
+	hashStr := hex.EncodeToString(hash[:])
 
-	identity, err := srv.uatService.ValidateToken(context.Background(), key)
+	token := &store.UserAccessToken{
+		ID: uuid.New().String(), UserID: ownerID, Name: "validate", Prefix: store.UATPrefix + keyBody[:UATPrefixLength],
+		KeyHash: hashStr, ProjectID: project.ID, Scopes: []string{"agent:attach"},
+		CeilingVersion: permissions.CeilingVersionV1, CeilingPermissionIDs: []string{"agent.read"},
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUserAccessToken(context.Background(), token))
+
+	identity, err := srv.uatService.ValidateToken(context.Background(), fullKey)
 	require.NoError(t, err)
 	ceiling := identity.Ceiling()
 	assert.Equal(t, permissions.CeilingVersionV1, ceiling.Version)
-	assert.True(t, ceiling.Allows("agent.read"))
-	assert.False(t, ceiling.Allows("agent.lifecycle"))
+	assert.True(t, ceiling.Allows("agent.read"), "ceiling must come from the persisted CeilingPermissionIDs")
+	assert.False(t, ceiling.Allows("agent.attach"), "ceiling must NOT be re-derived from Scopes, which normalize to a different permission")
 }

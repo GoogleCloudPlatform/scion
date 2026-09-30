@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -85,8 +86,7 @@ func seedProjectAndUser(t *testing.T, cs *CompositeStore) (userID, projectID str
 //
 // These entadapter tests run against SQLite by default (enttest.NewClient).
 // Building with -tags integration and SCION_TEST_POSTGRES_URL set runs the
-// same suite against Postgres instead; that was not exercised for this
-// change because no Postgres instance was available in this environment.
+// same suite against Postgres instead.
 func TestBackfillUATCeilings_PreservesFieldsAndNormalizes(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -442,4 +442,44 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, loaded.NormalizedCeiling().Allows("agent.read"), "an unknown ceiling version must deny even a well-formed permission list")
 	})
+
+	// A versioned row with NULL permission IDs is malformed: every V1+ mint
+	// sets both columns together, so this shape means something else wrote
+	// the version without the list. It must deny both before AND after
+	// Migrate runs, and the backfill must not touch it — rewriting it to
+	// version 0 would turn a denying row into an allowing one (the bug this
+	// sub-test pins).
+	for _, version := range []int32{int32(permissions.CeilingVersionV1), 9} {
+		version := version
+		t.Run(fmt.Sprintf("versioned row with NULL ids is left as is by Migrate, version %d", version), func(t *testing.T) {
+			id := uuid.New()
+			_, err := client.UserAccessToken.Create().
+				SetID(id).
+				SetUserID(uuid.MustParse(userID)).
+				SetName(fmt.Sprintf("v%d-null-ids", version)).
+				SetPrefix(fmt.Sprintf("scion_pat_v%dnull", version)).
+				SetKeyHash(uuid.NewString()).
+				SetProjectID(uuid.MustParse(projectID)).
+				SetScopes(marshalScopes([]string{"agent:read"})).
+				SetCeilingVersion(version).
+				SetRevoked(false).
+				SetCreated(time.Now()).
+				Save(ctx)
+			require.NoError(t, err)
+
+			before, err := cs.GetUserAccessToken(ctx, id.String())
+			require.NoError(t, err)
+			require.Equal(t, permissions.CeilingVersion(version), before.CeilingVersion)
+			require.Nil(t, before.CeilingPermissionIDs)
+			assert.False(t, before.NormalizedCeiling().Allows("agent.read"), "a versioned row with NULL ids must deny before Migrate, even though Scopes would otherwise resolve to agent.read")
+
+			require.NoError(t, cs.Migrate(ctx))
+
+			after, err := cs.GetUserAccessToken(ctx, id.String())
+			require.NoError(t, err)
+			assert.Equal(t, permissions.CeilingVersion(version), after.CeilingVersion, "the backfill must not rewrite a versioned row's version")
+			assert.Nil(t, after.CeilingPermissionIDs, "the backfill must not populate a versioned row's permission ids")
+			assert.False(t, after.NormalizedCeiling().Allows("agent.read"), "a versioned row with NULL ids must still deny after Migrate")
+		})
+	}
 }

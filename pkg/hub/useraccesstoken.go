@@ -280,12 +280,11 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, ErrUATProjectForbidden
 	}
 
-	// Resolve the requested scopes to a ceiling through the shared ceiling
-	// core (used identically at mint, runtime authorization, and
-	// delegation), and verify the issuer holds every resulting permission in
-	// the target project. Fail closed if any valid scope does not resolve.
-	// Mint validation and the persisted ceiling below share this one value,
-	// so they can never disagree.
+	// Resolve the requested scopes to a CeilingVersionV1 ceiling and verify
+	// the issuer holds every resulting permission in the target project;
+	// that same ceiling is persisted below and is what runtime authorization
+	// and delegation enforce. Fail closed if any valid scope does not
+	// resolve.
 	ceiling, ceilingOK := permissions.BuildCeilingFromSelectors(expanded)
 	if !ceilingOK {
 		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scope has no resolvable selector",

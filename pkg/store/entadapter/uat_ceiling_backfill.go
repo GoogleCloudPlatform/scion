@@ -35,18 +35,20 @@ const uatCeilingBackfillMarkerSection = "migration_uat_ceiling_backfill_v1"
 var uatCeilingBackfillPageSize = 500
 
 // BackfillUATCeilings persists a normalized permission ceiling for every
-// existing user_access_tokens row that has never had one computed.
-//
-// A row in scope is identified by ceiling_permission_ids IS NULL — "never
-// backfilled" — not by ceiling_version, and never by project_id (a later
-// change makes project_id nullable for hub-boundary rows; every row minted
-// under that scheme sets ceiling_permission_ids itself, so it is never a
-// backfill target). PermissionIDs is computed via
-// permissions.NormalizeLegacyUATScopes — a fixed table, never the live,
-// mutable permissions.ResolveSelector — from each row's existing Scopes
-// column, which is left untouched, as are ID, KeyHash, Prefix, ExpiresAt,
-// and Revoked. Idempotent via a HubSetting completion marker, the same
-// pattern as BackfillDelegationEdges; safe to run on every startup.
+// existing user_access_tokens row in scope: ceiling_version = 0
+// (unversioned) AND ceiling_permission_ids IS NULL — "never backfilled".
+// Rows are never selected by project_id (a later change makes project_id
+// nullable for hub-boundary rows; every row minted under that scheme sets
+// ceiling_permission_ids itself, so it is never a backfill target). A row
+// with any other version and no permission list is malformed and is left
+// as is; it denies both before and after this migration runs, since
+// NormalizedCeiling only interprets version 0 through the legacy snapshot.
+// PermissionIDs is computed via permissions.NormalizeLegacyUATScopes — a
+// fixed table, never the live, mutable permissions.ResolveSelector — from
+// each row's existing Scopes column, which is left untouched, as are ID,
+// KeyHash, Prefix, ExpiresAt, and Revoked. Idempotent via a HubSetting
+// completion marker, the same pattern as BackfillDelegationEdges; safe to
+// run on every startup.
 func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 	if _, err := c.GetHubSetting(ctx, uatCeilingBackfillMarkerSection); err == nil {
 		return nil
@@ -59,7 +61,10 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 
 	for {
 		q := c.client.UserAccessToken.Query().
-			Where(useraccesstoken.CeilingPermissionIdsIsNil()).
+			Where(
+				useraccesstoken.CeilingPermissionIdsIsNil(),
+				useraccesstoken.CeilingVersionEQ(int32(permissions.CeilingVersionUnspecified)),
+			).
 			Order(ent.Asc(useraccesstoken.FieldID)).
 			Limit(uatCeilingBackfillPageSize)
 		if lastID != nil {

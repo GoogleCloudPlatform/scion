@@ -241,3 +241,43 @@ func TestNormalizeLegacyUATScopes_ImmuneToRegistryChanges(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeLegacyUATScopes_TableShapes pins two specific legacy-row
+// shapes the frozen-table comment relies on.
+func TestNormalizeLegacyUATScopes_TableShapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		scopes []string
+		want   []string
+	}{
+		{
+			// hub:settings:read was briefly mintable (b09e7f49b, removed the
+			// same day by 943241adb) but is not a key in the frozen
+			// snapshot, so a row that somehow stored it contributes nothing.
+			name:   "briefly mintable hub scope contributes nothing",
+			scopes: []string{"hub:settings:read"},
+			want:   []string{},
+		},
+		{
+			// agent:update is an ordinary Registry pair with no UATScope
+			// collision (unlike the three shared hub:* pairs), so it maps
+			// to its own single permission.
+			name:   "registry pair without a UATScope maps to its single permission",
+			scopes: []string{"agent:update"},
+			want:   []string{"agent.update"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeLegacyUATScopes(tt.scopes)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("expected %v, got %v", tt.want, got)
+				}
+			}
+		})
+	}
+}

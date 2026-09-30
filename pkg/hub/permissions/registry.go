@@ -420,8 +420,9 @@ const (
 // selector vocabulary: a resource:action reconstruction would silently
 // collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable; mint, runtime authorization,
-// and delegation all resolve through this table instead.
+// selector once either becomes UAT-selectable. Mint resolves selectors
+// through this table, and runtime authorization and delegation enforce the
+// ceiling persisted from that resolution.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string

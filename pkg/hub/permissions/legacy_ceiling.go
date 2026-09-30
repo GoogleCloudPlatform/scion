@@ -33,9 +33,10 @@ package permissions
 //
 // Three pairs (hub:execute, hub:read, hub:update) are shared by several
 // Registry permissions; each entry here keeps the first matching Registry
-// permission. No hub scope has ever been mintable, and a project-bound
-// credential is denied every hub-level resource before this ceiling is
-// consulted, so these entries do not affect request authorization.
+// permission. None of these three pairs has ever been a mintable scope, and
+// a project-bound credential is denied every hub-level resource before this
+// ceiling is consulted, so these entries do not affect request
+// authorization.
 var legacyUATScopeToPermissionID = map[string]string{
 	"access_constraint:manage":     "access_constraint.admin",
 	"access_constraint:read":       "access_constraint.read",

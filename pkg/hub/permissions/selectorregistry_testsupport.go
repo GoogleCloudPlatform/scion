@@ -23,7 +23,7 @@ import "sync"
 // below.
 var selectorTestMu sync.Mutex
 
-// selectorOverrideActive is true while a install/restore pair from
+// selectorOverrideActive is true while an install/restore pair from
 // OverrideSelectorInputsForTest has not yet been restored. Guarded by
 // selectorTestMu.
 var selectorOverrideActive bool
