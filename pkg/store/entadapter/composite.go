@@ -729,15 +729,37 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 // row, matching entAgentToStore's identical tolerance for the
 // response-facing store.Agent.HarnessConfig (R4-1).
 //
-// The per-row update is conditioned on Where(HarnessConfigIsNil()) and
-// preserves the row's own Updated timestamp via SetUpdated, so this
-// migration never overwrites a value another writer set concurrently and
-// never bumps updated as a side effect of a purely internal column sync
-// (R7-1, R7-2). An ent.IsNotFound from either that guard (another writer
-// already reconciled the row) or a genuine concurrent delete is logged and
-// skipped, not treated as a boot failure — every replica runs this on
-// every boot, so both races are reachable in normal multi-replica
-// operation (R5-5, R7-2). Any other update error still aborts startup.
+// The per-row update is conditioned on
+// Where(HarnessConfigIsNil(), AppliedConfigEQ(a.AppliedConfig)) and preserves
+// the row's own Updated timestamp via SetUpdated, so this migration never
+// overwrites a value another writer set concurrently and never bumps
+// updated as a side effect of a purely internal column sync (R7-1, R7-2).
+// The AppliedConfigEQ half also covers a writer that predates this column
+// entirely: a pre-upgrade replica's UpdateAgent rewrites applied_config
+// without touching harness_config, so HarnessConfigIsNil() alone would still
+// match and let this migration write a harness parsed from the
+// now-superseded applied_config it read at SELECT time — permanently, since
+// the row would no longer be NULL for a later boot to pick up. Comparing
+// applied_config too means any change to it since the page read, from a
+// column-aware or a pre-upgrade writer alike, makes the UPDATE match zero
+// rows instead (R8-1). An ent.IsNotFound from that guard (another writer
+// already reconciled the row, or changed its applied_config since the page
+// read) or a genuine concurrent delete is logged and skipped, not treated
+// as a boot failure — every replica runs this on every boot, so all of
+// these races are reachable in normal multi-replica operation (R5-5, R7-2,
+// R8-1). Any other update error still aborts startup.
+//
+// Residual (R8-2): a concurrent write that does not change applied_config
+// at all — e.g. UpdateAgentStatus, UpdateAgentExposedPorts, or
+// MarkStaleAgentsOffline, none of which sync harness_config — can still
+// land between the page read and this row's UPDATE. Such a write bumps
+// updated but leaves harness_config NULL and applied_config unchanged, so
+// both guard predicates keep matching and SetUpdated(a.Updated) reverts
+// that updated bump to the page-read value. A portable guard against this
+// does not exist: comparing on Updated instead of/in addition to
+// AppliedConfig fails on SQLite, where the timestamp does not round-trip
+// for equality (R8-1). The window is bounded by the time to process one
+// page (seconds), and only during boot-time reconcile of NULL rows.
 func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error {
 	pageSize := harnessConfigReconcilePageSize
 	var (
@@ -801,20 +823,23 @@ func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error
 			}
 
 			if err := c.client.Agent.UpdateOneID(a.ID).
-				Where(agent.HarnessConfigIsNil()).
+				Where(agent.HarnessConfigIsNil(), agent.AppliedConfigEQ(a.AppliedConfig)).
 				SetHarnessConfig(harnessValue).
 				SetUpdated(a.Updated).
 				Exec(ctx); err != nil {
 				if ent.IsNotFound(err) {
-					// Either the row was concurrently deleted, or another
-					// writer already synced its harness_config (via
-					// CreateAgent/UpdateAgent or a concurrent reconcile run)
-					// between our page read and this write, so the
-					// Where(HarnessConfigIsNil()) guard no longer matches —
-					// neither is a boot failure. Not overwriting a
-					// concurrent writer's fresher value is exactly the
-					// point of the guard (ptone/scion#2146 review R7-2).
-					slog.Debug("harness_config reconcile: agent no longer exists or was already reconciled by another writer, skipping",
+					// The row was concurrently deleted, another writer
+					// already synced its harness_config (via
+					// CreateAgent/UpdateAgent or a concurrent reconcile run),
+					// or its applied_config changed since the page read (a
+					// pre-upgrade replica's UpdateAgent, which doesn't touch
+					// harness_config) — any of these means the guard no
+					// longer matches, and none is a boot failure. Not
+					// overwriting a concurrent writer's fresher value, nor a
+					// pre-upgrade writer's change to applied_config, is
+					// exactly the point of the guard (ptone/scion#2146
+					// review R7-2, R8-1).
+					slog.Debug("harness_config reconcile: agent no longer exists, was already reconciled, or its applied_config changed since the page read, skipping",
 						"agent_id", a.ID)
 					continue
 				}

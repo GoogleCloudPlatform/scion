@@ -552,6 +552,68 @@ func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite(t *testing
 		"the concurrent writer's value must survive; the reconcile's own stale value must not overwrite it")
 }
 
+// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite is
+// the ptone/scion#2146 review R8-1 fix: the R7-2 guard
+// (Where(HarnessConfigIsNil())) only detects a concurrent writer that also
+// sets harness_config, i.e. one that knows the column exists. A pre-upgrade
+// replica's UpdateAgent rewrites applied_config without touching
+// harness_config at all, so harness_config stays NULL and the R7-2 guard
+// alone still matches, letting the reconcile write a harness parsed from
+// the now-superseded applied_config it read at SELECT time — permanently,
+// since the row is no longer NULL for a later boot to pick up. Comparing
+// applied_config too (agent.AppliedConfigEQ(a.AppliedConfig)) closes this:
+// the UPDATE matches zero rows, the row stays NULL, and a later reconcile
+// call picks up the current applied_config. Uses the same ent-mutation-hook
+// technique as TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite,
+// except the injected write sets AppliedConfig only, the way a pre-upgrade
+// binary writes.
+func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite(t *testing.T) {
+	ctx := context.Background()
+	cs, projectUID := newHarnessBackfillTestStore(t)
+
+	id := createLegacyAgent(t, cs, projectUID, "concurrent-legacy-write", `{"harnessConfig":"claude"}`)
+
+	var injected bool
+	var legacyUpdated time.Time
+	cs.client.Agent.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !injected {
+				if am, ok := m.(*ent.AgentMutation); ok && am.Op() == ent.OpUpdateOne {
+					if mid, ok := am.ID(); ok && mid == id {
+						injected = true
+						legacy, err := cs.client.Agent.UpdateOneID(id).
+							SetAppliedConfig(`{"harnessConfig":"gemini"}`).
+							Save(ctx)
+						if err != nil {
+							return nil, err
+						}
+						legacyUpdated = legacy.Updated
+					}
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx),
+		"a concurrent pre-upgrade writer's change must not turn into a reconcile failure")
+
+	got, err := cs.client.Agent.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Empty(t, got.HarnessConfig,
+		"harness_config must stay NULL/empty, not the stale value parsed from the pre-race applied_config")
+	assert.True(t, got.Updated.Equal(legacyUpdated),
+		"the legacy writer's updated bump must survive: got %v, want %v", got.Updated, legacyUpdated)
+
+	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx),
+		"a second reconcile must pick up the now-current applied_config")
+
+	got2, err := cs.client.Agent.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini", got2.HarnessConfig,
+		"the second reconcile must reflect the legacy writer's applied_config, not the original stale value")
+}
+
 func TestMigrateRunsHarnessConfigReconcile(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
