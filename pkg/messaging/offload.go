@@ -116,6 +116,14 @@ func Qualifies(persistedBody string, raw, plain bool, p OffloadPolicy) bool {
 	if p.ThresholdRunes <= 0 {
 		return false
 	}
+	// A string's rune count never exceeds its byte length (each rune is at
+	// least one byte, and RuneCountInString counts one rune per invalid
+	// byte too), so a body no longer than the threshold in bytes can never
+	// qualify. This lets the common small-message path skip the UTF-8
+	// validity and rune-count passes below.
+	if len(persistedBody) <= p.ThresholdRunes {
+		return false
+	}
 	if !utf8.ValidString(persistedBody) {
 		return false
 	}
