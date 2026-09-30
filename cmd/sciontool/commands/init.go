@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -102,7 +103,7 @@ func init() {
 func runInit(args []string) int {
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
-	supervisor.StartReaper()
+	procreap.StartReaper()
 
 	// Extract the child command (everything after --)
 	childArgs := extractChildCommand(args)
@@ -1457,12 +1458,12 @@ func setupHostUser() (int, int, bool) {
 		}
 	} else {
 		// Modify group first (if different from current)
-		if err := exec.Command("groupmod", "-o", "-g", hostGID, "scion").Run(); err != nil {
+		if err := procreap.RunManaged(exec.Command("groupmod", "-o", "-g", hostGID, "scion")); err != nil {
 			log.Error("Failed to modify scion group to %s: %v", hostGID, err)
 		}
 
 		// Modify user UID and primary group
-		if err := exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion").Run(); err != nil {
+		if err := procreap.RunManaged(exec.Command("usermod", "-o", "-u", hostUID, "-g", hostGID, "scion")); err != nil {
 			// usermod can fail with exit code 12 on runtimes where the home
 			// directory is a mount point (e.g. Apple Virtualization / VirtioFS)
 			// because it tries a recursive chown that the filesystem rejects.
@@ -1512,7 +1513,7 @@ func directSetUID(username, newUID, newGID string) error {
 	groupSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		"/etc/group")
-	if out, err := groupSed.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(groupSed); err != nil {
 		return fmt.Errorf("sed /etc/group: %w (output: %s)", err, string(out))
 	}
 
@@ -1521,7 +1522,7 @@ func directSetUID(username, newUID, newGID string) error {
 	passwdSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
 		"/etc/passwd")
-	if out, err := passwdSed.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(passwdSed); err != nil {
 		return fmt.Errorf("sed /etc/passwd: %w (output: %s)", err, string(out))
 	}
 
@@ -1607,6 +1608,14 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 		return nil
 	}
 
+	// Snapshot the workspace's pre-existing top-level entries (e.g.
+	// bind-mounted marker directories such as .scion, .scion-volumes,
+	// .agents — see isWorkspaceEmpty) before this attempt writes anything.
+	// On failure, preExistingWorkspaceEntries lets cleanup remove only what
+	// this attempt itself created, leaving anything that was already there
+	// untouched.
+	preExisting := preExistingWorkspaceEntries(workspacePath)
+
 	// When uid is 0 (broker running as root or no host UID configured), fall
 	// back to the scion user so that cloned files are owned by the container
 	// user rather than root.
@@ -1673,25 +1682,31 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	// container runtime, and git-clone refuses to work in a non-empty dir.
 	initCmd := exec.Command("git", "init", workspacePath)
 	setupGitCmd(initCmd)
-	if out, err := initCmd.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(initCmd); err != nil {
 		return fmt.Errorf("git init failed: %s", sanitizeGitOutput(string(out), token))
 	}
 
-	// Clean up .git/ if the clone fails after init. This prevents a
-	// credential-bearing remote URL from persisting in .git/config when a
-	// subsequent fetch or checkout step errors out (miller79/scion#65).
+	// Clean up everything this attempt wrote if the clone fails after init,
+	// not just .git/: this prevents a credential-bearing remote URL from
+	// persisting in .git/config when a subsequent fetch or checkout step
+	// errors out (miller79/scion#65), and it restores the workspace to a
+	// cloneable state for a retry. The latter matters even when git itself
+	// never actually failed — a step like `git checkout` can succeed and
+	// populate the working tree, but still be reported as an error because
+	// its exec.Cmd.Wait lost the exit status to sciontool init's PID-1
+	// zombie reaper racing it for the same PID. Leaving those checked-out
+	// files behind (with .git removed) would make a retry's
+	// isWorkspaceEmpty() check see a "populated" workspace and skip cloning
+	// into it entirely.
 	defer func() {
 		if retErr != nil {
-			gitDir := filepath.Join(workspacePath, ".git")
-			if err := os.RemoveAll(gitDir); err != nil {
-				log.Error("Failed to clean up .git after clone failure: %v", err)
-			}
+			cleanFailedCloneAttempt(workspacePath, preExisting)
 		}
 	}()
 
 	remoteCmd := exec.Command("git", "-C", workspacePath, "remote", "add", "origin", authURL)
 	setupGitCmd(remoteCmd)
-	if out, err := remoteCmd.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(remoteCmd); err != nil {
 		return fmt.Errorf("git remote add failed: %s", sanitizeGitOutput(string(out), token))
 	}
 
@@ -1708,7 +1723,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 		setupGitCmd(fetchCmd)
 		var stderr bytes.Buffer
 		fetchCmd.Stderr = &stderr
-		if err := fetchCmd.Run(); err != nil {
+		if err := procreap.RunManaged(fetchCmd); err != nil {
 			return sanitizeGitOutput(stderr.String(), token), false
 		}
 		return "", true
@@ -1762,7 +1777,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	checkoutArgs := []string{"-C", workspacePath, "checkout", "-b", clonedBranch, "origin/" + clonedBranch}
 	coCmd := exec.Command("git", checkoutArgs...)
 	setupGitCmd(coCmd)
-	if out, err := coCmd.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(coCmd); err != nil {
 		return fmt.Errorf("git checkout failed: %s", sanitizeGitOutput(string(out), token))
 	}
 
@@ -1776,7 +1791,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	for _, cfg := range gitConfigs {
 		cfgCmd := exec.Command("git", "-C", workspacePath, "config", cfg.key, cfg.value)
 		setupGitCmd(cfgCmd)
-		if err := cfgCmd.Run(); err != nil {
+		if err := procreap.RunManaged(cfgCmd); err != nil {
 			return fmt.Errorf("failed to set git config %s: %w", cfg.key, err)
 		}
 	}
@@ -1787,7 +1802,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	// exposes it via `git remote -v`.
 	sanitizeCmd := exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", buildAuthenticatedURL(cloneURL, ""))
 	setupGitCmd(sanitizeCmd)
-	if out, err := sanitizeCmd.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(sanitizeCmd); err != nil {
 		log.Error("Failed to sanitize remote URL: %s %v", string(out), err)
 	}
 
@@ -1806,7 +1821,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	}
 	credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
 	setupGitCmd(credCmd)
-	if err := credCmd.Run(); err != nil {
+	if err := procreap.RunManaged(credCmd); err != nil {
 		return fmt.Errorf("failed to configure git credential helper: %w", err)
 	}
 
@@ -1825,7 +1840,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 		// 1. Try local checkout (works if branch matches the cloned branch)
 		checkoutCmd := exec.Command("git", "-C", workspacePath, "checkout", branchName)
 		setupGitCmd(checkoutCmd)
-		if err := checkoutCmd.Run(); err == nil {
+		if err := procreap.RunManaged(checkoutCmd); err == nil {
 			checked = true
 		}
 
@@ -1833,11 +1848,11 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 		if !checked {
 			fetchCmd := exec.Command("git", "-C", workspacePath, "fetch", "origin", branchName)
 			setupGitCmd(fetchCmd)
-			if err := fetchCmd.Run(); err == nil {
+			if err := procreap.RunManaged(fetchCmd); err == nil {
 				// Branch exists on remote — check it out tracking origin
 				trackCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName, "origin/"+branchName)
 				setupGitCmd(trackCmd)
-				if err := trackCmd.Run(); err == nil {
+				if err := procreap.RunManaged(trackCmd); err == nil {
 					checked = true
 				}
 			}
@@ -1847,7 +1862,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 		if !checked {
 			createCmd := exec.Command("git", "-C", workspacePath, "checkout", "-b", branchName)
 			setupGitCmd(createCmd)
-			if err := createCmd.Run(); err != nil {
+			if err := procreap.RunManaged(createCmd); err != nil {
 				return fmt.Errorf("failed to create branch %s: %w", branchName, err)
 			}
 		}
@@ -1944,7 +1959,7 @@ func configureSharedWorkspaceGit(agentHome string) {
 	// Use git config to set the credential helper in the user's gitconfig.
 	// This is idempotent and works even if provisioning already set it.
 	cmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(cmd); err != nil {
 		log.Error("Failed to configure credential helper: %s %v", string(out), err)
 	}
 
@@ -1960,7 +1975,7 @@ func configureSharedWorkspaceGit(agentHome string) {
 	}
 	for _, cfg := range configs {
 		cmd := exec.Command("git", "config", "--file", gitconfigPath, cfg.key, cfg.value)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := procreap.CombinedOutputManaged(cmd); err != nil {
 			log.Error("Failed to set git config %s: %s %v", cfg.key, string(out), err)
 		}
 	}
@@ -2015,7 +2030,7 @@ func formatCloneError(sanitizedStderr, token string) error {
 func detectDefaultBranch(workspacePath string, setupGitCmd func(*exec.Cmd)) string {
 	cmd := exec.Command("git", "-C", workspacePath, "ls-remote", "--symref", "origin", "HEAD")
 	setupGitCmd(cmd)
-	out, err := cmd.Output()
+	out, err := procreap.OutputManaged(cmd)
 	if err != nil {
 		return ""
 	}
@@ -2157,6 +2172,56 @@ func isWorkspaceEmpty(path string) bool {
 		}
 	}
 	return true
+}
+
+// preExistingWorkspaceEntries returns the set of top-level entry names
+// already present in path (e.g. bind-mounted marker directories such as
+// .scion, .scion-volumes, .agents). Used by cleanFailedCloneAttempt to tell
+// apart content that predates a clone attempt from content the attempt
+// itself created. Returns an empty set (never nil) if path doesn't exist or
+// can't be read, matching isWorkspaceEmpty's "missing dir counts as empty"
+// treatment.
+func preExistingWorkspaceEntries(path string) map[string]struct{} {
+	existing := make(map[string]struct{})
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return existing
+	}
+	for _, e := range entries {
+		existing[e.Name()] = struct{}{}
+	}
+	return existing
+}
+
+// cleanFailedCloneAttempt restores workspacePath to a cloneable state after
+// a failed clone attempt: it removes every top-level entry that is not in
+// preExisting, i.e. everything this attempt created (.git, checked-out
+// files, partial directories), while leaving anything that was already
+// there (preExisting) untouched.
+//
+// This is needed because a clone step can partially populate the working
+// tree and still be reported as a failure — most notably when a step like
+// `git checkout` actually succeeds but its exec.Cmd.Wait loses the exit
+// status to sciontool init's PID-1 zombie reaper racing it for the same
+// PID. Without this, a subsequent retry's isWorkspaceEmpty() check would
+// see those leftover files, treat the workspace as already populated, and
+// skip cloning into it — leaving a workspace with real file content but no
+// usable .git.
+func cleanFailedCloneAttempt(workspacePath string, preExisting map[string]struct{}) {
+	entries, err := os.ReadDir(workspacePath)
+	if err != nil {
+		log.Error("Failed to list workspace %s for clone-failure cleanup: %v", workspacePath, err)
+		return
+	}
+	for _, e := range entries {
+		if _, existed := preExisting[e.Name()]; existed {
+			continue
+		}
+		entryPath := filepath.Join(workspacePath, e.Name())
+		if err := os.RemoveAll(entryPath); err != nil {
+			log.Error("Failed to clean up %s after clone failure: %v", entryPath, err)
+		}
+	}
 }
 
 // hubMessageAdapter adapts the Hub client to the autoexpose.MessageClient interface

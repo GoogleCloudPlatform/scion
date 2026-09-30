@@ -19,6 +19,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 )
 
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
@@ -72,6 +73,13 @@ func DefaultConfig() Config {
 type Supervisor struct {
 	config Config
 	cmd    *exec.Cmd
+
+	// execToken is the reaper registration handle for cmd's PID, set once in
+	// Run (before waitForChild is spawned, so no synchronization is needed
+	// to read it there) and consumed exactly once in waitForChild's
+	// UnregisterManagedPID call. See procreap.Token for why the token
+	// (rather than just the PID) must be passed back.
+	execToken *procreap.Token
 
 	// mu protects the process state
 	mu        sync.Mutex
@@ -201,7 +209,17 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
 	}
 
-	if err := s.cmd.Start(); err != nil {
+	// Start and register the child's PID as a single gated step so
+	// sciontool init's SIGCHLD reaper cannot observe it as
+	// exited-and-unmanaged in the gap between Start() returning and
+	// registration (see pkg/sciontool/procreap for why).
+	if err := procreap.Gated(func() error {
+		if err := s.cmd.Start(); err != nil {
+			return err
+		}
+		s.execToken = procreap.RegisterManagedPID(s.cmd.Process.Pid)
+		return nil
+	}); err != nil {
 		return 1, fmt.Errorf("failed to start command: %w", err)
 	}
 	log.Debug("Started child process %d: %v", s.cmd.Process.Pid, args)
@@ -241,6 +259,7 @@ func (s *Supervisor) Signal(sig os.Signal) error {
 // waitForChild waits for the child process to exit and records its exit status.
 func (s *Supervisor) waitForChild() {
 	err := s.cmd.Wait()
+	procreap.UnregisterManagedPID(s.cmd.Process.Pid, s.execToken)
 
 	s.mu.Lock()
 	s.exited = true
