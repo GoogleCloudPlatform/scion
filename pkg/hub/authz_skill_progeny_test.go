@@ -124,6 +124,12 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 	sv := skillScopeResource(store.SkillScopeUser, v.ID())
 	fed := NewFederatedAgentIdentity("https://other.example", tid("sp-fed"), tid("sp-proj"), "fed", u.ID(), []string{u.ID()}, allRegisteredAgentScopes())
 
+	// noProgenyCandidate marks a negative case where the shape never produces
+	// a RelationshipRuleProgeny candidate at all (so there is no rejection
+	// stage to name), as distinct from a candidate that is produced and then
+	// rejected at a named stage.
+	const noProgenyCandidate = "no_candidate"
+
 	cases := []struct {
 		name     string
 		identity Identity
@@ -131,21 +137,26 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 		action   Action
 		perm     string
 		want     bool
+		// rejectedBy is checked only when want is false. It names the stage
+		// (RelationshipCandidateResult.RejectedBy) that rejected the
+		// RelationshipRuleProgeny candidate, or noProgenyCandidate when the
+		// shape produces no such candidate.
+		rejectedBy string
 	}{
-		{"creator skill", newAgent(u.ID()), su, ActionRead, "skill.read", true},
-		{"child agent gets origin user's skill", newAgent(u.ID(), parent), su, ActionRead, "skill.read", true},
-		{"other user's skill", newAgent(u.ID()), sv, ActionRead, "skill.read", false},
-		{"parent agent id is not a user bucket", newAgent(u.ID(), parent), skillScopeResource(store.SkillScopeUser, parent), ActionRead, "skill.read", false},
-		{"no ancestry", newAgent(), su, ActionRead, "skill.read", false},
-		{"update", newAgent(u.ID()), su, ActionUpdate, "skill.update", false},
-		{"delete", newAgent(u.ID()), su, ActionDelete, "skill.delete", false},
-		{"global skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, "skill.read", false},
-		{"project skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeProject, u.ID()), ActionRead, "skill.read", false},
-		{"user scope without owner", newAgent(u.ID()), skillScopeResource(store.SkillScopeUser, ""), ActionRead, "skill.read", false},
-		{"no scope kind", newAgent(u.ID()), Resource{Type: "skill", ScopeUserID: u.ID()}, ActionRead, "skill.read", false},
-		{"not a skill", newAgent(u.ID()), Resource{Type: "secret", ScopeKind: store.SkillScopeUser, ScopeUserID: u.ID()}, ActionRead, permissionProjectSecretRead, false},
-		{"federated agent", fed, su, ActionRead, "skill.read", false},
-		{"user principal", u, su, ActionRead, "skill.read", false},
+		{"creator skill", newAgent(u.ID()), su, ActionRead, "skill.read", true, ""},
+		{"child agent gets origin user's skill", newAgent(u.ID(), parent), su, ActionRead, "skill.read", true, ""},
+		{"other user's skill", newAgent(u.ID()), sv, ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"parent agent id is not a user bucket", newAgent(u.ID(), parent), skillScopeResource(store.SkillScopeUser, parent), ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"no ancestry", newAgent(), su, ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"update", newAgent(u.ID()), su, ActionUpdate, "skill.update", false, noProgenyCandidate},
+		{"delete", newAgent(u.ID()), su, ActionDelete, "skill.delete", false, noProgenyCandidate},
+		{"global skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"project skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeProject, u.ID()), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"user scope without owner", newAgent(u.ID()), skillScopeResource(store.SkillScopeUser, ""), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"no scope kind", newAgent(u.ID()), Resource{Type: "skill", ScopeUserID: u.ID()}, ActionRead, "skill.read", false, noProgenyCandidate},
+		{"not a skill", newAgent(u.ID()), Resource{Type: "secret", ScopeKind: store.SkillScopeUser, ScopeUserID: u.ID()}, ActionRead, permissionProjectSecretRead, false, RelationshipRejectFact},
+		{"federated agent", fed, su, ActionRead, "skill.read", false, RelationshipRejectUntrustedAncestry},
+		{"user principal", u, su, ActionRead, "skill.read", false, noProgenyCandidate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +170,29 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false)
 			got := out.accepted != nil && out.accepted.Allowed
 			assert.Equal(t, tc.want, got, "candidates: %+v", out.results)
+
+			if tc.want {
+				return
+			}
+			// A rejected candidate must be rejected at its intended stage,
+			// not at RelationshipRejectExecutionProject: a stage-order
+			// regression that made execution-project run first would still
+			// leave got == false (vacuously) without this check.
+			var progeny *RelationshipCandidateResult
+			for i := range out.results {
+				if out.results[i].Rule == RelationshipRuleProgeny {
+					progeny = &out.results[i]
+					break
+				}
+			}
+			if tc.rejectedBy == noProgenyCandidate {
+				assert.Nil(t, progeny, "expected no progeny candidate: %+v", out.results)
+				return
+			}
+			if assert.NotNil(t, progeny, "expected a progeny candidate: %+v", out.results) {
+				assert.Equal(t, tc.rejectedBy, progeny.RejectedBy)
+				assert.NotEqual(t, RelationshipRejectExecutionProject, progeny.RejectedBy)
+			}
 		})
 	}
 }
