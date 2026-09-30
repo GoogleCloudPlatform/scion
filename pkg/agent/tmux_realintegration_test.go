@@ -37,11 +37,10 @@ import (
 // the 16 KB argv cap that broke "tmux set-buffer -- <message>".
 //
 // This exercises tmux itself rather than mocking the Runtime abstraction (as
-// every other test in this package does). A container runtime (docker) was
-// not available in the environment this test was written in, so the target
-// pane runs under a private, temporary local tmux server instead of inside a
-// container; this test is skipped in short mode and when tmux itself is not
-// installed.
+// every other test in this package does). It drives a local tmux server
+// directly, so it needs no container runtime: the target pane runs under a
+// private, temporary tmux server rather than inside a container. The test is
+// skipped in short mode and when tmux itself is not installed.
 func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-tmux integration test in short mode")
