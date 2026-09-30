@@ -109,7 +109,14 @@ test.describe('project-detail Files tabs — real Shoelace tab-group', () => {
     // The never-opened third tab (shared-b) still made no request and is
     // still unmounted, through the entire flow above — including the
     // editor round trip, which remounts every *previously visited* tab but
-    // must not touch this one.
+    // must not touch this one. Settle first: both checks below are a single
+    // point-in-time read/first-truthy-poll, which would pass even if a
+    // regression mounted shared-b on a later, delayed render (e.g. an async
+    // catch-up scheduled after Back) rather than synchronously with it.
+    // A fixed wait, not networkidle: the mocked /events SSE endpoint (see
+    // mock-api.ts) closes immediately and the page keeps retrying it on a
+    // timer, so the network is never truly idle here.
+    await page.waitForTimeout(2000);
     expect(counts.sharedDirListings[SHARED_DIR_B]).toBe(0);
     await expect(page.locator(`scion-file-browser[data-tab="${SHARED_DIR_B}"]`)).toHaveCount(0);
   });
