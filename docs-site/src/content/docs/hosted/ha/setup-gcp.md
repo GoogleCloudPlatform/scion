@@ -734,6 +734,7 @@ server:
     gcp_project_id: PROJECT_ID
 
   hub:
+    hub_id: scion-hub-ha-prod           # Stable identity — see note below
     admin_emails:
       - your-admin@example.com          # Admin email addresses
     hub_name: scion-hub-ha
@@ -746,6 +747,30 @@ server:
     enabled: true
     host: 127.0.0.1
 ```
+
+:::note[Set a stable `hub_id`]
+`server.hub.hub_id` is a short string (recommended: lowercase letters,
+digits, hyphens — e.g. a project or environment slug such as
+`scion-hub-ha-prod`) that identifies this Hub instance. All Cloud Run
+replicas must resolve to the **same** value, and it should be unique
+among hubs that share a GCP project or bucket. Without an explicit
+`hub_id`, the Hub falls back to an implicit ID (a hash of the Cloud Run
+service name, or a per-host, hostname-derived value elsewhere). That
+value changes if the service is renamed or recreated under another
+name, and it differs for any process that does not run under the same
+service. The HA preflight therefore requires it to be pinned.
+
+The hub ID is permanent for the hub's lifetime: changing it changes the
+name prefix of every Secret Manager secret this hub writes
+(`scion-<sha256(hub_id)[:12]>-...`), the GCS prefix (`hubs/<hub_id>/...`)
+and hub-scoped database rows, orphaning anything namespaced under the
+old value — see
+[IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for the naming scheme. Set it once and keep every redeploy and revision
+on the same value. If `server.hub.hub_id` is missing on an HA deployment,
+the Hub refuses to start (`hosted HA deployment requires an explicit
+server.hub.hub_id`).
+:::
 
 :::caution[Critical: Distinguishing IAP Audiences]
 Configuring IAP requires two different audience formats used in separate contexts:
@@ -1232,6 +1257,7 @@ server:
     gcp_project_id: your-project
 
   hub:
+    hub_id: hub-ha-prod                # Stable identity — see Section 3c
     admin_emails:
       - admin@example.com
     hub_name: hub-ha-prod
