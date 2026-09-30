@@ -168,12 +168,30 @@ function getTabCountForFixture(el: TestElement): number {
   return el.shadowRoot!.querySelectorAll('sl-tab').length;
 }
 
+/** The basePath of the currently-open file editor's data source, if any. */
+function editorDataSourceBasePath(el: TestElement): string | undefined {
+  const editor = el.shadowRoot?.querySelector('scion-file-editor') as unknown as {
+    dataSource: { basePath: string } | null;
+  } | null;
+  return editor?.dataSource?.basePath;
+}
+
 /**
- * Switches tabs by dispatching a real `sl-tab-show` event on the rendered
- * `sl-tab-group` element — the same event Shoelace's tab-group emits on
- * click/keyboard activation — rather than calling the private
- * onFileTabChange handler directly. This exercises the actual
- * `@sl-tab-show=${this.onFileTabChange}` wiring in the template.
+ * Switches tabs by dispatching an `sl-tab-show` CustomEvent on the rendered
+ * `sl-tab-group` element, rather than calling the private onFileTabChange
+ * handler directly. This exercises the actual
+ * `@sl-tab-show=${this.onFileTabChange}` event-listener wiring in the
+ * template.
+ *
+ * It does NOT exercise Shoelace's own tab-group behavior: `<sl-tab-group>`
+ * is not a registered custom element in this test environment (happy-dom
+ * has no upgraded Shoelace components here), so a real click or `active`
+ * attribute change would do nothing, and Shoelace's internal fallback
+ * (silently displaying tabs[0] without emitting sl-tab-show when the named
+ * tab doesn't exist) is not covered by this helper or by any test in this
+ * file. That fallback behavior is what
+ * e2e/tests/project-detail-files.spec.ts (Playwright, real browser, real
+ * Shoelace) exercises instead.
  */
 async function changeFileTab(el: TestElement, tab: string): Promise<void> {
   const tabGroup = el.shadowRoot!.querySelector('sl-tab-group');
@@ -235,10 +253,9 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // Default active tab is 'workspace' for a hub-native project.
     expect(fileBrowsers(el).length).toBe(1);
     expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
-    // Exactly-once dedup of the mount-time request is ptone/scion#2380's
-    // fix, covered in file-browser-dedup.test.ts; here we only assert a
-    // browser was actually mounted and loaded.
-    expect(listingCalls.workspace).toBeGreaterThan(0);
+    // Exactly one request: this branch is stacked on ptone/scion#2380's
+    // dedup fix (also covered on its own in file-browser-dedup.test.ts).
+    expect(listingCalls.workspace).toBe(1);
   });
 
   it('unvisited tabs make no listing request and create no file-row DOM', async () => {
@@ -259,7 +276,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
 
     const browser = fileBrowserFor(el, SHARED_DIR_A);
     expect(browser).not.toBeNull();
-    expect(listingCalls[SHARED_DIR_A]).toBeGreaterThan(0);
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
     // Switching away doesn't touch the other, still-unvisited tab.
     expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
     expect(listingCalls[SHARED_DIR_B]).toBe(0);
@@ -270,8 +287,8 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     element = el;
 
     await changeFileTab(el, SHARED_DIR_A);
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
     const countAfterFirstVisit = listingCalls[SHARED_DIR_A];
-    expect(countAfterFirstVisit).toBeGreaterThan(0);
     const firstInstance = fileBrowserFor(el, SHARED_DIR_A);
     // Two of the three configured tabs (workspace, shared-dir-A) have been
     // visited so far — on main, all three would already be mounted, so this
@@ -364,7 +381,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
 
     expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
     expect(fileBrowsers(el).length).toBe(1);
-    expect(listingCalls.workspace).toBeGreaterThan(0);
+    expect(listingCalls.workspace).toBe(1);
   });
 
   // ── Regression coverage: activeFileTab can drift from the rendered tab
@@ -388,7 +405,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(getTabCountForFixture(el)).toBe(2);
     expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
     expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
-    expect(listingCalls[SHARED_DIR_A]).toBeGreaterThan(0);
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
   });
 
   it('mounts a shared dir that appears after load via a live project update, instead of leaving the panel empty', async () => {
@@ -417,7 +434,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // normalized activeFileTab is marked visited as soon as the section
     // opens, so the newly-appeared tab is mounted and loaded correctly.
     expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
-    expect(listingCalls[SHARED_DIR_A]).toBeGreaterThan(0);
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
   });
 
   it('falls back to another tab when the active shared dir is removed while the page is open', async () => {
@@ -437,7 +454,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // the remaining one and mounts it, rather than leaving an empty panel
     // with no matching tab at all.
     expect(fileBrowserFor(el, SHARED_DIR_B)).not.toBeNull();
-    expect(listingCalls[SHARED_DIR_B]).toBeGreaterThan(0);
+    expect(listingCalls[SHARED_DIR_B]).toBe(1);
   });
 
   it('hides the Files section entirely when the last shared dir is removed (no empty panel left behind)', async () => {
@@ -452,6 +469,32 @@ describe('scion-page-project-detail — lazy file tabs', () => {
 
     expect(el.shadowRoot?.querySelector('.workspace-section')).toBeNull();
     expect(fileBrowsers(el).length).toBe(0);
+  });
+
+  it('does not silently remount a re-added shared dir that was visited under a prior removal (visitedFileTabs is pruned)', async () => {
+    const { el, listingCalls } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    // Visit A (loadData() activates it at load).
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
+
+    // Remove A, then re-add a dir with the exact same name.
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_B }] });
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }] });
+
+    // Without pruning, the stale 'shared-a' entry in visitedFileTabs would
+    // still be present, mounting a browser for it — hidden, since B is now
+    // active — without the user ever having opened it this time around.
+    expect(fileBrowserFor(el, SHARED_DIR_A)).toBeNull();
+
+    // Opening it now is a fresh visit: it mounts and issues its own request.
+    await changeFileTab(el, SHARED_DIR_A);
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    expect(listingCalls[SHARED_DIR_A]).toBe(2);
   });
 
   // ── AC3: editor/back-flow coverage (round-1 review, blocking finding 2) ──
@@ -500,5 +543,114 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // ... and the never-visited one still does not.
     expect(fileBrowserFor(el, SHARED_DIR_B)).toBeNull();
     expect(fileBrowsers(el).length).toBe(2);
+  });
+
+  // ── Round-2 review, blocking finding 1: normalizeActiveFileTab() ran on
+  // every update regardless of whether the file editor was open. If the
+  // active shared dir was removed server-side while a user was editing (or
+  // creating) a file in it, activeFileTab silently retargeted to another
+  // shared dir, and the *already-open* editor's dataSource followed —
+  // redirecting an in-progress Save to a directory the user never chose,
+  // and for an existing file, discarding unsaved edits by reloading the
+  // other tab's content. Fixed by skipping normalization entirely while
+  // editingFilePath !== null. ──
+
+  it('does not retarget an open existing-file edit when its shared dir is removed via a live update', async () => {
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    // loadData() activates the first shared dir (A) at load.
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+
+    fileBrowserFor(el, SHARED_DIR_A)!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: `${SHARED_DIR_A}-file.txt` },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    const editor = el.shadowRoot?.querySelector('scion-file-editor');
+    expect(editor).not.toBeNull();
+    const originalBasePath = editorDataSourceBasePath(el);
+    expect(originalBasePath).toContain(`/shared-dirs/${SHARED_DIR_A}/`);
+
+    // The active shared dir (A, being edited) is removed server-side while
+    // the editor is still open.
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_B }] });
+
+    // The editor must still be open, still targeting A's data source — not
+    // silently retargeted to B, which would discard the in-progress edit
+    // and/or redirect a Save into the wrong directory.
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull();
+    expect(editorDataSourceBasePath(el)).toBe(originalBasePath);
+    expect((el as unknown as { editingFilePath: string | null }).editingFilePath).toBe(
+      `${SHARED_DIR_A}-file.txt`
+    );
+  });
+
+  it('does not retarget an open new-file create when its shared dir is removed via a live update', async () => {
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+
+    fileBrowserFor(el, SHARED_DIR_A)!.dispatchEvent(
+      new CustomEvent('file-create-requested', { bubbles: true, composed: true })
+    );
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull();
+    const originalBasePath = editorDataSourceBasePath(el);
+    expect(originalBasePath).toContain(`/shared-dirs/${SHARED_DIR_A}/`);
+
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_B }] });
+
+    // Still creating against A's data source — a Save must not silently
+    // land in B, which the user never chose.
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull();
+    expect(editorDataSourceBasePath(el)).toBe(originalBasePath);
+    expect((el as unknown as { editingFilePath: string | null }).editingFilePath).toBe('');
+  });
+
+  it('normalizes activeFileTab on the update after the editor closes, once the tab it was skipping for is gone', async () => {
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }, { name: SHARED_DIR_B }],
+    });
+    element = el;
+
+    fileBrowserFor(el, SHARED_DIR_A)!.dispatchEvent(
+      new CustomEvent('file-edit-requested', {
+        detail: { path: `${SHARED_DIR_A}-file.txt` },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_B }] });
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).not.toBeNull(); // still open, per the tests above
+
+    const backButton = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).find((b) =>
+      (b.textContent ?? '').includes('Back to files')
+    );
+    backButton!.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // Now that the editor is closed, normalization catches up: A is gone,
+    // so the view falls back to the only remaining tab, B.
+    expect(el.shadowRoot?.querySelector('scion-file-editor')).toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_B)).not.toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_A)).toBeNull();
   });
 });

@@ -1004,20 +1004,38 @@ export class ScionPageProjectDetail extends LitElement {
     this.observedFilesPlaceholder = null;
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    // Must run before render: if the tab list changed (a shared dir arrived
+    // or disappeared via an SSE project update) and left activeFileTab
+    // pointing at a tab that no longer exists, rendering against a stale
+    // activeFileTab would mount nothing for it — Shoelace silently falls
+    // back to displaying tabs[0] without firing sl-tab-show, so nothing
+    // else would notice or mount it. Doing this in willUpdate (before
+    // render), rather than updated() (after), sets
+    // activeFileTab/visitedFileTabs before Lit renders instead of
+    // scheduling a second render to fix up a frame that already rendered
+    // wrong.
+    //
+    // Also re-checked on an editingFilePath change: normalizeActiveFileTab()
+    // itself skips entirely while the editor is open (see its doc comment),
+    // so a correction that a project update would otherwise have triggered
+    // while editing is deferred — this is what catches it up on the very
+    // next update after the editor closes, rather than leaving it stale
+    // indefinitely.
+    if (changed.has('project') || changed.has('editingFilePath')) {
+      this.normalizeActiveFileTab();
+    }
+  }
+
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
-    // Must run before observeFilesSection(): if the tab list changed (a
-    // shared dir arrived or disappeared via an SSE project update) and
-    // left activeFileTab pointing at a tab that no longer exists, revealing
-    // the section against a stale activeFileTab would mount nothing for it
-    // — Shoelace silently falls back to displaying tabs[0] without firing
-    // sl-tab-show, so nothing else would notice or mount it.
-    this.normalizeActiveFileTab();
     this.observeFilesSection();
   }
 
   /**
-   * Keep activeFileTab pointing at a tab that actually exists.
+   * Keep activeFileTab pointing at a tab that actually exists, and drop
+   * visitedFileTabs entries for tabs that no longer exist.
    *
    * activeFileTab defaults to 'workspace' and is otherwise only assigned in
    * loadData() (initial load) and onFileTabChange() (user click). Neither
@@ -1030,19 +1048,38 @@ export class ScionPageProjectDetail extends LitElement {
    * scion-file-browser mounted for it and stays empty with no way for the
    * user to recover by clicking (setActiveTab no-ops when asked to
    * activate the tab it already considers active).
+   *
+   * Skipped entirely while the file editor is open: the editor's data
+   * source is derived from activeFileTab (see renderFilesSection()), and
+   * retargeting it out from under an open edit would silently redirect a
+   * Save to a different shared dir, or — for an existing file — discard
+   * unsaved edits by reloading a different tab's content. Leaving
+   * activeFileTab stale while editing matches what happens today if its
+   * shared dir is removed server-side: the save targets a directory that no
+   * longer exists and fails, which is safer than silently retargeting.
    */
   private normalizeActiveFileTab(): void {
+    if (this.editingFilePath !== null) return;
     if (!this.project) return;
     const tabs = this.getFileTabs();
-    if (tabs.length === 0) return;
-    if (!tabs.some((t) => t.key === this.activeFileTab)) {
+    const tabKeys = new Set(tabs.map((t) => t.key));
+
+    if (tabs.length > 0 && !tabKeys.has(this.activeFileTab)) {
       this.activeFileTab = tabs[0].key;
     }
     // If the Files section is already open, the (possibly just-corrected)
     // active tab must actually be mounted — see the note above on why
     // nothing else would notice it needs to be.
-    if (this.filesSectionVisible) {
+    if (tabs.length > 0 && this.filesSectionVisible) {
       this.markFileTabVisited(this.activeFileTab);
+    }
+
+    // Drop visited-tab entries for tabs that no longer exist, so a shared
+    // dir removed and later re-added under the same name starts fresh
+    // (unvisited) instead of mounting hidden and issuing a listing request
+    // for a tab the user never actually opened this time around.
+    if ([...this.visitedFileTabs].some((key) => !tabKeys.has(key))) {
+      this.visitedFileTabs = new Set([...this.visitedFileTabs].filter((key) => tabKeys.has(key)));
     }
   }
 
@@ -1052,6 +1089,11 @@ export class ScionPageProjectDetail extends LitElement {
    * file browsers and issues zero listing requests. Without
    * IntersectionObserver support (older engines, tests) the section is
    * revealed immediately — equivalent to "explicitly opened".
+   *
+   * Viewport visibility is the only reveal trigger; there is no separate
+   * click-to-open affordance on the placeholder itself. A section already
+   * in the initial viewport still reveals promptly, on its first
+   * intersection check.
    */
   private observeFilesSection(): void {
     if (this.filesSectionVisible) return;
@@ -2221,12 +2263,6 @@ export class ScionPageProjectDetail extends LitElement {
                   : this.renderAgentTable()}
           `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
-      ${
-        /* Reviewed: viewport visibility (observeFilesSection()) is the only reveal
-         trigger for the placeholder below — there is no click-to-open affordance.
-         Acceptable: without IntersectionObserver support it reveals immediately,
-         and a section already in the initial viewport reveals on first render. */ nothing
-      }
       ${this.shouldShowFilesSection()
         ? this.filesSectionVisible
           ? this.renderFilesSection()
