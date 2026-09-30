@@ -21,10 +21,10 @@
  * profiles, and agents grouped by project.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, RuntimeBroker, Agent } from '../../shared/types.js';
+import type { PageData, RuntimeBroker, Agent, BrokerSettingsResponse } from '../../shared/types.js';
 import { getAgentDisplayStatus } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -68,6 +68,22 @@ export class ScionPageBrokerDetail extends LitElement {
 
   @state()
   private unregisterLoading = false;
+
+  // Broker settings card (ptone/scion#2061 P2, ptone/scion#2177).
+  @state()
+  private brokerSettings: BrokerSettingsResponse | null = null;
+
+  @state()
+  private brokerSettingsMode: 'default' | 'custom' = 'default';
+
+  @state()
+  private brokerSettingsCustomValue = '';
+
+  @state()
+  private brokerSettingsSaving = false;
+
+  @state()
+  private brokerSettingsError: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
@@ -505,11 +521,13 @@ export class ScionPageBrokerDetail extends LitElement {
     this.error = null;
 
     try {
-      const [brokerResponse, projectsResponse, agentsResponse] = await Promise.all([
-        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`),
-        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/projects`),
-        apiFetch(`/api/v1/agents?runtimeBrokerId=${this.brokerId}`),
-      ]);
+      const [brokerResponse, projectsResponse, agentsResponse, settingsResponse] =
+        await Promise.all([
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`),
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/projects`),
+          apiFetch(`/api/v1/agents?runtimeBrokerId=${this.brokerId}`),
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`),
+        ]);
 
       if (!brokerResponse.ok) {
         throw new Error(
@@ -535,6 +553,15 @@ export class ScionPageBrokerDetail extends LitElement {
         this.agents = Array.isArray(agentsData) ? agentsData : agentsData.agents || [];
       } else {
         this.agents = [];
+      }
+
+      if (settingsResponse.ok) {
+        this.brokerSettings = (await settingsResponse.json()) as BrokerSettingsResponse;
+        this.initBrokerSettingsForm();
+      } else {
+        // Non-fatal: the Settings card simply doesn't render (e.g. broker
+        // was deleted between the list and this page load).
+        this.brokerSettings = null;
       }
 
       // Seed stateManager so SSE delta merging has full baseline data
@@ -750,7 +777,216 @@ export class ScionPageBrokerDetail extends LitElement {
       ${this.broker.profiles && this.broker.profiles.length > 0
         ? this.renderProfiles(this.broker.profiles)
         : ''}
-      ${this.renderProjectSections()}
+      ${this.renderSettingsSection()} ${this.renderProjectSections()}
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Settings card (ptone/scion#2061 P2, ptone/scion#2177, design.md §5.6)
+  // ---------------------------------------------------------------------------
+
+  /** Number of agents on this broker that count against max_agents_per_broker
+   * (design.md §5.6's usage line), mirroring isBrokerQuotaCountedPhase
+   * (pkg/hub/broker_quota.go): every phase except stopped/suspended/error. */
+  private get countedAgentCount(): number {
+    return this.agents.filter(
+      (a) => a.phase !== 'stopped' && a.phase !== 'suspended' && a.phase !== 'error'
+    ).length;
+  }
+
+  private sourceLabel(source: string): string {
+    switch (source) {
+      case 'broker':
+        return 'this broker’s own setting';
+      case 'entitlement':
+        return 'an entitlement binding';
+      case 'hub_default':
+        return 'the hub-wide default';
+      case 'not_enforced':
+        return 'not enforced (quota switch is off)';
+      case 'unlimited':
+        return 'unlimited (no quota configured)';
+      default:
+        return source;
+    }
+  }
+
+  /** Syncs the radio/number-input form state from the loaded settings
+   * document. Called after every successful load/save, not on every
+   * re-render, so mid-edit user input isn't clobbered. */
+  private initBrokerSettingsForm(): void {
+    const stored = this.brokerSettings?.settings.maxAgents;
+    if (stored === undefined || stored === null) {
+      this.brokerSettingsMode = 'default';
+      this.brokerSettingsCustomValue = '';
+    } else {
+      this.brokerSettingsMode = 'custom';
+      this.brokerSettingsCustomValue = String(stored);
+    }
+  }
+
+  private async loadBrokerSettings(): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`);
+      if (res.ok) {
+        this.brokerSettings = (await res.json()) as BrokerSettingsResponse;
+        this.initBrokerSettingsForm();
+      }
+    } catch (err) {
+      console.error('Failed to reload broker settings:', err);
+    }
+  }
+
+  private async saveBrokerSettings(): Promise<void> {
+    if (!this.brokerSettings) return;
+
+    let maxAgents: number | null;
+    if (this.brokerSettingsMode === 'default') {
+      maxAgents = null;
+    } else {
+      const parsed = Number(this.brokerSettingsCustomValue);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        this.brokerSettingsError = 'Enter a whole number 0 or greater (0 means unlimited).';
+        return;
+      }
+      maxAgents = parsed;
+    }
+
+    this.brokerSettingsSaving = true;
+    this.brokerSettingsError = null;
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          settings: { maxAgents },
+          expectedRevision: this.brokerSettings.revision,
+        }),
+      });
+
+      if (res.status === 409) {
+        this.brokerSettingsError = 'Settings were changed by someone else. Reloading…';
+        await this.loadBrokerSettings();
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, 'Failed to save broker settings'));
+      }
+      this.brokerSettings = (await res.json()) as BrokerSettingsResponse;
+      this.initBrokerSettingsForm();
+      showToast('Broker settings saved.', 'success');
+    } catch (err) {
+      this.brokerSettingsError =
+        err instanceof Error ? err.message : 'Failed to save broker settings';
+    } finally {
+      this.brokerSettingsSaving = false;
+    }
+  }
+
+  private renderSettingsSection() {
+    if (!this.brokerSettings) return nothing;
+
+    const settings = this.brokerSettings;
+    const canEdit = settings._capabilities.update;
+    const effective = settings.effective.maxAgents;
+    // The hub-default number is only known from this endpoint when no
+    // broker override is currently active (source is then hub_default or
+    // entitlement); while a custom override is active, the label omits the
+    // number rather than showing a stale or misleading one.
+    const hubDefaultKnown = this.brokerSettingsMode === 'default' && effective.value !== null;
+    const hubDefaultLabel = hubDefaultKnown
+      ? `Use hub default (${effective.value})`
+      : 'Use hub default';
+
+    return html`
+      <div class="section">
+        <div class="section-header">
+          <h2>Settings</h2>
+        </div>
+        <p>Per-broker overrides for hub-wide limits. Currently: maximum concurrent agents.</p>
+
+        ${this.brokerSettingsError
+          ? html`<div
+              style="margin-bottom: 0.75rem; font-size: 0.8125rem; color: var(--scion-danger, #dc2626);"
+            >
+              ${this.brokerSettingsError}
+            </div>`
+          : ''}
+
+        <div>
+          <label
+            style="display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.375rem;"
+            >Max concurrent agents</label
+          >
+          <sl-radio-group
+            value=${this.brokerSettingsMode}
+            @sl-change=${(e: Event) => {
+              if (!canEdit) return;
+              this.brokerSettingsMode = (e.target as HTMLInputElement).value as
+                | 'default'
+                | 'custom';
+            }}
+          >
+            <sl-radio value="default" ?disabled=${!canEdit || this.brokerSettingsSaving}>
+              ${hubDefaultLabel}
+            </sl-radio>
+            <sl-radio value="custom" ?disabled=${!canEdit || this.brokerSettingsSaving}>
+              Custom
+            </sl-radio>
+          </sl-radio-group>
+          ${this.brokerSettingsMode === 'custom'
+            ? html`
+                <sl-input
+                  type="number"
+                  min="0"
+                  step="1"
+                  size="small"
+                  style="max-width: 8rem; margin-top: 0.5rem;"
+                  .value=${this.brokerSettingsCustomValue}
+                  ?disabled=${!canEdit || this.brokerSettingsSaving}
+                  help-text="0 means unlimited"
+                  @sl-input=${(e: Event) => {
+                    this.brokerSettingsCustomValue = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
+              `
+            : ''}
+        </div>
+
+        <p
+          style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
+        >
+          Currently ${this.countedAgentCount} agent${this.countedAgentCount === 1 ? '' : 's'}
+          counted toward this broker’s cap. Effective limit:
+          ${effective.value === null
+            ? 'unknown'
+            : effective.value === 0
+              ? 'unlimited'
+              : effective.value}
+          (from ${this.sourceLabel(effective.source)}).
+        </p>
+
+        ${canEdit
+          ? html`
+              <sl-button
+                variant="primary"
+                size="small"
+                style="margin-top: 0.5rem;"
+                ?loading=${this.brokerSettingsSaving}
+                ?disabled=${this.brokerSettingsSaving}
+                @click=${() => this.saveBrokerSettings()}
+              >
+                Save
+              </sl-button>
+            `
+          : html`
+              <p
+                style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b); font-style: italic;"
+              >
+                Only Hub administrators can change this setting.
+              </p>
+            `}
+      </div>
     `;
   }
 
