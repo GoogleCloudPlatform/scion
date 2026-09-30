@@ -860,12 +860,12 @@ func nonSenderDMSide(ctx context.Context, kindA, idA, kindB, idB string) (addrKi
 // recipient check: when the caller supplied an explicit recipient alongside
 // an asserted direct conversation, that recipient must match the DM key's
 // non-sender participant by ID, and by kind when the recipient carries one —
-// the same participant S5
-// addressee derivation would have picked (see nonSenderDMSide). For direct
-// conversations the DM key IS the ACL and is derivable — a mismatch is an
-// authorization-shaped error, not a shape mismatch. This is shared by both
-// ways a caller can assert a direct conversation: a resolved
-// conversation_ref and a raw conversation_id, so the two behave identically.
+// the same participant S5 addressee derivation would have picked (see
+// nonSenderDMSide). For direct conversations the DM key IS the ACL and is
+// derivable — a mismatch is an authorization-shaped error, not a shape
+// mismatch. This is shared by both ways a caller can assert a direct
+// conversation: a resolved conversation_ref and a raw conversation_id, so the
+// two behave identically.
 func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.ResponseWriter, conversationID, externalRef, recipient, recipientID string, explicitRecipientSupplied bool) error {
 	if !explicitRecipientSupplied {
 		return nil
