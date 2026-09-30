@@ -253,8 +253,8 @@ func (s *nilAgentRecordStore) GetAgent(ctx context.Context, id string) (*store.A
 // TestHandleAgentMessage_RawGuard_CrossProjectCheck_NilSenderAgentRecord
 // proves the cross-project raw check in handlers_agent_messaging.go does not
 // panic when GetAgent returns a nil sender record with a nil error: it is
-// rejected with 500 instead, before any side effect
-// (GoogleCloudPlatform/scion#2125).
+// treated the same as store.ErrNotFound (404) instead, before any side
+// effect (GoogleCloudPlatform/scion#2125).
 func TestHandleAgentMessage_RawGuard_CrossProjectCheck_NilSenderAgentRecord(t *testing.T) {
 	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
 	spy := &spyEventPublisher{}
@@ -273,10 +273,10 @@ func TestHandleAgentMessage_RawGuard_CrossProjectCheck_NilSenderAgentRecord(t *t
 		rr = sendAgentDMWithMsg(t, srv, sender, target, sm, MessageRequest{})
 	})
 	require.NotNil(t, rr, "handler must return a response instead of panicking")
-	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
-	assert.Equal(t, ErrCodeInternalError, errResp.Error.Code)
+	assert.Equal(t, ErrCodeNotFound, errResp.Error.Code)
 
 	assertZeroMessagingSideEffects(t, s, ctx, dispatcher, spy, target, convCountBefore, len(subsBefore))
 }
