@@ -193,6 +193,61 @@ Both reviews independently confirmed: `pkg/hub` itself is green in
 on `GoogleCloudPlatform/scion main` / `ptone/scion main`, unrelated to this
 PR's diff, and reproduced identically with this branch's changes stashed out.
 
+**Round 3** (reviewer `broker-settings-rev-p1b-3`, fresh/independent, head
+`e77b8245`): REQUEST CHANGES, one required, one-line doc fix:
+
+- **R1 (required).** Two bare `#2103` issue refs in this log (this file,
+  base section and the round-2 paragraph above) resolved to
+  ptone/scion#2103, an unrelated closed issue, instead of
+  GoogleCloudPlatform/scion#2103 — a violation of the project's
+  fully-qualified-refs rule. Fixed by qualifying both.
+- **O1 (optional, but treated as in scope by the EM per design 4.4's
+  "settings-v1 schema" bullet).** `pkg/config/schemas/settings-v1.schema.json`
+  had no `quotas` entry, and its root `additionalProperties: false` rejected
+  a `settings.yaml` as soon as an admin saved the switch in file mode, so
+  `scion config validate` reported a hub-loadable file as invalid. Added a
+  `quotas` object (`enforce_broker_quotas: boolean`, `additionalProperties:
+  false`, `x-scope: global`, matching the `server` object's "global-only"
+  pattern) and three `ValidateSettings` tests (valid, non-boolean rejected,
+  unknown nested field rejected). The identical, pre-existing gap for
+  `auto_expose_ports` and `project_defaults` is deliberately left alone —
+  the EM will track it as a separate follow-up, not this PR's scope.
+- **O2 (optional).** Refreshed the PR body's CI paragraph again — see
+  round 4 below for the version current as of that rebase.
+- **FYI-2 (disclosed, not fixed).** In file mode, a `settings.yaml` with no
+  top-level `server:` key (e.g. a fresh `embeds/default_settings.yaml`) never
+  reaches the top-level `quotas` parse in `loadServerFromSettingsFile`, so a
+  raw-API `PUT` of the switch against such a file returns 200 and GET/the UI
+  show it set, but the hub stays enforced. This fails in the safe direction,
+  is pre-existing (shared by `telemetry` and `default_scratchpad`), and the
+  web UI's file-mode save always sends `server` alongside `quotas`, so the UI
+  itself can never trigger it. Noted in the PR body as a known limitation.
+
+**Round 4** (reviewer `broker-settings-rev-p1b-4`, fresh/independent, head
+`efa6398b`): REQUEST CHANGES, one required, metadata-only fix:
+
+- **F1 (required).** The round-3 fix commit's own message repeated the bare
+  `#2103` problem it was fixing, in its subject and body — not the file
+  content (already correct), the message text. This mattered more than a
+  doc typo: ptone/scion squash-merges using commit messages
+  (`squash_merge_commit_message = COMMIT_MESSAGES`), so an unqualified ref in
+  any commit message lands in `main`'s history and would have linked to the
+  same wrong ptone/scion#2103 issue on merge. Fixed by amending that commit's
+  message (not its content) to qualify both refs, and by auditing every
+  commit on the branch with
+  `git log --format=%B upstream-main..HEAD | grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'`,
+  which now returns nothing.
+- **O1 (optional).** This round-3/round-4 write-up (the paragraphs you're
+  reading) closes the "no round-3 entry" gap the reviewer noted.
+
+At the same time as the round-4 fix, rebased onto a fresh upstream main pull
+to pick up GoogleCloudPlatform/scion#2105 (merged: the `authzop`
+`TestMutationClassificationBidirectional` failure that had recurred in every
+round through round 4 is now resolved upstream). The one remaining
+pre-existing, unrelated CI break at this point is GoogleCloudPlatform/scion#2088's
+`authzTestSetup` `no_sqlite` vet failure, which every round from 3 onward
+found and disclosed in the PR body.
+
 ## Scope discipline
 
 Did not touch `pkg/hub/seed.go`, `updateLimitDefinition`
