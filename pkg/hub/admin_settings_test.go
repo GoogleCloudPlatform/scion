@@ -214,6 +214,35 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 	}
 }
 
+// Upstream review finding (GoogleCloudPlatform/scion#2115 follow-up,
+// ptone/scion#2315): deciding whether to delete the whole auto_expose_ports
+// section by checking the single named field Enabled != nil is fragile once
+// AutoExposePortsSettings gains a second field — a request that sets only
+// the new field, with Enabled omitted, would wrongly delete the section.
+// applySettingsUpdates now uses isZeroStruct (the same helper already used
+// for the quotas section) so the decision is section-generic: it looks at
+// every field, not one hardcoded name.
+func TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck(t *testing.T) {
+	// A struct with every field nil/zero must delete the section, regardless
+	// of which field(s) AutoExposePortsSettings has.
+	raw := map[string]interface{}{
+		"schema_version":    "1",
+		"auto_expose_ports": map[string]interface{}{"enabled": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{}})
+	if _, ok := raw["auto_expose_ports"]; ok {
+		t.Error("expected auto_expose_ports to be deleted when every field of AutoExposePortsSettings is nil")
+	}
+
+	// Any field being set must keep the section.
+	enabled := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{Enabled: &enabled}})
+	if _, ok := raw2["auto_expose_ports"]; !ok {
+		t.Error("expected auto_expose_ports to be kept when a field of AutoExposePortsSettings is set")
+	}
+}
+
 func TestApplySettingsUpdates_QuotasNilEnforceBrokerQuotas(t *testing.T) {
 	// When Quotas is provided but EnforceBrokerQuotas is nil, the key should
 	// be deleted to avoid persisting an empty quotas: {} block.
