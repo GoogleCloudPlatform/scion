@@ -37,7 +37,7 @@ import (
 // the ent client rather than through AgentStore.CreateAgent — CreateAgent
 // always sets harness_config via harnessConfigOf, so it can't produce the
 // harness_config-IS-NULL rows these tests need to exercise the reconcile
-// path itself (ptone/scion#2146 review R4-2).
+// path itself (ptone/scion#2146).
 func newHarnessBackfillTestStore(t *testing.T) (*CompositeStore, uuid.UUID) {
 	t.Helper()
 	client := enttest.NewClient(t)
@@ -76,10 +76,11 @@ func createLegacyAgent(t *testing.T, cs *CompositeStore, projectUID uuid.UUID, s
 }
 
 // harnessConfigIsNil reports whether id's harness_config column is currently
-// NULL (as opposed to a non-NULL "" sentinel or a real value) — the
-// distinction ptone/scion#2146 review R5-1 exists to make meaningful. Tests
-// use this instead of just asserting the Go-level value is empty, since ""
-// is what both a NULL column and a written-empty-sentinel column decode to.
+// NULL (as opposed to a non-NULL "" sentinel or a real value) — a
+// distinction that matters because the reconcile's convergence to an empty
+// working set depends on it. Tests use this instead of just asserting the
+// Go-level value is empty, since "" is what both a NULL column and a
+// written-empty-sentinel column decode to.
 func harnessConfigIsNil(t *testing.T, cs *CompositeStore, id uuid.UUID) bool {
 	t.Helper()
 	exists, err := cs.client.Agent.Query().
@@ -91,8 +92,8 @@ func harnessConfigIsNil(t *testing.T, cs *CompositeStore, id uuid.UUID) bool {
 
 // reconcilePendingCount returns the number of rows ReconcileHarnessConfigColumn
 // would currently select (harness_config IS NULL AND applied_config IS NOT
-// NULL) — the set R5-1 requires to converge to (and stay at) zero once every
-// row has been visited by a column-aware binary.
+// NULL) — the set that must converge to (and stay at) zero once every row
+// has been visited by a column-aware binary.
 func reconcilePendingCount(t *testing.T, cs *CompositeStore) int {
 	t.Helper()
 	n, err := cs.client.Agent.Query().
@@ -122,9 +123,9 @@ func TestReconcileHarnessConfigColumn_ValidHarness(t *testing.T) {
 	assert.Equal(t, id.String(), result.Items[0].ID)
 }
 
-// TestReconcileHarnessConfigColumn_InvalidJSON is the ptone/scion#2146
-// review R5-1 sentinel coverage for a truly-invalid-JSON row: it must leave
-// NULL and land on the "" sentinel, not stay NULL forever.
+// TestReconcileHarnessConfigColumn_InvalidJSON covers the sentinel behavior
+// for a truly-invalid-JSON row: it must leave NULL and land on the ""
+// sentinel, not stay NULL forever.
 func TestReconcileHarnessConfigColumn_InvalidJSON(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -138,17 +139,16 @@ func TestReconcileHarnessConfigColumn_InvalidJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got.HarnessConfig, "a row that isn't valid JSON at all has nothing usable to extract")
 	assert.False(t, harnessConfigIsNil(t, cs, id),
-		"R5-1: an invalid-JSON row must be written as the \"\" sentinel, not left NULL")
+		"an invalid-JSON row must be written as the \"\" sentinel, not left NULL")
 }
 
-// TestReconcileHarnessConfigColumn_SanitizedGCPModeRow is the exact
-// ptone/scion#2146 review R4-1 regression probe: a row whose applied_config
-// parses fine but needed sanitizing (an invalid GCP metadata mode) must
-// still have its HarnessConfig backfilled — parseAppliedConfig returns a
-// non-nil cfg AND a non-nil error in this case, and the pre-R4-1 backfill
-// treated any non-nil error as "corrupt, skip", permanently losing this
-// agent from every future --harness match (the one-shot marker meant it
-// would never be revisited). entAgentToStore applies the identical
+// TestReconcileHarnessConfigColumn_SanitizedGCPModeRow covers a row whose
+// applied_config parses fine but needed sanitizing (an invalid GCP metadata
+// mode): it must still have its HarnessConfig backfilled —
+// parseAppliedConfig returns a non-nil cfg AND a non-nil error in this
+// case, and treating any non-nil error as "corrupt, skip" would
+// permanently lose this agent from every future --harness match.
+// entAgentToStore applies the identical
 // tolerance when building the response-facing HarnessConfig, so the
 // reconcile must match that, not be stricter than it.
 func TestReconcileHarnessConfigColumn_SanitizedGCPModeRow(t *testing.T) {
@@ -163,7 +163,7 @@ func TestReconcileHarnessConfigColumn_SanitizedGCPModeRow(t *testing.T) {
 	got, err := cs.client.Agent.Get(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, "claude", got.HarnessConfig,
-		"a sanitized-but-parseable row must still be backfilled (R4-1) — it is not the same as a corrupt row")
+		"a sanitized-but-parseable row must still be backfilled — it is not the same as a corrupt row")
 
 	result, err := cs.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
 	require.NoError(t, err)
@@ -197,8 +197,8 @@ func TestReconcileHarnessConfigColumn_NoAppliedConfig(t *testing.T) {
 
 // TestReconcileHarnessConfigColumn_EmptyHarnessConfigValueNotBackfilled
 // covers valid JSON with no harnessConfig key at all — this DOES get
-// visited (applied_config is non-NULL), and per R5-1 must land on the ""
-// sentinel, not stay NULL.
+// visited (applied_config is non-NULL), and must land on the "" sentinel,
+// not stay NULL.
 func TestReconcileHarnessConfigColumn_EmptyHarnessConfigValueNotBackfilled(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -212,15 +212,14 @@ func TestReconcileHarnessConfigColumn_EmptyHarnessConfigValueNotBackfilled(t *te
 	require.NoError(t, err)
 	assert.Empty(t, got.HarnessConfig)
 	assert.False(t, harnessConfigIsNil(t, cs, id),
-		"R5-1: a visited row with no harness must land on the \"\" sentinel, not stay NULL")
+		"a visited row with no harness must land on the \"\" sentinel, not stay NULL")
 }
 
 // TestReconcileHarnessConfigColumn_LegacyHarnessKeyNotBackfilled covers a
 // row using the pre-0be8382 "harness" key instead of "harnessConfig"
-// (ptone/scion#2146 review R4-10, declined as a display/filter gap — but
-// under the R5-1 sentinel change, this row must still leave the reconcile's
-// pending set like any other no-usable-harness row, or it would join R5-1's
-// original "rescanned every boot forever" problem via a different path.
+// (declined as a display/filter gap — but this row must still leave the
+// reconcile's pending set like any other no-usable-harness row, or it
+// would be rescanned every boot forever via a different path).
 func TestReconcileHarnessConfigColumn_LegacyHarnessKeyNotBackfilled(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -231,24 +230,23 @@ func TestReconcileHarnessConfigColumn_LegacyHarnessKeyNotBackfilled(t *testing.T
 
 	got, err := cs.client.Agent.Get(ctx, id)
 	require.NoError(t, err)
-	assert.Empty(t, got.HarnessConfig, "the legacy \"harness\" key is not read by parseAppliedConfig (R4-10)")
+	assert.Empty(t, got.HarnessConfig, "the legacy \"harness\" key is not read by parseAppliedConfig")
 	assert.False(t, harnessConfigIsNil(t, cs, id),
-		"R5-1: a legacy-key row must still land on the \"\" sentinel and leave the pending set")
+		"a legacy-key row must still land on the \"\" sentinel and leave the pending set")
 
 	noMatch, err := cs.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, noMatch.Items, "the legacy key's value is not exposed as a match, consistent with R4-10")
+	assert.Empty(t, noMatch.Items, "the legacy key's value is not exposed as a match")
 }
 
-// TestReconcileHarnessConfigColumn_ConvergesToEmptySet is the direct
-// ptone/scion#2146 review R5-1 regression test: after one reconcile pass,
-// every row this migration can usefully touch (no-harness, invalid-JSON, and
-// legacy-key rows included) must have LEFT the pending set
-// (harness_config IS NULL AND applied_config IS NOT NULL). A second pass
-// must find nothing left to do. Before R5-1, all of these rows stayed NULL
-// forever, so this count never reached zero and the set only grew — exactly
-// the false "a caught-up Hub does one empty-result query" invariant the
-// docs claimed.
+// TestReconcileHarnessConfigColumn_ConvergesToEmptySet covers: after one
+// reconcile pass, every row this migration can usefully touch (no-harness,
+// invalid-JSON, and legacy-key rows included) must have LEFT the pending
+// set (harness_config IS NULL AND applied_config IS NOT NULL). A second
+// pass must find nothing left to do. Without the sentinel rule, all of
+// these rows would stay NULL forever, so this count would never reach zero
+// and the set would only grow — contradicting the "a caught-up Hub does one
+// empty-result query" invariant the docs claim.
 func TestReconcileHarnessConfigColumn_ConvergesToEmptySet(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -263,7 +261,7 @@ func TestReconcileHarnessConfigColumn_ConvergesToEmptySet(t *testing.T) {
 
 	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx))
 	assert.Equal(t, 0, reconcilePendingCount(t, cs),
-		"R5-1: a single pass must reconcile every row it can usefully touch, including no-harness/invalid/legacy rows")
+		"a single pass must reconcile every row it can usefully touch, including no-harness/invalid/legacy rows")
 
 	// A second pass has nothing to do — this is the "caught-up Hub does one
 	// empty-result query" property the docs now correctly claim.
@@ -271,14 +269,13 @@ func TestReconcileHarnessConfigColumn_ConvergesToEmptySet(t *testing.T) {
 	assert.Equal(t, 0, reconcilePendingCount(t, cs))
 }
 
-// TestReconcileHarnessConfigColumn_CrossesPageBoundary is the ptone/scion#2146
-// review R4-2/R4-4 paging coverage: with more legacy rows than the
-// reconcile's page size, pagination must still visit every row, including
-// the first row of the second page and the last row overall — not just "the
-// first page happens to work". See
+// TestReconcileHarnessConfigColumn_CrossesPageBoundary covers paging: with
+// more legacy rows than the reconcile's page size, pagination must still
+// visit every row, including the first row of the second page and the last
+// row overall — not just "the first page happens to work". See
 // TestReconcileHarnessConfigColumn_PagingAdvancesCursor, right below, for
-// the review R5-2 mutation-sensitive companion: this test alone does not
-// actually depend on keyset (IDGT) pagination working correctly, because
+// the mutation-sensitive companion: this test alone does not actually
+// depend on keyset (IDGT) pagination working correctly, because
 // every row here gets a distinct real value and therefore leaves the
 // pending set regardless of whether the cursor advances (a re-issued,
 // unbounded query would still only see the rows that are still pending). It
@@ -320,22 +317,19 @@ func TestReconcileHarnessConfigColumn_CrossesPageBoundary(t *testing.T) {
 	}
 }
 
-// TestReconcileHarnessConfigColumn_PagingAdvancesCursor is the ptone/scion#2146
-// review R5-2 fix: a test that actually fails if the keyset cursor
-// (lastID/IDGT) stops advancing.
+// TestReconcileHarnessConfigColumn_PagingAdvancesCursor is a test that
+// actually fails if the keyset cursor (lastID/IDGT) stops advancing.
 //
-// Directly mutating lastID's assignment into a no-op and re-running this
-// file's tests (done during this round, then reverted) showed that under
-// the R5-1 sentinel design, NO black-box behavioral test can tell a broken
+// Under the sentinel design, NO black-box behavioral test can tell a broken
 // cursor from a working one when every visited row leaves the pending set
 // on that same visit: with no lower bound, the next unbounded
 // `ORDER BY id LIMIT n` query simply returns whatever still matches
 // `harness_config IS NULL`, which already excludes every row the previous
 // page just fixed. TestReconcileHarnessConfigColumn_CrossesPageBoundary,
-// for example, still passes against that mutant. The cursor only matters
-// when some row *legitimately stays pending* across a single call — which,
-// by design, should no longer happen for any real row after R5-1, so a
-// realistic test can't produce that condition either.
+// for example, still passes if lastID's assignment is mutated into a no-op.
+// The cursor only matters when some row *legitimately stays pending* across
+// a single call — which, by design, should no longer happen for any real
+// row, so a realistic test can't produce that condition either.
 //
 // So this test constructs it directly, via the harnessConfigReconcileTestStuckIDs
 // seam: two rows are marked "stuck" (their update is skipped, so they stay
@@ -394,17 +388,16 @@ func TestReconcileHarnessConfigColumn_PagingAdvancesCursor(t *testing.T) {
 	}
 }
 
-// TestReconcileHarnessConfigColumn_Idempotent is the ptone/scion#2146 review
-// R4-2/R4-5 idempotency coverage: a second call's SELECT (scoped to
-// harness_config IS NULL) simply doesn't return a row that's already
-// non-NULL, so a second call is a cheap no-op and never re-derives a row's
-// harness_config from a later applied_config change — only
-// CreateAgent/UpdateAgent's own sync does that. This is a different
-// property from the UPDATE-side Where(HarnessConfigIsNil()) guard (R7-2),
-// which protects the narrower window between one reconcile call's own
-// SELECT and its own UPDATE, not across two separate calls like this test
-// exercises — see TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite
-// for that case.
+// TestReconcileHarnessConfigColumn_Idempotent covers idempotency: a second
+// call's SELECT (scoped to harness_config IS NULL) simply doesn't return a
+// row that's already non-NULL, so a second call is a cheap no-op and never
+// re-derives a row's harness_config from a later applied_config change —
+// only CreateAgent/UpdateAgent's own sync does that. This is a different
+// property from the UPDATE-side Where(HarnessConfigIsNil()) guard, which
+// protects the narrower window between one reconcile call's own SELECT and
+// its own UPDATE, not across two separate calls like this test exercises —
+// see TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite for
+// that case.
 func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -434,9 +427,8 @@ func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 		"a row whose harness_config is already non-NULL must not be re-derived by this migration")
 }
 
-// TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete is the
-// ptone/scion#2146 review R5-5 fix (R6-1: rewritten to force the real
-// race): a concurrent hard delete landing between
+// TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete covers: a
+// concurrent hard delete landing between
 // ReconcileHarnessConfigColumn's SELECT and its per-row UPDATE must be
 // skipped (logged), not treated as a boot failure. An ent mutation hook
 // intercepts exactly the UpdateOne for the targeted row and deletes it
@@ -480,9 +472,9 @@ func TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete(t *testing.T) {
 	assert.True(t, ent.IsNotFound(err), "the deleted row must actually be gone")
 }
 
-// TestReconcileHarnessConfigColumn_PreservesUpdatedTimestamp is the
-// ptone/scion#2146 review R7-1 fix: this migration is a derived-column
-// backfill, not a user-visible update, so its per-row UPDATE must not let
+// TestReconcileHarnessConfigColumn_PreservesUpdatedTimestamp covers: this
+// migration is a derived-column backfill, not a user-visible update, so its
+// per-row UPDATE must not let
 // ent's UpdateDefault(time.Now) bump the agent's `updated` column. Real
 // consumers of that column include `scion list --sort updated`, the Hub's
 // chat-v2 agent-roster last-activity fallback, and the notification
@@ -507,13 +499,17 @@ func TestReconcileHarnessConfigColumn_PreservesUpdatedTimestamp(t *testing.T) {
 		"the reconcile must not bump updated: got %v, want %v", got.Updated, past)
 }
 
-// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite is the
-// ptone/scion#2146 review R7-2 fix: a concurrent writer (e.g. another,
-// already-serving replica's UpdateAgent call, such as the broker's harness
-// overwrite) that sets a fresh, non-NULL harness_config between this
-// reconcile's SELECT and its own UPDATE must win — the reconcile's own,
-// by-then-stale value must never overwrite it. Uses the same
-// ent-mutation-hook technique as
+// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite guards
+// the UPDATE-side Where(HarnessConfigIsNil()) predicate: a concurrent writer
+// (e.g. another, already-serving replica's UpdateAgent call, such as the
+// broker's harness overwrite) that sets a fresh, non-NULL harness_config
+// between this reconcile's SELECT and its own UPDATE must win — the
+// reconcile's own, by-then-stale value must never overwrite it. The
+// injected write changes only harness_config (and, as a side effect,
+// updated); applied_config stays byte-identical to what the reconcile's own
+// SELECT read, so this test cannot pass merely because AppliedConfigEQ
+// rejected the write — HarnessConfigIsNil() has to be the predicate doing
+// the rejecting. Uses the same ent-mutation-hook technique as
 // TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete to force the
 // real interleaving, guarded by a one-shot flag so the injected write
 // (itself an UpdateOne) doesn't re-trigger the hook recursively.
@@ -524,18 +520,20 @@ func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite(t *testing
 	id := createLegacyAgent(t, cs, projectUID, "concurrent-write", `{"harnessConfig":"claude"}`)
 
 	var injected bool
+	var writerUpdated time.Time
 	cs.client.Agent.Use(func(next ent.Mutator) ent.Mutator {
 		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 			if !injected {
 				if am, ok := m.(*ent.AgentMutation); ok && am.Op() == ent.OpUpdateOne {
 					if mid, ok := am.ID(); ok && mid == id {
 						injected = true
-						if _, err := cs.client.Agent.UpdateOneID(id).
-							SetAppliedConfig(`{"harnessConfig":"gemini"}`).
+						writer, err := cs.client.Agent.UpdateOneID(id).
 							SetHarnessConfig("gemini").
-							Save(ctx); err != nil {
+							Save(ctx)
+						if err != nil {
 							return nil, err
 						}
+						writerUpdated = writer.Updated
 					}
 				}
 			}
@@ -550,21 +548,19 @@ func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "gemini", got.HarnessConfig,
 		"the concurrent writer's value must survive; the reconcile's own stale value must not overwrite it")
+	assert.True(t, got.Updated.Equal(writerUpdated),
+		"the concurrent writer's updated bump must survive: got %v, want %v", got.Updated, writerUpdated)
 }
 
-// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite is
-// the ptone/scion#2146 review R8-1 fix: the R7-2 guard
-// (Where(HarnessConfigIsNil())) only detects a concurrent writer that also
-// sets harness_config, i.e. one that knows the column exists. A pre-upgrade
-// replica's UpdateAgent rewrites applied_config without touching
-// harness_config at all, so harness_config stays NULL and the R7-2 guard
-// alone still matches, letting the reconcile write a harness parsed from
-// the now-superseded applied_config it read at SELECT time — permanently,
-// since the row is no longer NULL for a later boot to pick up. Comparing
-// applied_config too (agent.AppliedConfigEQ(a.AppliedConfig)) closes this:
-// the UPDATE matches zero rows, the row stays NULL, and a later reconcile
-// call picks up the current applied_config. Uses the same ent-mutation-hook
-// technique as TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite,
+// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite
+// guards the UPDATE-side AppliedConfigEQ predicate: a pre-upgrade replica's
+// UpdateAgent rewrites applied_config without touching harness_config at
+// all, so harness_config stays NULL. The UPDATE's AppliedConfigEQ predicate
+// must make the reconcile skip such a row — matching zero rows and leaving
+// it NULL — rather than write a harness parsed from the now-superseded
+// applied_config it read at SELECT time; a later reconcile call then picks
+// up the current applied_config. Uses the same ent-mutation-hook technique
+// as TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite,
 // except the injected write sets AppliedConfig only, the way a pre-upgrade
 // binary writes.
 func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite(t *testing.T) {
@@ -600,8 +596,8 @@ func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentLegacyWrite(t *t
 
 	got, err := cs.client.Agent.Get(ctx, id)
 	require.NoError(t, err)
-	assert.Empty(t, got.HarnessConfig,
-		"harness_config must stay NULL/empty, not the stale value parsed from the pre-race applied_config")
+	assert.True(t, harnessConfigIsNil(t, cs, id),
+		"harness_config must stay NULL so a later reconcile picks the row up")
 	assert.True(t, got.Updated.Equal(legacyUpdated),
 		"the legacy writer's updated bump must survive: got %v, want %v", got.Updated, legacyUpdated)
 
@@ -634,13 +630,13 @@ func TestMigrateRunsHarnessConfigReconcile(t *testing.T) {
 	assert.Equal(t, 0, reconcilePendingCount(t, cs))
 }
 
-// TestAgentStore_UpdateAgent_SyncsHarnessConfigColumn is the ptone/scion#2146
-// review R4-2 update-path coverage: CreateAgent's sync was already covered
-// by TestAgentStore_HarnessConfigFilter*, but no test exercised UpdateAgent
-// changing the value, or the column's value when AppliedConfig becomes nil
-// — the two agent_store.go paths that write harness_config on update. As of
-// R5-1, both paths always SetHarnessConfig (never clear to NULL); "clearing"
-// AppliedConfig now means the column becomes "" (the sentinel), not NULL.
+// TestAgentStore_UpdateAgent_SyncsHarnessConfigColumn covers the
+// update-path: CreateAgent's sync is covered by
+// TestAgentStore_HarnessConfigFilter*, but UpdateAgent changing the value,
+// and the column's value when AppliedConfig becomes nil, are the two
+// agent_store.go paths that write harness_config on update. Both paths
+// always SetHarnessConfig (never clear to NULL); "clearing" AppliedConfig
+// means the column becomes "" (the sentinel), not NULL.
 func TestAgentStore_UpdateAgent_SyncsHarnessConfigColumn(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -670,9 +666,9 @@ func TestAgentStore_UpdateAgent_SyncsHarnessConfigColumn(t *testing.T) {
 	assert.Equal(t, a.ID, byGemini.Items[0].ID)
 
 	// UpdateAgent with AppliedConfig set to nil must write the "" sentinel,
-	// not leave the stale value, and — per R5-1 — must not leave the column
-	// NULL either (NULL is reserved for "never written by a column-aware
-	// binary", which this update is).
+	// not leave the stale value, and must not leave the column NULL either
+	// (NULL is reserved for "never written by a column-aware binary", which
+	// this update is).
 	got2, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	got2.AppliedConfig = nil
@@ -689,5 +685,5 @@ func TestAgentStore_UpdateAgent_SyncsHarnessConfigColumn(t *testing.T) {
 	uid, err := uuid.Parse(a.ID)
 	require.NoError(t, err)
 	assert.False(t, harnessConfigIsNil(t, NewCompositeStore(s.client), uid),
-		"R5-1: UpdateAgent must write the \"\" sentinel, never leave/clear to NULL")
+		"UpdateAgent must write the \"\" sentinel, never leave/clear to NULL")
 }

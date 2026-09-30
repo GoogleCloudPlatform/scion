@@ -137,7 +137,7 @@ func (Agent) Fields() []ent.Field {
 		// solely so the CLI --harness filter (AgentFilter.HarnessConfig) can
 		// use a plain, dialect-independent equality predicate instead of
 		// parsing/pattern-matching the applied_config JSON document at query
-		// time (ptone/scion#2146 review R3-1). It is not part of store.Agent
+		// time (ptone/scion#2146). It is not part of store.Agent
 		// — nothing outside the HarnessConfig filter predicate reads it; the
 		// enriched, response-facing store.Agent.HarnessConfig field is
 		// unrelated and still derived from applied_config at response time,
@@ -155,7 +155,7 @@ func (Agent) Fields() []ent.Field {
 		// (`harness_config IS NULL`) actually converges to empty once every
 		// row has been visited by a column-aware binary, instead of
 		// re-selecting and re-parsing every no-harness/invalid/legacy-key
-		// row on every single boot forever (ptone/scion#2146 review R5-1).
+		// row on every single boot forever (ptone/scion#2146).
 		field.String("harness_config").
 			Optional(),
 
