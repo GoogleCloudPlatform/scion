@@ -44,6 +44,32 @@ func setProjectAgentCeiling(t *testing.T, s store.Store, value int64) {
 	require.NoError(t, err)
 }
 
+// Regression test for review finding F1 (ptone/scion#2270 round 1):
+// brokerQuotasEnforced() must read s.config.EnforceBrokerQuotas under
+// s.mu.RLock(), matching the s.mu.Lock() ApplySnapshot writes it under. Run
+// with -race, this reproduces the reviewer's confirmed data race before the
+// fix (concurrent ApplySnapshot writers and brokerQuotasEnforced() readers on
+// the same field) and passes clean after it.
+func TestBrokerQuotasEnforced_ConcurrentApplySnapshotIsRaceFree(t *testing.T) {
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	const iterations = 200
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			v := i%2 == 0
+			ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &v})
+		}
+	}()
+
+	for i := 0; i < iterations; i++ {
+		_ = srv.brokerQuotasEnforced()
+	}
+	<-done
+}
+
 // Test 1 (design 4.7 P1b): the switch defaults to unset, which must mean
 // enforced (fail-safe default) — an over-cap create is rejected exactly as
 // before this feature existed.
@@ -137,6 +163,40 @@ func TestBrokerQuotaSwitch_OffLockContentionProceeds(t *testing.T) {
 	created, err := qs.Reserve(ctx, "max_test_lock_off", "user-1", "project", "p1", "r1")
 	require.NoError(t, err, "lock contention while enforcement is off must not error")
 	assert.False(t, created, "no reservation is made on the contended path")
+}
+
+// TestBrokerQuotaSwitch_OffLockContentionProceedsEndToEnd is the
+// review-requested (F5) end-to-end variant of
+// TestBrokerQuotaSwitch_OffLockContentionProceeds: it goes through the real
+// server wiring (srv.quotaService, store.LimitMaxAgentsPerBroker,
+// srv.config.EnforceBrokerQuotas) and a real HTTP create request, rather than
+// a synthetic limit and a stubbed enforced func.
+func TestBrokerQuotaSwitch_OffLockContentionProceedsEndToEnd(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &quotaLifecycleDispatcher{})
+	srv.config.EnforceBrokerQuotas = boolPtr(false)
+	setBrokerAgentCeiling(t, s, 10) // high enough that only lock contention is in play
+	brokerID := project.DefaultRuntimeBrokerID
+
+	// Wrap the store so TryAdvisoryLockObject behaves like a real lock (on
+	// SQLite it is normally a documented no-op) — the same trick
+	// newTestQuotaService uses — without disturbing any other store method
+	// the create path relies on.
+	wrapper := newLockingStoreWrapper(s)
+	srv.quotaService.store = wrapper
+
+	objID := store.StableProjectHash(brokerID)
+	acquired, release, err := wrapper.TryAdvisoryLockObject(context.Background(), store.LockQuotaEnforcement, objID)
+	require.NoError(t, err)
+	require.True(t, acquired, "should acquire the broker's advisory lock in test setup")
+	defer func() { _ = release() }()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "switch-off-lock-e2e", ProjectID: project.ID,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String(),
+		"create must proceed through real lock contention on max_agents_per_broker while enforcement is off")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID),
+		"no reservation is made on the contended path, same as the direct QuotaService test")
 }
 
 // Test 5 (design 4.7 P1b): a DM wake (the non-HTTP enforcement site,

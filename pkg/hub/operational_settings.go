@@ -949,6 +949,17 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	return snap
 }
 
+// boolPtrEqual reports whether two *bool values are equal, treating nil as a
+// distinct value from both true and false (unlike dereferencing, which would
+// panic on nil, or treating nil as false, which would conflate "unset" with
+// "explicitly false").
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
 // and MaintenanceState. This is the refactored body of the old reloadSettings()
 // logic — no consumer sites change; request-path code keeps reading s.config.*
@@ -992,13 +1003,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 	}
 
-	// Quotas
-	if snap.EnforceBrokerQuotas != nil {
-		oldVal := s.config.EnforceBrokerQuotas
-		s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
-		if oldVal == nil || *oldVal != *snap.EnforceBrokerQuotas {
-			applied = append(applied, "enforce_broker_quotas")
-		}
+	// Quotas. Unlike the other *bool settings above, nil here is a real,
+	// meaningful value — the fail-safe default (enforced) — not "unset,
+	// leave the current value alone". So this assigns unconditionally: a
+	// snapshot with EnforceBrokerQuotas==nil (switch cleared, section
+	// deleted, or a PUT of {}) must flip the live hub back to enforced, not
+	// silently keep an old in-memory `false` in place while GET/the UI both
+	// report "enforced" (findings F3).
+	oldEnforceBrokerQuotas := s.config.EnforceBrokerQuotas
+	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
+		applied = append(applied, "enforce_broker_quotas")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match

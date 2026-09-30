@@ -1084,6 +1084,14 @@ func TestExtractKoanfKeys_Quotas(t *testing.T) {
 // it and the snapshot reflects the new value immediately (no restart).
 func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply (F4): without this, Update()'s
+	// self-apply is a no-op and srv.brokerQuotasEnforced() is never
+	// exercised in DB mode.
+	ops.server = srv
+
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
 
 	body := `{"quotas": {"enforce_broker_quotas": false}}`
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
@@ -1109,6 +1117,12 @@ func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
 		t.Errorf("EnforceBrokerQuotas: want false, got %v", snap.EnforceBrokerQuotas)
 	}
 
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after the DB-mode PUT self-apply")
+	}
+
 	// GET must reflect it too.
 	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
 	getRR := httptest.NewRecorder()
@@ -1119,6 +1133,56 @@ func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
 	}
 	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas != false {
 		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+}
+
+// Test AC5 (design 4.8), simulated cross-replica: a second OperationalSettings
+// instance sharing the same store (standing in for a second Hub replica in
+// postgres mode) picks up the change via refreshAndApply — the same call the
+// LISTEN/NOTIFY subscription and the 60s poll backstop both make — without
+// going through its own PUT. No live Postgres is available in this sandbox
+// (per review F4); this exercises the same propagation code path
+// (`Refresh` -> `ApplySnapshot`) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srvA.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/enforced.
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if srvB.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false on replica B after refreshAndApply propagated the change")
 	}
 }
 
@@ -2500,6 +2564,42 @@ func TestResetSection_DeletesManagedSection(t *testing.T) {
 	fakeStore.mu.Unlock()
 	if exists {
 		t.Error("expected access row to be deleted after reset")
+	}
+}
+
+// Regression test for review finding F3 (ptone/scion#2270 round 1): DELETE
+// on the quotas section ("Reset to bootstrap") self-applies a snapshot with
+// EnforceBrokerQuotas==nil. That must flip a previously-set false back to
+// enforced live, on the node that issued the DELETE — not leave the old
+// false in place while GET/the UI both report "enforced" (fail-open).
+func TestResetSection_QuotasDeleteResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/quotas", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected quotas row to be deleted after reset")
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after DELETE-ing the quotas section (fail-safe default), not fail-open")
 	}
 }
 

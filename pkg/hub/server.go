@@ -396,11 +396,17 @@ func DefaultServerConfig() ServerConfig {
 // brokerQuotasEnforced reports whether the per-broker agent quota cap
 // (max_agents_per_broker) is enforced on create. Fail-safe default: an
 // absent (nil) switch means enforced (design P1-D4/P1-D5).
+//
+// Thread-safe: s.config.EnforceBrokerQuotas is written under s.mu.Lock() by
+// ApplySnapshot (on the admin PUT path, and on every replica via the
+// LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it must be
+// read under s.mu.RLock() here — this is called on every QuotaService.Reserve,
+// for every limit, on every create/start/restart/resume/wake.
 func (s *Server) brokerQuotasEnforced() bool {
-	if s.config.EnforceBrokerQuotas == nil {
-		return true
-	}
-	return *s.config.EnforceBrokerQuotas
+	s.mu.RLock()
+	v := s.config.EnforceBrokerQuotas
+	s.mu.RUnlock()
+	return v == nil || *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
