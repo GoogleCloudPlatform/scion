@@ -928,7 +928,10 @@ func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id,
 	return affected == 1, nil
 }
 
-// DeleteRuntimeBroker removes a runtime broker by ID.
+// DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
+// edge to broker_settings (design.md §5.1), so the settings row, if any, is
+// deleted explicitly rather than relying on an FK cascade
+// (ptone/scion#2061 P2, AC-P2-4).
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -936,6 +939,9 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	}
 	if err := s.client.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
+	}
+	if err := NewBrokerSettingStore(s.client).DeleteBrokerSettings(ctx, id); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
 	}
 	return nil
 }
