@@ -109,8 +109,8 @@ for config_name in "${CHECKED_CONFIGS[@]}"; do
 
   # Lines are either a bare harness name (has a step whose `dir:` is
   # harnesses/<name>) or "MISMATCH:<name>" -- that step exists, but none of
-  # its `-t` args push a scion-<name> image, e.g. a step copy-pasted from
-  # another harness that kept the old image name (N2).
+  # its args end in /scion-<name>:$_TAG, e.g. a step copy-pasted from
+  # another harness that kept the old image name.
   raw="$("${PYTHON}" -c "
 import sys
 import yaml
@@ -128,14 +128,14 @@ for step in doc.get('steps') or []:
     name = d[len(prefix):]
     names.add(name)
     args = step.get('args') or []
-    if not any(a.endswith('/scion-' + name + ':\$_TAG') for a in args):
+    if not any(isinstance(a, str) and a.endswith('/scion-' + name + ':\$_TAG') for a in args):
         mismatched.append(name)
 
 for name in sorted(names):
     print(name)
 for name in sorted(mismatched):
     print('MISMATCH:' + name)
-" "${config_path}")"
+" "${config_path}")" || { echo "ERROR: failed to parse ${config_path}" >&2; exit 2; }
 
   actual="$(printf '%s\n' "${raw}" | grep -v '^MISMATCH:' || true)"
   image_mismatch="$(printf '%s\n' "${raw}" | grep '^MISMATCH:' | sed 's/^MISMATCH://' || true)"
