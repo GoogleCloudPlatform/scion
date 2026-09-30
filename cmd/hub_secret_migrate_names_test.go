@@ -28,12 +28,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -275,6 +277,84 @@ func TestRunMigrateNames_DeleteLegacyOrdering(t *testing.T) {
 	assert.True(t, mock.has(fmt.Sprintf("projects/test-project/secrets/%s", prefixedName)), "expected prefixed copy to survive")
 }
 
+// migrateNamesCountingSMClient wraps migrateNamesMockSMClient and counts
+// AccessSecretVersion calls per (suffix-trimmed) secret name, to prove
+// GoogleCloudPlatform/scion#2123 review discussion_r4144099464 /
+// discussion_r4144099474's fix: migrateOneCandidate's non-dry-run
+// --delete-legacy path must run canDeleteLegacyName's safety check exactly
+// once per candidate, not twice. Counts are kept per secret name (rather
+// than as one global total) so the assertion is unaffected by the other,
+// unrelated known-hub-scope-key candidates runMigrateNames always also
+// checks.
+type migrateNamesCountingSMClient struct {
+	*migrateNamesMockSMClient
+	mu          sync.Mutex
+	accessCalls map[string]int
+}
+
+func (c *migrateNamesCountingSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	name := req.Name
+	for _, suffix := range []string{"/versions/latest", "/versions/1"} {
+		if strings.HasSuffix(name, suffix) {
+			name = strings.TrimSuffix(name, suffix)
+			break
+		}
+	}
+	c.mu.Lock()
+	if c.accessCalls == nil {
+		c.accessCalls = make(map[string]int)
+	}
+	c.accessCalls[name]++
+	c.mu.Unlock()
+	return c.migrateNamesMockSMClient.AccessSecretVersion(ctx, req)
+}
+
+func (c *migrateNamesCountingSMClient) callsFor(fullName string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.accessCalls[fullName]
+}
+
+// TestRunMigrateNames_DeleteLegacySingleSafetyCheckPerCandidate reproduces
+// GoogleCloudPlatform/scion#2123 review discussion_r4144099464 /
+// discussion_r4144099474: for a candidate whose DB ref already designates
+// the prefixed name (nothing left to copy or repair, so migrateOneCandidate's
+// delete-legacy step is the only GCP SM work this run does for it),
+// canDeleteLegacyName's two reads (the legacy name, then the prefixed name,
+// to confirm it's readable) must each happen exactly once. Before the fix,
+// migrateOneCandidate ran the identical check twice -- once via
+// PlanLegacyDeletion, again via DeleteLegacySecretName -- doubling each to
+// two reads (four total).
+func TestRunMigrateNames_DeleteLegacySingleSafetyCheckPerCandidate(t *testing.T) {
+	ctx := context.Background()
+	db := newTestStore(t)
+	mock := &migrateNamesCountingSMClient{migrateNamesMockSMClient: newMigrateNamesMockSMClient()}
+	backend := migrateNamesTestBackend(t, db, mock, migrateNamesTestHubID)
+
+	legacyName := legacyNameForTest("API_KEY", "user", "user-1")
+	prefixedName := prefixedNameForTest("API_KEY", "user", "user-1")
+	legacyFull := fmt.Sprintf("projects/test-project/secrets/%s", legacyName)
+	prefixedFull := fmt.Sprintf("projects/test-project/secrets/%s", prefixedName)
+	mock.seed(t, "test-project", legacyName, "v")
+	mock.seed(t, "test-project", prefixedName, "v")
+	require.NoError(t, db.CreateSecret(ctx, &store.Secret{
+		ID: tid("single-safety-check"), Key: "API_KEY", Scope: "user", ScopeID: "user-1",
+		SecretRef: "gcpsm:" + prefixedFull,
+	}))
+
+	var out bytes.Buffer
+	err := runMigrateNames(ctx, backend, db, migrateNamesTestHubID, false, true /* deleteLegacy */, &out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "DELETED LEGACY")
+	assert.NotContains(t, out.String(), "MIGRATED", "the ref already designated the prefixed name; nothing to copy")
+
+	assert.Equal(t, 1, mock.callsFor(legacyFull), "canDeleteLegacyName must read the legacy name exactly once per candidate; a doubled safety check would read it twice")
+	assert.Equal(t, 1, mock.callsFor(prefixedFull), "canDeleteLegacyName must read the prefixed name exactly once per candidate; a doubled safety check would read it twice")
+
+	assert.False(t, mock.has(legacyFull), "expected legacy secret to be deleted")
+	assert.True(t, mock.has(prefixedFull), "expected prefixed copy to survive")
+}
+
 // TestRunMigrateNames_KnownHubSigningKeyWithoutDBRecord covers the
 // ptone/scion#2152 decision to also check known hub-scope signing-key names
 // even when no Hub DB record covers them (e.g. after a database reset that
@@ -441,6 +521,58 @@ func TestHubSecretMigrateNamesCmd_HasConfigFlag(t *testing.T) {
 	require.NotNil(t, f, "migrate-names must have a --config flag")
 	assert.Equal(t, "c", f.Shorthand)
 	assert.Equal(t, "", f.DefValue)
+}
+
+// --- GoogleCloudPlatform/scion#2123 review fixes (gemini-code-assist) ---
+
+// TestMigrateNamesTimeoutContext_DerivesFromCommandContext reproduces
+// discussion_r4144099499: the command's timeout context must be derived from
+// cmd.Context(), not context.Background(), so cancelling the command (an
+// operator's Ctrl+C in production, or a test/caller cancellation here) also
+// cancels the derived context instead of running until --timeout fires on
+// its own. Exercised directly against migrateNamesTimeoutContext rather than
+// the full RunE, since runSecretMigrateNames itself builds a real GCP SM
+// client and reads global settings, neither of which this constraint's own
+// "no real systems" rule allows a test to touch.
+func TestMigrateNamesTimeoutContext_DerivesFromCommandContext(t *testing.T) {
+	cmd := &cobra.Command{}
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	cmd.SetContext(parentCtx)
+
+	ctx, cancel := migrateNamesTimeoutContext(cmd, time.Minute)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("expected the derived context to still be open before the parent is canceled")
+	default:
+	}
+
+	cancelParent()
+
+	select {
+	case <-ctx.Done():
+		assert.ErrorIs(t, ctx.Err(), context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected canceling cmd.Context() to cancel the derived timeout context; context.Background() would never do this")
+	}
+}
+
+// TestPrintMigrateNamesHubID_WritesToCommandOutNotStdout reproduces
+// discussion_r4144099512: the "Using hub ID" line must go through
+// cmd.OutOrStdout(), not a direct fmt.Printf/os.Stdout write, so the
+// command's output can be captured (e.g. via cmd.SetOut in a test, or when
+// cobra redirects it for a subcommand/completion context) instead of always
+// landing on the process's real stdout regardless of how the command is
+// invoked.
+func TestPrintMigrateNamesHubID_WritesToCommandOutNotStdout(t *testing.T) {
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	printMigrateNamesHubID(cmd, "hub-1", "scion-abc123def456-")
+
+	assert.Equal(t, "Using hub ID: hub-1 (prefix: scion-abc123def456-)\n", buf.String())
 }
 
 // TestStripDSNQueryParam reproduces round-4 review Consider 4: a table test

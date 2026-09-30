@@ -184,8 +184,12 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 
 	// Default 5 minutes; --timeout raises this for a fleet with a large
 	// number of secrets to check (ptone/scion#2152 round-3 review
-	// non-blocking finding 11).
-	ctx, cancel := context.WithTimeout(context.Background(), migrateNamesTimeout)
+	// non-blocking finding 11). Derived from cmd.Context(), not
+	// context.Background(), so an operator's Ctrl+C (which cobra/cancelable
+	// command execution cancels through cmd.Context()) also cancels this
+	// command's own timeout context instead of being ignored until the timeout
+	// fires on its own (GoogleCloudPlatform/scion#2123 review discussion_r4144099499).
+	ctx, cancel := migrateNamesTimeoutContext(cmd, migrateNamesTimeout)
 	defer cancel()
 
 	cfg, err := config.LoadGlobalConfig(migrateNamesConfigPath)
@@ -224,7 +228,7 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	fmt.Printf("Using hub ID: %s (prefix: %s)\n", hubID, secret.SecretNamePrefixForHubID(hubID))
+	printMigrateNamesHubID(cmd, hubID, secret.SecretNamePrefixForHubID(hubID))
 
 	gcpBackend, err := secret.NewGCPBackend(ctx, db, secret.GCPBackendConfig{
 		ProjectID:       migrateNamesProject,
@@ -234,7 +238,28 @@ func runSecretMigrateNames(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create GCP backend: %w", err)
 	}
 
-	return runMigrateNames(ctx, gcpBackend, db, hubID, migrateNamesDryRun, migrateNamesDeleteLegacy, os.Stdout)
+	return runMigrateNames(ctx, gcpBackend, db, hubID, migrateNamesDryRun, migrateNamesDeleteLegacy, cmd.OutOrStdout())
+}
+
+// migrateNamesTimeoutContext derives runSecretMigrateNames' own timeout
+// context from cmd.Context(), not context.Background(), so a caller's
+// cancellation of the command (e.g. Ctrl+C, or a test) also cancels this
+// command's work instead of running until --timeout fires on its own
+// (GoogleCloudPlatform/scion#2123 review discussion_r4144099499). Factored
+// out so this derivation can be exercised in a test without constructing a
+// real GCP backend.
+func migrateNamesTimeoutContext(cmd *cobra.Command, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(cmd.Context(), timeout)
+}
+
+// printMigrateNamesHubID writes the resolved hub ID/prefix line to the
+// command's own output writer (cmd.OutOrStdout()), not directly to
+// fmt.Printf/os.Stdout, so the command's output can be captured in a test
+// via cmd.SetOut (GoogleCloudPlatform/scion#2123 review
+// discussion_r4144099512). Factored out so this routing can be tested
+// without constructing a real GCP backend.
+func printMigrateNamesHubID(cmd *cobra.Command, hubID, prefix string) {
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Using hub ID: %s (prefix: %s)\n", hubID, prefix)
 }
 
 // resolveMigrateNamesHubID resolves the hub ID exactly the way the running
@@ -617,24 +642,25 @@ func migrateOneCandidate(ctx context.Context, backend *secret.GCPBackend, c migr
 	}
 
 	// Delete the legacy name, only once nothing (that we can detect) still
-	// depends on it. PlanLegacyDeletion/DeleteLegacySecretName independently
-	// re-verify this via canDeleteLegacyName (defense in depth, not the only
-	// check): once a DB ref designates the prefixed name, deletion is safe
-	// once the prefixed copy is confirmed accessible -- value equality with
-	// the legacy copy is not required and is not checked in that case (a
-	// rotation performed after migration legitimately leaves the legacy
-	// value stale; see ptone/scion#2152 round-3 review finding 2). Value
-	// equality is used only for the no-DB-record path, where there is no ref
-	// to establish authority from.
+	// depends on it. DeleteLegacySecretName re-verifies this itself via
+	// canDeleteLegacyName: once a DB ref designates the prefixed name,
+	// deletion is safe once the prefixed copy is confirmed accessible --
+	// value equality with the legacy copy is not required and is not checked
+	// in that case (a rotation performed after migration legitimately leaves
+	// the legacy value stale; see ptone/scion#2152 round-3 review finding 2).
+	// Value equality is used only for the no-DB-record path, where there is
+	// no ref to establish authority from. Called directly here (instead of
+	// via the PlanLegacyDeletion + DeleteLegacySecretName pair
+	// planMigrateNamesCandidate's --dry-run path still uses) so this,
+	// non-dry-run, path runs canDeleteLegacyName's GCP SM calls only once per
+	// candidate instead of twice (GoogleCloudPlatform/scion#2123 review
+	// discussion_r4144099464 / discussion_r4144099474).
 	if deleteLegacy {
-		canDelete, err := backend.PlanLegacyDeletion(ctx, c.name, c.scope, c.scopeID)
+		deleted, err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID)
 		if err != nil {
-			return acted, fmt.Errorf("failed to check legacy secret: %w", err)
+			return acted, fmt.Errorf("failed to delete legacy secret: %w", err)
 		}
-		if canDelete {
-			if err := backend.DeleteLegacySecretName(ctx, c.name, c.scope, c.scopeID); err != nil {
-				return acted, fmt.Errorf("failed to delete legacy secret: %w", err)
-			}
+		if deleted {
 			_, _ = fmt.Fprintf(out, "  DELETED LEGACY  %s (scope: %s/%s)\n", c.name, c.scope, c.scopeID)
 			*deletedLegacy++
 			acted = true
