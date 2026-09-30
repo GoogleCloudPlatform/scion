@@ -124,6 +124,13 @@ export class ScionAgentTreeView extends LitElement {
    * The agent list to render — filtering is the parent's responsibility.
    * When this changes the layout is recalculated but pan/zoom state is
    * preserved (so SSE updates don't reset your viewport).
+   *
+   * Treat as immutable: assign a new array to update it. The id→agent memo
+   * (`getAgentById`) and the layout cache (#2388) key off this array's
+   * *identity*, not its contents — mutating elements in place and calling
+   * `requestUpdate()` would render stale objects instead of picking up the
+   * change. Every current host (agents.ts, project-detail.ts, agent-graph.ts)
+   * already assigns a fresh array on every update.
    */
   @property({ attribute: false })
   agents: Agent[] = [];
@@ -190,6 +197,43 @@ export class ScionAgentTreeView extends LitElement {
       this.agentByIdCache = { agents, map: new Map(agents.map((a) => [a.id, a])) };
     }
     return this.agentByIdCache.map;
+  }
+
+  /**
+   * Memoizes topologySignature's own inputs by identity, so a render that
+   * changes none of them (pan/zoom/hover, or a status-only agent swap) skips
+   * even the cheap sort-and-stringify work, not just the layout it gates.
+   * Safe because every input is always replaced wholesale rather than
+   * mutated: `agents` per the property doc above, `collapsedIds` in
+   * `toggleCollapse` (always a new Set).
+   */
+  private signatureCache: {
+    agents: Agent[];
+    collapsedIds: ReadonlySet<string>;
+    showUsers: boolean;
+    orientation: Orientation;
+    signature: string;
+  } | null = null;
+
+  private getSignature(
+    agents: Agent[],
+    collapsedIds: ReadonlySet<string>,
+    showUsers: boolean,
+    orientation: Orientation
+  ): string {
+    const cache = this.signatureCache;
+    if (
+      cache &&
+      cache.agents === agents &&
+      cache.collapsedIds === collapsedIds &&
+      cache.showUsers === showUsers &&
+      cache.orientation === orientation
+    ) {
+      return cache.signature;
+    }
+    const signature = topologySignature(agents, collapsedIds, showUsers, orientation);
+    this.signatureCache = { agents, collapsedIds, showUsers, orientation, signature };
+    return signature;
   }
 
   /**
@@ -866,7 +910,7 @@ export class ScionAgentTreeView extends LitElement {
     // when the topology signature changes (membership, structure, name,
     // collapse, showUsers or orientation). Status-only updates, pan, zoom
     // and hover reuse the cached forest and layout untouched.
-    const signature = topologySignature(
+    const signature = this.getSignature(
       agents,
       this.collapsedIds,
       this.showUsers,
@@ -1089,7 +1133,7 @@ export class ScionAgentTreeView extends LitElement {
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
     const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
-    const isRoot = !parentId || !this.agents.some((a) => a.id === parentId);
+    const isRoot = !parentId || !agentById.has(parentId);
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);

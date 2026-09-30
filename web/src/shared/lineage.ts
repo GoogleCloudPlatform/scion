@@ -107,17 +107,25 @@ export function rootUserOf(agent: Agent): string | undefined {
 }
 
 /**
- * A signature that changes iff the rendered topology of the forest would
- * change: membership (add/remove), structure (reparent, via ancestry), name
- * (sort order and label), collapse state, the show-users toggle, or
- * orientation. Two agent lists that differ only in object identity or in
- * fields outside this set (status, capabilities, messageability, etc.)
- * produce the same signature. Callers use this to cache layout across
- * status-only renders, pans, zooms and hovers, and to invalidate it exactly
- * on the changes that affect topology or geometry.
+ * A signature that changes iff a layout input the forest/layout functions
+ * actually read would change: membership (add/remove), direct-parent
+ * structure (reparent, via ancestry's last entry), the root user a tree is
+ * grouped under in layoutForestWithUsers (ancestry's first entry — a
+ * separate input from the direct parent, and read only when `showUsers` is
+ * on, but included unconditionally so toggling `showUsers` after an
+ * ancestry-only change still invalidates correctly), name (sort order and
+ * label), collapse state, the show-users toggle, or orientation. Two agent
+ * lists that differ only in object identity or in fields outside this set
+ * (status, capabilities, messageability, etc.) produce the same signature.
+ * Callers use this to cache layout across status-only renders, pans, zooms
+ * and hovers, and to invalidate it exactly on the changes that affect
+ * topology or geometry.
  *
  * Sorted by ID before hashing so the signature is independent of the input
  * array's order (e.g. after an SSE-triggered re-sort with no real change).
+ * Ties in `buildLineageForest`'s name sort break on ID (see `byName` below),
+ * so ID + parent + root user + name fully determines layout: nothing the
+ * layout depends on varies while producing the same signature.
  */
 export function topologySignature(
   agents: readonly Agent[],
@@ -126,7 +134,7 @@ export function topologySignature(
   orientation: Orientation
 ): string {
   const rows = agents
-    .map((a) => [a.id, parentIdOf(a) ?? '', a.name] as const)
+    .map((a) => [a.id, parentIdOf(a) ?? '', rootUserOf(a) ?? '', a.name] as const)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const collapsed = [...collapsedIds].sort();
   return JSON.stringify({ rows, collapsed, showUsers, orientation });
@@ -156,7 +164,14 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     }
   }
 
-  const byName = (a: LineageNode, b: LineageNode) => a.agent.name.localeCompare(b.agent.name);
+  // ID tie-break makes ordering a pure function of (id, name) — not of input
+  // array order — so equal-named siblings/roots always land in the same
+  // position regardless of history. This matters for the layout cache
+  // (topologySignature): the signature is order-independent, so the layout
+  // it keys must be too, or a cache hit can draw a stale ordering for ties.
+  const byName = (a: LineageNode, b: LineageNode) =>
+    a.agent.name.localeCompare(b.agent.name) ||
+    (a.agent.id < b.agent.id ? -1 : a.agent.id > b.agent.id ? 1 : 0);
   for (const node of byId.values()) {
     node.children.sort(byName);
   }

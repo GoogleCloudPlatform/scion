@@ -256,6 +256,123 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
     expect(viaCache).toEqual(viaFreshRecompute);
   });
+
+  /** The status-badge `label` for the node whose card links to /agents/<id>. */
+  function statusLabel(agentId: string): string | null {
+    return el.shadowRoot!
+      .querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
+      ?.getAttribute('label') ?? null;
+  }
+
+  it('renders the current status on a cache hit, not the stale cached node object (#2388 review B1)', async () => {
+    const before = cachedLayout(el);
+    expect(statusLabel('k1')).toBe('running');
+
+    // Same id/parentId/name for every agent (topology signature unchanged,
+    // so this is a cache hit), but k1's own status changed. If renderNode
+    // trusted the cached PositionedNode.agent instead of resolving the
+    // current agent by ID, this would still read 'running'.
+    el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, phase: 'stopped' } : a));
+    await el.updateComplete;
+
+    expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
+    expect(statusLabel('k1')).toBe('stopped');
+  });
+
+  /** Edges whose title indicates non-messageable ("mismatch") styling. */
+  function titledEdges(): Element[] {
+    return Array.from(el.shadowRoot!.querySelectorAll('svg path.edge')).filter((p) =>
+      p.querySelector('title')
+    );
+  }
+
+  it('renders current edge styling on a cache hit, not the stale cached endpoints (#2388 review B1)', async () => {
+    // A single-edge tree, so a messageMode change on one node affects exactly
+    // one edge (baseAgents' r1-k1-g1 chain would make k1's messageMode
+    // change affect both of k1's edges, muddying the assertion).
+    el.agents = [agent('r1', 'root', ['user-1']), agent('k1', 'kid', ['user-1', 'r1'])];
+    await el.updateComplete;
+    const before = cachedLayout(el);
+    // Both default to 'project' mode (agent() sets no messageMode): compatible.
+    expect(titledEdges()).toHaveLength(0);
+
+    // Same id/parentId/name (cache hit), but k1's messageMode now mismatches
+    // root's. messageMode is not part of the topology signature by design
+    // (edge styling reads live agents, same as node status), so this must
+    // still show the mismatch on the very next render.
+    el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, messageMode: 'branch' } : a));
+    await el.updateComplete;
+
+    expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
+    const titled = titledEdges();
+    expect(titled).toHaveLength(1);
+    expect(titled[0].querySelector('title')!.textContent).toContain('root');
+    expect(titled[0].querySelector('title')!.textContent).toContain('kid');
+  });
+});
+
+describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () => {
+  let el: ScionAgentTreeView;
+
+  function didAutoFit(): boolean {
+    return (el as unknown as { didAutoFit: boolean }).didAutoFit;
+  }
+  function setDidAutoFit(v: boolean): void {
+    (el as unknown as { didAutoFit: boolean }).didAutoFit = v;
+  }
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el.agents = [
+      { ...agent('r1', 'root', ['user-1']), projectId: 'p1' } as Agent,
+      { ...agent('k1', 'kid', ['user-1', 'r1']), projectId: 'p1' } as Agent,
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    // The canvas has zero size under happy-dom, so the render()-driven
+    // rAF auto-fit never actually commits `didAutoFit = true`; set it
+    // directly to simulate a completed fit and observe willUpdate's own
+    // decision to keep or reset it.
+    setDidAutoFit(true);
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  it('does not reset auto-fit when the same project scope reorders or gets a status-only update', async () => {
+    el.agents = [
+      { ...el.agents[1], phase: 'stopped' },
+      { ...el.agents[0] },
+    ]; // reordered, one status changed, same projectId set {p1}
+    await el.updateComplete;
+    expect(didAutoFit()).toBe(true);
+  });
+
+  it('resets auto-fit when the project scope changes entirely', async () => {
+    el.agents = [{ ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
+    await el.updateComplete;
+    expect(didAutoFit()).toBe(false);
+  });
+
+  it('resets auto-fit when a new project is added to the scope', async () => {
+    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
+    await el.updateComplete;
+    expect(didAutoFit()).toBe(false);
+  });
+
+  it('resets auto-fit when a project drops out of the scope', async () => {
+    el.agents = [
+      ...el.agents,
+      { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent,
+    ];
+    await el.updateComplete;
+    setDidAutoFit(true);
+    el.agents = el.agents.filter((a) => a.projectId !== 'p2');
+    await el.updateComplete;
+    expect(didAutoFit()).toBe(false);
+  });
 });
 
 describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => {

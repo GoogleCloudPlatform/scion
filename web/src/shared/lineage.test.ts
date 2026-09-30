@@ -369,6 +369,18 @@ describe('topologySignature (#2388 layout cache key)', () => {
     expect(sig([root, kid])).not.toBe(sig([root, reparented]));
   });
 
+  it('changes when the root user changes with the same direct parent (#2388 review B2)', () => {
+    // layoutForestWithUsers groups roots by rootUserOf (ancestry[0]), a
+    // separate input from parentIdOf (ancestry[last]). A signature keyed
+    // only on the direct parent misses this: two lists below share every
+    // child's direct parent ('gone', filtered out so both 'p' and 'c' are
+    // roots) but disagree on which user 'c' is grouped under.
+    const p = agent('p', 'p', ['u1']);
+    const cUnderU1 = agent('c', 'c', ['u1', 'gone']);
+    const cUnderU2 = agent('c', 'c', ['u2', 'gone']);
+    expect(sig([p, cUnderU1], noCollapse, true)).not.toBe(sig([p, cUnderU2], noCollapse, true));
+  });
+
   it('changes on rename', () => {
     const renamed = agent('k1', 'renamed-kid', ['user-1', 'r1']);
     expect(sig([root, kid])).not.toBe(sig([root, renamed]));
@@ -392,5 +404,26 @@ describe('topologySignature (#2388 layout cache key)', () => {
     expect(sig([root, kid], noCollapse, false, 'vertical')).not.toBe(
       sig([root, kid], noCollapse, false, 'horizontal')
     );
+  });
+});
+
+describe('name-tie ordering (#2388 review N1)', () => {
+  it('breaks equal-name ties by ID, so layout position does not depend on input array order', () => {
+    // topologySignature sorts by ID and is therefore order-independent. For
+    // the cache to be sound, the layout it keys must be order-independent
+    // too — otherwise a cache hit can draw whatever order was in effect at
+    // the last invalidation instead of what a fresh compute would give.
+    const a1 = agent('a1', 'worker', ['user-1']);
+    const a2 = agent('a2', 'worker', ['user-1']);
+
+    const forward = layoutForest(buildLineageForest([a1, a2]));
+    const reversed = layoutForest(buildLineageForest([a2, a1]));
+
+    const idsByX = (nodes: readonly { agent: Agent; px: number }[]) =>
+      [...nodes].sort((x, y) => x.px - y.px).map((n) => n.agent.id);
+
+    expect(idsByX(forward.nodes)).toEqual(idsByX(reversed.nodes));
+    // Pin the actual order too, so this doesn't just prove "some" tie-break.
+    expect(idsByX(forward.nodes)).toEqual(['a1', 'a2']);
   });
 });
