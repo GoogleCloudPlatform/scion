@@ -226,6 +226,7 @@ func (s *Server) handleChatSpaceRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse: /api/v1/chat/conversations/{key}/messages
 	//        /api/v1/chat/conversations/{key}/read
+	//        /api/v1/chat/conversations/{key}/unread
 	//        /api/v1/chat/conversations/{key}/typing
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.SplitN(path, "/", 2)
@@ -264,6 +265,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationMessages(w, r, key)
 	case "read":
 		s.handleConversationRead(w, r, key)
+	case "unread":
+		s.handleConversationMarkUnread(w, r, key)
 	case "typing":
 		s.handleConversationTyping(w, r, key)
 	case "interagent":
@@ -2914,6 +2917,142 @@ func (s *Server) writeConversationReadState(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// conversationRecentMessages returns up to limit of a conversation's most
+// recent messages, newest first — the (created_at, id) DESC order
+// ListMessages uses by default, the same order handleConversationRead's
+// monotonic guard reasons in. It resolves the same filter
+// handleConversationHistory and nativeDMLastMessage use, honouring the
+// ConversationEnvelopeSwitch when it is on so mark-unread sees the same
+// message set the history view and the DM list's "last message" do.
+//
+// That equivalence is exact for DMs: an unresolved conversation under the
+// switch returns (nil, nil) here, the same empty result history's DM branch
+// returns. For topics it is not quite exact — an unresolved topic falls back
+// to a ThreadID filter here, where history instead returns a 409 — but that
+// is harmless: an unresolved topic has nothing a ThreadID filter would match
+// either, so both paths agree there is nothing to show or act on.
+func (s *Server) conversationRecentMessages(
+	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
+) ([]store.Message, error) {
+	var filter store.MessageFilter
+	if isDM {
+		// Mention fan-out copies are excluded, matching nativeDMLastMessage —
+		// chat-thread does not display them, so they must not count as the
+		// "latest message" mark-unread reasons about.
+		filter = store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
+		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+			parts := strings.Split(key, ":")
+			if len(parts) != 5 {
+				return nil, fmt.Errorf("invalid DM key: %q", key)
+			}
+			conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if err != nil {
+				return nil, err
+			}
+			if conv == nil {
+				// Never-used DM: matches nativeDMLastMessage's prior
+				// behaviour exactly (nil, nil) rather than falling back to
+				// a ThreadID filter, which would show unrelated legacy rows
+				// once envelope mode is the source of truth.
+				return nil, nil
+			}
+			filter.ThreadID = ""
+			filter.ConversationID = conv.ConversationID
+		}
+	} else {
+		filter = store.MessageFilter{Channel: "web", ThreadID: key}
+		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() && wcs != nil {
+			if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
+				if convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
+					messaging.WithReadTopicLookup(wcs)); convResult != nil {
+					filter.ThreadID = ""
+					filter.ConversationID = convResult.ConversationID
+				}
+			}
+		}
+	}
+
+	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: limit, SkipTotalCount: true})
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// handleConversationMarkUnread handles POST
+// /api/v1/chat/conversations/{key}/unread. It is a dedicated, explicit
+// action distinct from /read: it sets the caller's own read watermark
+// backwards, on purpose, to the message immediately before the
+// conversation's latest by (created_at, id) — the same order
+// handleConversationRead's monotonic guard uses — or clears it entirely when
+// there is only one message. It never touches anyone else's watermark, and
+// it must never let /read's forward-only guard regress; a later POST to
+// /read still only moves the watermark forward from wherever mark-unread
+// left it.
+//
+// Authorization is identical to /read (authorizeConversationAccess): a
+// conversation the caller cannot read cannot be marked unread either.
+func (s *Server) handleConversationMarkUnread(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	isDM := strings.HasPrefix(key, "dm:")
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	recent, err := s.conversationRecentMessages(ctx, key, isDM, wcs, 2)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up messages", nil)
+		return
+	}
+	if len(recent) == 0 {
+		ValidationError(w, "conversation has no messages", nil)
+		return
+	}
+
+	// recent[0] is the latest message; recent[1] (if present) is the one
+	// immediately before it. A single-message conversation has no
+	// predecessor, so the watermark clears entirely — "never read".
+	predecessor := ""
+	if len(recent) > 1 {
+		predecessor = recent[1].ID
+	}
+
+	if err := wcs.SetReadState(ctx, user.ID(), key, predecessor); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update read state", nil)
+		return
+	}
+
+	// Multi-tab: the caller's other open tabs learn their own watermark moved
+	// the same way a DM peer learns theirs did on /read — over the
+	// ChatReadStateEvent, just fanned to the caller's own subject instead of
+	// the other participant's. Same event type, same subject convention,
+	// different recipient: not a new SSE event.
+	s.events.PublishChatOwnReadStateEvent(ctx, key, user.ID(), predecessor)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "lastReadMessageId": predecessor})
+}
+
 // authorizeConversationAccess authorizes the caller for a conversation key: a
 // DM is reachable by its participants, a topic by anyone with read access to
 // its project. It writes the error response itself and returns false when
@@ -3378,28 +3517,22 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // message, a deleted message, or one moved into a promoted thread, none of
 // which can be acknowledged by viewing this DM. Mention fan-out copies are
 // also excluded because chat-thread does not display them.
+//
+// Delegates to conversationRecentMessages (limit 1) rather than keeping a
+// second copy of this filter: the two are used together — this to know
+// "unread compared to what", mark-unread's predecessor lookup to know
+// "unread from what" — and a mention-exclusion (or envelope-switch) fix
+// applied to only one would silently reintroduce a mention row masking
+// mark-unread's effect.
 func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	filter := store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-		parts := strings.Split(key, ":")
-		if len(parts) != 5 {
-			return nil, fmt.Errorf("invalid DM key: %q", key)
-		}
-		conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
-		if err != nil || conv == nil {
-			return nil, err
-		}
-		filter.ThreadID = ""
-		filter.ConversationID = conv.ConversationID
-	}
-	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(result.Items) == 0 {
+	if len(recent) == 0 {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	return &recent[0], nil
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.

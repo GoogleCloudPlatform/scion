@@ -46,10 +46,10 @@ func TestMaterialResources_TypeStringsMatchRegistry(t *testing.T) {
 	}
 
 	cases := []struct{ scope, want string }{
-		{store.ScopeRuntimeBroker, "broker"},
-		{store.ScopeProject, "project"},
-		{store.ScopeHub, "hub"},
-		{store.ScopeUser, "user"},
+		{store.ScopeRuntimeBroker, permissions.ResourceBroker},
+		{store.ScopeProject, permissions.ResourceProject},
+		{store.ScopeHub, permissions.ResourceHub},
+		{store.ScopeUser, permissions.ResourceUser},
 		{"bogus-scope", scopeUnknownResourceType},
 		{"", scopeUnknownResourceType},
 	}
@@ -58,8 +58,12 @@ func TestMaterialResources_TypeStringsMatchRegistry(t *testing.T) {
 			t.Errorf("scopeToResourceType(%q) = %q, want %q", c.scope, got, c.want)
 		}
 	}
-	if scopeToResourceType(store.ScopeRuntimeBroker) != permissions.ResourceBroker {
-		t.Errorf("scopeToResourceType(%q) must equal the registry's broker resource type %q",
-			store.ScopeRuntimeBroker, permissions.ResourceBroker)
+	// Literal-pinning: the broker case is a rename (scope "runtime_broker"
+	// maps to resource type "broker"), so it is pinned against the raw wire
+	// string, not permissions.ResourceBroker -- a rename of that constant
+	// must not silently change the wire value this test guards.
+	if scopeToResourceType(store.ScopeRuntimeBroker) != "broker" {
+		t.Errorf("scopeToResourceType(%q) must equal the literal wire value %q",
+			store.ScopeRuntimeBroker, "broker")
 	}
 }

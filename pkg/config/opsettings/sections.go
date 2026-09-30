@@ -134,6 +134,15 @@ type ProfilesSettings = map[string]config.V1ProfileConfig
 // The entire map is stored as a single JSONB document in hub_settings.
 type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 
+// QuotaSettings holds Layer-1 quota enforcement settings.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent. When false, usage is
+	// still counted (reservations, release, reconcile, backfill all run) —
+	// only the reject is skipped (design P1-D5).
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //

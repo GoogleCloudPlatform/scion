@@ -19,7 +19,10 @@
 // mapping and its consistency test.
 package hub
 
-import "github.com/GoogleCloudPlatform/scion/pkg/store"
+import (
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
 
 // scopeUnknownResourceType is scopeToResourceType's result for a scope
 // string outside the four reviewed values. It is never "hub": an
@@ -38,13 +41,13 @@ const scopeUnknownResourceType = "unknown"
 func scopeToResourceType(scope string) string {
 	switch scope {
 	case store.ScopeRuntimeBroker:
-		return "broker"
+		return permissions.ResourceBroker
 	case store.ScopeProject:
-		return "project"
+		return permissions.ResourceProject
 	case store.ScopeHub:
-		return "hub"
+		return permissions.ResourceHub
 	case store.ScopeUser:
-		return "user"
+		return permissions.ResourceUser
 	default:
 		return scopeUnknownResourceType
 	}

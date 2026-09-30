@@ -70,6 +70,15 @@ scion hub token create \
 - `--scopes` (required) — a comma-separated list of the scopes above.
 - `--expires` — a duration (`30d`, `90d`, `1y`) or an RFC 3339 date
   (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
+- `--purpose` — an optional description of what the token is for (up to 128 bytes).
+- `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
+  lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
+  Values are up to 64 bytes. Keys that could be confused with identity or authorization
+  fields (for example `user`, `agent`, `owner`, `role` or `scope`) are rejected.
+
+The purpose and labels are descriptive only: they grant no permissions and cannot be changed
+after the token is created. The Hub records them, along with the token's identity, in request
+logs, authorization decisions and audit records, so you can tell which automation made a call.
 
 The command prints the token value **once**. Store it securely — it cannot be retrieved later.
 
@@ -84,6 +93,18 @@ scion list --project my-project
 
 When this variable is set, the CLI bypasses the browser-based OAuth flow and uses the token for
 all communication with the Hub.
+
+### What scoped tokens cannot do
+
+Because a UAT is scoped, some operations that must be re-checked later, or that rely on
+owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI login) instead:
+
+- **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
+  scheduled `dispatch_agent` events or schedules. See
+  [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Broker registration**: a UAT does not satisfy the owner or super-admin shortcuts when
+  registering a Runtime Broker. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
 
 ## Trust level separation
 

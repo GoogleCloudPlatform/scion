@@ -134,6 +134,37 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
 func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, false, opts...)
+}
+
+// OpenPostgresReadOnly creates an Ent client backed by PostgreSQL with the
+// session-level default_transaction_read_only GUC set to "on" for every
+// connection in the pool (ptone/scion#2152 round-3 review finding 10): every
+// transaction starts read-only, so a write attempted by a tool that should
+// never perform one (e.g. `hub secret migrate-names --dry-run`) fails
+// loudly at the database itself instead of relying solely on the caller
+// never issuing one. This is defense in depth on top of that caller
+// discipline — an application-level read-only call (e.g. PlanRefRepair)
+// choosing to write due to a bug elsewhere still hits this and fails,
+// rather than silently succeeding.
+//
+// Note (ptone/scion#2152 round-4 review FYI): default_transaction_read_only
+// is sent as a connection startup parameter, which PgBouncer in transaction
+// or statement pooling mode can reject unless explicitly listed in
+// ignore_startup_parameters. Session pooling mode is unaffected. If a
+// deployment fronts Postgres with PgBouncer in transaction-pooling mode,
+// confirm that setting is allow-listed before relying on this for --dry-run.
+func OpenPostgresReadOnly(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, true, opts...)
+}
+
+// buildPostgresConnConfig parses dsn and applies the keepalive and (when
+// readOnly) default_transaction_read_only RuntimeParams, without opening any
+// connection. Factored out of openPostgres so the resulting config is
+// directly assertable in tests (ptone/scion#2152 round-4 review Consider 4)
+// — in particular, that OpenPostgresReadOnly actually sets
+// default_transaction_read_only=on, without needing a real Postgres server.
+func buildPostgresConnConfig(dsn string, readOnly bool) (*pgx.ConnConfig, error) {
 	// Parse the DSN with pgx (accepts both keyword/value DSNs "host=... port=..."
 	// and URL-style "postgres://..." connection strings) so we can attach TCP
 	// keepalive settings to the connection before handing it to database/sql via
@@ -145,8 +176,21 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
 	}
 	applyKeepalives(connConfig.RuntimeParams)
+	if readOnly {
+		connConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	}
 	if connConfig.ConnectTimeout == 0 {
 		connConfig.ConnectTimeout = connectTimeout
+	}
+	return connConfig, nil
+}
+
+// openPostgres is the shared implementation behind OpenPostgres and
+// OpenPostgresReadOnly.
+func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option) (*ent.Client, error) {
+	connConfig, err := buildPostgresConnConfig(dsn, readOnly)
+	if err != nil {
+		return nil, err
 	}
 
 	// Register google/uuid.UUID with pgx's type system so that UUID values are

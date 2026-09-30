@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -109,6 +110,8 @@ type Client struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
+	// BrokerSetting is the client for interacting with the BrokerSetting builders.
+	BrokerSetting *BrokerSettingClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
 	// Conversation is the client for interacting with the Conversation builders.
@@ -232,6 +235,7 @@ func (c *Client) init() {
 	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
 	c.BrokerJoinToken = NewBrokerJoinTokenClient(c.config)
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
+	c.BrokerSetting = NewBrokerSettingClient(c.config)
 	c.ChatLinkCode = NewChatLinkCodeClient(c.config)
 	c.Conversation = NewConversationClient(c.config)
 	c.ConversationParticipant = NewConversationParticipantClient(c.config)
@@ -386,6 +390,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		BrokerSetting:            NewBrokerSettingClient(cfg),
 		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
@@ -467,6 +472,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		BrokerSetting:            NewBrokerSettingClient(cfg),
 		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
@@ -549,12 +555,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
 		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
-		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
 		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
@@ -574,12 +580,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
 		c.AgentIdentityKey, c.AgentReincarnation, c.AgentSessionMetrics,
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
-		c.BrokerSecret, c.ChatLinkCode, c.Conversation, c.ConversationParticipant,
-		c.DecisionAudit, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
 		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
@@ -619,6 +625,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BrokerJoinToken.mutate(ctx, m)
 	case *BrokerSecretMutation:
 		return c.BrokerSecret.mutate(ctx, m)
+	case *BrokerSettingMutation:
+		return c.BrokerSetting.mutate(ctx, m)
 	case *ChatLinkCodeMutation:
 		return c.ChatLinkCode.mutate(ctx, m)
 	case *ConversationMutation:
@@ -2381,6 +2389,139 @@ func (c *BrokerSecretClient) mutate(ctx context.Context, m *BrokerSecretMutation
 		return (&BrokerSecretDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown BrokerSecret mutation op: %q", m.Op())
+	}
+}
+
+// BrokerSettingClient is a client for the BrokerSetting schema.
+type BrokerSettingClient struct {
+	config
+}
+
+// NewBrokerSettingClient returns a client for the BrokerSetting from the given config.
+func NewBrokerSettingClient(c config) *BrokerSettingClient {
+	return &BrokerSettingClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `brokersetting.Hooks(f(g(h())))`.
+func (c *BrokerSettingClient) Use(hooks ...Hook) {
+	c.hooks.BrokerSetting = append(c.hooks.BrokerSetting, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `brokersetting.Intercept(f(g(h())))`.
+func (c *BrokerSettingClient) Intercept(interceptors ...Interceptor) {
+	c.inters.BrokerSetting = append(c.inters.BrokerSetting, interceptors...)
+}
+
+// Create returns a builder for creating a BrokerSetting entity.
+func (c *BrokerSettingClient) Create() *BrokerSettingCreate {
+	mutation := newBrokerSettingMutation(c.config, OpCreate)
+	return &BrokerSettingCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of BrokerSetting entities.
+func (c *BrokerSettingClient) CreateBulk(builders ...*BrokerSettingCreate) *BrokerSettingCreateBulk {
+	return &BrokerSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *BrokerSettingClient) MapCreateBulk(slice any, setFunc func(*BrokerSettingCreate, int)) *BrokerSettingCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &BrokerSettingCreateBulk{err: fmt.Errorf("calling to BrokerSettingClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*BrokerSettingCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &BrokerSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for BrokerSetting.
+func (c *BrokerSettingClient) Update() *BrokerSettingUpdate {
+	mutation := newBrokerSettingMutation(c.config, OpUpdate)
+	return &BrokerSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *BrokerSettingClient) UpdateOne(_m *BrokerSetting) *BrokerSettingUpdateOne {
+	mutation := newBrokerSettingMutation(c.config, OpUpdateOne, withBrokerSetting(_m))
+	return &BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *BrokerSettingClient) UpdateOneID(id uuid.UUID) *BrokerSettingUpdateOne {
+	mutation := newBrokerSettingMutation(c.config, OpUpdateOne, withBrokerSettingID(id))
+	return &BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for BrokerSetting.
+func (c *BrokerSettingClient) Delete() *BrokerSettingDelete {
+	mutation := newBrokerSettingMutation(c.config, OpDelete)
+	return &BrokerSettingDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *BrokerSettingClient) DeleteOne(_m *BrokerSetting) *BrokerSettingDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *BrokerSettingClient) DeleteOneID(id uuid.UUID) *BrokerSettingDeleteOne {
+	builder := c.Delete().Where(brokersetting.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &BrokerSettingDeleteOne{builder}
+}
+
+// Query returns a query builder for BrokerSetting.
+func (c *BrokerSettingClient) Query() *BrokerSettingQuery {
+	return &BrokerSettingQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeBrokerSetting},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a BrokerSetting entity by its id.
+func (c *BrokerSettingClient) Get(ctx context.Context, id uuid.UUID) (*BrokerSetting, error) {
+	return c.Query().Where(brokersetting.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *BrokerSettingClient) GetX(ctx context.Context, id uuid.UUID) *BrokerSetting {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *BrokerSettingClient) Hooks() []Hook {
+	return c.hooks.BrokerSetting
+}
+
+// Interceptors returns the client interceptors.
+func (c *BrokerSettingClient) Interceptors() []Interceptor {
+	return c.inters.BrokerSetting
+}
+
+func (c *BrokerSettingClient) mutate(ctx context.Context, m *BrokerSettingMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&BrokerSettingCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&BrokerSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&BrokerSettingDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown BrokerSetting mutation op: %q", m.Op())
 	}
 }
 
@@ -9423,33 +9564,35 @@ type (
 	hooks struct {
 		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
 		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, Conversation,
-		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
-		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
-		Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
-		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken []ent.Hook
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting, ChatLinkCode,
+		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, Message, MessageAddressee,
+		MutationAudit, NonceCache, Notification, NotificationSubscription,
+		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, RoleBinding, RoleDefinition, RuntimeBroker, Schedule,
+		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, UsageReservation, User,
+		UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentIdentityKey,
 		AgentReincarnation, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerSecret, ChatLinkCode, Conversation,
-		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
-		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
-		Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
-		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken []ent.Interceptor
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting, ChatLinkCode,
+		Conversation, ConversationParticipant, DecisionAudit, DelegationEdge,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, Message, MessageAddressee,
+		MutationAudit, NonceCache, Notification, NotificationSubscription,
+		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, RoleBinding, RoleDefinition, RuntimeBroker, Schedule,
+		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, UsageReservation, User,
+		UserAccessToken []ent.Interceptor
 	}
 )

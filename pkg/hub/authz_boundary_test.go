@@ -2238,10 +2238,10 @@ func TestValidRealProjectScopeKinds_MaterialRowsNowLive(t *testing.T) {
 			t.Errorf("resource type %q has no live Registry permission", rt)
 		}
 	}
-	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: "project"}); err != nil {
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject}); err != nil {
 		t.Errorf("secret.deliver with a registered scope kind should validate: %v", err)
 	}
-	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceEnvVar, ScopeKind: "project"}); err == nil {
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceEnvVar, ScopeKind: store.ScopeProject}); err == nil {
 		t.Error("a class resource type mismatched with the permission's own resource type must still be rejected")
 	}
 }

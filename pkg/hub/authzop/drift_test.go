@@ -130,3 +130,40 @@ func TestCheckDrift_NoOpOnEmptyInput(t *testing.T) {
 		t.Errorf("expected no findings for nil input, got %+v", findings)
 	}
 }
+
+// TestCheckDrift_MethodMismatch proves a method-only difference is reported
+// as DriftPatternMismatch, the same as a pattern-only difference: same
+// Kind, same Pattern, different Method must produce exactly one
+// DriftPatternMismatch finding with both the catalog and the discovered
+// (actual) entry point set. This is the regression the catalog's method
+// drift (#2227) needed and did not have: DiscoveredEntryPoint.matches
+// already compares Method (drift.go), but nothing pinned that comparison.
+func TestCheckDrift_MethodMismatch(t *testing.T) {
+	discovered := map[OperationID][]DiscoveredEntryPoint{
+		// agent.update declares PATCH (handlers_agents_core.go). Supply a
+		// discovered entry point with the same kind and pattern but PUT,
+		// as if the live route had moved off PATCH — the same shape as the
+		// pre-#2227 catalog bug (agent.update wrongly declared PUT while
+		// the live route was PATCH).
+		"agent.update": {
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PUT"},
+		},
+	}
+	findings := CheckDrift(discovered)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly one drift finding for the method-only difference, got %+v", findings)
+	}
+	f := findings[0]
+	if f.Kind != DriftPatternMismatch {
+		t.Errorf("expected DriftPatternMismatch, got %v", f.Kind)
+	}
+	if f.Catalog == nil || f.Actual == nil {
+		t.Fatalf("expected both Catalog and Actual entry points set, got Catalog=%v Actual=%v", f.Catalog, f.Actual)
+	}
+	if f.Catalog.Method == f.Actual.Method {
+		t.Errorf("expected catalog and actual methods to differ, both were %q", f.Catalog.Method)
+	}
+	if f.Catalog.Pattern != f.Actual.Pattern {
+		t.Errorf("expected catalog and actual patterns to match (method-only mismatch), got %q vs %q", f.Catalog.Pattern, f.Actual.Pattern)
+	}
+}

@@ -185,10 +185,21 @@ class TelemetryProvisionTest(unittest.TestCase):
                     self.assertEqual(env['OTEL_EXPORTER_OTLP_PROTOCOL'], 'http/protobuf')
                     self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'otlp')
                     self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
+                    self.assertEqual(env['OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE'], 'delta')
                 else:
                     self.assertNotIn('COPILOT_OTEL_ENABLED', env)
                 self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
                 self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
+
+    def test_copilot_sets_usage_source_native_only_when_enabled(self):
+        # ptone/scion#2053 phase 3a: copilot's usage rule is metric-sourced;
+        # the deriver converts its cumulative-only metrics to deltas itself
+        # (design §5). SCION_USAGE_SOURCE=native is the same D4/D10 opt-in
+        # claude and codex already use.
+        enabled_env, _ = self._invoke('copilot', True, 14318, port_env_key='SCION_OTEL_HTTP_PORT')
+        self.assertEqual(enabled_env['SCION_USAGE_SOURCE'], 'native')
+        disabled_env, _ = self._invoke('copilot', False, 14318, port_env_key='SCION_OTEL_HTTP_PORT')
+        self.assertNotIn('SCION_USAGE_SOURCE', disabled_env)
 
     def test_copilot_never_reaches_cloud_endpoint(self):
         # #2053: copilot used to resolve SCION_OTEL_ENDPOINT (the generic
