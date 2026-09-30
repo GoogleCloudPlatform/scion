@@ -1057,9 +1057,6 @@ export class ScionPageChat extends LitElement {
       this._paletteDocumentsUnsubscribe = chatRecentFiles.subscribe((snapshot) =>
         this._handleRecentFilesSnapshot(snapshot)
       );
-    }
-
-    if (this.isV2) {
       void this.initV2();
     } else {
       // Guard: redirect v2 routes to /chat when v2 flag is OFF (O3)
