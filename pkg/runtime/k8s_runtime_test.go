@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -660,5 +661,184 @@ func TestNewKubernetesRuntime_UsesDetectedNamespace(t *testing.T) {
 	r := NewKubernetesRuntime(client)
 	if r.DefaultNamespace != "scion" {
 		t.Fatalf("DefaultNamespace = %q, want %q", r.DefaultNamespace, "scion")
+	}
+}
+
+// TestRun_RejectsUnsafeWorkspaceSource is the fail-closed regression test for
+// the Run() call site: a workspace source that is not an allowed workspace
+// path must be refused before any pod is created, not just logged.
+func TestRun_RejectsUnsafeWorkspaceSource(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	config := RunConfig{
+		Name:         "test-agent-unsafe-workspace",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		Workspace:    "/",
+	}
+
+	_, err := r.Run(context.Background(), config)
+	if err == nil {
+		t.Fatal("expected Run() to fail for a workspace source of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+
+	pods, listErr := clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+	if listErr != nil {
+		t.Fatalf("failed to list pods: %v", listErr)
+	}
+	if len(pods.Items) != 0 {
+		t.Errorf("expected no pods created (fail closed), found %d", len(pods.Items))
+	}
+}
+
+// TestRun_AcceptsLegitimateScionHomeWorkspaces is the positive
+// acceptance-set counterpart to TestRun_RejectsUnsafeWorkspaceSource: Run()
+// has no per-project root to pass to the shared validator (see the no-root
+// comment at its call site), so it depends entirely on the validator's named
+// ~/.scion allow list to still admit real workspaces. This does not assert
+// Run() succeeds end to end (that needs a fully-ready fake pod, out of scope
+// here) -- it asserts the failure, if any, is not the workspace-source
+// rejection, proving validation did not refuse a legitimate path.
+func TestRun_AcceptsLegitimateScionHomeWorkspaces(t *testing.T) {
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project workspace", relPath: []string{".scion", "workspace"}},
+		{name: "hub-managed project workspace", relPath: []string{".scion", "projects", "my-project", "workspace"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+
+			parts := append([]string{tmpHome}, tt.relPath...)
+			workspace := filepath.Join(parts...)
+			if err := os.MkdirAll(workspace, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			clientset := k8sfake.NewClientset()
+			scheme := k8sruntime.NewScheme()
+			fc := fake.NewSimpleDynamicClient(scheme)
+			client := k8s.NewTestClient(fc, clientset)
+			r := NewKubernetesRuntime(client)
+
+			config := RunConfig{
+				Name:         "test-agent",
+				Image:        "test-image",
+				UnixUsername: "scion",
+				Workspace:    workspace,
+			}
+
+			// A short-lived context: validation happens before pod creation
+			// and is what this test cares about. Run() passes this same
+			// context into waitForPodReady, which otherwise polls for up to
+			// 10 minutes against a fake clientset that never reports a pod
+			// as ready -- the deadline here cuts that wait short instead of
+			// hitting the full 10-minute real timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			_, err := r.Run(ctx, config)
+			if err != nil && strings.Contains(err.Error(), "is not an allowed workspace path") {
+				t.Errorf("expected %q to be accepted by workspace source validation, got: %v", workspace, err)
+			}
+		})
+	}
+}
+
+// newFakeAgentPodWithWorkspaceAnnotation builds a fake pod for Sync() tests:
+// List() finds it via the scion.name label, and Sync() reads the workspace
+// path straight from the scion.workspace annotation — exactly the "value
+// read from a persisted config" shape this test is exercising, not a
+// freshly-computed one.
+func newFakeAgentPodWithWorkspaceAnnotation(name, workspacePath string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				"scion.name": name,
+			},
+			Annotations: map[string]string{
+				"scion.workspace": workspacePath,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: agentContainerName, Image: "test-image"},
+			},
+		},
+	}
+}
+
+// TestSync_RejectsPersistedWorkspacePath is the fail-closed regression test
+// for the Sync() call site: a workspace path read from an already-persisted
+// pod annotation (as opposed to one freshly computed this call) must still
+// be rejected. The assertion is on the specific validation error message,
+// not just "err != nil" — Sync() would also return a non-nil error if
+// rejection were skipped and the sync attempt itself failed (there is no
+// real API server behind the fake clientset), so asserting the exact
+// validation wording is what proves the sync was never attempted, not just
+// that it failed for some other reason.
+//
+// Positive acceptance-set coverage for Sync() is not exercised end to end
+// here: Sync() has no per-project root available (only the pod's
+// annotations/labels are in scope), so it depends entirely on the
+// validator's named ~/.scion allow list to still admit a real, persisted
+// workspace path. That path can't be driven through the fake clientset --
+// syncToPod issues its pod-exec request through
+// r.Client.Clientset.CoreV1().RESTClient(), and the fake clientset's
+// RESTClient() panics on that call (a nil-config dereference deep inside
+// client-go) rather than returning an error, a limitation of the fake
+// clientset's exec subresource, and not something to work around by
+// reaching into client-go internals from a test. The
+// acceptance-set proof for this call site is
+// TestValidateWorkspaceSource_RootlessAcceptsScionProjectsSubtree
+// (workspace_source_guard_test.go), which directly covers the same
+// ~/.scion/projects/<slug>/... shape Sync() passes to the validator with no
+// root, the same way this test proves the rejection path without needing
+// the sync call to actually run.
+func TestSync_RejectsPersistedWorkspacePath(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		direction SyncDirection
+		bad       string
+	}{
+		{name: "SyncTo with root", direction: SyncTo, bad: "/"},
+		{name: "SyncFrom with root", direction: SyncFrom, bad: "/"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clientset := k8sfake.NewClientset()
+			pod := newFakeAgentPodWithWorkspaceAnnotation("test-agent", tt.bad)
+			if _, err := clientset.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatalf("failed to create pod: %v", err)
+			}
+
+			scheme := k8sruntime.NewScheme()
+			fc := fake.NewSimpleDynamicClient(scheme)
+			client := k8s.NewTestClient(fc, clientset)
+			r := NewKubernetesRuntime(client)
+
+			err := r.Sync(context.Background(), "test-agent", tt.direction)
+			if err == nil {
+				t.Fatal("expected Sync to fail for a persisted workspace path of '/'")
+			}
+			if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+				t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+			}
+		})
 	}
 }

@@ -1338,6 +1338,69 @@ func TestPrepareScionLayout_RelocatesHomeDir(t *testing.T) {
 	}
 }
 
+// TestPrepareScionLayout_RejectsUnsafeWorkspaceSource is the fail-closed
+// regression test for the workspace-copy site: cfg.Workspace already went
+// through pkg/agent Start()'s validation to reach this RunConfig, but this
+// call site should not depend on that alone. An unsafe value must be
+// refused before copyDirContents ever reads from it, not just logged.
+func TestPrepareScionLayout_RejectsUnsafeWorkspaceSource(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: "/"}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err == nil {
+		t.Fatal("expected prepareScionLayout to fail for a workspace source of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+
+	// The workspace directory itself is created unconditionally (mkdir, not
+	// copy), so "nothing was copied" means it exists but is empty -- proving
+	// the rejected source was never actually read from.
+	entries, readErr := os.ReadDir(paths.workspace)
+	if readErr != nil {
+		t.Fatalf("ReadDir(%q): %v", paths.workspace, readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files copied into %q after rejection, found: %v", paths.workspace, entries)
+	}
+}
+
+// TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace is the positive
+// acceptance-set counterpart: this call site has no per-project root (same
+// reasoning as buildCommonRunArgs and the k8s runtime's Run()), so it
+// depends entirely on the validator's named ~/.scion allow list to still
+// admit and copy from a real workspace under ~/.scion.
+func TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workspace := filepath.Join(tmpHome, ".scion", "projects", "my-project", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "hello.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: workspace}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("expected %q to be accepted by workspace source validation, got error: %v", workspace, err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths.workspace, "hello.txt"))
+	if err != nil {
+		t.Fatalf("hello.txt not found at scion workspace path: %v", err)
+	}
+	if string(data) != "hi" {
+		t.Errorf("hello.txt content = %q, want %q", string(data), "hi")
+	}
+}
+
 // -----------------------------------------------------------------------
 // List tests
 // -----------------------------------------------------------------------

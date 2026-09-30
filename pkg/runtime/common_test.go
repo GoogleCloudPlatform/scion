@@ -249,6 +249,15 @@ func TestBuildCommonRunArgs(t *testing.T) {
 	adcFile := filepath.Join(tmpDir, "adc.json")
 	_ = os.WriteFile(adcFile, []byte("{}"), 0644)
 
+	// A real, existing repo root for the RepoRoot-resolution cases below:
+	// buildCommonRunArgs resolves RepoRoot through filepath.EvalSymlinks, so
+	// the path must actually exist.
+	repoRoot := t.TempDir()
+	repoWorktreeWorkspace := filepath.Join(repoRoot, ".scion", "agents", "test-agent", "workspace")
+	if err := os.MkdirAll(repoWorktreeWorkspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name    string
 		config  RunConfig
@@ -452,13 +461,13 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
-				RepoRoot:     "/home/user/repo",
-				Workspace:    "/home/user/repo/.scion/agents/test-agent/workspace",
+				RepoRoot:     repoRoot,
+				Workspace:    repoWorktreeWorkspace,
 				Image:        "scion-agent:latest",
 			},
 			wantIn: []string{
-				"-v /home/user/repo/.git:/repo-root/.git",
-				"-v /home/user/repo/.scion/agents/test-agent/workspace:/repo-root/.scion/agents/test-agent/workspace",
+				"-v " + filepath.Join(repoRoot, ".git") + ":/repo-root/.git",
+				"-v " + repoWorktreeWorkspace + ":/repo-root/.scion/agents/test-agent/workspace",
 				"--workdir /repo-root/.scion/agents/test-agent/workspace",
 			},
 		},
@@ -468,12 +477,12 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
-				RepoRoot:     "/home/user/repo",
-				Workspace:    "/home/user/repo",
+				RepoRoot:     repoRoot,
+				Workspace:    repoRoot,
 				Image:        "scion-agent:latest",
 			},
 			wantIn: []string{
-				"-v /home/user/repo:/workspace",
+				"-v " + repoRoot + ":/workspace",
 				"--workdir /workspace",
 			},
 			wantOut: []string{
@@ -1178,12 +1187,13 @@ func TestScionDirShadowedWhenFullRepoMounted(t *testing.T) {
 	// When the full repo root is mounted (workspace outside repo root),
 	// a tmpfs shadow mount should be added over /repo-root/.scion to
 	// prevent agents from accessing other agents' secrets.
+	repoRoot := t.TempDir()
 	args, err := buildCommonRunArgs(RunConfig{
 		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
-		RepoRoot:     "/home/user/repo",
+		RepoRoot:     repoRoot,
 		Workspace:    "/some/external/workspace", // outside repo root
 	})
 	if err != nil {
@@ -1193,7 +1203,7 @@ func TestScionDirShadowedWhenFullRepoMounted(t *testing.T) {
 	argStr := strings.Join(args, " ")
 
 	// Should have the full repo root mount
-	if !strings.Contains(argStr, "-v /home/user/repo:/repo-root") {
+	if !strings.Contains(argStr, "-v "+repoRoot+":/repo-root") {
 		t.Errorf("expected full repo root mount, got: %s", argStr)
 	}
 
@@ -1206,13 +1216,18 @@ func TestScionDirShadowedWhenFullRepoMounted(t *testing.T) {
 func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	// When the workspace is inside the repo root, .git and workspace are
 	// mounted separately (no full repo mount), so no tmpfs shadow is needed.
+	repoRoot := t.TempDir()
+	workspace := filepath.Join(repoRoot, ".scion", "agents", "test", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
 	args, err := buildCommonRunArgs(RunConfig{
 		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
-		RepoRoot:     "/home/user/repo",
-		Workspace:    "/home/user/repo/.scion/agents/test/workspace",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
 	})
 	if err != nil {
 		t.Fatalf("buildCommonRunArgs failed: %v", err)
@@ -1221,7 +1236,7 @@ func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	argStr := strings.Join(args, " ")
 
 	// Should NOT have the full repo root mount
-	if strings.Contains(argStr, "-v /home/user/repo:/repo-root ") {
+	if strings.Contains(argStr, "-v "+repoRoot+":/repo-root ") {
 		t.Errorf("expected no full repo root mount, got: %s", argStr)
 	}
 
@@ -1611,6 +1626,207 @@ func TestBuildCommonRunArgs_NetworkMode(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected --network host in args, got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_RejectsUnsafeWorkspaceSource is the fail-closed
+// regression test for the check at this second gate: a workspace source
+// that is not an allowed workspace path must still be refused here even
+// when the caller is not pkg/agent's Start() (which already validates), and
+// — critically — no mount args may be produced at all.
+func TestBuildCommonRunArgs_RejectsUnsafeWorkspaceSource(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Workspace:    "/",
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err == nil {
+		t.Fatal("expected buildCommonRunArgs to fail for a workspace source of '/'")
+	}
+	if len(args) != 0 {
+		t.Errorf("expected no args on rejection (fail closed), got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_UsesResolvedWorkspaceSource proves the actual mount
+// is set up from the validator's resolved, symlink-free path, not the
+// nominal (symlinked) config.Workspace value.
+func TestBuildCommonRunArgs_UsesResolvedWorkspaceSource(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	realWorkspace := filepath.Join(tmpDir, "real-workspace")
+	if err := os.MkdirAll(realWorkspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workspaceLink := filepath.Join(tmpDir, "workspace-link")
+	if err := os.Symlink(realWorkspace, workspaceLink); err != nil {
+		t.Fatal(err)
+	}
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		Workspace:    workspaceLink,
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	realResolved, err := filepath.EvalSymlinks(realWorkspace)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realWorkspace, err)
+	}
+
+	argStr := strings.Join(args, " ")
+	if !strings.Contains(argStr, realResolved) {
+		t.Errorf("expected mount args to reference the resolved path %q, got: %v", realResolved, args)
+	}
+	if strings.Contains(argStr, workspaceLink) {
+		t.Errorf("expected mount args to NOT reference the nominal symlinked path %q, got: %v", workspaceLink, args)
+	}
+}
+
+// TestBuildCommonRunArgs_ResolvesSymlinkedRepoRoot_WorktreeSubdir covers a
+// gap in symlink resolution: buildCommonRunArgs resolved config.Workspace
+// but not config.RepoRoot, so a symlinked repo path changed the mount
+// layout depending on which of the two still carried the symlink by the
+// time filepath.Rel compared them. Both must be resolved the same way
+// before that comparison, so the worktree-subdirectory branch fires
+// correctly (mounting .git and the workspace at their real, relative paths)
+// instead of falling into the "outside repo root" fallback.
+func TestBuildCommonRunArgs_ResolvesSymlinkedRepoRoot_WorktreeSubdir(t *testing.T) {
+	realRepoRoot := t.TempDir()
+	workspace := filepath.Join(realRepoRoot, ".scion", "agents", "test-agent", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	repoRootLink := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(realRepoRoot, repoRootLink); err != nil {
+		t.Fatal(err)
+	}
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RepoRoot:     repoRootLink,
+		Workspace:    workspace,
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	realResolvedRoot, err := filepath.EvalSymlinks(realRepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realRepoRoot, err)
+	}
+
+	argStr := strings.Join(args, " ")
+	if !strings.Contains(argStr, "-v "+filepath.Join(realResolvedRoot, ".git")+":/repo-root/.git") {
+		t.Errorf("expected the worktree-subdir .git mount at the resolved repo root, got: %v", args)
+	}
+	if !strings.Contains(argStr, "--workdir /repo-root/.scion/agents/test-agent/workspace") {
+		t.Errorf("expected the worktree-subdir workdir layout, got: %v", args)
+	}
+	if strings.Contains(argStr, "/repo-root:/repo-root") || strings.Contains(argStr, repoRootLink) {
+		t.Errorf("expected no fallback full-repo-root mount and no reference to the nominal symlinked repo root, got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_ResolvesSymlinkedRepoRoot_SharedWorkspace is the
+// shared-workspace sibling of the worktree-subdir case above: when Workspace
+// equals RepoRoot, resolving both through the same symlink must still land
+// on the single-/workspace-mount branch, not the outside-repo-root fallback.
+func TestBuildCommonRunArgs_ResolvesSymlinkedRepoRoot_SharedWorkspace(t *testing.T) {
+	realRepoRoot := t.TempDir()
+	repoRootLink := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(realRepoRoot, repoRootLink); err != nil {
+		t.Fatal(err)
+	}
+
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RepoRoot:     repoRootLink,
+		Workspace:    repoRootLink,
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	realResolvedRoot, err := filepath.EvalSymlinks(realRepoRoot)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", realRepoRoot, err)
+	}
+
+	argStr := strings.Join(args, " ")
+	if !strings.Contains(argStr, "-v "+realResolvedRoot+":/workspace") {
+		t.Errorf("expected the single shared /workspace mount at the resolved repo root, got: %v", args)
+	}
+	if strings.Contains(argStr, "/repo-root") {
+		t.Errorf("expected no /repo-root mount for the shared-workspace case, got: %v", args)
+	}
+}
+
+// TestBuildCommonRunArgs_AcceptsLegitimateScionHomeWorkspaces is the positive
+// acceptance-set counterpart to TestBuildCommonRunArgs_RejectsUnsafeWorkspaceSource:
+// buildCommonRunArgs has no per-project root to pass to the shared validator
+// (see the no-root comment at its call site), so it depends entirely on the
+// validator's named ~/.scion allow list to still admit real workspaces. Both
+// the global project's own workspace and a hub-managed project's workspace
+// must go through, not just fail to be rejected outright.
+func TestBuildCommonRunArgs_AcceptsLegitimateScionHomeWorkspaces(t *testing.T) {
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project workspace", relPath: []string{".scion", "workspace"}},
+		{name: "hub-managed project workspace", relPath: []string{".scion", "projects", "my-project", "workspace"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+
+			parts := append([]string{tmpHome}, tt.relPath...)
+			workspace := filepath.Join(parts...)
+			if err := os.MkdirAll(workspace, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			config := RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Workspace:    workspace,
+			}
+
+			args, err := buildCommonRunArgs(config)
+			if err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", workspace, err)
+			}
+			if !strings.Contains(strings.Join(args, " "), workspace) {
+				t.Errorf("expected mount args to reference %q, got: %v", workspace, args)
+			}
+		})
 	}
 }
 

@@ -639,6 +639,38 @@ func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, temp
 	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
 }
 
+// isGitWorkspaceProject reports whether projectDir should be treated as a
+// git project when deciding how to provision or validate its workspace
+// source. Inside an agent container (SCION_HOST_UID set), git detection is
+// suppressed: container worktrees produce path-identity mismatches, since
+// --relative-paths are computed against the container mount layout, not the
+// host filesystem. ProvisionAgent (resolving the workspace source on first
+// provision) and Start()'s workspaceSourceRoots (validating it on every
+// start, including resume) both call this, so a workspace provisioned
+// through the non-git branch under SCION_HOST_UID is never re-classified as
+// git later and checked against a repo root it was never provisioned
+// relative to.
+func isGitWorkspaceProject(projectDir string) bool {
+	return util.IsGitRepoDir(projectDir) && os.Getenv("SCION_HOST_UID") == ""
+}
+
+// isProjectConfigsPath reports whether projectDir is a marker-resolved,
+// externalized project directory under the global project-configs tree
+// (~/.scion/project-configs/<dir>/.scion, config.ResolveProjectMarker's
+// output for a hub-dispatched project whose own directory holds only a
+// .scion marker file, not a full .scion directory). Unlike a plain
+// externalized project's own .scion directory, filepath.Dir(projectDir)
+// here names storage for the project's configuration only, never the
+// project's actual files.
+func isProjectConfigsPath(projectDir string) bool {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	projectConfigsDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	return filepath.Dir(filepath.Dir(projectDir)) == projectConfigsDir
+}
+
 // resolveProjectRoot determines the project root directory on this broker.
 // Used for resolving relative --workspace paths against the project's logical root.
 func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
@@ -752,15 +784,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	projectName := config.GetProjectName(projectDir)
-	isGit := util.IsGitRepoDir(projectDir)
-	isGitWorkspace := isGit // preserve for skill injection before container override
-	if isGit && os.Getenv("SCION_HOST_UID") != "" {
-		// Inside an agent container: treat as non-git to prevent worktree
-		// creation. Container worktrees produce path-identity mismatches
-		// because --relative-paths are computed against the container mount
-		// layout, not the host filesystem.
-		isGit = false
-	}
+	isGitWorkspace := util.IsGitRepoDir(projectDir) // preserve for skill configuration before container override
+	isGit := isGitWorkspaceProject(projectDir)
 
 	// Verify .gitignore if in a repo
 	if isGit {
@@ -921,15 +946,39 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else {
 		// Case 3: Non-Git Repository (and no explicit workspace)
+		agentWorkspace = "" // Using external mount, except in the project-configs branch below.
 		if projectName == "global" {
-			workspaceSource, _ = os.Getwd()
+			// The global project has no repository or externalized workspace
+			// path of its own, so it owns a dedicated workspace directory
+			// under its own project directory rather than mounting whatever
+			// directory the CLI happened to be invoked from. Bootstrap it on
+			// first use, the same way the sibling git-clone branch above
+			// creates agentWorkspace.
+			globalWorkspace := filepath.Join(projectDir, "workspace")
+			if err := os.MkdirAll(globalWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create global project workspace directory: %w", err)
+			}
+			workspaceSource = globalWorkspace
 		} else if settings != nil && settings.WorkspacePath != "" {
 			// Externalized project: use workspace-path from settings
 			workspaceSource = settings.WorkspacePath
+		} else if isProjectConfigsPath(projectDir) {
+			// Hub-dispatched, non-git project whose projectDir was marker-
+			// resolved (config.ResolveProjectMarker) to its externalized
+			// ~/.scion/project-configs/<dir>/.scion: that directory holds
+			// only the project's own configuration, never the project's
+			// actual files, so mounting filepath.Dir(projectDir) directly
+			// (the plain-externalized-project fallback below) would give
+			// the agent an empty config directory to work in instead of a
+			// real workspace. Use the same per-agent workspace shape the
+			// git-clone and worktree branches above already create.
+			agentWorkspace = filepath.Join(agentDir, "workspace")
+			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+			}
 		} else {
 			workspaceSource = filepath.Dir(projectDir)
 		}
-		agentWorkspace = "" // Using external mount
 	}
 
 	// Worktree Creation (if needed)

@@ -422,6 +422,23 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	// Reject a workspace source that is not an allowed workspace path before
+	// it is persisted to the pod annotation that both this function's own
+	// sync step and the standalone Sync() command later trust. Act on the
+	// resolved, symlink-free path it returns. As in buildCommonRunArgs, no
+	// per-project root is passed: a workspace outside RepoRoot is a
+	// supported shape (an explicit --workspace, in particular) that
+	// RunConfig carries no flag to distinguish from a bad value, so only
+	// the fixed deny-set applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site.
+	if config.Workspace != "" {
+		resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+		if err != nil {
+			return "", err
+		}
+		config.Workspace = resolvedWorkspace
+	}
+
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
 		config.Annotations = ensureAnnotations(config.Annotations)
@@ -2833,6 +2850,21 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	if workspacePath == "" {
 		return fmt.Errorf("agent '%s' does not have a workspace path recorded", id)
 	}
+
+	// Only a path under the project's own workspace may be used here, as
+	// either a sync source (broker disk -> agent, SyncTo direction) or a
+	// sync destination (agent -> broker disk, SyncFrom direction). This is a
+	// value read straight from a persisted pod annotation, not freshly
+	// computed, so it needs this check independent of whatever validated it
+	// (or didn't) when it was first written. No per-project root is
+	// available at this call site — only agent annotations/labels are in
+	// scope, with no project directory or settings to derive one from — so
+	// only the fixed deny-set applies.
+	resolvedWorkspacePath, err := ValidateWorkspaceSource(workspacePath, "")
+	if err != nil {
+		return err
+	}
+	workspacePath = resolvedWorkspacePath
 
 	homeDir := agent.Annotations["scion.homedir"]
 	username := agent.Annotations["scion.username"]

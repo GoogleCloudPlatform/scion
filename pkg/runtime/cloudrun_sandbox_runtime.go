@@ -357,10 +357,23 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	// Workspace: copy content from broker-provisioned workspace to /scion.
 	// Do NOT remove the original — it may be shared among agents.
 	if cfg.Workspace != "" && !strings.HasPrefix(cfg.Workspace, rootDir+"/") && cfg.Workspace != rootDir {
-		if err := copyDirContents(cfg.Workspace, p.workspace); err != nil {
+		// Reject a workspace source that is not an allowed workspace path
+		// before copying from it. This is a second gate matching the one at
+		// buildCommonRunArgs and the k8s runtime's Run(): cfg.Workspace
+		// already went through pkg/agent Start()'s validation to reach this
+		// RunConfig, but this call site should not depend on that alone. No
+		// per-project root is passed for the same reason as those two sites:
+		// RunConfig carries no flag to tell "workspace outside repo root"
+		// (a supported shape) apart from a bad value, so only the fixed
+		// deny-set (and its named ~/.scion allow list) applies.
+		resolvedWorkspace, err := ValidateWorkspaceSource(cfg.Workspace)
+		if err != nil {
+			return p, err
+		}
+		if copyErr := copyDirContents(resolvedWorkspace, p.workspace); copyErr != nil {
 			// Non-fatal: agent can still read via rootfs; writes go to /scion.
 			runtimeLog.Debug("workspace content not copied to /scion",
-				"workspace", cfg.Workspace, "scionWorkspace", p.workspace, "error", err)
+				"workspace", resolvedWorkspace, "scionWorkspace", p.workspace, "error", copyErr)
 		}
 	}
 

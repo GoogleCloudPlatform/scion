@@ -205,6 +205,43 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if config.HomeDir != "" {
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
+	// Reject a workspace source that is not an allowed workspace path before
+	// any of the branches below turn it into a bind mount, and act on the
+	// resolved, symlink-free path it returns rather than the original value.
+	// This mirrors the same check at the pkg/agent Start() call site, as a
+	// second gate at the actual point config.Workspace becomes a mount —
+	// covering any caller that builds a RunConfig without going through
+	// Start().
+	//
+	// No root is passed here, even though config.RepoRoot is often set: a
+	// workspace outside the repo root is an intentional, supported shape at
+	// this layer (see the "Fallback if workspace is outside repo root"
+	// branch below, and an explicit --workspace generally), and RunConfig
+	// carries no flag this function could use to tell that apart from a bad
+	// value. Only the fixed deny-set ('/', $HOME, ~/.scion, and its named
+	// ~/.scion allow list) applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site, which does have
+	// that context.
+	resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+	if err != nil {
+		return nil, err
+	}
+	config.Workspace = resolvedWorkspace
+
+	// Resolve RepoRoot through any symlinks too, the same way Workspace just
+	// was: the branches below compare the two with filepath.Rel to decide
+	// the mount layout, and a symlinked repo path that only one of the two
+	// still carries silently changes which branch fires (in-repo worktree
+	// vs. shared-workspace vs. the outside-repo-root fallback) depending on
+	// which side of the comparison the symlink survives on.
+	if config.RepoRoot != "" {
+		resolvedRepoRoot, err := filepath.EvalSymlinks(config.RepoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repo root %s: %w", config.RepoRoot, err)
+		}
+		config.RepoRoot = resolvedRepoRoot
+	}
+
 	fullRepoRootMounted := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the

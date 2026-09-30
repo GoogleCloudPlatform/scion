@@ -543,13 +543,18 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 	globalScionDir, _ := config.GetGlobalDir()
 
-	// Change into a subdirectory to act as CWD
+	// Change into an unrelated subdirectory to prove the global project's
+	// workspace does not depend on the CLI's current working directory.
 	cwd := filepath.Join(tmpDir, "some-dir")
 	_ = os.MkdirAll(cwd, 0755)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
-	evalCWD, _ := filepath.EvalSymlinks(cwd)
+
+	wantGlobalWorkspace := filepath.Join(globalScionDir, "workspace")
+	if _, err := os.Stat(wantGlobalWorkspace); !os.IsNotExist(err) {
+		t.Fatalf("expected global project workspace directory to not exist yet, stat err = %v", err)
+	}
 
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
 	if err != nil {
@@ -560,18 +565,53 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Errorf("expected empty workspace path for global agent, got %q", ws)
 	}
 
+	if info, err := os.Stat(wantGlobalWorkspace); err != nil || !info.IsDir() {
+		t.Fatalf("expected global project workspace directory to be created at %q on first use: %v", wantGlobalWorkspace, err)
+	}
+	evalWantGlobalWorkspace, _ := filepath.EvalSymlinks(wantGlobalWorkspace)
+
 	found = false
 	for _, v := range cfg.Volumes {
 		if v.Target == "/workspace" {
 			found = true
 			evalSource, _ := filepath.EvalSymlinks(v.Source)
-			if evalSource != evalCWD {
-				t.Errorf("expected global agent volume source %q (CWD), got %q", evalCWD, evalSource)
+			if evalSource != evalWantGlobalWorkspace {
+				t.Errorf("expected global agent volume source %q, got %q", evalWantGlobalWorkspace, evalSource)
 			}
 		}
 	}
 	if !found {
 		t.Error("expected /workspace volume mount not found in global agent config")
+	}
+
+	// A second global agent, provisioned from a different CWD, reuses the
+	// same project workspace directory instead of deriving a new one.
+	cwd2 := filepath.Join(tmpDir, "another-dir")
+	_ = os.MkdirAll(cwd2, 0755)
+	if err := os.Chdir(cwd2); err != nil {
+		t.Fatal(err)
+	}
+
+	_, ws2, cfg2, err := ProvisionAgent(context.Background(), "global-agent-2", "default", "", "", globalScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed for second global agent: %v", err)
+	}
+	if ws2 != "" {
+		t.Errorf("expected empty workspace path for second global agent, got %q", ws2)
+	}
+
+	found = false
+	for _, v := range cfg2.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalWantGlobalWorkspace {
+				t.Errorf("expected second global agent to reuse volume source %q, got %q", evalWantGlobalWorkspace, evalSource)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in second global agent config")
 	}
 }
 
