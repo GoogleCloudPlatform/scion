@@ -95,9 +95,9 @@ func TestUATCeilingStep1_AliasSelectorMintTimeParity(t *testing.T) {
 // test fail if the Ceiling().Allows call in enforceUATConstraints is removed
 // (both assertions would then pass regardless of the ceiling, since nothing
 // gates on it — caught by the deny assertion no longer firing) or inverted
-// (the deny/control results would flip). This was proven by temporarily
-// removing/inverting that call locally, confirming this test fails both
-// ways, then reverting — see merge-r2-report.md.
+// (the deny/control results would flip). This was verified by temporarily
+// removing, then inverting, that call and confirming this test fails both
+// ways, then reverting.
 func TestUATCeilingStep1_ExactScopeDenialIsCeilingGated(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
