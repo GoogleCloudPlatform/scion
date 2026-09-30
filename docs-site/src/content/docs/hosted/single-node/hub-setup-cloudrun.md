@@ -395,10 +395,11 @@ curl -X PUT "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" \
 
 (`$LIMIT_ID` comes from `GET /api/v1/admin/limits`; the `description` above is
 the value the Hub seeds — check the `GET` response in case it has been edited.)
-This is a single hub-wide value; there is no way yet to set a different cap for
-one broker (per-broker values are coming in `ptone/scion#2061` P2). If you
-deploy at 8 CPU/32 GiB instead, scale the cap proportionally, keeping the same
-margin below that tier's measured ceiling — not up to it; see
+This is the hub-wide default; to set a different cap for one broker, use that
+broker's `maxAgents` setting instead — see [Broker
+Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings).
+If you deploy at 8 CPU/32 GiB instead, scale the cap proportionally, keeping
+the same margin below that tier's measured ceiling — not up to it; see
 [Sizing](#4-sizing) above.
 
 ---
