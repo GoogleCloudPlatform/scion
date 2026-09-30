@@ -1068,6 +1068,10 @@ func (s *Server) guarded(pattern string, handler http.HandlerFunc) http.HandlerF
 // It runs BEFORE the handler. The handler's own authorization checks remain as defense-in-depth.
 func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every guarded route's decision audit carries its RouteID.
+		if meta.RouteID != "" {
+			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
 		switch meta.Classification {
 		case RoutePublic:
 			// No guard — pass through
