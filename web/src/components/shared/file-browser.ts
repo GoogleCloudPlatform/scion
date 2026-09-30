@@ -1099,13 +1099,19 @@ export class ScionFileBrowser extends LitElement {
   }
 
   private formatDate(dateString: string): string {
+    // new Date() never throws, but Intl.DateTimeFormat#format() throws a
+    // RangeError for an invalid date (e.g. an unparseable dateString).
+    // Checking getTime() up front avoids that throw/catch entirely — cheap
+    // per row, and exceptions are comparatively expensive to raise
+    // (GoogleCloudPlatform/scion#2176 review) — while still falling back to
+    // the raw string for an invalid date, same as before.
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) {
+      return dateString;
+    }
     try {
-      const date = new Date(dateString);
       return FILE_DATE_FORMATTER.format(date);
     } catch {
-      // new Date() never throws, but Intl.DateTimeFormat#format() throws a
-      // RangeError for an invalid date (e.g. an unparseable dateString) —
-      // fall back to the raw string, same as before.
       return dateString;
     }
   }

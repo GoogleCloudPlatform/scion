@@ -131,6 +131,25 @@ describe('scion-file-browser — shared date formatter', () => {
     expect(text).toBe('not-a-real-date');
   });
 
+  it('never calls the formatter for an invalid date — no throw/catch on the hot path', async () => {
+    // GoogleCloudPlatform/scion#2176 review: Intl.DateTimeFormat#format()
+    // throws a RangeError for an invalid Date, and throwing/catching is
+    // comparatively expensive per row on a large listing. formatDate() now
+    // checks getTime() up front and returns before ever calling format(),
+    // rather than relying on catching that exception.
+    // `format` is a getter (returns a bound formatting function), not a
+    // plain method — spy on the accessor itself, since even *accessing*
+    // FILE_DATE_FORMATTER.format only happens on the path that goes on to
+    // call it.
+    const formatSpy = vi.spyOn(Intl.DateTimeFormat.prototype, 'format', 'get');
+    const el = await mountWithFiles([makeEntry('bad.txt', 'not-a-real-date')]);
+    const [text] = dateCellsText(el);
+    // Output is unchanged...
+    expect(text).toBe('not-a-real-date');
+    // ...but it's no longer produced by attempting-and-catching a throw.
+    expect(formatSpy).not.toHaveBeenCalled();
+  });
+
   // Mounting 1000 real rows (each with several Shoelace icon-buttons) in
   // happy-dom is inherently slower than the default 5s test timeout — that
   // is DOM/custom-element upgrade cost in the test environment, not the
