@@ -42,35 +42,14 @@ func errorsHelperCaptureLogs(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
-// errorsHelperRecordAtLevel returns the first JSON log record in buf at the
-// given level whose msg starts with "API ", or nil if there is none.
-// Filtering by prefix, rather than taking the last line in the buffer,
-// avoids picking up an unrelated log line that a background goroutine left
-// over from an earlier test could still write into the process-global
-// logger while this test runs.
-func errorsHelperRecordAtLevel(t *testing.T, buf *bytes.Buffer, level string) map[string]any {
+// errorsHelperAPIRecords returns every JSON log record in buf whose msg
+// starts with "API ", across all levels. Filtering by prefix, rather than
+// taking the last line in the buffer, avoids picking up an unrelated log
+// line that a background goroutine left over from an earlier test could
+// still write into the process-global logger while this test runs.
+func errorsHelperAPIRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	t.Helper()
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		msg, _ := rec["msg"].(string)
-		if rec["level"] == level && strings.HasPrefix(msg, "API ") {
-			return rec
-		}
-	}
-	return nil
-}
-
-// errorsHelperCountRecords returns the number of JSON log records in buf
-// whose msg starts with "API ", across all levels.
-func errorsHelperCountRecords(t *testing.T, buf *bytes.Buffer) int {
-	t.Helper()
-	n := 0
+	var recs []map[string]any
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if line == "" {
 			continue
@@ -81,10 +60,29 @@ func errorsHelperCountRecords(t *testing.T, buf *bytes.Buffer) int {
 		}
 		msg, _ := rec["msg"].(string)
 		if strings.HasPrefix(msg, "API ") {
-			n++
+			recs = append(recs, rec)
 		}
 	}
-	return n
+	return recs
+}
+
+// errorsHelperRecordAtLevel returns the first record from
+// errorsHelperAPIRecords at the given level, or nil if there is none.
+func errorsHelperRecordAtLevel(t *testing.T, buf *bytes.Buffer, level string) map[string]any {
+	t.Helper()
+	for _, rec := range errorsHelperAPIRecords(t, buf) {
+		if rec["level"] == level {
+			return rec
+		}
+	}
+	return nil
+}
+
+// errorsHelperCountRecords returns the number of records from
+// errorsHelperAPIRecords.
+func errorsHelperCountRecords(t *testing.T, buf *bytes.Buffer) int {
+	t.Helper()
+	return len(errorsHelperAPIRecords(t, buf))
 }
 
 func TestWriteErrorFromErr_PermissionError(t *testing.T) {
@@ -249,6 +247,14 @@ func TestWriteErrorFromErr_LogLevel(t *testing.T) {
 			rec := errorsHelperRecordAtLevel(t, buf, tt.level)
 			if rec == nil {
 				t.Fatalf("expected a %s record, got none", tt.level)
+			}
+
+			want := 1
+			if tt.elevated {
+				want = 2
+			}
+			if n := errorsHelperCountRecords(t, buf); n != want {
+				t.Errorf("expected exactly %d API log record(s) for %s, got %d", want, tt.name, n)
 			}
 
 			if !tt.elevated {
