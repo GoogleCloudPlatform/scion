@@ -354,7 +354,11 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// code) pending confirmation of the final cross-project policy for
 	// keystroke injection; it does not touch Plain, which is unaffected by
 	// this decision.
-	if input.Raw && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+	//
+	// Uses the shared crossProjectRawUnsupported predicate (raw_guard.go),
+	// the same one handlers_agent_messaging.go's earlier HTTP-layer check
+	// calls, so the two checks share one definition and cannot drift apart.
+	if input.Raw && crossProjectRawUnsupported(input.SenderAgent.ProjectID, input.TargetAgent.ProjectID) {
 		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
 			"cross-project raw keystroke delivery not supported"))
 		return nil, &AgentDMError{
@@ -363,6 +367,25 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusUnprocessableEntity,
 			Details: map[string]interface{}{
 				"reason": string(MessageDenialCrossProjectRawUnsupported),
+			},
+		}
+	}
+
+	// 4c. Managed-backend raw rejection (ptone/scion#2192).
+	//
+	// managedAgentMessage only accepts a plain-text body. Raw to a
+	// managed-runtime target is rejected here, so raw never reaches
+	// CreateInteraction and callers are not misled into believing raw
+	// semantics were applied.
+	if input.Raw && isManagedAgentRuntime(input.TargetAgent.Runtime) {
+		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialRawManagedUnsupported),
+			"raw delivery not supported for managed-runtime agents"))
+		return nil, &AgentDMError{
+			Code:       ErrCodeUnsupportedCapability,
+			Message:    "raw delivery is not supported for managed-runtime agents",
+			HTTPStatus: http.StatusUnprocessableEntity,
+			Details: map[string]interface{}{
+				"reason": string(MessageDenialRawManagedUnsupported),
 			},
 		}
 	}
@@ -680,16 +703,24 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// preserve the pre-refactor observer envelope shape.
 	// Cross-project DMs strip body and attachment metadata from the
 	// observer message (#1687).
-	if bp := s.GetMessageBrokerProxy(); bp != nil {
-		observerMsg := *structuredMsg
-		observerMsg.ObserverOnly = true
-		observerMsg.ConversationAsserted = false
-		if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
-			sanitizeCrossProjectObserver(&observerMsg)
-		}
-		if err := bp.PublishMessage(ctx, input.TargetAgent.ProjectID, &observerMsg); err != nil {
-			s.messageLog.Error("agent DM: observer publish failed",
-				"target_agent_id", input.TargetAgent.ID, "error", err)
+	//
+	// Phase 0.2 (ptone/scion#2192): do not mirror terminal input to message
+	// observers. Raw carries literal keystrokes, not a message body —
+	// plugin observers (Telegram, broker-log) and chat relays are message
+	// consumers, not a keystroke sink, so this publication is skipped
+	// entirely for raw DMs.
+	if !structuredMsg.Raw {
+		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			observerMsg := *structuredMsg
+			observerMsg.ObserverOnly = true
+			observerMsg.ConversationAsserted = false
+			if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
+				sanitizeCrossProjectObserver(&observerMsg)
+			}
+			if err := bp.PublishMessage(ctx, input.TargetAgent.ProjectID, &observerMsg); err != nil {
+				s.messageLog.Error("agent DM: observer publish failed",
+					"target_agent_id", input.TargetAgent.ID, "error", err)
+			}
 		}
 	}
 

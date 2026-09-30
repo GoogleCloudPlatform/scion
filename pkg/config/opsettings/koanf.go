@@ -112,6 +112,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
 	},
+	"quotas": {
+		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -152,6 +155,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
+	},
+	"quotas": {
+		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",

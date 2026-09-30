@@ -103,6 +103,15 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		ValidationError(w, "message is required", map[string]interface{}{"field": "message"})
 		return
 	}
+	// Phase 0.2 (ptone/scion#2192): broker/plugin ingress cannot use a raw
+	// message to obtain terminal authority through a claimed sender. Raw is
+	// rejected before sender identity synthesis, routing resolution,
+	// conversation resolution, mention work or dispatch.
+	if req.Message.Raw {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBrokerIngressUnsupported,
+			"raw message delivery is not supported on broker inbound ingress"))
+		return
+	}
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)

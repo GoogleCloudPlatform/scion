@@ -40,6 +40,25 @@ const (
 	AgentActionMetrics           = "metrics"
 	AgentActionSetMessageMode    = "set_message_mode"
 	AgentActionReincarnate       = "reincarnate"
+
+	// AgentActionKeys names the dedicated terminal-keystroke-injection route
+	// (POST /api/v1/agents/{id}/keys and the project-scoped equivalent),
+	// frozen by the agent-keys contract (.design/agent-keys-contract.md,
+	// ptone/scion#2191). It is a route/action name, not an independently
+	// grantable authorization permission — see agentActionPermission in
+	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
+	//
+	// Deliberately NOT added to RuntimeBrokerAgentActionMethod below: the
+	// broker side never sees this action at all yet. A live
+	// POST /api/v1/agents/{id}/keys request does reach
+	// agentActionPermission("keys") on the Hub side, through the generic
+	// authz block every action passes through before dispatch — but no case
+	// for this constant exists yet in pkg/hub's action-dispatch switches
+	// (handlers_agents_core.go, handlers_projects_core.go), so dispatch
+	// still 404s regardless. This constant exists so later tasks (1.1, 1.2,
+	// 2.1, 2.2) can reference a single frozen action name while they wire
+	// the actual route, rather than each inventing their own string.
+	AgentActionKeys = "keys"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed

@@ -602,7 +602,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | DELETE | `/api/v1/groups/{id}/members/{memberId}` |
+| http_route | DELETE | `/api/v1/groups/{id}/members/{memberType}/{memberId}` |
 
 **Principals:** `user`
 
@@ -993,7 +993,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/gcp-service-accounts/{id}/assign` |
+| internal_dispatch | — | `createAgentInProject:gcp-identity-assign` |
+| internal_dispatch | — | `applyAgentUpdate:gcp-identity-assign` |
 
 **Principals:** `user`
 
@@ -1234,7 +1235,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/chat/threads/{id}/messages` |
 | broker_call | — | `broker.inbound` |
 
 **Principals:** `user`, `agent`, `broker`
@@ -1356,7 +1356,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/secrets` |
 | http_route | PUT | `/api/v1/secrets/{key}` |
 | http_route | DELETE | `/api/v1/secrets/{key}` |
 
@@ -1596,7 +1595,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/admin/server-config/sections/{id}` |
+| http_route | PUT | `/api/v1/admin/server-config` |
+| http_route | DELETE | `/api/v1/admin/server-config/sections/{id}` |
 
 **Principals:** `user`
 
@@ -1657,12 +1657,12 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/admin/maintenance/operations` |
 | http_route | GET | `/api/v1/admin/maintenance/operations` |
 | http_route | GET | `/api/v1/admin/maintenance/operations/{id}` |
+| http_route | POST | `/api/v1/admin/maintenance/operations/{id}/run` |
 | http_route | POST | `/api/v1/admin/maintenance/restart` |
 | http_route | POST | `/api/v1/admin/maintenance/check-updates` |
-| http_route | POST | `/api/v1/admin/maintenance/migrations/{id}` |
+| http_route | POST | `/api/v1/admin/maintenance/migrations/{id}/run` |
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
 
@@ -1725,8 +1725,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/allow-list` |
-| http_route | PUT | `/api/v1/admin/allow-list` |
-| http_route | PUT | `/api/v1/admin/allow-list/{email}` |
+| http_route | POST | `/api/v1/admin/allow-list` |
 | http_route | DELETE | `/api/v1/admin/allow-list/{email}` |
 
 **Principals:** `user`
@@ -1911,7 +1910,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/admin/validate-resources` |
+| http_route | GET | `/api/v1/admin/validate-resources` |
 
 **Principals:** `user`
 
@@ -2183,7 +2182,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/agents/{id}` |
+| http_route | PATCH | `/api/v1/agents/{id}` |
 
 **Principals:** `user`
 
@@ -2308,7 +2307,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/agents/{id}/message-mode` |
+| http_route | POST | `/api/v1/agents/{id}/set_message_mode` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/set_message_mode` |
 
 **Principals:** `user`
 
@@ -2424,7 +2424,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}` |
+| http_route | PATCH | `/api/v1/projects/{id}` |
 
 **Principals:** `user`
 
@@ -2486,7 +2486,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
 | http_route | GET | `/api/v1/skills/{id}` |
-| http_route | GET | `/api/v1/skills/discover-directory` |
+| http_route | POST | `/api/v1/skills/discover-directory` |
 
 **Principals:** `user`
 
@@ -2546,7 +2546,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/skills/{id}` |
+| http_route | PATCH | `/api/v1/skills/{id}` |
 
 **Principals:** `user`
 
@@ -2656,7 +2656,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/templates` |
 | http_route | GET | `/api/v1/templates/{id}` |
-| http_route | GET | `/api/v1/resources/discover` |
+| http_route | POST | `/api/v1/resources/discover` |
 
 **Principals:** `user`
 
@@ -2973,7 +2973,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/groups/{id}` |
+| http_route | PATCH | `/api/v1/groups/{id}` |
 
 **Principals:** `user`
 
@@ -3066,6 +3066,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/runtime-brokers` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
@@ -3203,7 +3204,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/role-bindings` |
-| http_route | GET | `/api/v1/admin/role-bindings/{id}` |
+| http_route | GET | `/api/v1/admin/role-bindings/user/{userId}` |
 
 **Principals:** `user`
 
@@ -3299,7 +3300,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/admin/limits` |
-| http_route | POST | `/api/v1/admin/entitlements/{id}` |
+| http_route | POST | `/api/v1/admin/limits/{id}/entitlements` |
 
 **Principals:** `user`
 
@@ -3331,6 +3332,7 @@
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/limits/{id}` |
 | http_route | PUT | `/api/v1/admin/entitlements/{id}` |
+| http_route | PUT | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
@@ -3462,7 +3464,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
 
 **Principals:** `user`
 
@@ -3533,14 +3535,14 @@
 | http_route | GET | `/api/v1/chat/prefs` |
 | http_route | PUT | `/api/v1/chat/prefs` |
 | http_route | GET | `/api/v1/chat/threads` |
-| http_route | GET | `/api/v1/chat/threads/{id}` |
+| http_route | POST | `/api/v1/chat/threads/{id}/read` |
 | http_route | GET | `/api/v1/chat/spaces` |
-| http_route | GET | `/api/v1/chat/spaces/{id}` |
-| http_route | GET | `/api/v1/chat/conversations/{id}` |
+| http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/chat/topics/{id}` |
 | http_route | GET | `/api/v1/chat/dms` |
 | http_route | GET | `/api/v1/chat/search` |
-| http_route | GET | `/api/v1/chat/attachments` |
+| http_route | POST | `/api/v1/chat/attachments` |
 | http_route | GET | `/api/v1/chat/attachments/{id}` |
 
 **Principals:** `user`

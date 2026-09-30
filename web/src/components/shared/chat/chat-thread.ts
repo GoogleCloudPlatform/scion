@@ -37,15 +37,18 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
-import { stateManager } from '../../../client/main.js';
+import { navigateTo, stateManager } from '../../../client/main.js';
+import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
+import type { ChatAgentMember } from './chat-members.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -359,6 +362,18 @@ export class ScionChatThread extends LitElement {
     kind: 'user' | 'agent';
   }> = [];
 
+  /**
+   * Agent members with the richer per-agent fields (`canAttach`, `projectId`)
+   * the members sidebar (chat-members.ts) already receives as `.agents`.
+   * The context menu's "Open terminal" / "Open in graph" items key off this
+   * list rather than `members` because they act on the message's author
+   * agent, which may not be the thread's default agent or DM peer — the
+   * only agents `getAgentProjectId`/`renderAgentToolbarButtons` in
+   * pages/chat.ts otherwise resolve.
+   */
+  @property({ type: Array })
+  agentMembers: ChatAgentMember[] = [];
+
   /** Whether v2 mode is active. Derived from conversationKey presence. */
   private get isV2(): boolean {
     return this.conversationKey.length > 0;
@@ -558,6 +573,16 @@ export class ScionChatThread extends LitElement {
 
   /** Last message ID POSTed to /read — suppresses redundant watermark writes. */
   private _lastAdvancedMessageId = '';
+
+  /**
+   * Set when this conversation was just marked unread (from the rail, the
+   * members sidebar, or another of the user's own tabs) while it is open
+   * here. Blocks maybeAdvanceReadWatermark so viewing the still-open
+   * conversation does not immediately re-mark it read — Slack-like
+   * behaviour. Cleared by a conversation switch (navigate away and back) or
+   * by sending a message here.
+   */
+  private _autoAdvanceSuppressed = false;
 
   // ---- Typing indicator state ----
 
@@ -1052,6 +1077,11 @@ export class ScionChatThread extends LitElement {
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
 
+    // A thread switch is "navigate away" — mark-unread's suppression is
+    // scoped to the conversation being open continuously, so leaving it
+    // (even to come straight back) lifts it.
+    this._autoAdvanceSuppressed = false;
+
     // Clear unread divider state.
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
@@ -1416,6 +1446,11 @@ export class ScionChatThread extends LitElement {
         if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
         this._initialWatermarkTimer = setTimeout(() => {
           this._initialWatermarkTimer = null;
+          // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
+          // gates — a mark-unread landing during this delay (e.g. another tab,
+          // or this one via the rail) must not be undone the instant this
+          // timer fires.
+          if (this._autoAdvanceSuppressed) return;
           const messageId = this.lastReadableMessageId();
           if (messageId) {
             void this.advanceReadWatermark(messageId);
@@ -1887,16 +1922,70 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Handle a peer's read-watermark advance arriving over SSE. */
+  /**
+   * Handle a read-watermark change arriving over SSE. This fires for two
+   * different things sharing one event: a DM peer's watermark advancing
+   * (render the "Seen" tick), and the caller's OWN watermark moving via
+   * mark-unread. The `unread` field is the sole discriminator for the
+   * latter — NOT the userId match. userId alone would also be true for any
+   * future self-notifying /read, which must not be misread as mark-unread. A
+   * self-targeted event without `unread: true` is neither a peer tick nor a
+   * mark-unread — it is ignored, not misapplied as either.
+   */
   private handleV2ReadStateEvent(e: Event): void {
-    type ReadStateData = { conversationKey?: string; messageId?: string; readAt?: string };
+    type ReadStateData = {
+      conversationKey?: string;
+      userId?: string;
+      messageId?: string;
+      readAt?: string;
+      unread?: boolean;
+    };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ReadStateData } & ReadStateData)
       | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
-    if (!eventData?.messageId) return;
-    if (eventData.conversationKey !== this.conversationKey) return;
+    if (!eventData || eventData.conversationKey !== this.conversationKey) return;
+    // selfUserId(), not the public currentUserId field directly: it lazily
+    // resolves the ID from the chat scope for threads mounted before the
+    // scope is configured, falling back to currentUserId once set.
+    if (eventData.userId && eventData.userId === this.selfUserId()) {
+      if (eventData.unread === true) {
+        this.handleOwnReadStateChanged();
+      }
+      return;
+    }
+    if (!eventData.messageId) return;
     this.applyPeerReadState(eventData.messageId, eventData.readAt);
+  }
+
+  /**
+   * The caller's own watermark moved via mark-unread while this conversation
+   * is open (here, or in another of their tabs). Suppress auto-advance so
+   * simply having it open does not immediately undo the mark-unread.
+   */
+  private handleOwnReadStateChanged(): void {
+    this.suppressAutoAdvance();
+  }
+
+  /**
+   * Suppress auto-advance immediately. Called from two places: the SSE path
+   * above (other tabs, and this one on the round trip back), and directly by
+   * the chat page right after this tab's own "Mark unread" POST succeeds —
+   * the same-tab case must not wait on the SSE echo.
+   *
+   * Also cancels any debounce timer already in flight. In single-threaded
+   * JS this clearTimeout always wins over a pending callback — there is no
+   * "queued before the clear takes effect" race to close — so this is
+   * belt-and-braces with maybeAdvanceReadWatermark's own re-check and never
+   * load-bearing on its own: whichever of the two runs first already
+   * prevents the stale advance.
+   */
+  suppressAutoAdvance(): void {
+    this._autoAdvanceSuppressed = true;
+    if (this._readDebounceTimer) {
+      clearTimeout(this._readDebounceTimer);
+      this._readDebounceTimer = null;
+    }
   }
 
   /** Record the peer watermark and arm the auto-hide timer. */
@@ -2015,6 +2104,10 @@ export class ScionChatThread extends LitElement {
 
     this.sending = true;
     this.sendError = null;
+    // Sending is the other way mark-unread's suppression lifts (besides
+    // navigating away and back): you cannot both have just marked a
+    // conversation unread and be sending into it without meaning to read it.
+    this._autoAdvanceSuppressed = false;
 
     // Generate an idempotency key so duplicate sends (e.g. network retry)
     // are collapsed server-side. Also used as the optimistic message temp ID.
@@ -2434,11 +2527,22 @@ export class ScionChatThread extends LitElement {
   /** Advance the read watermark if conditions are met. */
   private maybeAdvanceReadWatermark(): void {
     if (!this.isV2 || !this._tabFocused || !this.pinnedToBottom) return;
+    if (this._autoAdvanceSuppressed) return;
     if (this.messages.length === 0) return;
 
     // Debounce
     if (this._readDebounceTimer) clearTimeout(this._readDebounceTimer);
     this._readDebounceTimer = setTimeout(() => {
+      this._readDebounceTimer = null;
+      // Re-check: suppression can arrive after this callback is scheduled
+      // but before it fires — a message arms this 1s debounce, then
+      // mark-unread lands mid-flight. suppressAutoAdvance already clears an
+      // in-flight timer synchronously when that is how suppression arrives,
+      // so this guard is belt-and-braces for that path (there is no "queued
+      // before the clear" race in single-threaded JS) and load-bearing only
+      // if suppression is ever set some other way, without going through
+      // suppressAutoAdvance.
+      if (this._autoAdvanceSuppressed) return;
       const messageId = this.lastReadableMessageId();
       if (messageId) {
         void this.advanceReadWatermark(messageId);
@@ -3168,8 +3272,93 @@ export class ScionChatThread extends LitElement {
               Make this agent thread default
             </div>`
           : nothing}
+        ${this.isSenderAgent(msg) ? this.renderAgentActionMenuItems(msg) : nothing}
       </div>
     `;
+  }
+
+  /**
+   * "Open terminal" / "Open in graph" context-menu items for the message's
+   * author agent — the same icons, labels and actions as the toolbar's
+   * `renderAgentToolbarButtons` (pages/chat.ts) and the members sidebar's
+   * `renderAgent` (chat-members.ts), scoped to the author of this message
+   * rather than the thread's default agent or DM peer.
+   *
+   * Terminal is gated on the author being a current roster member with
+   * `canAttach === true`, fail-closed exactly like the sidebar: absent,
+   * false, or the agent missing from `agentMembers` altogether (e.g. it left
+   * the space or was deleted — chat.ts drops deleted agents from that list)
+   * all hide the item rather than offering a control the server would
+   * refuse.
+   *
+   * Graph does not require a roster entry: it's gated only on a resolvable
+   * project id, which `senderProjectId` (#1706, cross-project messaging)
+   * supplies even for a departed author — the graph page can still show that
+   * project and the agent's history. An empty `senderId` hides both
+   * regardless (see `resolveAgentActionProjectId`): `isSenderAgent` can
+   * classify a message as agent-authored by `type` alone, with no id to act
+   * on.
+   */
+  private renderAgentActionMenuItems(msg: Message): TemplateResult {
+    if (!msg.senderId) return html``;
+    const member = this.agentMembers.find((m) => m.id === msg.senderId);
+    const projectId = this.resolveAgentActionProjectId(msg);
+    return html`
+      ${member?.canAttach === true
+        ? html`<div
+            class="context-menu-item"
+            @click=${(): void => this.handleContextMenuOpenTerminal()}
+          >
+            <sl-icon name="terminal"></sl-icon>
+            Open terminal
+          </div>`
+        : nothing}
+      ${projectId
+        ? html`<div
+            class="context-menu-item"
+            @click=${(): void => this.handleContextMenuOpenGraph()}
+          >
+            <sl-icon name="diagram-3"></sl-icon>
+            Open in graph
+          </div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * Project id for the author agent's graph/terminal actions. Prefers the
+   * server-derived `senderProjectId` — the only signal that's correct when
+   * the author belongs to a different project than this conversation, or
+   * has since left the roster entirely — falling back to the roster's
+   * per-agent `projectId`. Empty when `senderId` is empty — there is no
+   * agent to focus the graph on.
+   *
+   * `senderProjectId` is not set on every agent-authored row: the
+   * agent-to-user outbound path never sets it (same gap
+   * `resolvePathLinkProjectId` documents), so this is current behaviour for
+   * those messages, not just history. Those rows do carry the message's own
+   * `projectId` — the sending agent's project — so it comes next in the
+   * chain, ahead of the thread fallback: it stays correct even for a
+   * departed, cross-project author.
+   *
+   * Only once all three are empty does a project-scoped (non-DM) thread's
+   * own `projectId` kick in, as a last resort: unlike a DM's `projectId`
+   * (see `resolvePathLinkProjectId`, which is only `inheritedProjectId()`
+   * and unrelated to the conversation), a group thread's `projectId` is the
+   * project the conversation itself belongs to. This keeps "Open in graph"
+   * available instead of hiding it outright, at the cost of being a best
+   * guess rather than a guarantee for the rare row with no project of its
+   * own.
+   */
+  private resolveAgentActionProjectId(msg: Message): string {
+    if (!msg.senderId) return '';
+    const member = this.agentMembers.find((m) => m.id === msg.senderId);
+    return (
+      msg.senderProjectId ||
+      member?.projectId ||
+      msg.projectId ||
+      (!this.isDM ? this.projectId : '')
+    );
   }
 
   /** Handle right-click on a message to show context menu. */
@@ -3319,6 +3508,24 @@ export class ScionChatThread extends LitElement {
     } catch {
       // Non-critical
     }
+  }
+
+  /** Context menu: Open a terminal for the message's author agent. */
+  private handleContextMenuOpenTerminal(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    openTerminal(msg.senderId);
+  }
+
+  /** Context menu: Open the message's author agent in the dependency graph. */
+  private handleContextMenuOpenGraph(): void {
+    const msg = this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    const projectId = this.resolveAgentActionProjectId(msg);
+    if (!projectId) return;
+    navigateTo(agentGraphHref(projectId, msg.senderId));
   }
 
   // ---------------------------------------------------------------------------

@@ -261,6 +261,19 @@
       "description": "Service account used when default_gcp_identity_mode is \"assign\".",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "quotas": {
+      "type": "object",
+      "description": "Hub-level quota enforcement settings. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "enforce_broker_quotas": {
+          "type": "boolean",
+          "description": "Whether the per-broker agent quota cap (max_agents_per_broker) is enforced on create. Default true (enforced) when absent; when false, agent creates beyond the cap succeed but usage is still counted."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
