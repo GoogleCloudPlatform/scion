@@ -109,12 +109,13 @@ parity are all correct). Disposition of every finding:
   and 10,000-broker cap are correct (mirror `ReconcileStaleBrokerQuotaReservations` exactly) but not
   optimal. Added a code comment on the function documenting the bound and the accepted follow-up (a
   single-query store method), per the EM's call — no behavior change.
-- **F4 (Nit, fixed):** the doc comments for `AgentCount`/`AgentLimitSource`
-  (`response_types.go`, `handlers_quota.go`) and their TS mirrors (`types.ts`, `admin-quotas.ts`) said
-  they were absent "under the same conditions as AgentLimit" — wrong, since `AgentLimit` is also nil
-  when the broker is unlimited, and in that case the count and source *are* still present (source
-  `"unlimited"`). Reworded all four to state the real condition (absent only when resolution didn't run
-  or failed).
+- **F4 (Nit, fixed in round 1, corrected in round 2 — see below):** the doc comments for
+  `AgentCount`/`AgentLimitSource` (`response_types.go`, `handlers_quota.go`) and their TS mirrors
+  (`types.ts`, `admin-quotas.ts`) said they were absent "under the same conditions as AgentLimit" —
+  wrong, since `AgentLimit` is also nil when the broker is unlimited, and in that case the count and
+  source *are* still present. Round 1's fix, however, over-corrected into a second false statement:
+  that the source is literally the string `"unlimited"` in that case. It is not — see the round 2
+  disposition.
 - **F5 (Nit, fixed):** `brokers.ts`'s `renderAgentCapacity` showed the source twice (tooltip + small
   text) — removed the redundant small-text line, keeping the tooltip. `admin-quotas.ts` rendered
   "Broker cap: unlimited (unlimited)" — the parenthetical source is now omitted when the source itself
@@ -187,6 +188,42 @@ to the exact `main` baseline (6 errors — all pre-existing — 44 warnings, F5'
   `--onto`.
 - This log entry.
 - `scion message` to `broker-settings-em` with the PR number, head SHA, and the test evidence above.
+
+## Review round 2
+
+Full report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-2.md`
+(reviewed at `78dbd647`; round 1's F1 and F2 fixes independently re-verified as resolved). Verdict
+REQUEST CHANGES, comments-only.
+
+- **F1 (Required, fixed):** round 1's F4 fix replaced one false doc statement ("absent under the same
+  conditions as AgentLimit") with a *different* false one: that `AgentLimitSource`/`BrokerAgentLimitSource`
+  is literally the string `"unlimited"` whenever a broker has no cap. That is wrong.
+  `effectiveBrokerLimit` (`broker_capacity.go`, P2.1, unchanged by this PR) only returns the source
+  `"unlimited"` when `limitDef == nil || s.quotaService == nil` — a hub-wide "no quota system
+  configured" state, not a per-broker "no cap" state. A broker with `settings.maxAgents=0` (or a 0
+  binding, or a 0 default) resolves with source `"broker"` (or `"entitlement"`/`"hub_default"`) and
+  `Limit` simply absent — exactly what this PR's own `TestListRuntimeBrokers_AgentCountAgreesWithReserve`
+  already asserts (`assert.Equal(t, BrokerLimitSourceBroker, view.AgentLimitSource, ...)` after setting
+  `maxAgents=0`), which is how the reviewer caught the doc/test mismatch. Reworded all four comments
+  (`response_types.go`, `handlers_quota.go`, `shared/types.ts`, `admin-quotas.ts`) to state the real
+  invariant: the source names the precedence step that produced the result, not whether that result is
+  a cap; `"unlimited"` is reserved for the hub-wide no-quota-service/no-limit-definition case, in which
+  all three fields are omitted together. Corrected the round-1 F4 line above accordingly.
+  The `admin-quotas.ts` `=== 'unlimited'` branch this false comment had motivated is dead in practice
+  (that source value can't reach a row that requires an actual reservation to exist) but harmless if it
+  ever did fire — kept per the EM's option, with a comment marking it defensive.
+- **F2 (Optional, fixed):** `brokers.ts`'s grid stat re-implemented the same "count / cap-or-unlimited"
+  formatting `renderAgentCapacity` already produces for the table cell — a small, easy dedup.
+  `renderAgentCapacity`'s span now carries both `mono-cell` (scoped to the table's
+  `.resource-table-container`, so a no-op in the grid) and `stat-value` (unscoped, styles the grid
+  card), and the grid stat calls it directly instead of duplicating the template.
+- **F3, F4 (FYI):** no action — F3 restates round 1's F3 (accepted by the EM); F4 confirms the CI
+  reporting-only failures are unrelated (already reported to the EM after round 1's CI run).
+
+Re-verified after both fixes: `go build`/`go vet` (both tags), `tsc --noEmit`, eslint on the three
+changed web files (still the `main` baseline, 6 errors/44 warnings, 0 new), `golangci-lint run
+./pkg/hub/...` (same 11 pre-existing issues, none in changed files), `hack/check-authz-guards.sh`
+(clean), bare-#N grep on commits (empty).
 
 ## Note on the upstream-main rebase step
 
