@@ -248,11 +248,25 @@ func TestBrokerQuotaBindingsToSettingsMigration_MissingBrokerSkipped(t *testing.
 // TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection proves the
 // migration only ever acts on scopeType=broker bindings for
 // max_agents_per_broker: a system-scoped binding on the same limit is not
-// migrated (no settings row appears for the empty scope ID), a broker-scoped
-// binding on a DIFFERENT limit is invisible to this migration entirely (it
-// is filtered out before any broker is ever looked at, since bindings are
-// listed by this limit's ID), and a broker with no binding of its own gets
-// no settings row just because some other broker did.
+// migrated (no settings row appears for the empty scope ID), a
+// project-scoped binding whose scopeId happens to equal a broker's ID is not
+// migrated either (scopeType, not just a non-empty scopeId, gates
+// selection), a broker-scoped binding on a DIFFERENT limit is invisible to
+// this migration entirely (it is filtered out before any broker is ever
+// looked at, since bindings are listed by this limit's ID), and a broker
+// with no binding of its own gets no settings row just because some other
+// broker did.
+//
+// The brokers_scanned=1/missing_broker=0 log assertions are load-bearing,
+// not decorative: if the scopeType check were ever dropped from the
+// grouping filter, the system-scoped binding's empty scopeId would land in
+// its own "broker" bucket, GetRuntimeBroker("") would return ErrNotFound,
+// and the pass would still complete "successfully" — just with
+// brokers_scanned=2 and missing_broker=1 instead of 1/0. Asserting only
+// GetBrokerSettings(ctx, "") returns ErrNotFound cannot tell that apart from
+// the correct behaviour, because both paths leave no settings row at "".
+// (Verified by mutation: see the round-2 review disposition in the project
+// log for how this was confirmed against the real filter.)
 func TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -276,6 +290,22 @@ func TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection(t *testing.T) 
 	})
 	require.NoError(t, err)
 
+	// A project-scoped binding whose scopeId equals targetBroker's ID must
+	// also be excluded: the filter is on scopeType=broker, not merely on a
+	// non-empty scopeId. If the scopeType check were dropped, this row would
+	// wrongly join targetBroker's bucket and (being the largest value) would
+	// change its migrated result from 5 to 777.
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: limitDef.ID,
+		SubjectType:       store.EntitlementSubjectUser,
+		SubjectID:         "some-user",
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           targetBroker.ID,
+		Value:             777,
+		CreatedBy:         "test",
+	})
+	require.NoError(t, err)
+
 	// A broker-scoped binding on a DIFFERENT limit must be invisible to this
 	// migration: it is filtered out by the ListEntitlementBindings(limitDef.ID)
 	// call before any grouping happens, so it can't touch any broker's
@@ -289,12 +319,19 @@ func TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection(t *testing.T) 
 	require.NoError(t, err)
 	seedBrokerBinding(t, ctx, s, otherLimit.ID, store.EntitlementSubjectUser, untouchedBroker.ID, untouchedBroker.ID, 42)
 
+	buf, restore := captureSlog(t)
+	defer restore()
+
 	runBrokerQuotaBindingsToSettingsMigration(ctx, s)
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "brokers_scanned=1", "only targetBroker's real broker-scoped binding should ever form a group")
+	assert.Contains(t, logOutput, "missing_broker=0", "neither the system- nor project-scoped binding should be mistaken for a broker-scoped one with a missing broker")
 
 	rec, err := s.GetBrokerSettings(ctx, targetBroker.ID)
 	require.NoError(t, err)
 	require.NotNil(t, rec.Settings.MaxAgents)
-	assert.Equal(t, int64(5), *rec.Settings.MaxAgents, "the system-scoped binding's value must not leak into the broker-scoped result")
+	assert.Equal(t, int64(5), *rec.Settings.MaxAgents, "neither the system-scoped nor the project-scoped binding's value may leak into the broker-scoped result")
 
 	_, err = s.GetBrokerSettings(ctx, untouchedBroker.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "a broker with no max_agents_per_broker binding of its own must get no settings row")

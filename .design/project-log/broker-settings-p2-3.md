@@ -104,7 +104,7 @@ explicitly to the EM rather than silently only running SQLite.
   broker-settings key is added later. This paid off in review round 1 (F4): a dedicated test
   (`_NilMaxAgentsCASUpdate`) now proves the CAS-update branch this choice implies.
 
-## Review round 1 disposition (broker-settings-rev-p2-3-1, head `a11493c77`)
+## Review round 1 disposition (broker-settings-rev-p2-3-1, head `50e19fb10` after the F1 reword — see round 2 below)
 
 Full review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-3-1.md`.
 Verdict was REQUEST CHANGES on a single Required item (F1); everything else was Optional/Nit/FYI.
@@ -141,5 +141,51 @@ All were addressed:
 Re-ran after the fixes: the full `TestBrokerQuotaBindingsToSettingsMigration_*` suite in `cmd`
 (10 tests, all passing, including the two new ones), the targeted `pkg/hub` tests
 (`-run 'Quota|Entitlement|BrokerSetting|Migrated'`), `go build ./...`, `gofmt -l`, and
-`golangci-lint run ./cmd/...` (clean on the touched files). Pushed as `a11493c77`; confirmed present
-on `origin/scion/broker-settings-p2-3`.
+`golangci-lint run ./cmd/...` (clean on the touched files). Originally pushed as `a11493c77`; that
+commit's message itself introduced a fresh bare `#2275` (caught in round 2, see below), so it no
+longer exists on the branch — it was reworded in place to `50e19fb10` (tree-identical, verified via
+`git diff a11493c77 50e19fb10` being empty) and force-pushed with lease.
+
+## Review round 2 disposition (broker-settings-rev-p2-3-2, head `62976cd0e`)
+
+Full review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-3-2.md`.
+Verdict: **APPROVE** at head `62976cd0e9f61a2a6999ea73b4243a9c3bbb8a00`, conditional only on CI
+(pending at review time; confirmed green afterward — see below). The reviewer independently verified
+the message-only reword (`git rev-parse 62976cd0^{tree} a7d85e94^{tree}` — same tree) before applying
+the verdict to the new head. Three non-blocking findings remained; the EM asked me to close them as
+test/docs/log-only changes with no further review round, since the EM would verify the delta
+directly:
+
+- **F2 (Optional, fixed):** round 1's `_NegativeSelection` test asserted outcomes that were also true
+  without the scope-type filter (a system-scoped binding's empty `scopeId` happens to resolve to
+  `ErrNotFound` either way), so it didn't actually prove the filter mattered. The reviewer confirmed
+  this by mutation (temporarily disabling the filter — all 10 tests still passed). I did the same
+  check myself before committing the fix:
+  1. Replaced the filter body with `if false { continue }` in
+     `cmd/boot_broker_quota_bindings_to_settings.go`.
+  2. Ran `go test ./cmd/... -run 'TestBrokerQuotaBindingsToSettingsMigration' -v`: 9 of 10 passed;
+     `_NegativeSelection` failed, with the log showing `brokers_scanned=2 missing_broker=1` and the
+     target broker's migrated value pulled from the wrong binding (`max_agents=777` instead of `5`) —
+     the system-scoped binding's empty-`scopeId` bucket got treated as its own broker group, and a new
+     project-scoped binding I added (scoped to the target broker's own ID) leaked its value in.
+  3. Reverted the mutation (`git diff cmd/boot_broker_quota_bindings_to_settings.go` empty afterward)
+     and reran the full suite: 10/10 pass.
+  The committed fix: capture slog and assert `brokers_scanned=1`/`missing_broker=0`, and add the
+  project-scoped-binding-with-broker's-ID case the reviewer suggested, so the test now fails under the
+  exact mutation that was silently passing before.
+- **F3 (Nit, fixed, docs):** api.md's migration paragraph said clearing a migrated setting makes "any
+  leftover broker-scoped bindings" live again — overstated, since the never-enforced shapes (F2 from
+  round 1) never become live regardless. Reworded to name only the shapes the entitlement engine
+  actually matches (user binding with `subjectId` = broker ID, or `system_default` with an empty
+  subject).
+- **F4 (FYI, fixed, log-only):** this log's round-1 section cited the pre-reword head `a11493c77`,
+  which no longer exists on the branch after the F1 fix. Corrected above to `50e19fb10`, and this
+  section records the actual current head.
+
+No production code changed for round 2 — F2 is test-only (plus the mutate/revert cycle above, which
+left the production file byte-identical to before), F3 and F4 are docs/log only.
+
+Re-ran after the fixes: the full `TestBrokerQuotaBindingsToSettingsMigration_*` suite (10/10 pass),
+`go build ./...`, `gofmt -l` on the changed files, and confirmed
+`git diff cmd/boot_broker_quota_bindings_to_settings.go` against the pre-mutation state is empty.
+Checked `git log --format=%B 0875d543..HEAD | grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'` prints nothing.
