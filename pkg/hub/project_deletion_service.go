@@ -688,18 +688,10 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 
 // createAuditRecord writes a mutation audit record within the transaction.
 func (svc *ProjectDeletionService) createAuditRecord(ctx context.Context, txStore store.Store, record *store.MutationAuditRecord) error {
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 	if record.Timestamp.IsZero() {
 		record.Timestamp = svc.nowFunc()
 	}

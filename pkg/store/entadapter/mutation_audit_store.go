@@ -49,6 +49,15 @@ func entMutationAuditToStore(ma *ent.MutationAudit) *store.MutationAuditRecord {
 		AfterSummary:        ma.AfterSummary,
 		CanDelegateResult:   ma.CanDelegateResult,
 		CanDelegateReason:   ma.CanDelegateReason,
+
+		// E.2a additive fields.
+		CredentialName:              ma.CredentialName,
+		CredentialBoundaryKind:      ma.CredentialBoundaryKind,
+		CredentialBoundaryProjectID: ma.CredentialBoundaryProjectID,
+		CredentialLabels:            ma.CredentialLabels,
+		CorrelationID:               ma.CorrelationID,
+		ExecutorKind:                ma.ExecutorKind,
+		ExecutorID:                  ma.ExecutorID,
 	}
 }
 
@@ -89,6 +98,27 @@ func (s *MutationAuditStore) CreateMutationAudit(ctx context.Context, record *st
 	if record.CanDelegateReason != "" {
 		builder.SetCanDelegateReason(record.CanDelegateReason)
 	}
+	if record.CredentialName != "" {
+		builder.SetCredentialName(record.CredentialName)
+	}
+	if record.CredentialBoundaryKind != "" {
+		builder.SetCredentialBoundaryKind(record.CredentialBoundaryKind)
+	}
+	if record.CredentialBoundaryProjectID != "" {
+		builder.SetCredentialBoundaryProjectID(record.CredentialBoundaryProjectID)
+	}
+	if record.CredentialLabels != "" {
+		builder.SetCredentialLabels(record.CredentialLabels)
+	}
+	if record.CorrelationID != "" {
+		builder.SetCorrelationID(record.CorrelationID)
+	}
+	if record.ExecutorKind != "" {
+		builder.SetExecutorKind(record.ExecutorKind)
+	}
+	if record.ExecutorID != "" {
+		builder.SetExecutorID(record.ExecutorID)
+	}
 
 	created, err := builder.Save(ctx)
 	if err != nil {
@@ -122,6 +152,9 @@ func (s *MutationAuditStore) ListMutationAudits(ctx context.Context, filter stor
 	}
 	if filter.TargetID != "" {
 		query = query.Where(mutationaudit.TargetIDEQ(filter.TargetID))
+	}
+	if filter.CorrelationID != "" {
+		query = query.Where(mutationaudit.CorrelationIDEQ(filter.CorrelationID))
 	}
 	if !filter.Since.IsZero() {
 		query = query.Where(mutationaudit.TimestampGTE(filter.Since))

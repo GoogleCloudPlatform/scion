@@ -79,6 +79,17 @@ func (m *migrationSecretBackend) Resolve(context.Context, string, string, string
 
 func (m *migrationSecretBackend) HubID() string { return "test-hub" }
 
+// FetchValues is not exercised by the activation tests in this file; this
+// stub only satisfies secret.SecretBackend and reports every item not found,
+// the same as the other minimal fakes in this codebase.
+func (m *migrationSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 // newActivationServer returns a Server wired with a mock plugin manager and
 // the given secret backend, plus a temporary HOME so plugin dir resolution
 // stays inside the test sandbox.

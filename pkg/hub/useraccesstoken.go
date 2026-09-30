@@ -65,6 +65,33 @@ var (
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
 )
 
+// UATRejection reports that a presented UAT failed ValidateToken, and
+// classifies why. Reason is one of "invalid", "revoked", "expired", or
+// "user_suspended" — see auth.go's UAT branch, which logs exactly one of
+// these per rejection (plan §3.1(3)).
+//
+// Found and TokenID answer the rulings' plan correction (b): a rejection log
+// may identify a server-verified matched credential record, but must mark it
+// as a rejection, not an authenticated principal. Found is true, and TokenID
+// is set, only when the presented value hashed to a stored token row
+// (revoked, expired, or the row's user suspended) — never for a value that
+// matched nothing (invalid format or unknown hash), so an unrecognized
+// bearer value never yields an asserted identity, not even a rejected one.
+type UATRejection struct {
+	err     error
+	Reason  string
+	Found   bool
+	TokenID string
+}
+
+func (e *UATRejection) Error() string { return e.err.Error() }
+
+// Unwrap preserves errors.Is/errors.As compatibility with the pre-existing
+// sentinel errors (ErrInvalidUAT, ErrUATRevoked, ErrUATExpired,
+// ErrUserSuspended) for the one production caller (auth.go) that already
+// branches on ErrUserSuspended via errors.Is.
+func (e *UATRejection) Unwrap() error { return e.err }
+
 // ---------------------------------------------------------------------------
 // UserAccessTokenService — RS4 bounded domain service
 //
@@ -110,18 +137,10 @@ func NewUserAccessTokenService(s store.Store, authz *AuthzService, logger *slog.
 // caller's context (and transaction, if any). Unlike the fire-and-forget
 // emitMutationAudit, this returns an error so the caller can roll back.
 func (s *UserAccessTokenService) createAuditRecord(ctx context.Context, txStore store.Store, record *store.MutationAuditRecord) error {
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 	if record.Timestamp.IsZero() {
 		record.Timestamp = s.nowFunc()
 	}
@@ -177,6 +196,21 @@ func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context, u
 // target-project authorization, atomic audit, and concurrency-safe cap.
 // Returns the plaintext token (shown only once) and the stored metadata.
 func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
+	return s.CreateTokenWithMetadata(ctx, userID, name, projectID, scopes, expiresAt, TokenMetadata{})
+}
+
+// TokenMetadata carries E.1's optional, bounded, issuer-supplied descriptive
+// fields for a new token. Metadata is immutable after issuance: there is no
+// update path (E.1 ruling Q1). Use TokenMetadata{} for no metadata.
+type TokenMetadata struct {
+	Purpose string
+	Labels  map[string]string
+}
+
+// CreateTokenWithMetadata is CreateToken plus E.1's bounded, issuer-supplied
+// purpose/labels. CreateToken is kept as a thin wrapper over this method so
+// existing callers are unaffected.
+func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time, metadata TokenMetadata) (string, *store.UserAccessToken, error) {
 	// A1: Credential caveat at service boundary.
 	if err := s.enforceSessionCredential(ctx, userID); err != nil {
 		return "", nil, err
@@ -188,6 +222,11 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 	}
 	if projectID == "" {
 		return "", nil, ErrUATProjectIDEmpty
+	}
+	// E.1: bounded validation of name/purpose/labels at issuance. Metadata
+	// is immutable afterward, so this is the only place it is checked.
+	if err := ValidateCredentialMetadata(name, metadata.Purpose, metadata.Labels); err != nil {
+		return "", nil, err
 	}
 
 	// Expand and validate scopes against the registry.
@@ -300,6 +339,14 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 			ExpiresAt: expiresAt,
 			Created:   now,
 		}
+		// E.1 descriptive credential metadata: set only when supplied.
+		trimmedPurpose := strings.TrimSpace(metadata.Purpose)
+		if trimmedPurpose != "" {
+			token.Purpose = &trimmedPurpose
+		}
+		if len(metadata.Labels) > 0 {
+			token.Labels = metadata.Labels
+		}
 
 		if createErr := tx.CreateUserAccessToken(ctx, token); createErr != nil {
 			return fmt.Errorf("failed to create token: %w", createErr)
@@ -309,6 +356,12 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		scopesJSON, _ := json.Marshal(expanded)
 		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
 			token.ID, string(scopesJSON), projectID)
+		// E.1: record that purpose/label metadata was set and which label
+		// keys were used, without recording label or purpose values in
+		// audit (values are issuer-supplied and unbounded-trust text).
+		if trimmedPurpose != "" || len(metadata.Labels) > 0 {
+			afterSummary = appendCredentialMetadataAuditFields(afterSummary, trimmedPurpose != "", metadata.Labels)
+		}
 
 		return s.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "credential_create",
@@ -328,7 +381,7 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 // ValidateToken validates a UAT and returns the scoped user identity.
 func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) (*ScopedUserIdentity, error) {
 	if !strings.HasPrefix(key, store.UATPrefix) {
-		return nil, ErrInvalidUATFormat
+		return nil, &UATRejection{err: ErrInvalidUATFormat, Reason: "invalid"}
 	}
 
 	hash := sha256.Sum256([]byte(key))
@@ -337,17 +390,20 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 	token, err := s.tokens.GetUserAccessTokenByHash(ctx, hashStr)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, ErrInvalidUAT
+			// No stored token matched: an unrecognized presented value never
+			// yields an asserted identity, not even a rejected one (rulings,
+			// plan correction (b)).
+			return nil, &UATRejection{err: ErrInvalidUAT, Reason: "invalid"}
 		}
 		return nil, fmt.Errorf("failed to look up token: %w", err)
 	}
 
 	if token.Revoked {
-		return nil, ErrUATRevoked
+		return nil, &UATRejection{err: ErrUATRevoked, Reason: "revoked", Found: true, TokenID: token.ID}
 	}
 
 	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
-		return nil, ErrUATExpired
+		return nil, &UATRejection{err: ErrUATExpired, Reason: "expired", Found: true, TokenID: token.ID}
 	}
 
 	// Update last used (async)
@@ -364,14 +420,41 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 	}
 
 	if user.Status == store.UserStatusSuspended {
-		return nil, ErrUserSuspended
+		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
 	}
 
-	return NewScopedUserIdentityWithCredentialID(
+	// E.1: derive the descriptive credential decoration from the
+	// server-validated token row this function already loaded. This is the
+	// single trustworthy derivation point — no header, query parameter, or
+	// body field ever contributes to it.
+	//
+	// D.1 has not yet persisted a boundary column on the UAT row, so this
+	// builds A.1's TokenBoundary inline from the token's stored project ID
+	// (every UAT is project-scoped today). This is the one call site that
+	// changes when D.1 lands, per the E.1 handoff note.
+	decoration := &CredentialDecoration{
+		Kind:      CredentialKindUAT,
+		TokenID:   token.ID,
+		TokenName: token.Name,
+		Boundary:  decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: token.ProjectID}),
+	}
+	if token.Purpose != nil {
+		decoration.Purpose = *token.Purpose
+	}
+	if len(token.Labels) > 0 {
+		labels := make(map[string]string, len(token.Labels))
+		for k, v := range token.Labels {
+			labels[k] = v
+		}
+		decoration.Labels = labels
+	}
+
+	return NewScopedUserIdentityWithDecoration(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
 		token.Scopes,
 		token.ID,
+		decoration,
 	), nil
 }
 

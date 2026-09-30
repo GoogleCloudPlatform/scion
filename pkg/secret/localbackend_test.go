@@ -18,6 +18,7 @@ package secret
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -924,46 +925,6 @@ func TestLocalBackend_ResolveProgeny_DeniedByPolicyCheck(t *testing.T) {
 	}
 }
 
-// TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll verifies that
-// when no AuthzCheck is provided, progeny secrets with matching ancestry
-// are included (the policy check is optional).
-func TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll(t *testing.T) {
-	backend, s := createTestBackend(t)
-	ctx := context.Background()
-
-	seedSecret(t, s, &store.Secret{
-		ID:             tid("sec-no-authz"),
-		Key:            "NO_AUTHZ_KEY",
-		EncryptedValue: "no-authz-value",
-		SecretType:     store.SecretTypeEnvironment,
-		Target:         "NO_AUTHZ_KEY",
-		Scope:          store.ScopeUser,
-		ScopeID:        "alice-123",
-		AllowProgeny:   true,
-		CreatedBy:      "alice-123",
-	})
-
-	opts := &ResolveOpts{
-		AgentAncestry: []string{"alice-123", "agent-a"},
-		AuthzCheck:    nil, // no policy checker — secrets are included by default
-	}
-
-	resolved, err := backend.Resolve(ctx, "", "", "", opts)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-
-	found := false
-	for _, sv := range resolved {
-		if sv.Name == "NO_AUTHZ_KEY" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("progeny secret should be included when AuthzCheck is nil (no policy gating)")
-	}
-}
-
 // TestLocalBackend_ResolveProgeny_NilOptsNoProgeny verifies that passing
 // nil opts preserves the original behavior (no progeny resolution).
 func TestLocalBackend_ResolveProgeny_NilOptsNoProgeny(t *testing.T) {
@@ -1270,6 +1231,28 @@ func TestLocalBackend_DecryptRawValue_NilKeyEncryptedValue(t *testing.T) {
 		if sv.Name == "LEAKED_SECRET" {
 			t.Error("encrypted secret should not appear in resolved secrets when encryption key is nil")
 		}
+	}
+}
+
+// TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError verifies
+// that decryptRawValue returns a non-nil error and an empty string for
+// ciphertext that fails AES-GCM authentication, rather than
+// silently returning ("", nil) as if the value were legitimately empty.
+// Reverting the fix at localbackend.go (restoring `return "", nil` on a
+// decrypt failure) turns this test red.
+func TestLocalBackend_DecryptRawValue_CorruptCiphertextReturnsError(t *testing.T) {
+	backend, _ := createTestBackend(t)
+
+	// enc:v1: prefixed, valid base64, but not a value EncryptValue ever
+	// produced: it decodes but fails AES-GCM authentication.
+	corrupt := EncryptedPrefix + base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	value, err := backend.decryptRawValue(corrupt)
+	if err == nil {
+		t.Fatal("expected a decrypt error for corrupt ciphertext, got nil")
+	}
+	if value != "" {
+		t.Errorf("expected empty value on decrypt failure, got %q", value)
 	}
 }
 

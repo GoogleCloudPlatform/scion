@@ -111,6 +111,15 @@ func mapSystemCategory(category string) *EventBody {
 		return &EventBody{Type: EventPortExposed}
 	case messages.SystemCategoryDeliveryFailed:
 		return &EventBody{Type: EventDeliveryFailed}
+	case messages.SystemCategoryDeliveryDeferred:
+		// O-c (p2a-r2 review): design agent-reincarnate §3.7's deferred
+		// notice (publishDeliveryDeferred) is not a failure — the message
+		// was saved, not dropped — but there is no dedicated EventType for
+		// it. Reuse EventDeliveryFailed's type with a distinct Status so
+		// the category round-trips instead of falling to default (which
+		// would both warn and silently reclassify it as
+		// agent.state-changed).
+		return &EventBody{Type: EventDeliveryFailed, Status: "DELIVERY_DEFERRED"}
 	default:
 		slog.Warn("unknown system_category, defaulting to agent.state-changed",
 			"system_category", category)
@@ -369,7 +378,7 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 	// Map metadata from event body.
 	if msg.Event != nil {
 		old.Metadata = make(map[string]string)
-		if cat := eventTypeToSystemCategory(msg.Event.Type); cat != "" {
+		if cat := eventTypeToSystemCategory(msg.Event); cat != "" {
 			old.Metadata["system_category"] = cat
 		}
 		if msg.Event.Status != "" {
@@ -441,14 +450,26 @@ func mapNewTypeToLegacy(msg *Message) string {
 	}
 }
 
-// eventTypeToSystemCategory maps an EventType back to the old system_category.
-func eventTypeToSystemCategory(et EventType) string {
-	switch et {
+// eventTypeToSystemCategory maps an EventBody back to the old system_category.
+// Takes the full body, not just the Type, because O-c (p2a-r2 review) reuses
+// EventDeliveryFailed's Type for the deferred notice (there is no dedicated
+// EventType for it) and distinguishes it only by Status — without checking
+// Status here, a deferred notice would round-trip back to
+// SystemCategoryDeliveryFailed and lose the distinction mapSystemCategory
+// made on the way in.
+func eventTypeToSystemCategory(body *EventBody) string {
+	if body == nil {
+		return ""
+	}
+	switch body.Type {
 	case EventScheduleFired:
 		return messages.SystemCategoryScheduler
 	case EventPortExposed:
 		return messages.SystemCategoryPortForward
 	case EventDeliveryFailed:
+		if body.Status == "DELIVERY_DEFERRED" {
+			return messages.SystemCategoryDeliveryDeferred
+		}
 		return messages.SystemCategoryDeliveryFailed
 	default:
 		return ""

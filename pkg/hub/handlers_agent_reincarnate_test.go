@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -1168,6 +1169,65 @@ func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 		"a template image must beat the harness-config fallback")
 }
 
+// TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig pins
+// ptone/scion#2156: the reincarnate plan must mirror the broker's own
+// precedence (explicit inline, then template, then
+// Hub settings harness_configs.<name>, then the harness config's own stored
+// image) — not stop at the harness config's stored image the way A11.1(a)
+// did before settings could win. A settings image with no template image
+// must make plan.Image.New equal the settings image, not the harness
+// config's own image.
+//
+// The overlay is keyed by the harness config's SLUG, and Name is
+// deliberately different from Slug: the broker (and so the reincarnate
+// lookup, to match it) resolves settings by the dispatched harness-config
+// name/slug, never by the harness config's own display Name. Keying by
+// Name here would pass even with the wrong lookup key, hiding the bug.
+func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate LoadEffectiveSettings from any ambient config
+
+	hcSlug := "settings-image-hc-" + tidSlugSafe(t.Name())
+
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
+		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
+	}, "")
+	config.SetGlobalSettingsOverlay(overlay)
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
+
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+	hc := &store.HarnessConfig{
+		ID:          tid("hc-settings-image-" + t.Name()),
+		Name:        "HC Pinned Display Name",
+		Slug:        hcSlug,
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-v1",
+		Config:      &store.HarnessConfigData{Image: "harness-config-image:v1"},
+	}
+	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = ""
+		a.AppliedConfig.HarnessConfig = hc.Slug
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{DryRun: true})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "settings-image:v1", resp.Plan.Image.New,
+		"a Hub settings harness_configs.<name>.image must outrank the harness config's own stored image")
+}
+
 // TestReincarnateAgent_WorkerPersistsBrokerEchoedImage is the worker-side
 // half of design §3.4 Amendment A11 item 1: when the broker's reprovision
 // response echoes back a resolved image different from what the hub planned
@@ -2040,20 +2100,39 @@ func TestReincarnateAgent_EndToEnd_IdentityContinuityAndHandoff(t *testing.T) {
 	assert.GreaterOrEqual(t, disp.stopCalls, 1)
 }
 
-// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery pins the wording of
-// the preamble's step 2. Messages sent during a migration are rejected, not
-// queued, so the preamble must not claim they are redelivered.
-func TestBuildReincarnationPreamble_DoesNotPromiseRedelivery(t *testing.T) {
+// TestBuildReincarnationPreamble_CatchUpWindow is the Amendment A25
+// 2a.3/R4 (p2a-r1 review), then O-b (p2a-r2 review), update of the former
+// TestBuildReincarnationPreamble_DoesNotPromiseRedelivery: now that 2a.1
+// (catch-up works in agent containers) and 2a.2/R3 (the migration gate
+// persists-and-defers on every hub delivery path instead of
+// rejecting/dropping) are both true, step 2 is allowed to say messages sent
+// during the migration can be read with catch-up. R4 corrected the window
+// to name only a start (an end would have to be the state-clear instant,
+// not known until long after this text is built). O-b corrected the command
+// itself: plain `scion conversation list` truncates IDs to 12 runes with no
+// `conv:` prefix, which `catch-up` cannot accept — step 2 now says
+// `list --json` and spells out the `conv:<id>` prefix.
+func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	srv, _ := testServer(t)
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next")
+	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
 
 	assert.Contains(t, preamble,
-		"2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
-		"step 2 must not claim messages sent during the migration window are redelivered — that was never implemented")
+		"2. Run `scion conversation list --json` and, for each conversation, "+
+			"`scion conversation catch-up conv:<id> --since <duration reaching back to 2026-09-28T10:00:00Z>`.",
+		"step 2 must be runnable as written: --json for full IDs, and the conv:<id> prefix catch-up requires")
+	assert.Contains(t, preamble,
+		"Messages sent to you since 2026-09-28T10:00:00Z were saved to your conversations, not dropped.",
+		"step 2 must reinstate the catch-up claim now that 2a.1/R3 make it true, naming only a start")
+	assert.NotContains(t, preamble, "to 2026-09-28T10:05",
+		"an end timestamp would be a lower bound the preamble cannot honestly state (R4)")
+	assert.Contains(t, preamble,
+		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.",
+		"the image-lag fallback (#1910) must remain since it is not fixed by this phase")
 	assert.NotContains(t, preamble, "redeliver",
-		"the unverified redelivery claim must not appear anywhere in the preamble")
+		"catch-up is not automatic redelivery — the wording must not claim that")
 	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
 }
 

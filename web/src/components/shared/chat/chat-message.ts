@@ -34,6 +34,14 @@ import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
+import {
+  CONTAINER_PATH_PATTERN,
+  extensionOf,
+  isRecognizedFilePath,
+  isMarkdownFileName,
+} from '../../../utils/chat-file-links.js';
+import './chat-file-preview.js';
+import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 
@@ -145,22 +153,6 @@ interface EntityPattern {
   linkBuilder: (match: RegExpExecArray) => string;
 }
 
-/** Known filenames that should be linked even without a file extension. */
-const EXTENSIONLESS_FILES = new Set([
-  'makefile',
-  'dockerfile',
-  'license',
-  'readme',
-  'changelog',
-  'gemfile',
-  'rakefile',
-  'procfile',
-  'vagrantfile',
-  'justfile',
-  'taskfile',
-  'caddyfile',
-]);
-
 /**
  * Configurable entity patterns for deep-linking. Order matters: the first
  * match wins, so more specific patterns must come before less specific ones.
@@ -191,14 +183,15 @@ const ENTITY_PATTERNS: EntityPattern[] = [
       return `commit <a class="entity-link" href="/commits/${encodeURIComponent(sha)}" title="View commit ${sha}">${sha}</a>`;
     },
   },
-  // File paths: /workspace/... and /scion-volumes/... container paths
+  // File paths: /workspace/... and /scion-volumes/... container paths.
+  // The pattern and the "is this actually a file" rule are shared with the
+  // recent-files recorder (utils/chat-file-links.ts) so both agree on what
+  // counts as a recognized path.
   {
-    regex:
-      /(?:\/scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|\/workspace\/(?:\.scion-volumes\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*|[a-zA-Z0-9_.-]*[a-zA-Z0-9_-](?:\/[a-zA-Z0-9_.-]*[a-zA-Z0-9_-])*))/g,
+    regex: CONTAINER_PATH_PATTERN,
     linkBuilder: (m) => {
       const path = m[0];
-      const lastSegment = path.split('/').pop() || '';
-      if (!lastSegment.includes('.') && !EXTENSIONLESS_FILES.has(lastSegment.toLowerCase())) {
+      if (!isRecognizedFilePath(path)) {
         return path;
       }
       return `<a class="entity-link path-link" data-file-path="${path.replace(/"/g, '&quot;')}" href="javascript:void(0)" title="Open ${path.replace(/"/g, '&quot;')}">${path}</a>`;
@@ -273,16 +266,101 @@ function styleEntityLinks(htmlStr: string): string {
   return out + styleEntityLinksInText(htmlStr.slice(cursor));
 }
 
-/** Lowercase extension including the dot, or '' when the name has none. */
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(dot).toLowerCase() : '';
+// ---------------------------------------------------------------------------
+// GitHub shortform issue/PR references (owner/repo#N) — auto-link to the
+// GitHub issue page. GitHub redirects /issues/N to /pull/N for PRs, so the
+// issues URL is correct for both.
+// ---------------------------------------------------------------------------
+
+/**
+ * Matches `owner/repo#123` shortform GitHub references:
+ *   - Owner: a GitHub username/org, `[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`.
+ *   - Repo: `[A-Za-z0-9._-]+`, excluding a repo made up of only dots (`.`,
+ *     `..`, ...) — GitHub forbids those as repo names, and without the
+ *     exclusion they'd produce a wrong link that the browser silently
+ *     resolves to a different URL. A repo merely starting with a dot, like
+ *     the real `.github` repo, is unaffected: `(?!\.+#)` only rejects dots
+ *     running all the way to `#`.
+ *   - Number: one or more digits after `#`.
+ *
+ * The leading group captures the boundary before the owner instead of using
+ * a lookbehind assertion, and the replacement re-emits it unchanged (see
+ * `styleGithubRefsInText`). A captured boundary is exactly equivalent to a
+ * lookbehind here, because the boundary can never itself be part of a valid
+ * match, but it parses on every JS engine that supports `u`-flag `\p{…}`
+ * classes — lookbehind additionally needs Safari 16.4+ (Mar 2023), and this
+ * is the only regex in `web/src` that would otherwise require it. A
+ * lookbehind that an older Safari can't parse is a `SyntaxError` at parse
+ * time, which would fail the whole `chat-message` module, not just ref
+ * linking — too large a blast radius for a linkifier.
+ *
+ * The boundary must be the start of the string, or a character that is not
+ * a Unicode letter, digit, `_`, `/`, `.`, or `-`. That is what keeps
+ * `foo/bar#1` from double-linking inside a URL or file path, keeps
+ * `a/b/c#12` from also matching the shorter `b/c#12` tail (a repo can never
+ * contain `/`, so a match starting at `a` fails structurally, and a match
+ * starting at `b` or `c` is blocked by the preceding `/`), keeps a
+ * scheme-less host like `example.com/foo#12` or a dotted prefix like
+ * `user.name/repo#1` from matching (blocked by the `.` exclusion, since a
+ * GitHub owner can never follow a `.`), keeps a hyphenated prefix like
+ * `user.foo-bar/repo#1` from sliding past the `.` and matching `bar/repo#1`
+ * at the `-` instead (blocked by the `-` exclusion), and — using
+ * `\p{L}`/`\p{N}` with the `u` flag rather than ASCII `\w` — keeps a
+ * non-ASCII prefix like `äptone` from letting `ptone/scion#1` match
+ * mid-word. The trailing negative lookahead excludes a following Unicode
+ * letter, digit, or `_`, so `#2217a` and `#12é` cannot be split into a ref
+ * plus stray text.
+ */
+const GITHUB_REF_REGEX =
+  /(^|[^\p{L}\p{N}_/.-])([A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?!\.+#)([A-Za-z0-9._-]+)#(\d+)(?![\p{L}\p{N}_])/gu;
+
+/** Apply the GitHub-ref pattern to a text segment (outside code/HTML regions). */
+function styleGithubRefsInText(text: string): string {
+  return text.replace(
+    GITHUB_REF_REGEX,
+    (_full, boundary: string, owner: string, repo: string, number: string) => {
+      const ref = `${owner}/${repo}#${number}`;
+      const url = `https://github.com/${owner}/${repo}/issues/${number}`;
+      return `${boundary}<a class="entity-link gh-ref-link" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${ref} on GitHub">${ref}</a>`;
+    }
+  );
+}
+
+/**
+ * Skip regions for GitHub-ref processing. Unlike ENTITY_SKIP_REGION, this
+ * also skips inline `<code>` spans in full — a shortform reference inside
+ * backticks is literal text, not a link. `<pre>` fences and existing `<a>`
+ * elements are also skipped in full, so a ref inside a fenced code block, an
+ * existing markdown link, or an already-autolinked URL is never re-linked.
+ *
+ * This intentionally does not reuse ENTITY_SKIP_REGION: that region skips
+ * `<pre>` but deliberately leaves inline `<code>` open, because a file path
+ * inside backticks is still meant to link (see its own doc comment) — the
+ * opposite of what this feature needs — so the two skip lists must diverge.
+ */
+const GITHUB_REF_SKIP_REGION =
+  '<pre\\b[^>]*>[\\s\\S]*?</pre>|<a\\b[^>]*>[\\s\\S]*?</a>|<code\\b[^>]*>[\\s\\S]*?</code>|<[^>]+>';
+
+/**
+ * Post-process rendered markdown to turn `owner/repo#123` shortform
+ * references into links to the GitHub issue page, leaving code blocks,
+ * inline code, and existing links untouched.
+ */
+function styleGithubRefs(htmlStr: string): string {
+  const skip = new RegExp(GITHUB_REF_SKIP_REGION, 'gi');
+  let out = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = skip.exec(htmlStr)) !== null) {
+    out += styleGithubRefsInText(htmlStr.slice(cursor, match.index)) + match[0];
+    cursor = match.index + match[0].length;
+  }
+  return out + styleGithubRefsInText(htmlStr.slice(cursor));
 }
 
 /** True when the file is a Markdown document. */
 function isMarkdownFile(name: string): boolean {
-  const ext = extensionOf(name);
-  return ext === '.md' || ext === '.markdown';
+  return isMarkdownFileName(name);
 }
 
 /**
@@ -530,9 +608,17 @@ export class ScionChatMessage extends LitElement {
   @state()
   private previews: ReadonlyMap<string, PreviewState> = new Map();
 
-  /** Attachment shown in the full-height overlay, if any. */
+  /**
+   * Target shown in the full-height overlay, if any. Built once, at open
+   * time, and kept as the same object reference across this component's
+   * re-renders — `<scion-chat-file-preview>` refetches and resets its
+   * Source/Rendered toggle whenever `.target` changes identity, so rebuilding
+   * a fresh object literal here on every render (reactions, read receipts,
+   * SSE edits, a parent re-render) would spuriously refetch and reset an
+   * overlay the user already has open.
+   */
   @state()
-  private expanded: AttachmentRefInfo | null = null;
+  private expandedTarget: PreviewTarget | null = null;
 
   /**
    * Per-attachment toggle: true = show raw source, false/absent = show
@@ -1108,28 +1194,6 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
-    .full-preview::part(panel) {
-      width: 90vw;
-      max-width: 900px;
-    }
-
-    .full-preview::part(body) {
-      padding-top: 0;
-    }
-
-    .full-preview .preview-placeholder {
-      padding: 2rem;
-    }
-
-    /* Fit the whole image in the panel rather than scrolling it. */
-    .full-preview .full-image {
-      display: block;
-      margin: 0 auto;
-      max-width: 100%;
-      max-height: 75vh;
-      object-fit: contain;
-    }
-
     /* Verbose (recessed) rendering — no bubble, muted text, small label */
     .message-wrapper.verbose .bubble-content {
       background: none;
@@ -1227,6 +1291,17 @@ export class ScionChatMessage extends LitElement {
 
     .delivery-state.failed sl-icon {
       color: var(--scion-danger-600, #dc2626);
+    }
+
+    /* F5 (p2a-r2 review): deferred (design agent-reincarnate §3.7) —
+       distinct from failed (not an error) and from pending (not a normal
+       in-flight send); a warning-toned, not danger-toned, indicator. */
+    .delivery-state.deferred {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.deferred sl-icon {
+      color: var(--scion-warning-600, #d97706);
     }
 
     /* ---- Phase-3: Message action bar ---- */
@@ -1764,6 +1839,7 @@ export class ScionChatMessage extends LitElement {
       let rendered = renderer.render(this.body);
       rendered = styleMentions(rendered);
       rendered = styleEntityLinks(rendered);
+      rendered = styleGithubRefs(rendered);
       this.renderedHtml = rendered;
     } catch {
       if (taskId !== this.renderTaskId) return;
@@ -1938,6 +2014,24 @@ export class ScionChatMessage extends LitElement {
                 Delivered
               </div>
             `;
+      case 'deferred':
+        // F5 (p2a-r2 review): design agent-reincarnate §3.7 — the
+        // recipient is mid-`scion reincarnate`. The message was saved to
+        // history for catch-up, not dropped and not yet dispatched.
+        // Distinct from "failed" (no icon/wording overlap) and from
+        // "pending" (that's a normal in-flight send, this is a deliberate
+        // hold).
+        return html`
+          <sl-tooltip
+            content="Agent is reincarnating; message saved and will be seen on catch-up"
+            hoist
+          >
+            <div class="delivery-state deferred">
+              <sl-icon name="pause-circle"></sl-icon>
+              Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
       case 'failed': {
         // nc-delivery-unreachable: distinguish "the agent can't receive this
         // at all" from a generic dispatch failure. Prefer the machine-readable
@@ -2201,8 +2295,12 @@ export class ScionChatMessage extends LitElement {
     return html`<scion-markdown-preview .content=${state.text ?? ''}></scion-markdown-preview>`;
   }
 
-  /** Editor, spinner or error for one preview, depending on load state. */
-  private renderPreviewBody(ref: AttachmentRefInfo, state: PreviewState | undefined, full = false) {
+  /**
+   * Editor, spinner or error for the collapsed inline slice, clipped to the
+   * first lines — the full-height overlay now lives in the extracted
+   * `<scion-chat-file-preview>`, which fetches its own untruncated content.
+   */
+  private renderPreviewBody(ref: AttachmentRefInfo, state: PreviewState | undefined) {
     if (!state || state.status === 'loading') {
       return html`
         <div class="preview-placeholder">
@@ -2217,73 +2315,41 @@ export class ScionChatMessage extends LitElement {
     const text = state.text ?? '';
     return html`
       <scion-code-editor
-        .content=${full ? text : firstLines(text, PREVIEW_MAX_LINES)}
+        .content=${firstLines(text, PREVIEW_MAX_LINES)}
         language=${getLanguageFromPath(ref.name)}
         readonly
       ></scion-code-editor>
     `;
   }
 
-  /** Full-height overlay for the expanded attachment, when one is open. */
+  /**
+   * Full-height overlay for the expanded attachment, when one is open.
+   * Loading/error/markdown-toggle/copy/download state all live inside the
+   * reusable <scion-chat-file-preview>; this component only owns which
+   * attachment is open.
+   */
   private renderFullPreview() {
-    const ref = this.expanded;
-    if (!ref) return nothing;
-
-    const isMd = isMarkdownFile(ref.name);
-    const showSource = isMd && (this.mdSourceView.get(ref.id) ?? false);
-    const state = this.previews.get(ref.id);
-
+    const target = this.expandedTarget;
+    if (!target) return nothing;
     return html`
-      <sl-dialog
-        class="full-preview"
-        open
-        label=${ref.name}
-        @sl-after-hide=${(e: Event) => {
-          if (e.target === e.currentTarget) this.expanded = null;
+      <scion-chat-file-preview
+        .target=${target}
+        @chat-file-preview-close=${() => {
+          this.expandedTarget = null;
         }}
-      >
-        ${IMAGE_MIMES.has(ref.mime)
-          ? html`<img class="full-image" src=${attachmentURL(ref.id)} alt=${ref.name} />`
-          : isMd && !showSource
-            ? this.renderMdPreviewBody(ref, state)
-            : this.renderPreviewBody(ref, state, true)}
-        <div slot="footer" style="display:flex;gap:0.5rem;align-items:center">
-          ${isMd
-            ? html`
-                <sl-button size="small" @click=${() => this.toggleMdSource(ref.id)}>
-                  <sl-icon slot="prefix" name=${showSource ? 'eye' : 'code'}></sl-icon>
-                  ${showSource ? 'Preview' : 'Source'}
-                </sl-button>
-              `
-            : nothing}
-          ${isMd && showSource
-            ? html`
-                <sl-button size="small" @click=${() => this.copyAttachmentText(ref.id)}>
-                  <sl-icon
-                    slot="prefix"
-                    name=${this.copiedIds.has(ref.id) ? 'check2' : 'clipboard'}
-                  ></sl-icon>
-                  ${this.copiedIds.has(ref.id) ? 'Copied!' : 'Copy'}
-                </sl-button>
-              `
-            : nothing}
-          <sl-button href=${attachmentURL(ref.id)} download=${ref.name}>
-            <sl-icon slot="prefix" name="download"></sl-icon>
-            Download
-          </sl-button>
-        </div>
-      </sl-dialog>
+      ></scion-chat-file-preview>
     `;
   }
 
-  /** Open the overlay, fetching the content if the slice has not yet. */
+  /** Open the overlay for an attachment; the preview component fetches its own content. */
   private openFullPreview(ref: AttachmentRefInfo): void {
-    this.expanded = ref;
-    // An image is shown by the browser straight from its URL; only text
-    // previews need the body pulled down.
-    if (!IMAGE_MIMES.has(ref.mime)) {
-      void this.loadPreview(ref.id);
-    }
+    this.expandedTarget = {
+      kind: 'attachment',
+      id: ref.id,
+      name: ref.name,
+      mime: ref.mime,
+      size: ref.size,
+    };
   }
 
   private formatTime(): string {

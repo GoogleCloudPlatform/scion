@@ -200,6 +200,118 @@ func (_c *DecisionAuditCreate) SetNillableSampled(v *bool) *DecisionAuditCreate 
 	return _c
 }
 
+// SetPermissionID sets the "permission_id" field.
+func (_c *DecisionAuditCreate) SetPermissionID(v string) *DecisionAuditCreate {
+	_c.mutation.SetPermissionID(v)
+	return _c
+}
+
+// SetNillablePermissionID sets the "permission_id" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillablePermissionID(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetPermissionID(*v)
+	}
+	return _c
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (_c *DecisionAuditCreate) SetCredentialName(v string) *DecisionAuditCreate {
+	_c.mutation.SetCredentialName(v)
+	return _c
+}
+
+// SetNillableCredentialName sets the "credential_name" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableCredentialName(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetCredentialName(*v)
+	}
+	return _c
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (_c *DecisionAuditCreate) SetCredentialBoundaryKind(v string) *DecisionAuditCreate {
+	_c.mutation.SetCredentialBoundaryKind(v)
+	return _c
+}
+
+// SetNillableCredentialBoundaryKind sets the "credential_boundary_kind" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableCredentialBoundaryKind(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetCredentialBoundaryKind(*v)
+	}
+	return _c
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (_c *DecisionAuditCreate) SetCredentialBoundaryProjectID(v string) *DecisionAuditCreate {
+	_c.mutation.SetCredentialBoundaryProjectID(v)
+	return _c
+}
+
+// SetNillableCredentialBoundaryProjectID sets the "credential_boundary_project_id" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableCredentialBoundaryProjectID(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetCredentialBoundaryProjectID(*v)
+	}
+	return _c
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (_c *DecisionAuditCreate) SetCredentialLabels(v string) *DecisionAuditCreate {
+	_c.mutation.SetCredentialLabels(v)
+	return _c
+}
+
+// SetNillableCredentialLabels sets the "credential_labels" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableCredentialLabels(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetCredentialLabels(*v)
+	}
+	return _c
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (_c *DecisionAuditCreate) SetExecutorKind(v string) *DecisionAuditCreate {
+	_c.mutation.SetExecutorKind(v)
+	return _c
+}
+
+// SetNillableExecutorKind sets the "executor_kind" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableExecutorKind(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetExecutorKind(*v)
+	}
+	return _c
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (_c *DecisionAuditCreate) SetExecutorID(v string) *DecisionAuditCreate {
+	_c.mutation.SetExecutorID(v)
+	return _c
+}
+
+// SetNillableExecutorID sets the "executor_id" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableExecutorID(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetExecutorID(*v)
+	}
+	return _c
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (_c *DecisionAuditCreate) SetDeniedBy(v string) *DecisionAuditCreate {
+	_c.mutation.SetDeniedBy(v)
+	return _c
+}
+
+// SetNillableDeniedBy sets the "denied_by" field if the given value is not nil.
+func (_c *DecisionAuditCreate) SetNillableDeniedBy(v *string) *DecisionAuditCreate {
+	if v != nil {
+		_c.SetDeniedBy(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *DecisionAuditCreate) SetID(v uuid.UUID) *DecisionAuditCreate {
 	_c.mutation.SetID(v)
@@ -418,6 +530,38 @@ func (_c *DecisionAuditCreate) createSpec() (*DecisionAudit, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Sampled(); ok {
 		_spec.SetField(decisionaudit.FieldSampled, field.TypeBool, value)
 		_node.Sampled = value
+	}
+	if value, ok := _c.mutation.PermissionID(); ok {
+		_spec.SetField(decisionaudit.FieldPermissionID, field.TypeString, value)
+		_node.PermissionID = value
+	}
+	if value, ok := _c.mutation.CredentialName(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialName, field.TypeString, value)
+		_node.CredentialName = value
+	}
+	if value, ok := _c.mutation.CredentialBoundaryKind(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryKind, field.TypeString, value)
+		_node.CredentialBoundaryKind = value
+	}
+	if value, ok := _c.mutation.CredentialBoundaryProjectID(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialBoundaryProjectID, field.TypeString, value)
+		_node.CredentialBoundaryProjectID = value
+	}
+	if value, ok := _c.mutation.CredentialLabels(); ok {
+		_spec.SetField(decisionaudit.FieldCredentialLabels, field.TypeString, value)
+		_node.CredentialLabels = value
+	}
+	if value, ok := _c.mutation.ExecutorKind(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorKind, field.TypeString, value)
+		_node.ExecutorKind = value
+	}
+	if value, ok := _c.mutation.ExecutorID(); ok {
+		_spec.SetField(decisionaudit.FieldExecutorID, field.TypeString, value)
+		_node.ExecutorID = value
+	}
+	if value, ok := _c.mutation.DeniedBy(); ok {
+		_spec.SetField(decisionaudit.FieldDeniedBy, field.TypeString, value)
+		_node.DeniedBy = value
 	}
 	return _node, _spec
 }
@@ -696,6 +840,150 @@ func (u *DecisionAuditUpsert) SetSampled(v bool) *DecisionAuditUpsert {
 // UpdateSampled sets the "sampled" field to the value that was provided on create.
 func (u *DecisionAuditUpsert) UpdateSampled() *DecisionAuditUpsert {
 	u.SetExcluded(decisionaudit.FieldSampled)
+	return u
+}
+
+// SetPermissionID sets the "permission_id" field.
+func (u *DecisionAuditUpsert) SetPermissionID(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldPermissionID, v)
+	return u
+}
+
+// UpdatePermissionID sets the "permission_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdatePermissionID() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldPermissionID)
+	return u
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (u *DecisionAuditUpsert) ClearPermissionID() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldPermissionID)
+	return u
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (u *DecisionAuditUpsert) SetCredentialName(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldCredentialName, v)
+	return u
+}
+
+// UpdateCredentialName sets the "credential_name" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateCredentialName() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldCredentialName)
+	return u
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (u *DecisionAuditUpsert) ClearCredentialName() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldCredentialName)
+	return u
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsert) SetCredentialBoundaryKind(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldCredentialBoundaryKind, v)
+	return u
+}
+
+// UpdateCredentialBoundaryKind sets the "credential_boundary_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateCredentialBoundaryKind() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldCredentialBoundaryKind)
+	return u
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsert) ClearCredentialBoundaryKind() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldCredentialBoundaryKind)
+	return u
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsert) SetCredentialBoundaryProjectID(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldCredentialBoundaryProjectID, v)
+	return u
+}
+
+// UpdateCredentialBoundaryProjectID sets the "credential_boundary_project_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateCredentialBoundaryProjectID() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldCredentialBoundaryProjectID)
+	return u
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsert) ClearCredentialBoundaryProjectID() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldCredentialBoundaryProjectID)
+	return u
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (u *DecisionAuditUpsert) SetCredentialLabels(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldCredentialLabels, v)
+	return u
+}
+
+// UpdateCredentialLabels sets the "credential_labels" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateCredentialLabels() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldCredentialLabels)
+	return u
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (u *DecisionAuditUpsert) ClearCredentialLabels() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldCredentialLabels)
+	return u
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (u *DecisionAuditUpsert) SetExecutorKind(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldExecutorKind, v)
+	return u
+}
+
+// UpdateExecutorKind sets the "executor_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateExecutorKind() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldExecutorKind)
+	return u
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (u *DecisionAuditUpsert) ClearExecutorKind() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldExecutorKind)
+	return u
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (u *DecisionAuditUpsert) SetExecutorID(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldExecutorID, v)
+	return u
+}
+
+// UpdateExecutorID sets the "executor_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateExecutorID() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldExecutorID)
+	return u
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (u *DecisionAuditUpsert) ClearExecutorID() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldExecutorID)
+	return u
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (u *DecisionAuditUpsert) SetDeniedBy(v string) *DecisionAuditUpsert {
+	u.Set(decisionaudit.FieldDeniedBy, v)
+	return u
+}
+
+// UpdateDeniedBy sets the "denied_by" field to the value that was provided on create.
+func (u *DecisionAuditUpsert) UpdateDeniedBy() *DecisionAuditUpsert {
+	u.SetExcluded(decisionaudit.FieldDeniedBy)
+	return u
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (u *DecisionAuditUpsert) ClearDeniedBy() *DecisionAuditUpsert {
+	u.SetNull(decisionaudit.FieldDeniedBy)
 	return u
 }
 
@@ -1013,6 +1301,174 @@ func (u *DecisionAuditUpsertOne) SetSampled(v bool) *DecisionAuditUpsertOne {
 func (u *DecisionAuditUpsertOne) UpdateSampled() *DecisionAuditUpsertOne {
 	return u.Update(func(s *DecisionAuditUpsert) {
 		s.UpdateSampled()
+	})
+}
+
+// SetPermissionID sets the "permission_id" field.
+func (u *DecisionAuditUpsertOne) SetPermissionID(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetPermissionID(v)
+	})
+}
+
+// UpdatePermissionID sets the "permission_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdatePermissionID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdatePermissionID()
+	})
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (u *DecisionAuditUpsertOne) ClearPermissionID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearPermissionID()
+	})
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (u *DecisionAuditUpsertOne) SetCredentialName(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialName(v)
+	})
+}
+
+// UpdateCredentialName sets the "credential_name" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateCredentialName() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialName()
+	})
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (u *DecisionAuditUpsertOne) ClearCredentialName() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialName()
+	})
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsertOne) SetCredentialBoundaryKind(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialBoundaryKind(v)
+	})
+}
+
+// UpdateCredentialBoundaryKind sets the "credential_boundary_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateCredentialBoundaryKind() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialBoundaryKind()
+	})
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsertOne) ClearCredentialBoundaryKind() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialBoundaryKind()
+	})
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsertOne) SetCredentialBoundaryProjectID(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialBoundaryProjectID(v)
+	})
+}
+
+// UpdateCredentialBoundaryProjectID sets the "credential_boundary_project_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateCredentialBoundaryProjectID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialBoundaryProjectID()
+	})
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsertOne) ClearCredentialBoundaryProjectID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialBoundaryProjectID()
+	})
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (u *DecisionAuditUpsertOne) SetCredentialLabels(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialLabels(v)
+	})
+}
+
+// UpdateCredentialLabels sets the "credential_labels" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateCredentialLabels() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialLabels()
+	})
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (u *DecisionAuditUpsertOne) ClearCredentialLabels() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialLabels()
+	})
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (u *DecisionAuditUpsertOne) SetExecutorKind(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetExecutorKind(v)
+	})
+}
+
+// UpdateExecutorKind sets the "executor_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateExecutorKind() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateExecutorKind()
+	})
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (u *DecisionAuditUpsertOne) ClearExecutorKind() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearExecutorKind()
+	})
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (u *DecisionAuditUpsertOne) SetExecutorID(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetExecutorID(v)
+	})
+}
+
+// UpdateExecutorID sets the "executor_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateExecutorID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateExecutorID()
+	})
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (u *DecisionAuditUpsertOne) ClearExecutorID() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearExecutorID()
+	})
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (u *DecisionAuditUpsertOne) SetDeniedBy(v string) *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetDeniedBy(v)
+	})
+}
+
+// UpdateDeniedBy sets the "denied_by" field to the value that was provided on create.
+func (u *DecisionAuditUpsertOne) UpdateDeniedBy() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateDeniedBy()
+	})
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (u *DecisionAuditUpsertOne) ClearDeniedBy() *DecisionAuditUpsertOne {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearDeniedBy()
 	})
 }
 
@@ -1497,6 +1953,174 @@ func (u *DecisionAuditUpsertBulk) SetSampled(v bool) *DecisionAuditUpsertBulk {
 func (u *DecisionAuditUpsertBulk) UpdateSampled() *DecisionAuditUpsertBulk {
 	return u.Update(func(s *DecisionAuditUpsert) {
 		s.UpdateSampled()
+	})
+}
+
+// SetPermissionID sets the "permission_id" field.
+func (u *DecisionAuditUpsertBulk) SetPermissionID(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetPermissionID(v)
+	})
+}
+
+// UpdatePermissionID sets the "permission_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdatePermissionID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdatePermissionID()
+	})
+}
+
+// ClearPermissionID clears the value of the "permission_id" field.
+func (u *DecisionAuditUpsertBulk) ClearPermissionID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearPermissionID()
+	})
+}
+
+// SetCredentialName sets the "credential_name" field.
+func (u *DecisionAuditUpsertBulk) SetCredentialName(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialName(v)
+	})
+}
+
+// UpdateCredentialName sets the "credential_name" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateCredentialName() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialName()
+	})
+}
+
+// ClearCredentialName clears the value of the "credential_name" field.
+func (u *DecisionAuditUpsertBulk) ClearCredentialName() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialName()
+	})
+}
+
+// SetCredentialBoundaryKind sets the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsertBulk) SetCredentialBoundaryKind(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialBoundaryKind(v)
+	})
+}
+
+// UpdateCredentialBoundaryKind sets the "credential_boundary_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateCredentialBoundaryKind() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialBoundaryKind()
+	})
+}
+
+// ClearCredentialBoundaryKind clears the value of the "credential_boundary_kind" field.
+func (u *DecisionAuditUpsertBulk) ClearCredentialBoundaryKind() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialBoundaryKind()
+	})
+}
+
+// SetCredentialBoundaryProjectID sets the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsertBulk) SetCredentialBoundaryProjectID(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialBoundaryProjectID(v)
+	})
+}
+
+// UpdateCredentialBoundaryProjectID sets the "credential_boundary_project_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateCredentialBoundaryProjectID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialBoundaryProjectID()
+	})
+}
+
+// ClearCredentialBoundaryProjectID clears the value of the "credential_boundary_project_id" field.
+func (u *DecisionAuditUpsertBulk) ClearCredentialBoundaryProjectID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialBoundaryProjectID()
+	})
+}
+
+// SetCredentialLabels sets the "credential_labels" field.
+func (u *DecisionAuditUpsertBulk) SetCredentialLabels(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetCredentialLabels(v)
+	})
+}
+
+// UpdateCredentialLabels sets the "credential_labels" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateCredentialLabels() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateCredentialLabels()
+	})
+}
+
+// ClearCredentialLabels clears the value of the "credential_labels" field.
+func (u *DecisionAuditUpsertBulk) ClearCredentialLabels() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearCredentialLabels()
+	})
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (u *DecisionAuditUpsertBulk) SetExecutorKind(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetExecutorKind(v)
+	})
+}
+
+// UpdateExecutorKind sets the "executor_kind" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateExecutorKind() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateExecutorKind()
+	})
+}
+
+// ClearExecutorKind clears the value of the "executor_kind" field.
+func (u *DecisionAuditUpsertBulk) ClearExecutorKind() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearExecutorKind()
+	})
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (u *DecisionAuditUpsertBulk) SetExecutorID(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetExecutorID(v)
+	})
+}
+
+// UpdateExecutorID sets the "executor_id" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateExecutorID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateExecutorID()
+	})
+}
+
+// ClearExecutorID clears the value of the "executor_id" field.
+func (u *DecisionAuditUpsertBulk) ClearExecutorID() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearExecutorID()
+	})
+}
+
+// SetDeniedBy sets the "denied_by" field.
+func (u *DecisionAuditUpsertBulk) SetDeniedBy(v string) *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.SetDeniedBy(v)
+	})
+}
+
+// UpdateDeniedBy sets the "denied_by" field to the value that was provided on create.
+func (u *DecisionAuditUpsertBulk) UpdateDeniedBy() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.UpdateDeniedBy()
+	})
+}
+
+// ClearDeniedBy clears the value of the "denied_by" field.
+func (u *DecisionAuditUpsertBulk) ClearDeniedBy() *DecisionAuditUpsertBulk {
+	return u.Update(func(s *DecisionAuditUpsert) {
+		s.ClearDeniedBy()
 	})
 }
 
