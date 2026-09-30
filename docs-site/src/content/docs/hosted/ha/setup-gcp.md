@@ -737,16 +737,22 @@ server:
 ```
 
 :::note[Set a stable `hub_id`]
-`server.hub.hub_id` is a short, unique string (letters, digits, hyphens —
-e.g. a project or environment slug such as `scion-hub-ha-prod`) that
-identifies this Hub instance, so all Cloud Run replicas must resolve to
-the **same** value. Without an explicit `hub_id`, each instance derives
-its own ID from its hostname (or Cloud Run revision), causing replicas to
-diverge on GCS storage prefixes and secret scopes.
+`server.hub.hub_id` is a short string (recommended: lowercase letters,
+digits, hyphens — e.g. a project or environment slug such as
+`scion-hub-ha-prod`) that identifies this Hub instance, so all Cloud Run
+replicas must resolve to the **same** value; it should be unique among
+hubs that share a GCP project or bucket. Without an explicit `hub_id`,
+the Hub falls back to an implicit ID (a hash of the Cloud Run service
+name, or a per-host, hostname-derived value elsewhere). That value
+changes if the service is renamed or recreated under another name, and
+it differs for any process that does not run under the same service.
+The HA preflight therefore requires it to be pinned.
 
-The hub ID is permanent for the hub's lifetime: changing it changes every
-hub-scoped secret name (`scion-<sha256(hub_id)[:12]>-...`) and storage
-path, orphaning anything namespaced under the old value — see
+The hub ID is permanent for the hub's lifetime: changing it changes the
+name prefix of every Secret Manager secret this hub writes
+(`scion-<sha256(hub_id)[:12]>-...`), the GCS prefix (`hubs/<hub_id>/...`)
+and hub-scoped database rows, orphaning anything namespaced under the
+old value — see
 [IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
 for the naming scheme. Set it once and keep every redeploy and revision
 on the same value. If `server.hub.hub_id` is missing on an HA deployment,
