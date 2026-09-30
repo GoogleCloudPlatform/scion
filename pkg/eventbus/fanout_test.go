@@ -645,3 +645,77 @@ func TestFanOutEventBus_HasSpokeAfterAddRemove(t *testing.T) {
 		t.Fatal("expected HasSpoke('discord') = false after remove")
 	}
 }
+
+// newSaturatedUserTopicInproc builds an InProcessEventBus whose single
+// subscriber's buffer is already full for a user-message topic, so the next
+// Publish is guaranteed to be dropped and reported.
+func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *messages.StructuredMessage) {
+	t.Helper()
+	b := NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = b.Close() })
+
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	_, err := b.Subscribe("scion.project.g1.user.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-block
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { close(block) })
+
+	topic := "scion.project.g1.user.alice.messages"
+	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+
+	// Prime the dispatch goroutine so it is blocked inside the handler,
+	// then fill the channel buffer behind it (mirrors
+	// TestInProcessEventBus_UserTopicBufferFullReturnsError).
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("unexpected error priming dispatch goroutine: %v", err)
+	}
+	<-started
+
+	for i := 0; i < defaultSubscriberBuffer; i++ {
+		if err := b.Publish(context.Background(), topic, msg); err != nil {
+			t.Fatalf("unexpected error filling buffer (iteration %d): %v", i, err)
+		}
+	}
+	return b, topic, msg
+}
+
+// TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel is a regression
+// test for N1 in the ptone/scion#2325 review: FanOutEventBus must preserve
+// errors.Is(err, ErrSubscriberBufferFull) from a saturated InProcessEventBus
+// spoke, on both the plain fan-out path (no msg.Channel, errors.Join over
+// unwrapped errors) and the channel-routing path (msg.Channel set, the
+// inproc error is %w-wrapped before errors.Join). A future regression to
+// %v-wrapping or to dropping the join on either path would otherwise let the
+// sentinel silently stop propagating through the production bus topology.
+func TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel(t *testing.T) {
+	t.Run("without channel", func(t *testing.T) {
+		inproc, topic, msg := newSaturatedUserTopicInproc(t)
+		fan := NewFanOutEventBus([]NamedEventBus{
+			{Name: InProcessBusName, Bus: inproc},
+		}, slog.Default())
+
+		if err := fan.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
+			t.Fatalf("expected ErrSubscriberBufferFull, got %v", err)
+		}
+	})
+
+	t.Run("with channel", func(t *testing.T) {
+		inproc, topic, msg := newSaturatedUserTopicInproc(t)
+		fan := NewFanOutEventBus([]NamedEventBus{
+			{Name: InProcessBusName, Bus: inproc},
+		}, slog.Default())
+
+		msg.Channel = "web"
+		if err := fan.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
+			t.Fatalf("expected ErrSubscriberBufferFull, got %v", err)
+		}
+	})
+}

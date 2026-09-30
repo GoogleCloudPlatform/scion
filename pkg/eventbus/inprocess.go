@@ -101,14 +101,12 @@ func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *mess
 			default:
 				b.log.Warn("Message dropped: subscriber buffer full",
 					"pattern", sub.pattern, "topic", topic)
-				if reportDrop {
-					dropped = true
-				}
+				dropped = true
 			}
 		}
 	}
 
-	if dropped {
+	if dropped && reportDrop {
 		return ErrSubscriberBufferFull
 	}
 
