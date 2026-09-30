@@ -254,6 +254,13 @@ export class ScionChatComposer extends LitElement {
       this.resetMentionTracking();
       this.focusTextarea();
     }
+    // A new reply target (including switching from one message to another)
+    // must move focus into the textarea, caret at the end of the draft, so
+    // the user can start typing the reply immediately. Clearing `replyTo`
+    // (cancel/send) must not re-steal focus, hence the truthy check.
+    if (changedProperties.has('replyTo') && this.replyTo) {
+      this.focusTextareaCaretEnd();
+    }
     if (changedProperties.has('conversationKey')) {
       // Save the draft for the OLD conversation immediately before switching.
       const oldKey = changedProperties.get('conversationKey') as string;
@@ -1566,6 +1573,25 @@ export class ScionChatComposer extends LitElement {
         const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
         if (slTextarea) {
           (slTextarea as HTMLElement).focus();
+        }
+      });
+    });
+  }
+
+  /**
+   * Focus the textarea with the caret placed after the last character of the
+   * current draft. Used for entry points (e.g. Reply) that must not disturb
+   * the existing draft text but still need the caret at a predictable spot
+   * so typing continues the message rather than landing mid-draft.
+   */
+  private focusTextareaCaretEnd(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        const ta = this.getTextareaElement();
+        if (ta) {
+          const end = ta.value.length;
+          ta.setSelectionRange(end, end);
+          ta.focus();
         }
       });
     });

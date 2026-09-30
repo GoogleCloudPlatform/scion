@@ -69,6 +69,10 @@ vi.mock('../../../client/api.js', () => ({
 }));
 
 await import('./chat-thread.js');
+// Registers <sl-textarea> so the composer's shadow root actually contains it
+// (and its own shadow root) instead of an unupgraded, shadow-less stand-in —
+// needed for the reply-focus tests below to walk into the native <textarea>.
+import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 type ChatSendDetail = import('./chat-composer.js').ChatSendDetail;
 type Message = import('../../../shared/types.js').Message;
@@ -5500,6 +5504,172 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
       const labels = menuItemLabels(el);
       expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
       expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+    });
+  });
+});
+
+/**
+ * Choosing Reply from the message context menu must move keyboard focus into
+ * the composer so the user can start typing the reply immediately. The menu
+ * itself must be gone and the reply-preview chip rendered before focus lands
+ * — otherwise the menu's own teardown could still be mid-flight and steal
+ * focus back to the message bubble.
+ */
+describe('scion-chat-thread reply focuses the composer', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  /** Mount a v2 thread with one rendered message bubble per given item, in order. */
+  async function mountWithMessages(
+    items: Array<{ id: string; msg: string; createdAt: string }>
+  ): Promise<{ el: ScionChatThread; bubbles: HTMLElement[] }> {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: items.map((item) => ({
+            sender: 'them@example.com',
+            senderId: 'user-them',
+            type: 'chat',
+            ...item,
+          })),
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(items.length)
+    );
+    const bubbles = Array.from(
+      el.shadowRoot!.querySelectorAll('scion-chat-message')
+    ) as (HTMLElement & {
+      updateComplete: Promise<boolean>;
+    })[];
+    await Promise.all(bubbles.map((b) => b.updateComplete));
+    return { el, bubbles };
+  }
+
+  /** Right-click a message bubble, then click the "Reply" item in the menu that opens. */
+  async function chooseReplyFromContextMenu(
+    el: ScionChatThread,
+    bubble: HTMLElement
+  ): Promise<void> {
+    bubble.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, composed: true, clientX: 5, clientY: 5 })
+    );
+    await el.updateComplete;
+
+    const replyItem = Array.from(el.shadowRoot!.querySelectorAll('.context-menu-item')).find(
+      (item) => item.textContent?.includes('Reply')
+    ) as HTMLElement | undefined;
+    expect(replyItem).toBeTruthy();
+    replyItem!.click();
+    await el.updateComplete;
+  }
+
+  it('makes the composer textarea the active element after choosing Reply', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+    ]);
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    // Menu is gone and the reply-preview chip is up before focus is asserted.
+    expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+    expect(composer.shadowRoot?.querySelector('.reply-bar')).not.toBeNull();
+
+    await vi.waitFor(() => {
+      const slTextarea = composer.shadowRoot?.querySelector('sl-textarea') as
+        | (HTMLElement & { shadowRoot: ShadowRoot | null })
+        | null;
+      expect(slTextarea).not.toBeNull();
+      const textarea = slTextarea!.shadowRoot?.querySelector('textarea') ?? null;
+      expect(composer.shadowRoot?.activeElement).toBe(slTextarea);
+      expect(slTextarea!.shadowRoot?.activeElement).toBe(textarea);
+    });
+  });
+
+  it('places the caret at the end of the existing draft, not at its start', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+    ]);
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+
+    const slTextarea = composer.shadowRoot!.querySelector('sl-textarea') as HTMLElement & {
+      shadowRoot: ShadowRoot | null;
+      updateComplete: Promise<boolean>;
+    };
+    await slTextarea.updateComplete;
+    const textarea = slTextarea.shadowRoot!.querySelector('textarea') as HTMLTextAreaElement;
+
+    // Simulate an in-progress draft the user had already typed.
+    textarea.value = 'existing draft text';
+    textarea.selectionStart = textarea.selectionEnd = 0;
+    textarea.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    await composer.updateComplete;
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(el);
+      expect(textarea.selectionStart).toBe('existing draft text'.length);
+      expect(textarea.selectionEnd).toBe('existing draft text'.length);
+    });
+  });
+
+  it('re-focuses the composer when the reply target switches from one message to another', async () => {
+    const { el, bubbles } = await mountWithMessages([
+      { id: 'm1', msg: 'hello there', createdAt: '2026-01-01T00:00:00Z' },
+      { id: 'm2', msg: 'second message', createdAt: '2026-01-01T00:01:00Z' },
+    ]);
+
+    await chooseReplyFromContextMenu(el, bubbles[0]);
+
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await composer.updateComplete;
+    const slTextarea = composer.shadowRoot!.querySelector('sl-textarea') as HTMLElement & {
+      shadowRoot: ShadowRoot | null;
+    };
+    let textarea: HTMLTextAreaElement | null = null;
+    await vi.waitFor(() => {
+      textarea = slTextarea.shadowRoot?.querySelector('textarea') ?? null;
+      expect(textarea).not.toBeNull();
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
+    });
+
+    // Move focus away — a subsequent reply-target change must reclaim it
+    // rather than leaving focus wherever it drifted to in between.
+    textarea!.blur();
+    expect(slTextarea.shadowRoot?.activeElement).not.toBe(textarea);
+
+    await chooseReplyFromContextMenu(el, bubbles[1]);
+    await composer.updateComplete;
+
+    // Confirms the target actually changed, not just a re-fire on message 1.
+    expect(composer.shadowRoot?.querySelector('.reply-bar .reply-content')?.textContent).toContain(
+      'second message'
+    );
+    await vi.waitFor(() => {
+      expect(composer.shadowRoot?.activeElement).toBe(slTextarea);
+      expect(slTextarea.shadowRoot?.activeElement).toBe(textarea);
     });
   });
 });
