@@ -2740,7 +2740,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/useraccesstoken.go — user access token CRUD
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/useraccesstoken.go", Function: "CreateTokenWithMetadata", Symbol: "CreateUserAccessToken", OperationID: "credential.token.create"},
+	{File: "pkg/hub/useraccesstoken.go", Function: "CreateTokenWithParams", Symbol: "CreateUserAccessToken", OperationID: "credential.token.create"},
 	{File: "pkg/hub/useraccesstoken.go", Function: "RevokeToken", Symbol: "RevokeUserAccessToken", OperationID: "credential.token.revoke"},
 	{File: "pkg/hub/useraccesstoken.go", Function: "DeleteToken", Symbol: "DeleteUserAccessToken", OperationID: "credential.token.revoke"},
 

@@ -65382,25 +65382,28 @@ func (m *UserMutation) ResetEdge(name string) error {
 // UserAccessTokenMutation represents an operation that mutates the UserAccessToken nodes in the graph.
 type UserAccessTokenMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	user_id       *uuid.UUID
-	name          *string
-	prefix        *string
-	key_hash      *string
-	project_id    *uuid.UUID
-	scopes        *string
-	revoked       *bool
-	expires_at    *time.Time
-	last_used     *time.Time
-	created       *time.Time
-	purpose       *string
-	labels        *string
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*UserAccessToken, error)
-	predicates    []predicate.UserAccessToken
+	op                     Op
+	typ                    string
+	id                     *uuid.UUID
+	user_id                *uuid.UUID
+	name                   *string
+	prefix                 *string
+	key_hash               *string
+	project_id             *uuid.UUID
+	scopes                 *string
+	ceiling_version        *int32
+	addceiling_version     *int32
+	ceiling_permission_ids *string
+	revoked                *bool
+	expires_at             *time.Time
+	last_used              *time.Time
+	created                *time.Time
+	purpose                *string
+	labels                 *string
+	clearedFields          map[string]struct{}
+	done                   bool
+	oldValue               func(context.Context) (*UserAccessToken, error)
+	predicates             []predicate.UserAccessToken
 }
 
 var _ ent.Mutation = (*UserAccessTokenMutation)(nil)
@@ -65723,6 +65726,111 @@ func (m *UserAccessTokenMutation) ResetScopes() {
 	m.scopes = nil
 }
 
+// SetCeilingVersion sets the "ceiling_version" field.
+func (m *UserAccessTokenMutation) SetCeilingVersion(i int32) {
+	m.ceiling_version = &i
+	m.addceiling_version = nil
+}
+
+// CeilingVersion returns the value of the "ceiling_version" field in the mutation.
+func (m *UserAccessTokenMutation) CeilingVersion() (r int32, exists bool) {
+	v := m.ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingVersion returns the old "ceiling_version" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingVersion: %w", err)
+	}
+	return oldValue.CeilingVersion, nil
+}
+
+// AddCeilingVersion adds i to the "ceiling_version" field.
+func (m *UserAccessTokenMutation) AddCeilingVersion(i int32) {
+	if m.addceiling_version != nil {
+		*m.addceiling_version += i
+	} else {
+		m.addceiling_version = &i
+	}
+}
+
+// AddedCeilingVersion returns the value that was added to the "ceiling_version" field in this mutation.
+func (m *UserAccessTokenMutation) AddedCeilingVersion() (r int32, exists bool) {
+	v := m.addceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCeilingVersion resets all changes to the "ceiling_version" field.
+func (m *UserAccessTokenMutation) ResetCeilingVersion() {
+	m.ceiling_version = nil
+	m.addceiling_version = nil
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) SetCeilingPermissionIds(s string) {
+	m.ceiling_permission_ids = &s
+}
+
+// CeilingPermissionIds returns the value of the "ceiling_permission_ids" field in the mutation.
+func (m *UserAccessTokenMutation) CeilingPermissionIds() (r string, exists bool) {
+	v := m.ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingPermissionIds returns the old "ceiling_permission_ids" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingPermissionIds: %w", err)
+	}
+	return oldValue.CeilingPermissionIds, nil
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) ClearCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	m.clearedFields[useraccesstoken.FieldCeilingPermissionIds] = struct{}{}
+}
+
+// CeilingPermissionIdsCleared returns if the "ceiling_permission_ids" field was cleared in this mutation.
+func (m *UserAccessTokenMutation) CeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[useraccesstoken.FieldCeilingPermissionIds]
+	return ok
+}
+
+// ResetCeilingPermissionIds resets all changes to the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) ResetCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	delete(m.clearedFields, useraccesstoken.FieldCeilingPermissionIds)
+}
+
 // SetRevoked sets the "revoked" field.
 func (m *UserAccessTokenMutation) SetRevoked(b bool) {
 	m.revoked = &b
@@ -66025,7 +66133,7 @@ func (m *UserAccessTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserAccessTokenMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 14)
 	if m.user_id != nil {
 		fields = append(fields, useraccesstoken.FieldUserID)
 	}
@@ -66043,6 +66151,12 @@ func (m *UserAccessTokenMutation) Fields() []string {
 	}
 	if m.scopes != nil {
 		fields = append(fields, useraccesstoken.FieldScopes)
+	}
+	if m.ceiling_version != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingVersion)
+	}
+	if m.ceiling_permission_ids != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
 	}
 	if m.revoked != nil {
 		fields = append(fields, useraccesstoken.FieldRevoked)
@@ -66082,6 +66196,10 @@ func (m *UserAccessTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.ProjectID()
 	case useraccesstoken.FieldScopes:
 		return m.Scopes()
+	case useraccesstoken.FieldCeilingVersion:
+		return m.CeilingVersion()
+	case useraccesstoken.FieldCeilingPermissionIds:
+		return m.CeilingPermissionIds()
 	case useraccesstoken.FieldRevoked:
 		return m.Revoked()
 	case useraccesstoken.FieldExpiresAt:
@@ -66115,6 +66233,10 @@ func (m *UserAccessTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldProjectID(ctx)
 	case useraccesstoken.FieldScopes:
 		return m.OldScopes(ctx)
+	case useraccesstoken.FieldCeilingVersion:
+		return m.OldCeilingVersion(ctx)
+	case useraccesstoken.FieldCeilingPermissionIds:
+		return m.OldCeilingPermissionIds(ctx)
 	case useraccesstoken.FieldRevoked:
 		return m.OldRevoked(ctx)
 	case useraccesstoken.FieldExpiresAt:
@@ -66178,6 +66300,20 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetScopes(v)
 		return nil
+	case useraccesstoken.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingVersion(v)
+		return nil
+	case useraccesstoken.FieldCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingPermissionIds(v)
+		return nil
 	case useraccesstoken.FieldRevoked:
 		v, ok := value.(bool)
 		if !ok {
@@ -66227,13 +66363,21 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *UserAccessTokenMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addceiling_version != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingVersion)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *UserAccessTokenMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case useraccesstoken.FieldCeilingVersion:
+		return m.AddedCeilingVersion()
+	}
 	return nil, false
 }
 
@@ -66242,6 +66386,13 @@ func (m *UserAccessTokenMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case useraccesstoken.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCeilingVersion(v)
+		return nil
 	}
 	return fmt.Errorf("unknown UserAccessToken numeric field %s", name)
 }
@@ -66250,6 +66401,9 @@ func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *UserAccessTokenMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(useraccesstoken.FieldCeilingPermissionIds) {
+		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
+	}
 	if m.FieldCleared(useraccesstoken.FieldExpiresAt) {
 		fields = append(fields, useraccesstoken.FieldExpiresAt)
 	}
@@ -66276,6 +66430,9 @@ func (m *UserAccessTokenMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *UserAccessTokenMutation) ClearField(name string) error {
 	switch name {
+	case useraccesstoken.FieldCeilingPermissionIds:
+		m.ClearCeilingPermissionIds()
+		return nil
 	case useraccesstoken.FieldExpiresAt:
 		m.ClearExpiresAt()
 		return nil
@@ -66313,6 +66470,12 @@ func (m *UserAccessTokenMutation) ResetField(name string) error {
 		return nil
 	case useraccesstoken.FieldScopes:
 		m.ResetScopes()
+		return nil
+	case useraccesstoken.FieldCeilingVersion:
+		m.ResetCeilingVersion()
+		return nil
+	case useraccesstoken.FieldCeilingPermissionIds:
+		m.ResetCeilingPermissionIds()
 		return nil
 	case useraccesstoken.FieldRevoked:
 		m.ResetRevoked()
