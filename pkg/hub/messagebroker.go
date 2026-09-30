@@ -689,6 +689,21 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 // deliverToAgent dispatches a message to a specific agent via the existing
 // DispatchAgentMessage path. ObserverOnly messages are skipped — they were
 // already delivered directly and are only published for plugin observers.
+//
+// Raw forwarding note (ptone/scion#2192 inventory): this function and its
+// siblings fanOutToProject/fanOutGlobal forward msg.Raw unchanged with no
+// guard. That is intentional and safe here: after ptone/scion#2192, no Hub
+// publisher places a raw message on this bus at all. Broadcast and group
+// forms reject raw upstream before they would ever publish, the
+// still-supported single-agent raw shape is dispatched directly through the
+// dispatcher (never through this bus), and the agent-to-agent observer
+// copies (agent_dm_operation.go, handlers_agent_messaging.go) are skipped
+// entirely for raw. Inbound traffic from plugin adapters never reaches this
+// bus either; it is delivered directly by handlers_broker_inbound.go /
+// _routed.go, which is where the raw guard for that ingress path lives. Do
+// not add a second guard here without first confirming a new Hub-originated
+// publisher can put a raw message on this bus — that would be duplicating
+// policy, not adding containment.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.ObserverOnly {
 		return
