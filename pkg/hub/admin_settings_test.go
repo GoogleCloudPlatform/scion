@@ -287,6 +287,39 @@ func TestApplySettingsUpdates_QuotasNilRequest(t *testing.T) {
 	}
 }
 
+// Upstream review finding (GoogleCloudPlatform/scion#2115, gemini-code-assist,
+// pkg/hub/admin_settings.go): deciding whether to delete the whole quotas
+// section by checking the single named field EnforceBrokerQuotas != nil is
+// fragile once QuotaSettings gains a second field — a request that sets only
+// the new field, with EnforceBrokerQuotas omitted, would wrongly delete the
+// section. applySettingsUpdates now uses isZeroStruct (the same helper
+// admin_settings_db.go already uses for this exact "is anything meaningfully
+// set" question), so the decision is section-generic: it looks at every
+// field, not one hardcoded name. This is directly exercised by isZeroStruct's
+// own tests (TestIsZeroStruct) for the current single-field QuotaSettings;
+// this test locks in the equivalent behavior through the actual
+// applySettingsUpdates entry point.
+func TestApplySettingsUpdates_QuotasSectionGenericZeroCheck(t *testing.T) {
+	// A struct with every field nil/zero must delete the section, regardless
+	// of which field(s) QuotaSettings has.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas":         map[string]interface{}{"enforce_broker_quotas": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{}})
+	if _, ok := raw["quotas"]; ok {
+		t.Error("expected quotas to be deleted when every field of QuotaSettings is nil")
+	}
+
+	// Any field being set must keep the section.
+	enabled := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enabled}})
+	if _, ok := raw2["quotas"]; !ok {
+		t.Error("expected quotas to be kept when a field of QuotaSettings is set")
+	}
+}
+
 // TestApplySettingsUpdates_ClearFieldsToBlank is a regression test for
 // ptone/scion#860: clearing a field to blank in the admin UI should delete
 // the key from settings.yaml, not preserve the old value.

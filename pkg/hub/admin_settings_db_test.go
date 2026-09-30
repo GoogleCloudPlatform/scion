@@ -2220,6 +2220,9 @@ func TestIsZeroStruct(t *testing.T) {
 	if !isZeroStruct(&config.V1MessageBrokerConfig{}) {
 		t.Error("expected zero V1MessageBrokerConfig")
 	}
+	if !isZeroStruct(&config.QuotaSettings{}) {
+		t.Error("expected zero QuotaSettings")
+	}
 
 	// Non-zero structs.
 	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
@@ -2233,6 +2236,10 @@ func TestIsZeroStruct(t *testing.T) {
 	}
 	if isZeroStruct(&config.V1MessageBrokerConfig{Enabled: true}) {
 		t.Error("V1MessageBrokerConfig with enabled=true should not be zero")
+	}
+	enforced := false
+	if isZeroStruct(&config.QuotaSettings{EnforceBrokerQuotas: &enforced}) {
+		t.Error("QuotaSettings with EnforceBrokerQuotas set should not be zero")
 	}
 
 	// Nil.

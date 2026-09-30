@@ -661,7 +661,13 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.Quotas != nil {
-		if req.Quotas.EnforceBrokerQuotas != nil {
+		// Section-generic zero check (matches isZeroStruct's use elsewhere,
+		// admin_settings_db.go): checking a single named field (e.g.
+		// EnforceBrokerQuotas != nil) would silently stop deleting empty
+		// documents the moment QuotaSettings gains a second field, since a
+		// request with only the new field set would then wrongly delete the
+		// whole section. Delete only when every field is nil/zero.
+		if !isZeroStruct(req.Quotas) {
 			raw["quotas"] = marshalToMap(req.Quotas)
 		} else {
 			delete(raw, "quotas")
