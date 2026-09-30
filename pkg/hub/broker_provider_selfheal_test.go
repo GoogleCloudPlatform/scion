@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -600,4 +601,74 @@ func TestBrokerProviderSelfHeal_NoPublishWhenNothingHealed(t *testing.T) {
 	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
 
 	assert.Empty(t, spy.getCalls(), "self-heal must not publish when no provider row changed")
+}
+
+// TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp covers ptone/scion#2356:
+// a successful restamp must be visible in the logs at Info level, carrying the
+// broker ID and the number of providers restamped, so operators can confirm
+// from logs alone that a rollout did not leave providers offline. It asserts
+// only identifiers and a count -- no per-provider project IDs -- since a
+// broker can have many providers and per-provider Info lines would be log
+// spam on this hot, every-tick path.
+func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	broker, project := newProviderSelfHealFixture(t, s, "logsuccess")
+
+	const sessionID = "sess-selfheal-logsuccess"
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: sessionID}
+	srv.controlChannel.mu.Unlock()
+
+	capture := &capturingHandler{}
+	restore := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
+
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.BrokerStatusOnline, provider.Status, "precondition: the row must actually have been healed")
+
+	rec, ok := findRecord(capture.all(), "Scheduler: broker provider self-heal restamped providers online")
+	require.True(t, ok, "a successful restamp must log an Info line")
+	assert.Equal(t, slog.LevelInfo, rec.Level)
+	attrs := recordAttrs(rec)
+	assert.Equal(t, broker.ID, attrs["brokerID"])
+	assert.Equal(t, int64(1), attrs["count"])
+}
+
+// TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed is the counterpart to
+// the above: a tick that heals nothing (every row already online) must not
+// emit the restamp Info line, since this handler runs on every scheduler tick
+// on every instance holding a live socket, and that no-op path is expected to
+// be the hot, common case.
+func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	broker, project := newProviderSelfHealFixture(t, s, "lognoop")
+
+	const sessionID = "sess-selfheal-lognoop"
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: sessionID}
+	srv.controlChannel.mu.Unlock()
+
+	// Bring the row online first via the normal connect path.
+	srv.markBrokerOnline(broker.ID, sessionID)
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.BrokerStatusOnline, provider.Status, "precondition")
+
+	capture := &capturingHandler{}
+	restore := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
+
+	_, ok := findRecord(capture.all(), "Scheduler: broker provider self-heal restamped providers online")
+	assert.False(t, ok, "a no-op tick must not log the restamp Info line")
 }

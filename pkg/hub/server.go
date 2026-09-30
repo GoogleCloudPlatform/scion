@@ -5682,6 +5682,14 @@ func (s *Server) selfHealBrokerProviders(ctx context.Context, snapshot []string)
 		if err == nil {
 			brokerName = broker.Name
 		}
+		// Logged only on the success path, and only when something actually
+		// healed: this handler runs every scheduler tick on every instance
+		// holding a live socket (see brokerProviderSelfHealHandler), so most
+		// ticks find nothing to restamp -- that hot, no-op path stays silent
+		// (the len(healedProjectIDs) == 0 continue above) to avoid Info-level
+		// log spam, while a genuine restamp remains visible to operators
+		// confirming a rollout did not leave providers offline.
+		slog.Info("Scheduler: broker provider self-heal restamped providers online", "brokerID", brokerID, "count", len(healedProjectIDs))
 		s.events.PublishBrokerConnected(ctx, brokerID, brokerName, healedProjectIDs)
 	}
 }
