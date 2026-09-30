@@ -157,20 +157,23 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (end
 // in priority order: the request-level HubEndpoint, the hub connection
 // endpoint, this broker's own configured HubEndpoint, the resolved env
 // (ResolvedEnv, i.e. hub-side AppliedConfig.Env — creator-controlled), and
-// finally project settings.
+// finally project settings. All five tiers feed the returned endpoint,
+// which is what SCION_HUB_ENDPOINT delivers to the agent.
 //
-// trusted reports whether the returned endpoint came from an
-// OPERATOR-DERIVED tier: the first three tiers, or project settings (an
-// operator-controlled file) — never the resolved-env tier, which a project
-// or template creator controls. Once the resolved-env tier supplies a
-// non-empty value, project settings is never consulted (the same "first
-// non-empty tier wins" rule the endpoint itself follows), so trusted is
-// false for exactly the cases where a creator-controlled value is what
-// ultimately got returned. The final localhost/connection-endpoint
-// substitution and the container-bridge override below only ever replace
-// the endpoint with another operator-derived value (the connection endpoint
-// or a rewrite of the broker's own bridge address), so neither one can turn
-// a trusted result into an untrusted one or vice versa.
+// trusted reports whether that endpoint came from an OPERATOR-DERIVED tier:
+// only the first three (the request HubEndpoint, the connection endpoint,
+// or this broker's own configured HubEndpoint) — never the resolved-env
+// tier, which a project or template creator controls, and never project
+// settings either, since for a hub-managed project that file's own content
+// is itself hub-resolved, the same tenant-reachable path the resolved-env
+// tier already excludes. Once either of those last two tiers supplies the
+// endpoint, trusted stays false for exactly that result, even though the
+// endpoint itself is no longer empty and is still delivered to the agent.
+// The final localhost/connection-endpoint substitution and the
+// container-bridge override below only ever replace the endpoint with
+// another operator-derived value (the connection endpoint or a rewrite of
+// the broker's own bridge address), so neither one can turn a trusted
+// result into an untrusted one or vice versa.
 func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) (endpoint string, trusted bool) {
 	hubEndpoint := reqHubEndpoint
 	trusted = hubEndpoint != ""
@@ -191,8 +194,13 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = hubEndpointFromResolvedEnv(resolvedEnv)
 	}
 	if hubEndpoint == "" {
+		// hubEndpointFromProjectSettings is also excluded from trust: for a
+		// hub-managed project this file's content is itself hub-resolved,
+		// the same degenerate precondition (every earlier tier empty) that
+		// makes the resolved-env tier untrustworthy above. trusted stays
+		// false even though hubEndpoint itself is no longer empty; only the
+		// delivered (non-egress) SCION_HUB_ENDPOINT value uses this tier.
 		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
-		trusted = hubEndpoint != ""
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
 	// machine's loopback, not this broker's. When we have a non-localhost

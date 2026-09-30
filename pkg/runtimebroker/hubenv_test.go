@@ -79,10 +79,10 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		runtimeName          string
 		want                 string
 		// wantTrusted is the trust bit resolveHubEndpointForCreate reports
-		// for the returned endpoint: true for every operator-derived tier
-		// (request, connection, broker, project settings), false only for
-		// the resolved-env tier — see the "resolved env fallback" case
-		// below.
+		// for the returned endpoint: true only for the request/connection/
+		// broker tiers, false for both the resolved-env and the project-
+		// settings tiers — see the "resolved env fallback" and "settings
+		// fallback" cases below.
 		wantTrusted bool
 	}{
 		{
@@ -117,7 +117,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			name:        "settings fallback when others absent",
 			projectPath: projectDir,
 			want:        "https://settings.example.com",
-			wantTrusted: true,
+			wantTrusted: false,
 		},
 		{
 			name:                 "localhost req overridden by non-localhost connection",
