@@ -103,6 +103,14 @@ func assertCeilingDeny(t *testing.T, d Decision, msg string) {
 	assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "%s: reason %q", msg, d.Reason)
 }
 
+// assertCeilingDenyCause is assertCeilingDeny plus the DenyCause the
+// ceiling recorded, which selects the SA-assign 403 text.
+func assertCeilingDenyCause(t *testing.T, d Decision, cause DenyCause, msg string) {
+	t.Helper()
+	assertCeilingDeny(t, d, msg)
+	assert.Equal(t, cause, d.DenyCause, "%s: reason %q", msg, d.Reason)
+}
+
 func TestParentCeiling_SoftDeletedImmediateAgentDelegatorDenies(t *testing.T) {
 	f := newParentCeilingFixture(t, "softdel")
 	parent, child := tid("pc-softdel-parent"), tid("pc-softdel-child")
@@ -112,8 +120,8 @@ func TestParentCeiling_SoftDeletedImmediateAgentDelegatorDenies(t *testing.T) {
 	require.True(t, f.agentCreate(t, child).Allowed, "live chain allows")
 
 	softDeleteStoredAgent(t, f.store, parent)
-	assertCeilingDeny(t, f.projectRead(t, child), "read with a soft-deleted parent")
-	assertCeilingDeny(t, f.agentCreate(t, child), "create with a soft-deleted parent")
+	assertCeilingDenyCause(t, f.projectRead(t, child), DenyCauseCeilingOrphaned, "read with a soft-deleted parent")
+	assertCeilingDenyCause(t, f.agentCreate(t, child), DenyCauseCeilingOrphaned, "create with a soft-deleted parent")
 }
 
 func TestParentCeiling_MissingAgentDelegatorDenies(t *testing.T) {
@@ -123,8 +131,8 @@ func TestParentCeiling_MissingAgentDelegatorDenies(t *testing.T) {
 	createDCEdge(t, f.store, store.DelegationPrincipalAgent, tid("pc-purged-parent-absent"),
 		store.DelegationPrincipalAgent, child, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 
-	assertCeilingDeny(t, f.projectRead(t, child), "read with a purged parent")
-	assertCeilingDeny(t, f.agentCreate(t, child), "create with a purged parent")
+	assertCeilingDenyCause(t, f.projectRead(t, child), DenyCauseCeilingOrphaned, "read with a purged parent")
+	assertCeilingDenyCause(t, f.agentCreate(t, child), DenyCauseCeilingOrphaned, "create with a purged parent")
 }
 
 func TestParentCeiling_MissingUserDelegatorDenies(t *testing.T) {
@@ -134,7 +142,7 @@ func TestParentCeiling_MissingUserDelegatorDenies(t *testing.T) {
 	createDCEdge(t, f.store, store.DelegationPrincipalUser, tid("pc-nouser-absent"),
 		store.DelegationPrincipalAgent, child, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 
-	assertCeilingDeny(t, f.projectRead(t, child), "read with a missing user delegator")
+	assertCeilingDenyCause(t, f.projectRead(t, child), DenyCauseCeilingOrphaned, "read with a missing user delegator")
 }
 
 func TestParentCeiling_DeeperDeletedDelegatorDenies(t *testing.T) {
@@ -144,8 +152,9 @@ func TestParentCeiling_DeeperDeletedDelegatorDenies(t *testing.T) {
 	require.True(t, f.projectRead(t, c).Allowed)
 
 	softDeleteStoredAgent(t, f.store, a)
-	assertCeilingDeny(t, f.projectRead(t, c), "grandchild with a deleted grandparent and a live parent")
-	assertCeilingDeny(t, f.projectRead(t, b), "child with a deleted parent")
+	assertCeilingDenyCause(t, f.projectRead(t, c), DenyCauseCeilingOrphaned, "grandchild with a deleted grandparent and a live parent")
+	assertCeilingDenyCause(t, f.projectRead(t, b), DenyCauseCeilingOrphaned, "child with a deleted parent")
+	assertCeilingDenyCause(t, f.agentCreate(t, c), DenyCauseCeilingOrphaned, "grandchild create with a deleted grandparent")
 }
 
 func TestParentCeiling_StoppedDelegatorAllows(t *testing.T) {
@@ -174,7 +183,10 @@ func TestParentCeiling_MigrationSentinel(t *testing.T) {
 		perm          string
 		allowed       bool
 		// ceiling marks rows the delegation ceiling denies. Other denied
-		// rows are denied by an earlier stage (kernel or scope).
+		// rows are denied by an earlier stage (kernel or scope). Every
+		// ceiling row records DenyCauseCeilingOrphaned: the exact sentinel
+		// denies as an unresolvable delegator, and a near-match ID or type
+		// names a principal that does not exist.
 		ceiling bool
 	}{
 		{"registered non-sensitive read", store.DelegationPrincipalUser, "system/migration",
@@ -210,29 +222,42 @@ func TestParentCeiling_MigrationSentinel(t *testing.T) {
 			assert.Equal(t, tc.allowed, d.Allowed, "reason %q", d.Reason)
 			if tc.ceiling {
 				assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+				assert.Equal(t, DenyCauseCeilingOrphaned, d.DenyCause, "reason %q", d.Reason)
 			}
 		})
 	}
 }
 
 // A user delegator supplies authority only while it exists and is active,
-// including a super-admin.
+// including a super-admin. A suspended user exists but holds no permission
+// (ceiling_delegator_lacks_permission); a deleted user does not resolve
+// (ceiling_orphaned).
 func TestParentCeiling_UserDelegatorMustBeLive(t *testing.T) {
+	suspend := func(t *testing.T, s store.Store, id string) { setUserStatus(t, s, id, store.UserStatusSuspended) }
+	del := func(t *testing.T, s store.Store, id string) {
+		require.NoError(t, s.DeleteUser(context.Background(), id))
+	}
 	for _, tc := range []struct {
-		name    string
-		mutate  func(t *testing.T, s store.Store, userID string)
-		allowed bool
+		name       string
+		superAdmin bool
+		mutate     func(t *testing.T, s store.Store, userID string)
+		allowed    bool
+		cause      DenyCause
 	}{
-		{"active super-admin", func(*testing.T, store.Store, string) {}, true},
-		{"suspended super-admin", func(t *testing.T, s store.Store, id string) { setUserStatus(t, s, id, store.UserStatusSuspended) }, false},
-		{"deleted super-admin", func(t *testing.T, s store.Store, id string) {
-			require.NoError(t, s.DeleteUser(context.Background(), id))
-		}, false},
+		{"active super-admin", true, func(*testing.T, store.Store, string) {}, true, ""},
+		{"suspended super-admin", true, suspend, false, DenyCauseCeilingDelegatorLacksPermission},
+		{"deleted super-admin", true, del, false, DenyCauseCeilingOrphaned},
+		{"active project owner", false, func(*testing.T, store.Store, string) {}, true, ""},
+		{"suspended project owner", false, suspend, false, DenyCauseCeilingDelegatorLacksPermission},
+		{"deleted project owner", false, del, false, DenyCauseCeilingOrphaned},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newParentCeilingFixture(t, "admindel")
-			adminID := tid("pc-admindel-admin")
-			createTestUserWithRole(t, f.store, adminID, "admindel-admin@pc.test", "admin", store.SystemRoleSuperAdmin)
+			adminID := f.userID
+			if tc.superAdmin {
+				adminID = tid("pc-admindel-admin")
+				createTestUserWithRole(t, f.store, adminID, "admindel-admin@pc.test", "admin", store.SystemRoleSuperAdmin)
+			}
 			child := tid("pc-admindel-child")
 			createDCAgent(t, f.store, child, f.projectID, adminID, AgentRoleFull)
 			createDCEdge(t, f.store, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, child,
@@ -244,6 +269,7 @@ func TestParentCeiling_UserDelegatorMustBeLive(t *testing.T) {
 				if !tc.allowed {
 					assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
 				}
+				assert.Equal(t, tc.cause, d.DenyCause, "reason %q", d.Reason)
 			}
 		})
 	}
