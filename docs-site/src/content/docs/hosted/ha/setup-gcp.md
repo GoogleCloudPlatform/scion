@@ -1162,12 +1162,39 @@ When redeploying the Hub with a new image:
 A hub deployed exactly as in this guide (§1b) uses a Cloud SQL instance with a public
 IP, but there are no authorized networks and its DSN is a Unix-socket DSN
 (`?host=/cloudsql/...`), so an operator's workstation can't reach it directly. Start
-the Cloud SQL Auth Proxy first (`cloud-sql-proxy --unix-socket /cloudsql
-PROJECT_ID:REGION:scion-hub-db`), then run `scion hub secret migrate-names` with
-`--config` pointing at this guide's `settings.yaml` (§3), plus `--gcp-project` and
-`--global` — see
+the Cloud SQL Auth Proxy first — create `/cloudsql` if it doesn't already exist
+(`sudo mkdir -p /cloudsql && sudo chown "$USER" /cloudsql`), then
+`cloud-sql-proxy --unix-socket /cloudsql PROJECT_ID:REGION:scion-hub-db`.
+
+`scion hub secret migrate-names` needs to resolve the same hub ID the running server
+does. This guide's `settings.yaml` (§3) sets no `server.hub.hub_id`, so the server
+derives its ID from the Cloud Run service name (`scion-hub`) instead of a configured
+value. Supply that same value through the env var the command checks first — not
+`--hub-id`, which would turn off the command's own cross-check against existing hub
+records:
+
+```bash
+export SCION_SERVER_HUB_HUBID=$(printf %s scion-hub | sha256sum | cut -c1-12)
+```
+
+The command also needs the hub's live `settings.yaml`, not the local placeholder copy
+from §3c (that one still has `DB_PASSWORD_PLACEHOLDER` and `PROJECT_ID`) — fetch the
+real one into its own directory (the loader requires the file be named exactly
+`settings.yaml`), point `--config` at it, and remove it afterward:
+
+```bash
+SETTINGS_DIR=$(mktemp -d)
+gcloud secrets versions access latest --secret=scion-hub-settings \
+  --project=$PROJECT_ID > "$SETTINGS_DIR/settings.yaml"
+scion hub secret migrate-names --config="$SETTINGS_DIR/settings.yaml" \
+  --gcp-project=$PROJECT_ID --global
+rm -rf "$SETTINGS_DIR"
+```
+
+If your own workstation's `~/.scion/settings.yaml` has a `server:` section, it takes
+precedence over `--config` and this command uses it instead — move it aside first. See
 [Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
-for what it does, and `--help` for its flags.
+for what the command does, and `--help` for its flags.
 
 If you've since moved this hub's database to a private-IP-only Cloud SQL instance (for
 example, following the hub-cloudrun Terraform module), an operator's workstation no

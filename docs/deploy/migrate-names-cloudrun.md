@@ -13,11 +13,11 @@ Terraform module — private-IP Cloud SQL (reachable only from inside the VPC), 
 VPC egress, the DSN delivered as the `SCION_SERVER_DATABASE_URL` secret env var, and
 `settings.yaml` mounted from a secret volume. An operator's workstation has no
 network path to that database, so the CLI cannot be run from a laptop at all. Other
-Cloud Run layouts (including a hub whose database has a public IP, or one wired up
-by hand rather than by that module) will need the discovery steps in §2 adapted to
-their own service definition — and if the database *is* reachable from your
-workstation, you don't need this runbook at all: run
-`scion hub secret migrate-names` directly with the CLI (`--help` for its flags).
+Cloud Run layouts (including one wired up by hand rather than by that module) will
+need the discovery steps in §2 adapted to their own service definition — and if you
+can reach the database from your workstation (for example through the Cloud SQL Auth
+Proxy), run `scion hub secret migrate-names` with the CLI instead, with the same hub
+ID the server resolves (`--hub-id` or `server.hub.hub_id`) (`--help` for its flags).
 
 This runbook works around the no-network-path problem with a **one-off Cloud Run
 job**: an ephemeral job that borrows the running service's own identity, VPC wiring
@@ -178,8 +178,11 @@ pinned, non-latest traffic is handled correctly too:
 
 ```bash
 REVISION=$(echo "$SVC" | jq -r '.status.traffic[] | select(.percent==100) | .revisionName')
-[ "$(echo "$SVC" | jq -r '.status.latestReadyRevisionName')" = "$REVISION" ] \
-  || echo "STOP: traffic is pinned to a non-latest revision; finish or revert the rollout, then restart §2"
+echo "$SVC" | jq -e --arg rev "$REVISION" '
+    .status.latestReadyRevisionName == $rev
+    and .status.latestCreatedRevisionName == $rev
+    and .metadata.generation == .status.observedGeneration' >/dev/null \
+  || echo "STOP: traffic is pinned to a non-latest revision, or a deploy is in progress or failed; finish or revert the rollout, then restart §2"
 REV_JSON=$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" --format=json)
 IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 ```
@@ -187,11 +190,15 @@ IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 Every other discovered value above (`SA`, network/subnet/egress, `CONN`, `HUB_ID`, the
 DSN version, the settings version) comes from `$SVC.spec.template` — the newest
 revision's template — while `REVISION`/`IMG` come from whichever revision has 100% of
-traffic. Those are normally the same revision, but a rollback done by shifting traffic
-to an older revision (a supported path) leaves them different: the job would then run
-one revision's binary against another revision's settings and DSN versions. The check
-above stops that case before it reaches job creation; if it prints `STOP`, resolve the
-rollout (finish or revert it) and restart from the top of this section before
+traffic. Those are normally the same revision, but two cases can split them: a rollback
+done by shifting traffic to an older revision (a supported path), and a deploy whose
+new revision fails to become ready or hasn't finished rolling out yet
+(`latestCreatedRevisionName` differs from `latestReadyRevisionName`, or
+`metadata.generation` is ahead of `status.observedGeneration`). In both, `spec.template`
+belongs to a revision that isn't the one serving traffic, so the job would run one
+revision's binary against another revision's settings and DSN versions. The check above
+stops all of these cases before it reaches job creation; if it prints `STOP`, resolve
+the rollout (finish or revert it) and restart from the top of this section before
 continuing.
 
 `.status.imageDigest` on a v1 Revision is already the resolved **full reference**
@@ -292,21 +299,26 @@ live state, so it can't be fooled by a stale `$SVC` captured back in §2:
 ```bash
 FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
 echo "$FRESH_SVC" \
-  | jq -e --arg rev "$REVISION" --arg latest "$(echo "$FRESH_SVC" | jq -r '.status.latestReadyRevisionName')" '
-      .status.traffic | length == 1
-      and .[0].percent == 100
-      and .[0].revisionName == $rev
-      and .[0].revisionName == $latest
-      and (.[0].tag // "") == ""' \
+  | jq -e --arg rev "$REVISION" '
+      (.status.traffic | length == 1)
+      and .status.traffic[0].percent == 100
+      and .status.traffic[0].revisionName == $rev
+      and ((.status.traffic[0].tag // "") == "")
+      and .status.latestReadyRevisionName == $rev
+      and .status.latestCreatedRevisionName == $rev
+      and .metadata.generation == .status.observedGeneration' \
   && echo "OK: 100% on $REVISION" \
   || echo "STOP: rollout not complete, revision changed, or traffic is pinned to a non-latest revision"
 ```
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
-the job to in §2, and that revision must also be `latestReadyRevisionName` — otherwise
-the job's config (read from the service template) and its image (read from the traffic
-revision) could belong to two different revisions. If the check reports `STOP`, an older or newer revision is now
-serving: wait for the rollout to finish, delete the job (§6), and restart from §2 so
+the job to in §2, and that revision must also be both `latestReadyRevisionName` and
+`latestCreatedRevisionName`, with `metadata.generation` equal to
+`status.observedGeneration` — otherwise the job's config (read from the service
+template) and its image (read from the traffic revision) could belong to two different
+revisions: a rollback with traffic pinned to an older revision, or a new deploy that
+failed to become ready or hasn't finished rolling out yet. If the check reports `STOP`,
+resolve the rollout (finish or revert it), delete the job (§6), and restart from §2 so
 the job is re-pinned to the new serving digest. Never run a non-dry pass from a job
 whose digest isn't the 100%-traffic revision's — retrying later from the same job
 won't help, since it's still pinned to the old digest.
@@ -459,10 +471,11 @@ gcloud logging read '
 
 `succeededCount: 1` means the command exited 0. `failedCount: 1` means it exited
 non-zero: either the summary shows `failed > 0` (look for `ERROR` / `CONFLICT`
-lines), or look for the `Error: <message>` line near the end — it is followed by the
-command's usage text, which `cmd/root.go` prints on every failed invocation (this
-command has no opt-out) and does *not* mean the arguments were wrong. `gcloud run jobs
-execute --wait` also exits non-zero in that case.
+lines), or look for the `Error: <message>` line near the end (wrapped in terminal
+colour codes in the log, so a literal search for a line starting `Error:` misses it)
+— it is followed by the command's usage text, which `cmd/root.go` prints on every
+failed invocation (this command has no opt-out) and does *not* mean the arguments were
+wrong. `gcloud run jobs execute --wait` also exits non-zero in that case.
 
 The output vocabulary, taken from `cmd/hub_secret_migrate_names.go`:
 
