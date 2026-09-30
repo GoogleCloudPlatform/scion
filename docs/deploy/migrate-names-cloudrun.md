@@ -31,7 +31,7 @@ grant) retires anyway.
 No human ever sees the database credential: the DSN stays a Secret Manager reference
 passed to the job with `--set-secrets`, the same way it reaches the real service.
 
-Every command below uses placeholders — `PROJECT`, `PROJECT_NUMBER`, `REGION`, `HUB` —
+Every command below uses placeholders — `PROJECT`, `REGION`, `HUB` —
 and every real value is *discovered* from the live service with `gcloud`, not typed in
 by hand. Do not fill in a real project ID or hub name in this page.
 
@@ -47,8 +47,8 @@ against `cmd/hub_secret_migrate_names.go`:
 | Direct VPC egress (network/subnet, `PRIVATE_RANGES_ONLY`) | Yes — private-IP Cloud SQL is only reachable from inside the VPC. | Yes, `--network`/`--subnet`/`--vpc-egress` |
 | `/cloudsql` Cloud SQL volume | Yes — the DSN embeds `?host=/cloudsql/<connection name>`; without the volume the socket path doesn't exist and the connection fails. | Yes, `--set-cloudsql-instances` |
 | `SCION_SERVER_DATABASE_URL` secret env (the DSN) | Yes — this is the only way the command opens the database. | Yes, `--set-secrets` |
-| `settings.yaml` secret, mounted as a file | Yes, but only for one field: **`server.database.driver: postgres`**. Without the settings file (or `SCION_SERVER_DATABASE_DRIVER`), the driver resolves to sqlite — `openMigrateNamesStore`'s `switch` treats an empty/default driver as `"sqlite"` (the legacy loader's own default), so the job would silently try to open the Postgres DSN as a sqlite file. `--config` pointed at the mounted file is what makes the command see `driver: postgres`. The file also carries `server.hub.hub_id`, a second corroborating source for the hub ID (see below) — nothing else in it matters. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml` |
-| `SCION_SERVER_HUB_HUBID` env var | Not required once `--hub-id` is passed explicitly (see below) — but harmless, and requires no extra secret access, so it's included as a second corroborating source of the same value. | Yes, `--set-env-vars` |
+| `settings.yaml` secret, mounted as a file | Yes, but only for one field: **`server.database.driver: postgres`**. Without the settings file (or `SCION_SERVER_DATABASE_DRIVER`), the driver resolves to sqlite — `openMigrateNamesStore`'s `switch` treats an empty/default driver as `"sqlite"` (the legacy loader's own default), so the job would silently try to open the Postgres DSN as a sqlite file. `--config` pointed at the mounted file is what makes the command see `driver: postgres`. Its `server.hub.hub_id` is not read when `--hub-id` is passed. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml` |
+| `SCION_SERVER_HUB_HUBID` env var | Not required once `--hub-id` is passed explicitly (see below) — harmless; not read when `--hub-id` is passed. | Yes, `--set-env-vars` |
 | `SCION_SERVER_SESSION_SECRET` (session secret) | No — migrate-names never touches sessions, and `secret.NewGCPBackend` doesn't consume it. | **No** |
 | Kubeconfig secret / `KUBECONFIG` env / `SCION_K8S_NAMESPACE` | No — migrate-names never talks to Kubernetes. | **No** |
 | NFS volume | No — migrate-names does no workspace I/O. | **No** |
@@ -178,9 +178,21 @@ pinned, non-latest traffic is handled correctly too:
 
 ```bash
 REVISION=$(echo "$SVC" | jq -r '.status.traffic[] | select(.percent==100) | .revisionName')
+[ "$(echo "$SVC" | jq -r '.status.latestReadyRevisionName')" = "$REVISION" ] \
+  || echo "STOP: traffic is pinned to a non-latest revision; finish or revert the rollout, then restart §2"
 REV_JSON=$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" --format=json)
 IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 ```
+
+Every other discovered value above (`SA`, network/subnet/egress, `CONN`, `HUB_ID`, the
+DSN version, the settings version) comes from `$SVC.spec.template` — the newest
+revision's template — while `REVISION`/`IMG` come from whichever revision has 100% of
+traffic. Those are normally the same revision, but a rollback done by shifting traffic
+to an older revision (a supported path) leaves them different: the job would then run
+one revision's binary against another revision's settings and DSN versions. The check
+above stops that case before it reaches job creation; if it prints `STOP`, resolve the
+rollout (finish or revert it) and restart from the top of this section before
+continuing.
 
 `.status.imageDigest` on a v1 Revision is already the resolved **full reference**
 (`<registry>/<path>@sha256:<hex>`), not a bare `sha256:<hex>` — use it as-is for
@@ -217,9 +229,7 @@ value the running hub server itself resolves at boot, and because every pass's o
 `Using hub ID: ...` log line (§5) echoes it back, letting you confirm it reached the
 job unchanged. This runbook deliberately does **not** read the settings secret's
 content to double-check it — that would require a human (or a script running as one)
-to read a secret value, which this whole procedure is designed to avoid. If you want
-independent corroboration, compare the job's `Using hub ID: ...` log line across
-passes instead of reading the settings secret.
+to read a secret value, which this whole procedure is designed to avoid.
 
 ## 3. Create the job
 
@@ -280,17 +290,22 @@ The **rollout check** below re-appears before passes 2, 3, and 4 — it always f
 live state, so it can't be fooled by a stale `$SVC` captured back in §2:
 
 ```bash
-gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json \
-  | jq -e --arg rev "$REVISION" '
+FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
+echo "$FRESH_SVC" \
+  | jq -e --arg rev "$REVISION" --arg latest "$(echo "$FRESH_SVC" | jq -r '.status.latestReadyRevisionName')" '
       .status.traffic | length == 1
       and .[0].percent == 100
       and .[0].revisionName == $rev
+      and .[0].revisionName == $latest
       and (.[0].tag // "") == ""' \
-  && echo "OK: 100% on $REVISION" || echo "STOP: rollout not complete or revision changed"
+  && echo "OK: 100% on $REVISION" \
+  || echo "STOP: rollout not complete, revision changed, or traffic is pinned to a non-latest revision"
 ```
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
-the job to in §2. If the check reports `STOP`, an older or newer revision is now
+the job to in §2, and that revision must also be `latestReadyRevisionName` — otherwise
+the job's config (read from the service template) and its image (read from the traffic
+revision) could belong to two different revisions. If the check reports `STOP`, an older or newer revision is now
 serving: wait for the rollout to finish, delete the job (§6), and restart from §2 so
 the job is re-pinned to the new serving digest. Never run a non-dry pass from a job
 whose digest isn't the 100%-traffic revision's — retrying later from the same job
@@ -305,9 +320,7 @@ gcloud run jobs execute "$JOB" --project "$PROJECT" --region "$REGION" --wait
 ```
 
 Read the output (§5). Expect `WOULD MIGRATE` / `WOULD RESYNC` / `WOULD REPAIR REF`
-lines (joined with ` AND ` when more than one action applies to the same secret, e.g.
-`WOULD REPAIR REF AND DELETE LEGACY`) for anything not yet on the hub-prefixed name,
-and a summary:
+lines for anything not yet on the hub-prefixed name, and a summary:
 
 ```
 Migrate-names dry run complete: N migrated, N skipped (already migrated or absent), 0 failed, 0 legacy secrets deleted
@@ -411,7 +424,7 @@ gcloud run jobs execute "$JOB" --project "$PROJECT" --region "$REGION" --wait
 Migrate-names dry run complete: 0 migrated, N skipped (already migrated or absent), 0 failed, 0 legacy secrets deleted
 ```
 
-and no line in the output starts with `WOULD`. `ORPHAN` lines may remain and don't
+and no `WOULD` lines appear. `ORPHAN` lines may remain and don't
 block acceptance. Only then is this hub done.
 
 ## 5. Reading the output
@@ -432,8 +445,8 @@ gcloud run jobs executions list --job "$JOB" --project "$PROJECT" --region "$REG
   --format='table(metadata.name,status.succeededCount,status.failedCount,status.startTime,status.completionTime)'
 ```
 
-Read that execution's logs. `logging read` needs an explicit `--freshness` — its
-1-day default can silently miss an older execution:
+Read that execution's logs. `gcloud logging read` only looks back 1 day by default; if
+the execution is older, raise `--freshness` (e.g. `7d`):
 
 ```bash
 gcloud logging read '
@@ -446,10 +459,10 @@ gcloud logging read '
 
 `succeededCount: 1` means the command exited 0. `failedCount: 1` means it exited
 non-zero: either the summary shows `failed > 0` (look for `ERROR` / `CONFLICT`
-lines), or there's no summary and the last log line is the fatal error (a config,
-database, or hub-ID resolution error before the migration loop even starts, which has
-no summary line of its own). `gcloud run jobs execute --wait` also exits non-zero in
-that case.
+lines), or look for the `Error: <message>` line near the end — it is followed by the
+command's usage text, which `cmd/root.go` prints on every failed invocation (this
+command has no opt-out) and does *not* mean the arguments were wrong. `gcloud run jobs
+execute --wait` also exits non-zero in that case.
 
 The output vocabulary, taken from `cmd/hub_secret_migrate_names.go`:
 
@@ -464,6 +477,7 @@ The output vocabulary, taken from `cmd/hub_secret_migrate_names.go`:
 | `ERROR ...` | any | counts as failed |
 | `Migrate-names complete: N migrated, N skipped (already migrated or absent), N failed, N legacy secrets deleted` | non-dry summary | |
 | `Migrate-names dry run complete: ...` | dry-run summary (legacy-deleted is always 0) | |
+| `Error: migrate-names finished with N failure(s); re-run to retry (idempotent)` | non-dry or dry run with `failed > 0` | follows the summary; see the `ERROR`/`CONFLICT` lines above it |
 
 **`CONFLICT`**: the command already wrote a version to the prefixed name and then
 detected that a concurrent write had changed the record. The change may be a real ref
@@ -506,9 +520,11 @@ only existed to bridge the old naming scheme can be removed, each as its own
 per-resource acknowledgment rather than a single blanket change:
 
 - the legacy conditioned `secretmanager.admin` (or equivalent) grant scoped to the
-  hub's pre-migration secret-name prefix (`scion-hub-<hash>-*`) — see
+  hub's pre-migration secret-name prefix, `scion-hub-<h>-*`, where `<h>` is the first
+  12 hex characters of `sha256("<hub_id>:<hub_id>")` (`legacyGCPSecretName`,
+  `pkg/secret/gcpbackend.go`) — see
   [Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
-  for how that prefix and its hub-prefixed replacement are computed;
+  for how the hub-prefixed replacement is computed;
 - the Terraform-managed pre-create of the legacy-named OIDC signing key secret —
   once every hub image resolves the OIDC key under the hub-prefixed name instead,
   the pre-create under the legacy name is no longer read by anything.

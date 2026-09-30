@@ -1160,14 +1160,19 @@ When redeploying the Hub with a new image:
 ### 7b. Secret Name Migration
 
 A hub deployed exactly as in this guide (§1b) uses a Cloud SQL instance with a public
-IP, and an operator's workstation can reach its database directly, so
-`scion hub secret migrate-names` can be run directly with the CLI — see
+IP, but there are no authorized networks and its DSN is a Unix-socket DSN
+(`?host=/cloudsql/...`), so an operator's workstation can't reach it directly. Start
+the Cloud SQL Auth Proxy first (`cloud-sql-proxy --unix-socket /cloudsql
+PROJECT_ID:REGION:scion-hub-db`), then run `scion hub secret migrate-names` with
+`--config` pointing at this guide's `settings.yaml` (§3), plus `--gcp-project` and
+`--global` — see
 [Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
 for what it does, and `--help` for its flags.
 
 If you've since moved this hub's database to a private-IP-only Cloud SQL instance (for
-example, following the multi-hub Terraform pattern), an operator's workstation no
-longer has a network path to it, and the CLI can't be run from a laptop. See
+example, following the hub-cloudrun Terraform module), an operator's workstation no
+longer has a network path to it even via the proxy, and the CLI can't be run from a
+laptop. See
 [`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md)
 for running it via a one-off Cloud Run job instead.
 
