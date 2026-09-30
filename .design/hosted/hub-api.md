@@ -1372,6 +1372,7 @@ All error responses follow a consistent format:
 |-------------|------|-------------|
 | 400 | `invalid_request` | Malformed request body |
 | 400 | `validation_error` | Request validation failed |
+| 400 | `invalid_cursor` | Pagination cursor is not valid for this request (tampered, sealed under a different or rotated key, legacy format, or issued for a different query or caller); restart from the first page |
 | 401 | `unauthorized` | Missing or invalid authentication |
 | 403 | `forbidden` | Insufficient permissions |
 | 404 | `not_found` | Resource not found |

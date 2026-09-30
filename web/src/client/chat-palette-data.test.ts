@@ -39,10 +39,19 @@ import {
   fetchPaletteDms,
   buildAgentCandidates,
   isPaletteAgentViable,
+  fetchAllPaletteUsers,
+  buildUserCandidates,
+  isPaletteUserViable,
+  fetchPaletteSpaces,
+  fetchPaletteThreadsForSpace,
+  buildThreadCandidates,
   PaletteLoadError,
   ChatPaletteDataController,
   type RawPaletteAgent,
   type RawPaletteDm,
+  type RawPaletteUser,
+  type RawPaletteSpace,
+  type RawPaletteThread,
 } from './chat-palette-data.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
@@ -751,5 +760,1098 @@ describe('ChatPaletteDataController: cancellation and stale-load guarding', () =
       .mockResolvedValueOnce(jsonResponse({}, 500));
     const controller = new ChatPaletteDataController();
     await expect(controller.loadAgentsGroup()).rejects.toThrow(PaletteLoadError);
+  });
+});
+
+// ===========================================================================
+// People group
+// ===========================================================================
+
+describe('fetchAllPaletteUsers: full pagination', () => {
+  it('traverses more than 100 entries across pages', async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ id: `u${i}` }));
+    const page2 = Array.from({ length: 30 }, (_, i) => ({ id: `v${i}` }));
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ users: page1, nextCursor: 'cursor-1' }))
+      .mockResolvedValueOnce(jsonResponse({ users: page2 }));
+
+    const all = await fetchAllPaletteUsers();
+
+    expect(all).toHaveLength(130);
+    expect(apiFetchMock).toHaveBeenCalledTimes(2);
+    expect(apiFetchMock.mock.calls[1][0]).toContain('cursor=cursor-1');
+  });
+
+  it('continues past a filtered empty intermediate page that still carries a cursor', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }], nextCursor: 'cursor-1' }))
+      .mockResolvedValueOnce(jsonResponse({ users: [], nextCursor: 'cursor-2' }))
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1' }] }));
+
+    const all = await fetchAllPaletteUsers();
+
+    expect(all.map((u) => u.id)).toEqual(['u0', 'u1']);
+    expect(apiFetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops when nextCursor is absent even if totalCount implied more', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }] }));
+    const all = await fetchAllPaletteUsers();
+    expect(all).toHaveLength(1);
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a repeated cursor as a load error, not an infinite loop', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0' }], nextCursor: 'loop' }))
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1' }], nextCursor: 'loop' }));
+
+    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
+    expect(apiFetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows nextCursor through the full 500-page safety bound and then throws, rather than looping forever', async () => {
+    // A server that keeps returning a new (never-repeated) cursor forever —
+    // buggy or hostile — must not hang the palette on an unbounded loop.
+    for (let i = 0; i < 501; i++) {
+      apiFetchMock.mockResolvedValueOnce(
+        jsonResponse({ users: [{ id: `u${i}` }], nextCursor: `cursor-${i}` })
+      );
+    }
+    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
+    expect(apiFetchMock).toHaveBeenCalledTimes(500);
+  });
+
+  it('exactly 500 pages that terminate normally on the last one does not throw', async () => {
+    // A server with exactly 500 pages, with pagination legitimately ending
+    // on the last one (no further cursor), must not be treated as having
+    // hit the safety bound.
+    for (let i = 0; i < 499; i++) {
+      apiFetchMock.mockResolvedValueOnce(
+        jsonResponse({ users: [{ id: `u${i}` }], nextCursor: `cursor-${i}` })
+      );
+    }
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u499' }] })); // 500th page, no nextCursor
+    const all = await fetchAllPaletteUsers();
+    expect(all).toHaveLength(500);
+    expect(apiFetchMock).toHaveBeenCalledTimes(500);
+  });
+
+  it('throws PaletteLoadError on a non-ok response', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+    await expect(fetchAllPaletteUsers()).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('an abort landing during the body read rejects with the original AbortError, not PaletteLoadError', async () => {
+    const controller = new AbortController();
+    apiFetchMock.mockImplementationOnce(() => {
+      controller.abort();
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new DOMException('aborted', 'AbortError')),
+      } as unknown as Response);
+    });
+    await expect(fetchAllPaletteUsers(controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+
+  it('a genuinely malformed body under a live (non-aborted) signal still becomes a PaletteLoadError', async () => {
+    const controller = new AbortController();
+    apiFetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError('bad json')),
+    } as unknown as Response);
+    await expect(fetchAllPaletteUsers(controller.signal)).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('ignores a malformed (non-array) users field instead of spreading it', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: 'not-an-array' }));
+    const all = await fetchAllPaletteUsers();
+    expect(all).toEqual([]);
+  });
+
+  it('throws PaletteLoadError on a literal null body instead of a raw TypeError', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
+    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on an array body instead of silently returning an empty page', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse([1, 2, 3]));
+    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on a primitive (e.g. number) body instead of silently returning an empty page', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
+    await expect(fetchAllPaletteUsers()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+});
+
+describe('isPaletteUserViable: status exclusion', () => {
+  it('active is viable', () => {
+    expect(isPaletteUserViable({ id: 'u', status: 'active' })).toBe(true);
+  });
+  it('an absent status is viable (existing callers such as loadHubMembers treat this as active)', () => {
+    expect(isPaletteUserViable({ id: 'u' })).toBe(true);
+  });
+  it('an empty-string status is viable', () => {
+    expect(isPaletteUserViable({ id: 'u', status: '' })).toBe(true);
+  });
+  it('suspended is not viable', () => {
+    expect(isPaletteUserViable({ id: 'u', status: 'suspended' })).toBe(false);
+  });
+  it('invited is not viable', () => {
+    expect(isPaletteUserViable({ id: 'u', status: 'invited' })).toBe(false);
+  });
+  it("a hypothetical future 'disabled' status is not viable, by the same not-'active' rule as everything else (not a real backend value today, and not a separate literal check)", () => {
+    expect(isPaletteUserViable({ id: 'u', status: 'disabled' })).toBe(false);
+  });
+  it('an unrecognized future status is not viable (fails closed)', () => {
+    expect(isPaletteUserViable({ id: 'u', status: 'something-new' })).toBe(false);
+  });
+});
+
+describe('buildUserCandidates: DM recency join, self/disabled exclusion', () => {
+  const SELF_ID = 'self-user';
+
+  function user(overrides: Partial<RawPaletteUser> & { id: string }): RawPaletteUser {
+    return { displayName: overrides.id, ...overrides };
+  }
+
+  it('joins an existing DM lastActivityAt onto the matching user', () => {
+    const users = [user({ id: 'u0', displayName: 'Alice' })];
+    const dms: RawPaletteDm[] = [
+      {
+        conversationKey: 'dm:user:a:user:b',
+        peerId: 'u0',
+        peerKind: 'user',
+        lastActivityAt: '2026-09-28T12:00:00Z',
+      },
+    ];
+    const [candidate] = buildUserCandidates(users, dms, SELF_ID);
+    expect(candidate.activityMs).toBe(Date.parse('2026-09-28T12:00:00Z'));
+    expect(candidate.group).toBe('people');
+  });
+
+  it('a viable user with no DM yet still appears, with activityMs=0', () => {
+    const users = [user({ id: 'u0', displayName: 'Alice' })];
+    const [candidate] = buildUserCandidates(users, [], SELF_ID);
+    expect(candidate.activityMs).toBe(0);
+    expect(candidate.target).toEqual({
+      kind: 'dm',
+      peerKind: 'user',
+      peerId: 'u0',
+      displayName: 'Alice',
+    });
+  });
+
+  it('excludes the current user (self)', () => {
+    const users = [
+      user({ id: SELF_ID, displayName: 'Me' }),
+      user({ id: 'u0', displayName: 'Alice' }),
+    ];
+    const candidates = buildUserCandidates(users, [], SELF_ID);
+    expect(candidates.map((c) => c.target)).toEqual([
+      { kind: 'dm', peerKind: 'user', peerId: 'u0', displayName: 'Alice' },
+    ]);
+  });
+
+  it("excludes a status=disabled user (a hypothetical future value, excluded by the same not-'active' rule, not a separate literal check)", () => {
+    const users = [
+      user({ id: 'u0', displayName: 'Alice', status: 'disabled' }),
+      user({ id: 'u1', displayName: 'Bob' }),
+    ];
+    const candidates = buildUserCandidates(users, [], SELF_ID);
+    expect(candidates.map((c) => c.label)).toEqual(['Bob']);
+  });
+
+  it('excludes a status=suspended user (suspended counts as disabled)', () => {
+    const users = [
+      user({ id: 'u0', displayName: 'Alice', status: 'suspended' }),
+      user({ id: 'u1', displayName: 'Bob' }),
+    ];
+    const candidates = buildUserCandidates(users, [], SELF_ID);
+    expect(candidates.map((c) => c.label)).toEqual(['Bob']);
+  });
+
+  it('excludes a status=invited user', () => {
+    const users = [
+      user({ id: 'u0', displayName: 'Alice', status: 'invited' }),
+      user({ id: 'u1', displayName: 'Bob' }),
+    ];
+    const candidates = buildUserCandidates(users, [], SELF_ID);
+    expect(candidates.map((c) => c.label)).toEqual(['Bob']);
+  });
+
+  it('includes a status=active user', () => {
+    const users = [user({ id: 'u0', displayName: 'Alice', status: 'active' })];
+    expect(buildUserCandidates(users, [], SELF_ID).map((c) => c.label)).toEqual(['Alice']);
+  });
+
+  it('includes a user with an absent/empty status (the field is optional on the real response shape)', () => {
+    const users = [user({ id: 'u0', displayName: 'Alice' })];
+    expect(buildUserCandidates(users, [], SELF_ID).map((c) => c.label)).toEqual(['Alice']);
+  });
+
+  it('a DM whose peer is missing from the authorized user list is never resurrected as a candidate', () => {
+    // Only iterates `users`, never `dms` — a denied/disabled/deleted peer's DM
+    // entry must not produce a candidate of its own.
+    const users = [user({ id: 'u0', displayName: 'Alice' })];
+    const dms: RawPaletteDm[] = [
+      { conversationKey: 'dm:user:x:user:y', peerId: 'gone-user', peerKind: 'user' },
+    ];
+    const candidates = buildUserCandidates(users, dms, SELF_ID);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].label).toBe('Alice');
+  });
+
+  it('a DM from a non-user peer (peerKind !== "user") is never joined onto a person, even with a matching peerId', () => {
+    const users = [user({ id: 'shared-id', displayName: 'Alice' })];
+    const dms: RawPaletteDm[] = [
+      {
+        conversationKey: 'dm:agent:shared-id:user:x',
+        peerId: 'shared-id',
+        peerKind: 'agent',
+        lastActivityAt: '2026-09-28T12:00:00Z',
+      },
+    ];
+    const [candidate] = buildUserCandidates(users, dms, SELF_ID);
+    expect(candidate.activityMs).toBe(0);
+  });
+
+  it('includes the email as an additional search field and as the secondary label', () => {
+    const users = [user({ id: 'u0', displayName: 'Alice', email: 'alice@example.com' })];
+    const [candidate] = buildUserCandidates(users, [], SELF_ID);
+    expect(candidate.searchFields).toEqual(['Alice', 'alice@example.com']);
+    expect(candidate.secondaryLabel).toBe('alice@example.com');
+  });
+
+  it('falls back to email for the display name when displayName is absent', () => {
+    const users = [user({ id: 'u0', displayName: '', email: 'alice@example.com' })];
+    const [candidate] = buildUserCandidates(users, [], SELF_ID);
+    expect(candidate.label).toBe('alice@example.com');
+  });
+
+  it('a user with a falsy id is skipped, not turned into a candidate with an empty id', () => {
+    const users = [user({ id: '', displayName: 'Nobody' })];
+    expect(buildUserCandidates(users, [], SELF_ID)).toEqual([]);
+  });
+});
+
+describe('ChatPaletteDataController: People group cancellation and stale-load guarding', () => {
+  it('resolves with candidates for a normal load, excluding self', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          users: [
+            { id: 'self-user', displayName: 'Me' },
+            { id: 'u0', displayName: 'Alice' },
+          ],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+    const controller = new ChatPaletteDataController();
+    const candidates = await controller.loadPeopleGroup('self-user');
+    expect(candidates.map((c) => c.label)).toEqual(['Alice']);
+  });
+
+  it('a superseded load rejects with an AbortError rather than resolving stale data', async () => {
+    let resolveFirst!: (v: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          })
+      )
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadPeopleGroup('self-user');
+    const secondLoad = controller.loadPeopleGroup('self-user');
+    resolveFirst(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }));
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
+  });
+
+  it('cancel() aborts the in-flight request', async () => {
+    const controller = new ChatPaletteDataController();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+    const load = controller.loadPeopleGroup('self-user');
+    controller.cancel();
+    await expect(load).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('a DM-list failure fails the whole People group rather than silently degrading recency', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }))
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+    const controller = new ChatPaletteDataController();
+    await expect(controller.loadPeopleGroup('self-user')).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('a supersede that arrives while the stale load is blocked on its own DMs fetch also rejects with an AbortError (isolates the *second*, post-DMs check)', async () => {
+    // Isolates loadPeopleGroup's *second* generation check (after
+    // fetchPaletteDms resolves) from the first (after fetchAllPaletteUsers
+    // resolves, isolated separately below) — mirrors the equivalent
+    // Agents-group test. This check is the last thing before returning (no
+    // further fetch follows it), so removing it can only make the stale load
+    // *resolve* with stale data — there's no other error for the outer
+    // catch-all's `signal.aborted` reclassification to coincidentally mask
+    // it with.
+    let resolveFirstDms!: (v: Response) => void;
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstDms = resolve;
+          })
+      )
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadPeopleGroup('self-user');
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+
+    const secondLoad = controller.loadPeopleGroup('self-user');
+    resolveFirstDms(jsonResponse({ dms: [] }));
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
+  });
+
+  it('the post-users generation check avoids a wasteful extra DMs fetch for an already-stale load (the immediately-following post-DMs check independently guarantees correctness either way)', async () => {
+    // The check immediately after `fetchAllPaletteUsers` resolves and the
+    // one immediately after `fetchPaletteDms` resolves test the exact same
+    // condition (`myGeneration !== this.peopleGeneration`), with nothing in
+    // between able to change it back — so removing the *first* one alone
+    // cannot produce a wrong *result*: the second one still throws the
+    // AbortError before any stale data could be returned. A plain
+    // reject/resolve assertion therefore cannot tell the two apart. What the
+    // first check actually buys is avoiding a pointless, already-doomed
+    // `fetchPaletteDms` call once a load is known stale — an efficiency
+    // property, not a correctness one, so it has to be observed as a call
+    // count instead: exactly 3 apiFetch calls when the stale load's own
+    // users fetch resolves after being superseded (not 4).
+    let resolveFirstUsers!: (v: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstUsers = resolve;
+          })
+      )
+      .mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', displayName: 'Second' }] }))
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }))
+      // Only reached if the post-users check is missing and the stale load
+      // wastefully re-fetches DMs — must resolve validly (not run out of
+      // queued responses) so removing the check is caught by the *call
+      // count* below, not incidentally by an unrelated TypeError-to-AbortError
+      // path.
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadPeopleGroup('self-user');
+    const secondLoad = controller.loadPeopleGroup('self-user');
+    resolveFirstUsers(jsonResponse({ users: [{ id: 'u0', displayName: 'First' }] }));
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(secondLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Second' })]);
+    expect(apiFetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('cancelling Agents does not abort a concurrently in-flight People load, and vice versa', async () => {
+    // Each group has its own generation/AbortController — the palette loads
+    // all groups on open, and one group's cancellation must not corrupt an
+    // unrelated group's request.
+    let agentsSignal!: AbortSignal;
+    let peopleSignal!: AbortSignal;
+    apiFetchMock
+      .mockImplementationOnce((_url, options) => {
+        agentsSignal = options!.signal!;
+        return new Promise(() => {});
+      })
+      .mockImplementationOnce((_url, options) => {
+        peopleSignal = options!.signal!;
+        return new Promise(() => {});
+      });
+    const controller = new ChatPaletteDataController();
+    void controller.loadAgentsGroup();
+    void controller.loadPeopleGroup('self-user');
+    await vi.waitFor(() => {
+      expect(agentsSignal).toBeDefined();
+      expect(peopleSignal).toBeDefined();
+    });
+
+    apiFetchMock.mockImplementationOnce(() => new Promise(() => {}));
+    void controller.loadAgentsGroup();
+
+    expect(agentsSignal.aborted).toBe(true);
+    expect(peopleSignal.aborted).toBe(false);
+  });
+});
+
+// ===========================================================================
+// Threads group
+// ===========================================================================
+
+describe('fetchPaletteSpaces', () => {
+  it('returns the spaces array', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({ spaces: [{ projectId: 'p1', projectName: 'Alpha', projectSlug: 'alpha' }] })
+    );
+    const spaces = await fetchPaletteSpaces();
+    expect(spaces).toEqual([{ projectId: 'p1', projectName: 'Alpha', projectSlug: 'alpha' }]);
+  });
+
+  it('returns an empty list for a malformed (non-array) spaces field', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ spaces: null }));
+    expect(await fetchPaletteSpaces()).toEqual([]);
+  });
+
+  it('throws PaletteLoadError on a literal null body instead of a raw TypeError', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
+    await expect(fetchPaletteSpaces()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on an array body instead of silently returning an empty list', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse([1, 2, 3]));
+    await expect(fetchPaletteSpaces()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on a primitive (e.g. number) body instead of silently returning an empty list', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
+    await expect(fetchPaletteSpaces()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on a non-ok response', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+    await expect(fetchPaletteSpaces()).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('an abort landing during the body read rejects with the original AbortError', async () => {
+    const controller = new AbortController();
+    apiFetchMock.mockImplementationOnce(() => {
+      controller.abort();
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new DOMException('aborted', 'AbortError')),
+      } as unknown as Response);
+    });
+    await expect(fetchPaletteSpaces(controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+});
+
+describe('fetchPaletteThreadsForSpace', () => {
+  it('returns the threads array, including muted rows', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        threads: [{ id: 't1', projectId: 'p1', name: 'General' }],
+      })
+    );
+    const threads = await fetchPaletteThreadsForSpace('p1');
+    expect(threads).toEqual([{ id: 't1', projectId: 'p1', name: 'General' }]);
+  });
+
+  it('requests the encoded project ID in the URL', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ threads: [] }));
+    await fetchPaletteThreadsForSpace('p 1/x');
+    expect(apiFetchMock.mock.calls[0][0]).toBe(
+      `/api/v1/chat/spaces/${encodeURIComponent('p 1/x')}/threads`
+    );
+  });
+
+  it('throws PaletteLoadError on a non-ok response', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 404));
+    await expect(fetchPaletteThreadsForSpace('p1')).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on a literal null body instead of a raw TypeError', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(null));
+    await expect(fetchPaletteThreadsForSpace('p1')).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on an array body instead of silently returning an empty list', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse([1, 2, 3]));
+    await expect(fetchPaletteThreadsForSpace('p1')).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('throws PaletteLoadError on a primitive (e.g. number) body instead of silently returning an empty list', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
+    await expect(fetchPaletteThreadsForSpace('p1')).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('an abort landing during the body read rejects with the original AbortError', async () => {
+    const controller = new AbortController();
+    apiFetchMock.mockImplementationOnce(() => {
+      controller.abort();
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new DOMException('aborted', 'AbortError')),
+      } as unknown as Response);
+    });
+    await expect(fetchPaletteThreadsForSpace('p1', controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+});
+
+describe('buildThreadCandidates', () => {
+  const SPACE: RawPaletteSpace = { projectId: 'p1', projectName: 'Alpha', projectSlug: 'alpha' };
+
+  it('maps a thread to a Threads-group candidate carrying the real projectId/slug', () => {
+    const threads: RawPaletteThread[] = [
+      { id: 't1', projectId: 'p1', name: 'General', lastActivityAt: '2026-09-28T12:00:00Z' },
+    ];
+    const [candidate] = buildThreadCandidates(SPACE, threads);
+    expect(candidate.group).toBe('threads');
+    expect(candidate.label).toBe('General');
+    expect(candidate.secondaryLabel).toBe('Alpha');
+    expect(candidate.activityMs).toBe(Date.parse('2026-09-28T12:00:00Z'));
+    expect(candidate.target).toEqual({
+      kind: 'thread',
+      projectId: 'p1',
+      threadId: 't1',
+      threadName: 'General',
+      projectSlug: 'alpha',
+    });
+  });
+
+  it('includes every returned row, muted or not — no client-side filtering', () => {
+    const threads: RawPaletteThread[] = [
+      { id: 't1', projectId: 'p1', name: 'Muted thread' },
+      { id: 't2', projectId: 'p1', name: 'Normal thread' },
+    ];
+    expect(buildThreadCandidates(SPACE, threads)).toHaveLength(2);
+  });
+
+  it('includes the space name in searchFields, so a thread is findable by its space', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: 'p1', name: 'General' },
+    ]);
+    expect(candidate.searchFields).toContain('Alpha');
+  });
+
+  it('does not duplicate the space name in searchFields when it equals the thread name', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: 'p1', name: 'Alpha' },
+    ]);
+    expect(candidate.searchFields).toEqual(['Alpha']);
+  });
+
+  it('omits projectSlug from the target when the space has none (exactOptionalPropertyTypes)', () => {
+    const spaceNoSlug: RawPaletteSpace = { projectId: 'p2', projectName: 'Beta', projectSlug: '' };
+    const [candidate] = buildThreadCandidates(spaceNoSlug, [{ id: 't1', projectId: 'p2' }]);
+    expect('projectSlug' in candidate.target).toBe(false);
+  });
+
+  it('omits defaultAgent from the target when the thread has none', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [{ id: 't1', projectId: 'p1' }]);
+    expect('defaultAgent' in candidate.target).toBe(false);
+  });
+
+  it('includes defaultAgent in the target when present', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: 'p1', defaultAgent: 'agent-1' },
+    ]);
+    expect(candidate.target).toMatchObject({ defaultAgent: 'agent-1' });
+  });
+
+  it('falls back to the thread id for the label when name is absent', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [{ id: 't1', projectId: 'p1' }]);
+    expect(candidate.label).toBe('t1');
+  });
+
+  it('produces a stable JSON-tuple candidate ID including the project ID', () => {
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: 'p1', name: 'General' },
+    ]);
+    expect(candidate.id).toBe(JSON.stringify(['thread', 'p1', 't1']));
+  });
+
+  it('a thread with a falsy id is skipped', () => {
+    expect(buildThreadCandidates(SPACE, [{ id: '', projectId: 'p1' }])).toEqual([]);
+  });
+
+  it("uses the space's own projectId when a thread row omits one", () => {
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: '', name: 'General' },
+    ]);
+    expect(candidate.target).toMatchObject({ projectId: 'p1' });
+  });
+
+  it("uses the space's own projectId even when a thread row disagrees (never pair a mismatched ID with the space's slug)", () => {
+    // A thread's own `projectId` field disagreeing with the space it was
+    // fetched under would indicate a server data-integrity bug; trusting it
+    // anyway would route to `space.projectSlug` for the *wrong* project.
+    // `space.projectId`, the ID this thread was actually fetched under, is
+    // used unconditionally.
+    const [candidate] = buildThreadCandidates(SPACE, [
+      { id: 't1', projectId: 'some-other-project', name: 'General' },
+    ]);
+    expect(candidate.target).toMatchObject({ projectId: 'p1' });
+    expect(candidate.id).toBe(JSON.stringify(['thread', 'p1', 't1']));
+  });
+});
+
+describe('ChatPaletteDataController: Threads group', () => {
+  function spacesResponse(spaces: RawPaletteSpace[]) {
+    return jsonResponse({ spaces });
+  }
+
+  it('resolves with candidates for every space, incomplete=false when all succeed', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(
+        spacesResponse([
+          { projectId: 'p1', projectName: 'Alpha', projectSlug: 'alpha' },
+          { projectId: 'p2', projectName: 'Beta', projectSlug: 'beta' },
+        ])
+      )
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] }));
+
+    const controller = new ChatPaletteDataController();
+    const result = await controller.loadThreadsGroup();
+
+    expect(result.incomplete).toBe(false);
+    expect(result.candidates.map((c) => c.target)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ threadId: 't1', projectId: 'p1' }),
+        expect.objectContaining({ threadId: 't2', projectId: 'p2' }),
+      ])
+    );
+  });
+
+  it('resolves with an empty, non-incomplete result when there are no spaces at all', async () => {
+    apiFetchMock.mockResolvedValueOnce(spacesResponse([]));
+    const controller = new ChatPaletteDataController();
+    const result = await controller.loadThreadsGroup();
+    expect(result).toEqual({ candidates: [], incomplete: false });
+  });
+
+  it('a space with an empty projectId is dropped before any thread-list request, and never taints incomplete', async () => {
+    // A space with a falsy projectId is filtered out before
+    // fetchThreadsForSpaces runs, so no request for it is ever issued (an
+    // unfiltered projectId would produce a malformed
+    // /api/v1/chat/spaces//threads request) and it never occupies a
+    // threadsSpacesById/threadsFailedProjectIds entry under an empty-string
+    // key — a failed empty-key entry could never be resolved by
+    // retryThreadsGroup either, permanently flagging the group incomplete
+    // for a row that was never real.
+    apiFetchMock
+      .mockResolvedValueOnce(
+        spacesResponse([
+          { projectId: '', projectName: 'Malformed' },
+          { projectId: 'p1', projectName: 'Alpha' },
+        ])
+      )
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }));
+    const controller = new ChatPaletteDataController();
+    const result = await controller.loadThreadsGroup();
+
+    // Exactly two requests total: the spaces list, then p1's threads. No
+    // second thread-list request — in particular, never one for the
+    // malformed space's own (empty-projectId) URL.
+    expect(apiFetchMock).toHaveBeenCalledTimes(2);
+    expect(apiFetchMock.mock.calls[1][0]).toContain('/chat/spaces/p1/threads');
+    expect(result.incomplete).toBe(false);
+    expect(result.candidates).toHaveLength(1);
+  });
+
+  it('every space having an empty projectId resolves as an honestly empty, non-incomplete group rather than a failed load', async () => {
+    // With every space filtered out before any thread-list request is
+    // attempted, attemptedSpaceCount is 0 — the same "no spaces exist"
+    // outcome as an actually-empty spaces list, not "every attempted space
+    // failed" (which would reject with PaletteLoadError instead).
+    apiFetchMock.mockResolvedValueOnce(
+      spacesResponse([
+        { projectId: '', projectName: 'Malformed One' },
+        { projectId: '', projectName: 'Malformed Two' },
+      ])
+    );
+    const controller = new ChatPaletteDataController();
+    const result = await controller.loadThreadsGroup();
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ candidates: [], incomplete: false });
+  });
+
+  it('a partial failure keeps the succeeded spaces and flags incomplete=true, rather than failing the whole group', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(
+        spacesResponse([
+          { projectId: 'p1', projectName: 'Alpha' },
+          { projectId: 'p2', projectName: 'Beta' },
+        ])
+      )
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+
+    const controller = new ChatPaletteDataController();
+    const result = await controller.loadThreadsGroup();
+
+    expect(result.incomplete).toBe(true);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].target).toMatchObject({ threadId: 't1' });
+  });
+
+  it('rejects with PaletteLoadError (not a silent empty group) when every space fails', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p1', projectName: 'Alpha' }]))
+      .mockResolvedValueOnce(jsonResponse({}, 500));
+    const controller = new ChatPaletteDataController();
+    await expect(controller.loadThreadsGroup()).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('rejects with PaletteLoadError when the spaces list itself fails', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+    const controller = new ChatPaletteDataController();
+    await expect(controller.loadThreadsGroup()).rejects.toThrow(PaletteLoadError);
+  });
+
+  it('bounds concurrent thread-list requests to 4', async () => {
+    const spaces = Array.from({ length: 9 }, (_, i) => ({
+      projectId: `p${i}`,
+      projectName: `Space ${i}`,
+    }));
+    apiFetchMock.mockResolvedValueOnce(spacesResponse(spaces));
+
+    let inFlight = 0;
+    let peak = 0;
+    let totalStarted = 0;
+    const pending: Array<() => void> = [];
+    // A single default implementation (rather than one `mockImplementationOnce`
+    // per space) applies to every thread-list call after the spaces call
+    // above consumes the `mockResolvedValueOnce` — vitest mocks always drain
+    // the once-queue before falling back to this.
+    apiFetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          totalStarted++;
+          inFlight++;
+          peak = Math.max(peak, inFlight);
+          pending.push(() => {
+            inFlight--;
+            resolve(jsonResponse({ threads: [] }));
+          });
+        })
+    );
+
+    const controller = new ChatPaletteDataController();
+    const resultPromise = controller.loadThreadsGroup();
+
+    // The worker pool should start exactly 4 requests up front, never more.
+    await vi.waitFor(() => expect(pending.length).toBe(4));
+    expect(peak).toBe(4);
+
+    // Resolve one request at a time; each completion lets exactly one more
+    // start, so concurrency never exceeds 4 for the rest of the run either.
+    for (let i = 0; i < spaces.length; i++) {
+      await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+      pending.shift()!();
+      expect(peak).toBeLessThanOrEqual(4);
+    }
+
+    await resultPromise;
+    expect(totalStarted).toBe(spaces.length);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  it('a superseded load rejects with an AbortError rather than resolving stale data', async () => {
+    let resolveFirstSpaces!: (v: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstSpaces = resolve;
+          })
+      )
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p2', projectName: 'Second' }]))
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadThreadsGroup();
+    const secondLoad = controller.loadThreadsGroup();
+    resolveFirstSpaces(spacesResponse([{ projectId: 'p1', projectName: 'First' }]));
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    const secondResult = await secondLoad;
+    expect(secondResult.candidates).toHaveLength(1);
+  });
+
+  it('cancel() aborts the in-flight spaces request', async () => {
+    const controller = new ChatPaletteDataController();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+    const load = controller.loadThreadsGroup();
+    controller.cancel();
+    await expect(load).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('a supersede that arrives between the spaces fetch and the per-space thread fetches also rejects with an AbortError', async () => {
+    // Isolates loadThreadsGroup's *second* generation check (after
+    // fetchThreadsForSpaces resolves) from the first (after fetchPaletteSpaces
+    // resolves, exercised by the "superseded load" test above).
+    let resolveFirstThreads!: (v: Response) => void;
+    apiFetchMock
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p1', projectName: 'First' }]))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstThreads = resolve;
+          })
+      )
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p2', projectName: 'Second' }]))
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadThreadsGroup();
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+
+    const secondLoad = controller.loadThreadsGroup();
+    resolveFirstThreads(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }));
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    const secondResult = await secondLoad;
+    expect(secondResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+  });
+
+  it("a stale first load's per-space write never lands in a later read of shared state (the generation check runs before applying results)", async () => {
+    // Resolving the stale fetch only *before* reading the second load's own
+    // result would mean the write this test checks for could never be
+    // observed either way — the assertions would only ever look at a
+    // snapshot taken before the stale write could land. Keeping the
+    // controller alive and taking a *third* reading — via retryThreadsGroup —
+    // after the stale write has had a chance to land is what makes an
+    // unconditional apply actually observable.
+    let resolveFirstThreads!: (v: Response) => void;
+    apiFetchMock
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p1', projectName: 'First' }]))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstThreads = resolve;
+          })
+      )
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p2', projectName: 'Second' }]))
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] }));
+
+    const controller = new ChatPaletteDataController();
+    const firstLoad = controller.loadThreadsGroup();
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    const secondLoad = controller.loadThreadsGroup();
+    const secondResult = await secondLoad;
+    expect(secondResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+    expect(secondResult.incomplete).toBe(false);
+
+    // Now resolve the stale first load's per-space fetch as a *failure*,
+    // strictly after the second load has already cleared and repopulated
+    // the shared per-space maps with only p2. An unconditional apply would
+    // add p1 — a project the second load never even requested — to the
+    // shared failed-project set.
+    resolveFirstThreads(jsonResponse({}, 500));
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+
+    // A third read: with the failed set genuinely empty, retryThreadsGroup
+    // falls back to a full, fresh load, so queue responses for that —
+    // spaces and threads for p2 again. If the stale write above had instead
+    // landed in the shared failed-project set, retryThreadsGroup would take
+    // the narrow-retry branch instead, fetch nothing further (p1 is not in
+    // the current space map), and report incomplete=true even though
+    // nothing about the second load's own data actually failed.
+    apiFetchMock
+      .mockResolvedValueOnce(spacesResponse([{ projectId: 'p2', projectName: 'Second' }]))
+      .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] }));
+    const thirdResult = await controller.retryThreadsGroup();
+
+    expect(thirdResult.incomplete).toBe(false);
+    expect(thirdResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+  });
+
+  describe('retryThreadsGroup: only the failed spaces', () => {
+    it('re-fetches only the previously-failed space, keeping the succeeded one intact', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          spacesResponse([
+            { projectId: 'p1', projectName: 'Alpha' },
+            { projectId: 'p2', projectName: 'Beta' },
+          ])
+        )
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const controller = new ChatPaletteDataController();
+      const first = await controller.loadThreadsGroup();
+      expect(first.incomplete).toBe(true);
+
+      apiFetchMock.mockResolvedValueOnce(
+        jsonResponse({ threads: [{ id: 't2', projectId: 'p2' }] })
+      );
+      const retried = await controller.retryThreadsGroup();
+
+      // Exactly one more request — for p2's threads only, never p1's spaces
+      // or threads endpoint again.
+      expect(apiFetchMock).toHaveBeenCalledTimes(4);
+      expect(apiFetchMock.mock.calls[3][0]).toContain('/chat/spaces/p2/threads');
+      expect(retried.incomplete).toBe(false);
+      expect(retried.candidates.map((c) => c.target.threadId).sort()).toEqual(['t1', 't2']);
+    });
+
+    it('falls back to a full load when nothing failed (or nothing has loaded yet)', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(spacesResponse([{ projectId: 'p1', projectName: 'Alpha' }]))
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }));
+      const controller = new ChatPaletteDataController();
+      const result = await controller.retryThreadsGroup();
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      expect(result.candidates).toHaveLength(1);
+    });
+
+    it('a still-failing retried space remains incomplete without dropping the other space', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          spacesResponse([
+            { projectId: 'p1', projectName: 'Alpha' },
+            { projectId: 'p2', projectName: 'Beta' },
+          ])
+        )
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const controller = new ChatPaletteDataController();
+      await controller.loadThreadsGroup();
+
+      apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+      const retried = await controller.retryThreadsGroup();
+
+      expect(retried.incomplete).toBe(true);
+      expect(retried.candidates.map((c) => c.target.threadId)).toEqual(['t1']);
+    });
+
+    it("a supersede during retry's own per-space fetch rejects with an AbortError, not stale retry data", async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          spacesResponse([
+            { projectId: 'p1', projectName: 'Alpha' },
+            { projectId: 'p2', projectName: 'Beta' },
+          ])
+        )
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const controller = new ChatPaletteDataController();
+      const first = await controller.loadThreadsGroup();
+      expect(first.incomplete).toBe(true);
+
+      let resolveFirstRetry!: (v: Response) => void;
+      apiFetchMock.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstRetry = resolve;
+          })
+      );
+      const firstRetry = controller.retryThreadsGroup();
+      await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(4));
+
+      apiFetchMock.mockResolvedValueOnce(
+        jsonResponse({ threads: [{ id: 't2-fresh', projectId: 'p2' }] })
+      );
+      const secondRetry = controller.retryThreadsGroup();
+      resolveFirstRetry(jsonResponse({ threads: [{ id: 't2-stale', projectId: 'p2' }] }));
+
+      await expect(firstRetry).rejects.toMatchObject({ name: 'AbortError' });
+      const secondResult = await secondRetry;
+      expect(secondResult.incomplete).toBe(false);
+      expect(secondResult.candidates.map((c) => c.target.threadId).sort()).toEqual([
+        't1',
+        't2-fresh',
+      ]);
+    });
+
+    it("a stale retry's per-space write never lands in a later read of shared state, even when the load that supersedes it is a fresh full load", async () => {
+      // retryThreadsGroup has the identical
+      // fetch-then-generation-check-then-apply shape as loadThreadsGroup and
+      // needs its own coverage for the same stale-write race.
+      apiFetchMock
+        .mockResolvedValueOnce(
+          spacesResponse([
+            { projectId: 'p1', projectName: 'Alpha' },
+            { projectId: 'p2', projectName: 'Beta' },
+          ])
+        )
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't1', projectId: 'p1' }] }))
+        .mockResolvedValueOnce(jsonResponse({}, 500));
+
+      const controller = new ChatPaletteDataController();
+      const first = await controller.loadThreadsGroup();
+      expect(first.incomplete).toBe(true); // p2 failed
+
+      // Start a retry of the failed space (p2), and hold its per-space fetch
+      // pending — this is the load whose write will go stale.
+      let resolveStaleRetryThreads!: (v: Response) => void;
+      apiFetchMock.mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveStaleRetryThreads = resolve;
+          })
+      );
+      const staleRetry = controller.retryThreadsGroup();
+      await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(4));
+
+      // Before the stale retry's fetch resolves, a fresh full load supersedes
+      // it entirely (a different space set — p1 is gone, replaced by p3) and
+      // completes.
+      apiFetchMock
+        .mockResolvedValueOnce(spacesResponse([{ projectId: 'p3', projectName: 'Third' }]))
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't3', projectId: 'p3' }] }));
+      const freshLoad = controller.loadThreadsGroup();
+      const freshResult = await freshLoad;
+      expect(freshResult.incomplete).toBe(false);
+      expect(freshResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
+
+      // Now resolve the stale retry's per-space fetch as a *failure*, well
+      // after the fresh load has cleared and repopulated shared state with
+      // only p3. An unconditional apply would add p2 — a project the fresh
+      // load never requested and that no longer exists in the current space
+      // map — to the shared failed-project set.
+      resolveStaleRetryThreads(jsonResponse({}, 500));
+      await expect(staleRetry).rejects.toMatchObject({ name: 'AbortError' });
+
+      // A further read: with the failed set genuinely empty, retryThreadsGroup
+      // falls back to a full, fresh load, so queue responses for that — spaces
+      // and threads for p3 again. If the stale write above had instead landed
+      // in the shared failed-project set, retryThreadsGroup would take the
+      // narrow-retry branch instead, fetch nothing further (p2 is not in the
+      // current space map), and report incomplete=true even though nothing
+      // about the fresh load's own data actually failed.
+      apiFetchMock
+        .mockResolvedValueOnce(spacesResponse([{ projectId: 'p3', projectName: 'Third' }]))
+        .mockResolvedValueOnce(jsonResponse({ threads: [{ id: 't3', projectId: 'p3' }] }));
+      const finalResult = await controller.retryThreadsGroup();
+
+      expect(finalResult.incomplete).toBe(false);
+      expect(finalResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
+    });
   });
 });
