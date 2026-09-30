@@ -108,8 +108,9 @@ type usageByLimitResponse struct {
 // or the hub-wide default in place of what create actually enforces.
 type usageReservationView struct {
 	*store.UsageReservation
-	// BrokerAgentLimit is nil when the broker is unlimited, or when this row
-	// isn't a max_agents_per_broker broker-scoped reservation.
+	// BrokerAgentLimit is nil when the broker is unlimited, when limit
+	// resolution failed, or when this row isn't a max_agents_per_broker
+	// broker-scoped reservation.
 	BrokerAgentLimit *int64 `json:"brokerAgentLimit,omitempty"`
 	// BrokerAgentLimitSource is one of the BrokerLimitSource* constants
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
@@ -121,10 +122,10 @@ type usageReservationView struct {
 	// BrokerAgentLimit is absent but BrokerAgentLimitSource is still
 	// whichever step produced it ("broker" for a settings.maxAgents=0
 	// override, "entitlement"/"hub_default" for a 0 binding or default).
-	// "unlimited" itself means no limit definition or no quota service is
-	// configured at all — in which case brokerCapacity returns before
-	// counting, so this row (which requires an actual reservation to exist)
-	// would not be reachable in practice.
+	// "unlimited" itself needs a nil limitDef or a nil quotaService in
+	// effectiveBrokerLimit; neither can occur here: def is this request's
+	// limit definition (never nil — see getUsageByLimit/getUsageSummary),
+	// and s.quotaService is always constructed in NewServer (server.go).
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
