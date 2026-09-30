@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2252,6 +2253,27 @@ func TestIsZeroStruct(t *testing.T) {
 	// Nil.
 	if !isZeroStruct((*config.V1DatabaseConfig)(nil)) {
 		t.Error("nil should be zero")
+	}
+}
+
+// TestSingleFieldSettingsStructsGuard fails when AutoExposePortsSettings or
+// QuotaSettings gains a field, since the section zero-check tests above
+// (TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck and
+// TestApplySettingsUpdates_QuotasSectionGenericZeroCheck in
+// admin_settings_test.go) only ever exercise the current single field of
+// each struct: a new field would go unverified by those "any field set"
+// cases.
+func TestSingleFieldSettingsStructsGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"config.AutoExposePortsSettings", reflect.TypeOf(config.AutoExposePortsSettings{})},
+		{"config.QuotaSettings", reflect.TypeOf(config.QuotaSettings{})},
+	} {
+		if n := tc.typ.NumField(); n != 1 {
+			t.Errorf("%s has %d fields, want 1: add a case that sets only the new field to the section zero-check tests in admin_settings_test.go", tc.name, n)
+		}
 	}
 }
 
