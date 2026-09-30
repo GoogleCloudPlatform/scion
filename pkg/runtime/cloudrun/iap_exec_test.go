@@ -108,7 +108,7 @@ func TestAppendRemoteCommandNilLeavesArgsUnchanged(t *testing.T) {
 
 func TestAppendRemoteCommandAddsExactlyOneElement(t *testing.T) {
 	base := []string{"-p", "2222", "-i", "keyfile", "user@host"}
-	cmdArgs := []string{"ls", "-la", "some dir; rm -rf /tmp/x"}
+	cmdArgs := []string{"ls", "-la", "some dir; echo marker"}
 
 	got := appendRemoteCommand(base, cmdArgs)
 
