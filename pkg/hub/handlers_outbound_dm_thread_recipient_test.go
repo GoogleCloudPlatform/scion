@@ -43,7 +43,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 2211: dm: thread_id must match the asserted conversation's own key.
+// ptone/scion#2211: dm: thread_id must match the asserted conversation's own key.
 // ---------------------------------------------------------------------------
 
 // TestDirectConversation_ThreadIDMismatch_NoRecipient_Rejected_ConvRef covers
@@ -99,9 +99,9 @@ func TestDirectConversation_ThreadIDMismatch_NoRecipient_Rejected_ConvRef(t *tes
 // conversation_id counterpart. Asserting a conversation_id with no recipient
 // at all is already rejected earlier (the pre-existing "recipient is
 // required" guard applies whenever conversation_ref is empty, regardless of
-// conversation_id) — that is unrelated to 2211/2212 and out of scope here.
+// conversation_id) — that is unrelated to ptone/scion#2211/ptone/scion#2212 and out of scope here.
 //
-// To isolate the new 2211 thread_id check from the pre-existing S1
+// To isolate the new ptone/scion#2211 thread_id check from the pre-existing S1
 // thread_id/recipient ownership check (handlers_agent_messaging.go, the
 // "DM thread_id does not match the sender and recipient" check), the
 // recipient supplied is otherUser — the participant the thread_id's OWN key
@@ -155,7 +155,7 @@ func TestDirectConversation_ThreadIDMismatch_Rejected_RawConvID(t *testing.T) {
 
 // TestDirectConversation_ThreadIDMatchesDMKey_Accepted_ConvRef and its raw
 // counterpart below confirm a dm: thread_id that matches the asserted
-// conversation's own key is accepted, exactly as before 2211.
+// conversation's own key is accepted, exactly as before ptone/scion#2211.
 func TestDirectConversation_ThreadIDMatchesDMKey_Accepted_ConvRef(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	setupWebChannelBroker(t, srv, s, project)
@@ -207,7 +207,7 @@ func TestDirectConversation_ThreadIDMatchesDMKey_Accepted_RawConvID(t *testing.T
 
 // TestDirectConversation_EmptyThreadID_StillBackfilled_ConvRef and its raw
 // counterpart confirm an empty thread_id is still backfilled to the
-// conversation's DM key, unaffected by the new 2211 check (a no-op on empty
+// conversation's DM key, unaffected by the new ptone/scion#2211 check (a no-op on empty
 // thread_id).
 func TestDirectConversation_EmptyThreadID_StillBackfilled_ConvRef(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
@@ -262,7 +262,7 @@ func TestDirectConversation_EmptyThreadID_StillBackfilled_RawConvID(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// 2212: an explicit recipient must match the non-sender participant by kind
+// ptone/scion#2212: an explicit recipient must match the non-sender participant by kind
 // AND id.
 // ---------------------------------------------------------------------------
 
@@ -452,6 +452,161 @@ func TestDirectConversation_CorrectNonSenderRecipient_Accepted_RawConvID(t *test
 	require.Equal(t, http.StatusOK, rr.Code,
 		"raw conversation_id: the correct non-sender recipient must be accepted: %s",
 		rr.Body.String())
+}
+
+// TestDirectConversation_KindlessRecipientID_PeerAgent_Accepted_ConvRef and
+// its raw counterpart cover a recipient supplied as recipient_id only (no
+// Recipient string, so it carries no kind) on an agent-agent DM. The
+// non-sender participant is the peer agent; a kindless recipient_id naming
+// that peer must still be accepted — it cannot be "the wrong kind" when it
+// carries none. Dispatch itself then fails for an unrelated reason (no
+// runtime broker configured for the fixture agent), which pins that the
+// recipient check let the request through rather than rejecting it.
+func TestDirectConversation_KindlessRecipientID_PeerAgent_Accepted_ConvRef(t *testing.T) {
+	srv, s, project, agent, _ := def138Setup(t)
+	ctx := context.Background()
+
+	peerAgent := &store.Agent{
+		ID:        tid("kindless-recip-peer-agent"),
+		Name:      "kindless-recip-peer-agent",
+		Slug:      "kindless-recip-peer-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, peerAgent))
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: mustDMKey(t, "agent", agent.ID, "agent", peerAgent.ID),
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		RecipientID:     peerAgent.ID, // no Recipient string supplied — no kind
+		Msg:             "kindless recipient_id naming the peer",
+		ConversationRef: "conv:" + dmConv.ID,
+	})
+	require.NotEqual(t, http.StatusBadRequest, rr.Code,
+		"conversation_ref: a kindless recipient_id naming the non-sender peer must not be rejected as a mismatch: %s",
+		rr.Body.String())
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code,
+		"the request must fail only at dispatch (no runtime broker), not at the recipient check: %s",
+		rr.Body.String())
+	assert.Equal(t, ErrCodeDeliveryFailed, decodeErrorCode(t, rr.Body.Bytes()))
+	assert.Contains(t, rr.Body.String(), "no_runtime_broker")
+}
+
+func TestDirectConversation_KindlessRecipientID_PeerAgent_Accepted_RawConvID(t *testing.T) {
+	srv, s, project, agent, _ := def138Setup(t)
+	ctx := context.Background()
+
+	peerAgent := &store.Agent{
+		ID:        tid("kindless-recip-raw-peer-agent"),
+		Name:      "kindless-recip-raw-peer-agent",
+		Slug:      "kindless-recip-raw-peer-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, peerAgent))
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: mustDMKey(t, "agent", agent.ID, "agent", peerAgent.ID),
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		RecipientID:    peerAgent.ID, // no Recipient string supplied — no kind
+		Msg:            "kindless recipient_id naming the peer",
+		ConversationID: dmConv.ID,
+	})
+	require.NotEqual(t, http.StatusBadRequest, rr.Code,
+		"raw conversation_id: a kindless recipient_id naming the non-sender peer must not be rejected as a mismatch: %s",
+		rr.Body.String())
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code,
+		"the request must fail only at dispatch (no runtime broker), not at the recipient check: %s",
+		rr.Body.String())
+	assert.Equal(t, ErrCodeDeliveryFailed, decodeErrorCode(t, rr.Body.Bytes()))
+	assert.Contains(t, rr.Body.String(), "no_runtime_broker")
+}
+
+// TestDirectConversation_KindlessRecipientID_Sender_Rejected_ConvRef and its
+// raw counterpart cover a recipient supplied as recipient_id only equal to
+// the sender's own ID. A kindless recipient still carries an ID, and that ID
+// must still be compared against the non-sender participant — omitting the
+// kind must not also disable the ID check.
+func TestDirectConversation_KindlessRecipientID_Sender_Rejected_ConvRef(t *testing.T) {
+	srv, s, project, agent, _ := def138Setup(t)
+	ctx := context.Background()
+
+	peerAgent := &store.Agent{
+		ID:        tid("kindless-recip-sender-peer-agent"),
+		Name:      "kindless-recip-sender-peer-agent",
+		Slug:      "kindless-recip-sender-peer-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, peerAgent))
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: mustDMKey(t, "agent", agent.ID, "agent", peerAgent.ID),
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		RecipientID:     agent.ID, // the sender's own ID, no Recipient string
+		Msg:             "kindless recipient_id naming the sender",
+		ConversationRef: "conv:" + dmConv.ID,
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"conversation_ref: a kindless recipient_id equal to the sender's own ID must still be rejected: %s",
+		rr.Body.String())
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "a rejected send must not persist a message")
+}
+
+func TestDirectConversation_KindlessRecipientID_Sender_Rejected_RawConvID(t *testing.T) {
+	srv, s, project, agent, _ := def138Setup(t)
+	ctx := context.Background()
+
+	peerAgent := &store.Agent{
+		ID:        tid("kindless-recip-sender-raw-peer-agent"),
+		Name:      "kindless-recip-sender-raw-peer-agent",
+		Slug:      "kindless-recip-sender-raw-peer-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, peerAgent))
+
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: mustDMKey(t, "agent", agent.ID, "agent", peerAgent.ID),
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		RecipientID:    agent.ID, // the sender's own ID, no Recipient string
+		Msg:            "kindless recipient_id naming the sender",
+		ConversationID: dmConv.ID,
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"raw conversation_id: a kindless recipient_id equal to the sender's own ID must still be rejected: %s",
+		rr.Body.String())
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "a rejected send must not persist a message")
 }
 
 // ---------------------------------------------------------------------------

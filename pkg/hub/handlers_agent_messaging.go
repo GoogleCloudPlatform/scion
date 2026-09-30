@@ -729,9 +729,7 @@ func (s *Server) resolveOutboundRouting(
 				}
 
 			case "direct":
-				// 2211: when the caller supplied a dm:-prefixed thread_id alongside
-				// a direct conv-ref, it must match the conversation's own DM key.
-				// A no-op when thread_id is empty or not dm:-prefixed.
+				// A supplied dm: thread_id must match the conversation's own key.
 				if err := s.checkDirectThreadIDMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, req.ThreadID); err != nil {
 					return nil, err
 				}
@@ -743,13 +741,8 @@ func (s *Server) resolveOutboundRouting(
 					req.ThreadID = convResult.ExternalRef
 				}
 
-				// DEF-161 (direct half): when the caller supplied an explicit recipient
-				// alongside a direct conv-ref, validate that the recipient matches the
-				// DM key's non-sender participant, by kind and ID. For direct
-				// conversations the DM key IS the ACL and is derivable — a mismatch is
-				// an authorization-shaped error, not a shape mismatch. Do NOT silently
-				// overwrite (contrast with the group half above where overwriting is
-				// the correct action).
+				// DEF-161 (direct half): an explicit recipient must match the DM
+				// key's non-sender participant; do NOT silently overwrite it.
 				explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
 				if err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient); err != nil {
 					return nil, err
@@ -792,9 +785,7 @@ func (s *Server) resolveOutboundRouting(
 	// and no conversation_ref is rejected earlier), so it is always false
 	// here.
 	if !convRefResolved && asserted && convResult.Kind == "direct" {
-		// 2211: apply the same dm: thread_id consistency check as the
-		// conv-ref path above (a no-op when thread_id is empty or not
-		// dm:-prefixed).
+		// Same dm: thread_id consistency check as the conv-ref path above.
 		if err := s.checkDirectThreadIDMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, req.ThreadID); err != nil {
 			return nil, err
 		}
@@ -865,7 +856,7 @@ func nonSenderDMSide(ctx context.Context, kindA, idA, kindB, idB string) (addrKi
 	}
 }
 
-// checkDirectRecipientMatchesDMKey applies the 2212 direct-conversation
+// checkDirectRecipientMatchesDMKey applies the ptone/scion#2212 direct-conversation
 // recipient check: when the caller supplied an explicit recipient alongside
 // an asserted direct conversation, that recipient must match the DM key's
 // non-sender participant by BOTH kind and ID — the same participant S5
@@ -891,32 +882,23 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 		s.messageLog.Error("DEF-161: authenticated sender not found in DM key for recipient validation",
 			"external_ref", externalRef, "conversation_id", conversationID)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"conversation has an invalid DM key; cannot validate recipient", nil)
+			"cannot validate recipient: sender not found in conversation", nil)
 		return fmt.Errorf("sender not in DM key")
 	}
-	// The supplied recipient must match the non-sender participant by kind
-	// AND id, not merely appear somewhere in the key — otherwise a caller
-	// could supply their own ID (always "in" the key) or the right ID under
-	// the wrong kind, and both would incorrectly read as consistent.
+	// The supplied recipient must match the non-sender participant by ID,
+	// and by kind when a kind was supplied — not merely appear somewhere in
+	// the key — otherwise a caller could supply their own ID (always "in"
+	// the key) or the right ID under the wrong kind, and both would
+	// incorrectly read as consistent. A recipient with no kind (recipient_id
+	// only) carries no kind to compare, so it cannot be "the wrong kind";
+	// the ID comparison alone still rejects the sender's own ID.
 	recipientKind, hasKind := messages.PrincipalKindFromAddress(recipient)
-	if !hasKind {
-		// No recipient string (recipient_id-only) carries no kind of its
-		// own; this endpoint's other derivations default an unqualified
-		// recipient to "user" (see RecipientKind: "user" in S5's
-		// DeriveConversationKey call), so match that default here too.
-		recipientKind = "user"
-	}
-	if recipientKind != addrKind || recipientID != addrID {
-		s.messageLog.Warn("DEF-161/2212: supplied recipient does not match the direct conversation's non-sender participant",
+	if (hasKind && recipientKind != addrKind) || recipientID != addrID {
+		s.messageLog.Warn("DEF-161: supplied recipient does not match the direct conversation's non-sender participant",
 			"recipient_kind", recipientKind, "recipient_id", recipientID,
 			"dm_key_addr_kind", addrKind, "dm_key_addr_id", addrID,
 			"external_ref", externalRef)
-		// This helper serves both the conversation_ref and the raw
-		// conversation_id paths (see the doc comment above), so the body
-		// deliberately says "direct conversation" rather than "conversation
-		// reference" — it reads correctly no matter which way the caller
-		// named the conversation. Both call sites share this single body;
-		// do not fork it per path.
+		// Both call sites share this single body; do not fork it per path.
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"a recipient may not be supplied with a direct conversation — "+
 				"the conversation is the address; remove the recipient and retry", nil)
@@ -925,7 +907,7 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 	return nil
 }
 
-// checkDirectThreadIDMatchesDMKey applies the 2211 direct-conversation
+// checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation
 // thread_id check: when the caller supplied a dm:-prefixed thread_id
 // alongside an asserted direct conversation, that thread_id must equal the
 // conversation's own DM key (ExternalRef) — a mismatched dm: thread_id names
@@ -934,11 +916,11 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 // (some other addressing scheme). Shared by both the conversation_ref and
 // the raw conversation_id paths, so the two behave identically.
 func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, threadID string) error {
-	if threadID == "" || !strings.HasPrefix(threadID, "dm:") {
+	if !strings.HasPrefix(threadID, "dm:") {
 		return nil
 	}
 	if threadID != externalRef {
-		s.messageLog.Warn("2211: supplied dm: thread_id does not match the direct conversation's key",
+		s.messageLog.Warn("supplied dm: thread_id does not match the direct conversation's key",
 			"thread_id", threadID, "external_ref", externalRef, "conversation_id", conversationID)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"thread_id does not match the direct conversation's key — "+
