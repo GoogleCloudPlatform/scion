@@ -1003,6 +1003,26 @@ func TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities(t *
 	}
 }
 
+// TestSubstrateTemplateName_ChangesWithImageDigest confirms the image is
+// part of the template's content-address: ensureActorTemplate's reuse
+// decision (same templateName -> assume the existing golden template is
+// still current) must not reuse a template built from a different image, or
+// an actor started from it would run stale image content under a name that
+// claims to match the current one. TestSubstrateTemplateName_Stable holds
+// the image fixed across all of its cases and never varies it, so this is
+// the only place that exercises this input.
+func TestSubstrateTemplateName_ChangesWithImageDigest(t *testing.T) {
+	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	image1 := "repo/image@sha256:" + strings.Repeat("a", 64)
+	image2 := "repo/image@sha256:" + strings.Repeat("b", 64)
+
+	n1 := substrateTemplateName(image1, cfg, nil)
+	n2 := substrateTemplateName(image2, cfg, nil)
+	if n1 == n2 {
+		t.Error("substrateTemplateName() did not change with the image digest — an existing golden template would be silently reused with stale image content")
+	}
+}
+
 // TestSubstrateTemplateName_ChangesWithCapabilitySet confirms the
 // capabilities buildActorTemplate grants are part of the template's
 // content-address: an existing golden template built before a capability
