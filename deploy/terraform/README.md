@@ -42,9 +42,17 @@ reads it, by naming convention, through the `shared-lookup` module (no
    `roles/compute.networkAdmin`, `roles/container.admin`,
    `roles/run.admin`, `roles/resourcemanager.projectIamAdmin`,
    `roles/iam.serviceAccountAdmin`, `roles/servicenetworking.networksAdmin`,
-   `roles/storage.admin`, `roles/iap.admin`. Grant all of these up front —
-   a partial role set surfaces as a plan or apply failure partway through,
-   not as a clean early error.
+   `roles/storage.admin`, `roles/iap.admin`, `roles/secretmanager.admin`
+   (needed for the `google_secret_manager_secret_iam_member` resources in
+   `cloudsql-database` and `hub-cloudrun` — Editor and
+   `resourcemanager.projectIamAdmin` cover project-level policy but not
+   `secretmanager.secrets.setIamPolicy` on a resource; a narrower custom
+   role granting just that permission also works). This is a role on the
+   *operator* identity applying Terraform, separate from the hub service
+   account's conditioned, hub-prefixed `secretmanager.admin` grant discussed
+   in "Troubleshooting" below — the two are not in tension. Grant all of
+   these up front — a partial role set surfaces as a plan or apply failure
+   partway through, not as a clean early error.
 2. A GCS state bucket, versioned: `<project>-<name_prefix>-tfstate` (e.g.
    `my-project-tfha-tfstate`). Access limited to operators.
 3. ~~An IAP OAuth web client~~ — **not a prerequisite.** `iap_enabled = true`
@@ -386,21 +394,39 @@ sufficient on its own:
 > being destroyed). Doing either is two deliberate deviations from this
 > runbook, not an accident — see the residual-risk note below.
 
+Step 2 below is an `apply`, not a `destroy`; there is no step in this
+runbook at which `terraform destroy -var deletion_protection=false` against
+`shared-infra` is permitted.
+
 1. For each hub: empty its artifacts bucket, **noncurrent versions
    included** — the bucket is versioned and deliberately has no
    `force_destroy`, so `destroy` fails otherwise:
    ```bash
    gcloud storage rm -r --all-versions gs://<project>-<hub>-artifacts/**
    ```
-   Then `terraform -chdir=configurations/hub destroy` (with that hub's
-   backend prefix and tfvars). This removes only that hub's resources; it
-   never touches shared infra, because the hub root only reads shared infra
-   via data sources.
-2. `terraform -chdir=configurations/shared-infra apply -var
-   deletion_protection=false ...`. The `terraform_data.destroy_guard`
-   precondition makes this specific apply **fail** while any hub database
-   still exists on the shared Cloud SQL instance — every hub creates exactly
-   one, so this is the proxy for "a hub still exists".
+   Then plan and apply the destroy — never a bare `destroy` — through the
+   same plan-review gate as any other apply:
+   ```bash
+   terraform -chdir=configurations/hub plan -destroy \
+     -var hub_name=<hub_name> -var state_prefix=<prefix>/hubs/<hub_name> \
+     -var-file=<hub_name>.tfvars -out=/tmp/<hub_name>-destroy.tfplan
+   terraform -chdir=configurations/hub apply /tmp/<hub_name>-destroy.tfplan
+   ```
+   This removes only that hub's resources; it never touches shared infra,
+   because the hub root only reads shared infra via data sources.
+2. A normal (non-destroy) `plan`/`apply` that only flips
+   `deletion_protection` off — not `plan -destroy`, since `destroy_guard`
+   below is a `plan`/`apply`-time check, not a `terraform destroy`:
+   ```bash
+   terraform -chdir=configurations/shared-infra plan \
+     -var-file=terraform.tfvars -var deletion_protection=false \
+     -out=/tmp/shared-unprotect.tfplan
+   terraform -chdir=configurations/shared-infra apply /tmp/shared-unprotect.tfplan
+   ```
+   The `terraform_data.destroy_guard` precondition makes the **plan** above
+   **fail** while any hub database still exists on the shared Cloud SQL
+   instance — every hub creates exactly one, so this is the proxy for "a hub
+   still exists". This apply succeeds once every hub is gone.
 3. On a teardown branch (never merged to `main`), commit removing
    `lifecycle { prevent_destroy = true }` from the three shared stateful
    modules (`cloudsql-instance`, `filestore`, `gke-autopilot`). This is a
@@ -408,7 +434,13 @@ sufficient on its own:
    variable-driven `prevent_destroy` — so intentional teardown costs a
    one-line commit per module. That friction is intended for infra every
    hub depends on.
-4. `terraform -chdir=configurations/shared-infra destroy`, from that branch.
+4. From that branch, plan and apply the destroy — never a bare
+   `destroy` — through the same plan-review gate:
+   ```bash
+   terraform -chdir=configurations/shared-infra plan -destroy \
+     -var-file=terraform.tfvars -out=/tmp/shared-final-destroy.tfplan
+   terraform -chdir=configurations/shared-infra apply /tmp/shared-final-destroy.tfplan
+   ```
 5. The operator compares a before/after `tfha*` resource inventory to
    confirm nothing outside the prefix was touched, and that nothing was
    left behind.

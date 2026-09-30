@@ -56,10 +56,20 @@ The identity applying this Terraform needs Owner, or Editor plus:
 `roles/compute.networkAdmin`, `roles/container.admin`, `roles/run.admin`,
 `roles/resourcemanager.projectIamAdmin`, `roles/iam.serviceAccountAdmin`,
 `roles/servicenetworking.networksAdmin`, `roles/storage.admin`,
-`roles/iap.admin`. **Ask for all of these up front** — a partial role set
-surfaces as a plan or apply failure partway through, not as a clean early
-error, and re-diagnosing which specific grant is missing mid-apply wastes
-much more time than asking once.
+`roles/iap.admin`, `roles/secretmanager.admin`. The last one is needed for
+the five `google_secret_manager_secret_iam_member` resources across
+`cloudsql-database` and `hub-cloudrun` — none of the other roles above
+grant `secretmanager.secrets.setIamPolicy` (`roles/editor` has no
+`setIamPolicy` permissions at all, and `resourcemanager.projectIamAdmin`
+only covers project-level policy, not resource-level secret policy); a
+narrower custom role granting just `secretmanager.secrets.setIamPolicy`
+also works. This is a grant on the *operator* identity applying Terraform —
+it is unrelated to, and not a relaxation of, §11's rule against a
+project-wide `secretmanager.admin` on a *hub's* runtime service account.
+**Ask for all of these up front** — a partial role set surfaces as a plan
+or apply failure partway through, not as a clean early error, and
+re-diagnosing which specific grant is missing mid-apply wastes much more
+time than asking once.
 
 Verify the role set is actually granted before proceeding — don't take the
 user's word for it:
@@ -239,7 +249,7 @@ is pushed into the Artifact Registry repo this step creates.
 
 ---
 
-## 5. Build and Push the Hub Image
+## 5. Build and Push Images
 
 Out of scope for this Terraform (see the README's "Non-Goals"). The hub and
 agent images must be built from the **same commit** and pushed to the AR
@@ -261,11 +271,16 @@ tag or digest** (never `:latest`) and set `hub_image` to that reference —
 this never moves a tag anything else resolves against, so it needs no
 `:latest` ack.
 
-**Agent harness images.** Build these with
-`image-build/scripts/build-images.sh --target harnesses` (per-image
-builders) or `--target harnesses --builder cloud-build` (submits
-`cloudbuild-harnesses.yaml`) — not `--target common`/`--target all`, both of
-which also build the wrong `scion-hub` image described above.
+**Agent harness images.** Each harness image builds `FROM
+<registry>/scion-base:<tag>`, and `scion-base` in turn builds `FROM
+<registry>/core-base:<tag>` (`image-build/scripts/lib/targets.sh`'s
+`step_build_args`; `cloudbuild-harnesses.yaml`'s header and its
+`BASE_IMAGE=$_REGISTRY/scion-base:$_TAG` build-arg on every step).
+`--target harnesses` only builds the harnesses themselves — it does not
+build `scion-base` or `core-base` — so that base chain must already exist
+under the **same tag** you're about to build the harnesses with, or the
+harness build fails on its very first image because `scion-base:<tag>`
+doesn't exist.
 
 Both `build-images.sh --tag` and every `image-build/cloudbuild-*.yaml`'s
 `_TAG` substitution **default to `latest`.** Agent harness images are
@@ -275,17 +290,59 @@ scion-<h>:latest`; README "Harness images"). There is no per-hub or
 per-harness image pin in this module set today (upstream settings-based
 agent image pinning exists as `ptone/scion#2156`, but this module set does
 not expose it yet). **Running the build with its defaults therefore moves
-`:latest` in the shared registry implicitly — never do this.** Always pass
-an explicit immutable tag:
+`:latest` in the shared registry implicitly — never do this, and never
+"fix" a failed build by dropping `--tag`** to fall back to it — that's the
+same implicit move by another route. Always pass an explicit immutable tag,
+and build the base chain under that **same** tag first:
 
 ```bash
-# per-image builders (local-docker / local-podman)
+# per-image builders (local-docker / local-podman) — three explicit
+# stages, same --tag throughout, so scion-base:<immutable-tag> (and, under
+# it, core-base:<immutable-tag>) exist before the harnesses build FROM them
+image-build/scripts/build-images.sh --target core-base --registry <registry> \
+  --tag <immutable-tag> --push
+image-build/scripts/build-images.sh --target scion-base --registry <registry> \
+  --tag <immutable-tag> --push
 image-build/scripts/build-images.sh --target harnesses --registry <registry> \
   --tag <immutable-tag> --push
-# cloud-build builder (submits cloudbuild-harnesses.yaml with _TAG=<immutable-tag>)
+```
+
+If a single command is preferred, `--target all` builds the same chain —
+`core-base`, then `scion-base`, then every harness — under one `--tag`, for
+either builder:
+
+```bash
+image-build/scripts/build-images.sh --target all --registry <registry> \
+  --tag <immutable-tag> --push
+# or: --builder cloud-build --target all (submits cloudbuild.yaml)
+```
+
+`--target all` (either builder) also builds and pushes a
+`scion-hub:<immutable-tag>` image from `image-build/hub/Dockerfile`.
+**That image is not the Cloud Run hub image for this deployment** — this
+deployment's hub image comes from `scripts/cloudrun/Dockerfile` (see "Hub
+image" above), and nothing in this module set resolves `scion-hub`. The
+extra image is unused but harmless; there's no need to delete it, and no
+`--target` exists that builds the chain without it.
+
+The `cloud-build` builder has no per-target equivalent for staging
+`core-base` then `scion-base` alone before `--target harnesses` — use
+`--target all` there, or build `core-base`/`scion-base` with
+`--builder local-docker` first (same `--tag`) and only submit the harnesses
+to Cloud Build:
+
+```bash
 image-build/scripts/build-images.sh --target harnesses --builder cloud-build \
   --registry <registry> --tag <immutable-tag>
 ```
+
+Before running any of this, check whether `scion-base` (and, if building it
+separately, `core-base`) already exists under `<immutable-tag>` —
+`gcloud artifacts docker images describe <registry>/scion-base:<immutable-tag>`
+— or confirm it will be built in the same run. The `--dry-run` output below
+shows each step's resolved `BASE_IMAGE=` value; check that before asking
+for the ack, so a missing base surfaces before any push, not after the
+first harness fails.
 
 (If invoking Cloud Build directly instead of through `build-images.sh`, pass
 `--substitutions=_TAG=<immutable-tag>,...` — the config's own default is
@@ -301,22 +358,48 @@ command will push** — run the same command first with `--dry-run`:
   $_REGISTRY/<image>:$_TAG` and `:$_SHORT_SHA`), so also read that file to
   show the actual list.
 
+"Immutable" is a naming convention here, not something the tool enforces —
+`--tag <immutable-tag>` will happily overwrite an existing tag of the same
+name, and the auto-added `:<short-sha>` can already exist too if another
+operator already built the same commit. Either re-points an existing tag,
+which is exactly what §10 requires an ack for. **Pre-check before asking:**
+```bash
+gcloud artifacts docker tags list <registry>/scion-<harness> \
+  --filter='tag:<immutable-tag>'
+```
+for each harness (or the image list from the `--dry-run` output above). An
+empty result means the tag is new; any output means this push would
+re-point it.
+
 Then **ask the user**, and make the question state explicitly whether
 `:latest` will move, e.g.: *"This pushes `scion-<harness>:<immutable-tag>`
-(and `:<short-sha>`) for [list of harnesses] to `<registry>`. It will
-**not** move `scion-<harness>:latest`. Do you also want `:latest` moved to
-this build?"* This applies equally to a first deployment into an empty
-registry — pushing the *initial* `:latest` establishes the tag every future
-hub on this registry inherits, so it is the same explicit ack, not something
-to do implicitly as part of "build and push."
+(new, or re-pointed if already present — see the pre-check above) and
+`:<short-sha>` (new, or re-pointed if already present) for [list of
+harnesses] to `<registry>`. It will **not** move `scion-<harness>:latest`.
+Do you also want `:latest` moved to this build?"* This applies equally to a
+first deployment into an empty registry — pushing the *initial* `:latest`
+establishes the tag every future hub on this registry inherits, so it is
+the same explicit ack, not something to do implicitly as part of "build and
+push."
 
-If the user declines moving `:latest`, tell them plainly what that means:
-every hub on this shared infra keeps pulling the **current** `:latest` for
-new agents, so the freshly built agent harness images and the `hub_image`
-you're about to set are no longer at the same commit — contradicting
-question 9's "same commit" requirement — until `:latest` is moved later.
-Get an explicit acknowledgment of that skew before proceeding; do not move
-`:latest` yourself later without asking again.
+If the user declines moving `:latest`, the consequence differs by case —
+state the one that applies:
+
+- **Existing shared registry (there is a current `:latest`):** every hub on
+  this shared infra keeps pulling that **current** `:latest` for new
+  agents, so the freshly built agent harness images and the `hub_image`
+  you're about to set are no longer at the same commit — contradicting
+  question 9's "same commit" requirement — until `:latest` is moved later.
+  Get an explicit acknowledgment of that skew before proceeding; do not
+  move `:latest` yourself later without asking again.
+- **Empty registry (first deployment, no current `:latest`):** there is
+  nothing for a decline to "keep" — no `scion-<harness>:latest` exists at
+  all. Every agent create fails with an image-pull `NotFound` (§12
+  Troubleshooting) until `:latest` is pushed, so step 8.4 (the first agent)
+  cannot pass. This is a **stop-and-ask gate, not a skew to acknowledge**:
+  either the user acks the initial `:latest` push now, or tell them plainly
+  that no agent can start on this shared infra, and **stop before the hub
+  apply** (step 7) rather than proceeding to a hub that can't run agents.
 
 See "Image Rolls and Rollback" (§10) for how a `hub_image` roll differs
 from moving `:latest`.
@@ -639,8 +722,10 @@ already given for a previous one.**
 
 **Order: every hub root first, then shared-infra — never the reverse.**
 This is a multi-step, deliberately redundant sequence in the README's
-"Destroy runbook" section; **read it in full and follow it exactly** before
-tearing anything down; do not improvise a shortcut. In outline:
+"Destroy runbook" section; **read it in full for the rationale and the
+prohibitions, then execute the gated sequence below — it supersedes any
+paraphrased or bare command in the README's prose.** The step numbers and
+commands below match the README's exactly:
 
 1. **Stop: get an explicit ack, naming the exact bucket, before running
    this.** It is irreversible data deletion with no plan to review. For
