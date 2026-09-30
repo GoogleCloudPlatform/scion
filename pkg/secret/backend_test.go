@@ -553,9 +553,9 @@ func TestSecretFetch_RecordChangedDuringSecretManagerReadNotDelivered(t *testing
 	// beforeAccess lands the new Secret Manager version immediately before
 	// fetchValue's read of it, so that read returns the new value.
 	hook.beforeAccess = func() {
-		hook.mockSMClient.mu.Lock()
-		hook.mockSMClient.versions[smPath] = []byte("v2")
-		hook.mockSMClient.mu.Unlock()
+		hook.mu.Lock()
+		hook.versions[smPath] = []byte("v2")
+		hook.mu.Unlock()
 	}
 	// afterAccess lands the corresponding database write right after
 	// fetchValue's Secret Manager read but before its re-read, the same way
@@ -823,8 +823,7 @@ var hubInternalGetCallers = map[string]int{
 	filepath.Join("pkg", "hub", "handlers_github_app.go"):         1, // hub-scoped GitHub App credential
 	filepath.Join("pkg", "hub", "handlers_projects_core.go"):      2, // resolveCloneToken: hub-side git clone credential, never delivered
 	filepath.Join("pkg", "hub", "resource_import.go"):             1, // resource import: hub-side git clone credential, never delivered
-	filepath.Join("pkg", "hub", "handlers_agent_secret_fetch.go"): 1, // pending FetchValues migration: agent runtime secret fetch
-	filepath.Join("pkg", "hub", "handlers_env_secrets.go"):        1, // pending FetchValues migration: agent runtime secret get
+	filepath.Join("pkg", "hub", "material_runtime.go"):            1, // pending FetchValues migration: agent runtime material read (fetchAuthorizedValue)
 	filepath.Join("pkg", "hub", "httpdispatcher.go"):              3, // pending FetchValues migration: provision credentials + NoAuth GITHUB_TOKEN (own and owner scope)
 	filepath.Join("pkg", "secretmigration", "secretmigration.go"): 1, // hub secret migration helper
 	filepath.Join("cmd", "server_foreground.go"):                  3, // hub startup: signing keys + telemetry credentials

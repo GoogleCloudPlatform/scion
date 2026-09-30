@@ -500,18 +500,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				// Same-role but binding changed — use a repair-specific type.
 				mutationType = "user_role_binding_" + string(bindingMutation)
 			}
-			if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:        mutationType,
-				ActorPrincipalKind:  auditActor.kind,
-				ActorPrincipalID:    auditActor.id,
-				ActorCredentialID:   auditActor.credID,
-				ActorCredentialType: auditActor.credType,
-				TargetType:          "user",
-				TargetID:            txUser.ID,
-				BeforeSummary:       fmt.Sprintf(`{"role":%q,"binding":%q}`, beforeRole, bindingMutation),
-				AfterSummary:        fmt.Sprintf(`{"role":%q}`, txUser.Role),
-				Timestamp:           time.Now(),
-			}); err != nil {
+			record := &store.MutationAuditRecord{
+				MutationType:  mutationType,
+				TargetType:    "user",
+				TargetID:      txUser.ID,
+				BeforeSummary: fmt.Sprintf(`{"role":%q,"binding":%q}`, beforeRole, bindingMutation),
+				AfterSummary:  fmt.Sprintf(`{"role":%q}`, txUser.Role),
+				Timestamp:     time.Now(),
+			}
+			auditActor.ApplyActor(record)
+			if err := tx.CreateMutationAudit(ctx, record); err != nil {
 				return fmt.Errorf("audit role change: %w", err)
 			}
 		}
@@ -521,18 +519,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			if txUser.Status == "active" {
 				mutationType = "user_reactivate"
 			}
-			if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:        mutationType,
-				ActorPrincipalKind:  auditActor.kind,
-				ActorPrincipalID:    auditActor.id,
-				ActorCredentialID:   auditActor.credID,
-				ActorCredentialType: auditActor.credType,
-				TargetType:          "user",
-				TargetID:            txUser.ID,
-				BeforeSummary:       fmt.Sprintf(`{"status":%q}`, beforeStatus),
-				AfterSummary:        fmt.Sprintf(`{"status":%q}`, txUser.Status),
-				Timestamp:           time.Now(),
-			}); err != nil {
+			record := &store.MutationAuditRecord{
+				MutationType:  mutationType,
+				TargetType:    "user",
+				TargetID:      txUser.ID,
+				BeforeSummary: fmt.Sprintf(`{"status":%q}`, beforeStatus),
+				AfterSummary:  fmt.Sprintf(`{"status":%q}`, txUser.Status),
+				Timestamp:     time.Now(),
+			}
+			auditActor.ApplyActor(record)
+			if err := tx.CreateMutationAudit(ctx, record); err != nil {
 				return fmt.Errorf("audit status change: %w", err)
 			}
 		}
@@ -557,28 +553,13 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, user)
 }
 
-// auditActorInfo holds pre-resolved actor metadata for audit records.
-type auditActorInfo struct {
-	kind     string
-	id       string
-	credID   string
-	credType string
-}
-
 // buildAuditActorFromContext extracts actor identity and credential metadata
-// from the request context for use in transactional audit records.
-func (s *Server) buildAuditActorFromContext(ctx context.Context) auditActorInfo {
-	var info auditActorInfo
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		info.kind = identity.Type()
-		info.id = identity.ID()
-	}
-	cred := GetCredentialContextFromContext(ctx)
-	if cred.Kind != "" {
-		info.credID = cred.ID
-		info.credType = string(cred.Kind)
-	}
-	return info
+// from the request context for use in transactional audit records. E.2a: thin
+// wrapper over the shared auditActorFromContext helper (plan §3.3), which
+// also carries the credential snapshot, correlation ID, and executor fields
+// this file's call sites apply via AuditActor.ApplyActor.
+func (s *Server) buildAuditActorFromContext(ctx context.Context) AuditActor {
+	return auditActorFromContext(ctx)
 }
 
 // superAdminBindingState describes the lifecycle state of a user's super-admin
@@ -1023,17 +1004,15 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 
 		// Synchronous audit record (R4-C3).
-		if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-			MutationType:        "user_delete",
-			ActorPrincipalKind:  auditActor.kind,
-			ActorPrincipalID:    auditActor.id,
-			ActorCredentialID:   auditActor.credID,
-			ActorCredentialType: auditActor.credType,
-			TargetType:          "user",
-			TargetID:            id,
-			BeforeSummary:       fmt.Sprintf(`{"email":%q,"role":%q,"status":%q}`, user.Email, user.Role, user.Status),
-			Timestamp:           time.Now(),
-		}); err != nil {
+		record := &store.MutationAuditRecord{
+			MutationType:  "user_delete",
+			TargetType:    "user",
+			TargetID:      id,
+			BeforeSummary: fmt.Sprintf(`{"email":%q,"role":%q,"status":%q}`, user.Email, user.Role, user.Status),
+			Timestamp:     time.Now(),
+		}
+		auditActor.ApplyActor(record)
+		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("audit delete: %w", err)
 		}
 

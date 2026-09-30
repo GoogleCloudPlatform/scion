@@ -65,6 +65,33 @@ var (
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
 )
 
+// UATRejection reports that a presented UAT failed ValidateToken, and
+// classifies why. Reason is one of "invalid", "revoked", "expired", or
+// "user_suspended" — see auth.go's UAT branch, which logs exactly one of
+// these per rejection (plan §3.1(3)).
+//
+// Found and TokenID answer the rulings' plan correction (b): a rejection log
+// may identify a server-verified matched credential record, but must mark it
+// as a rejection, not an authenticated principal. Found is true, and TokenID
+// is set, only when the presented value hashed to a stored token row
+// (revoked, expired, or the row's user suspended) — never for a value that
+// matched nothing (invalid format or unknown hash), so an unrecognized
+// bearer value never yields an asserted identity, not even a rejected one.
+type UATRejection struct {
+	err     error
+	Reason  string
+	Found   bool
+	TokenID string
+}
+
+func (e *UATRejection) Error() string { return e.err.Error() }
+
+// Unwrap preserves errors.Is/errors.As compatibility with the pre-existing
+// sentinel errors (ErrInvalidUAT, ErrUATRevoked, ErrUATExpired,
+// ErrUserSuspended) for the one production caller (auth.go) that already
+// branches on ErrUserSuspended via errors.Is.
+func (e *UATRejection) Unwrap() error { return e.err }
+
 // ---------------------------------------------------------------------------
 // UserAccessTokenService — RS4 bounded domain service
 //
@@ -110,18 +137,10 @@ func NewUserAccessTokenService(s store.Store, authz *AuthzService, logger *slog.
 // caller's context (and transaction, if any). Unlike the fire-and-forget
 // emitMutationAudit, this returns an error so the caller can roll back.
 func (s *UserAccessTokenService) createAuditRecord(ctx context.Context, txStore store.Store, record *store.MutationAuditRecord) error {
-	if record.ActorPrincipalKind == "" || record.ActorPrincipalID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			record.ActorPrincipalKind = identity.Type()
-			record.ActorPrincipalID = identity.ID()
-			credential := GetCredentialContextFromContext(ctx)
-			if credential.Kind != "" {
-				record.ActorCredentialID = credential.ID
-				record.ActorCredentialType = string(credential.Kind)
-			}
-		}
-	}
+	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
+	// §3.3), replacing this function's own copy of the extraction logic.
+	// ApplyActor only fills fields the caller has not already set explicitly.
+	auditActorFromContext(ctx).ApplyActor(record)
 	if record.Timestamp.IsZero() {
 		record.Timestamp = s.nowFunc()
 	}
@@ -362,7 +381,7 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 // ValidateToken validates a UAT and returns the scoped user identity.
 func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) (*ScopedUserIdentity, error) {
 	if !strings.HasPrefix(key, store.UATPrefix) {
-		return nil, ErrInvalidUATFormat
+		return nil, &UATRejection{err: ErrInvalidUATFormat, Reason: "invalid"}
 	}
 
 	hash := sha256.Sum256([]byte(key))
@@ -371,17 +390,20 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 	token, err := s.tokens.GetUserAccessTokenByHash(ctx, hashStr)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nil, ErrInvalidUAT
+			// No stored token matched: an unrecognized presented value never
+			// yields an asserted identity, not even a rejected one (rulings,
+			// plan correction (b)).
+			return nil, &UATRejection{err: ErrInvalidUAT, Reason: "invalid"}
 		}
 		return nil, fmt.Errorf("failed to look up token: %w", err)
 	}
 
 	if token.Revoked {
-		return nil, ErrUATRevoked
+		return nil, &UATRejection{err: ErrUATRevoked, Reason: "revoked", Found: true, TokenID: token.ID}
 	}
 
 	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
-		return nil, ErrUATExpired
+		return nil, &UATRejection{err: ErrUATExpired, Reason: "expired", Found: true, TokenID: token.ID}
 	}
 
 	// Update last used (async)
@@ -398,7 +420,7 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 	}
 
 	if user.Status == store.UserStatusSuspended {
-		return nil, ErrUserSuspended
+		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
 	}
 
 	// E.1: derive the descriptive credential decoration from the

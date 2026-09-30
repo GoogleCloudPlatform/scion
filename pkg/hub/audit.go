@@ -253,6 +253,23 @@ func (l *LogAuditLogger) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// credentialLogAttr returns the "credential" attribute for a hub.audit event
+// log line, when descriptive credential metadata (token name, boundary,
+// issuer-supplied purpose/labels) is available on ctx. ok is false when
+// there is nothing to add — no such metadata on ctx, e.g. a non-token
+// credential or no request context at all — so callers append nothing
+// rather than an empty group.
+//
+// This is a rendering helper only: it never changes an event's outcome or
+// fields, and it does not touch any authentication middleware.
+func credentialLogAttr(ctx context.Context) (slog.Attr, bool) {
+	decoration, ok := CredentialDecorationFromContext(ctx)
+	if !ok {
+		return slog.Attr{}, false
+	}
+	return slog.Any("credential", decoration), true
+}
+
 // LogBrokerAuthEvent logs a broker authentication event to the standard logger.
 //
 // ⚠️ HISTORY, BECAUSE THE NO-OP THIS REPLACES WAS DELIBERATE. Commit 500efd1a
@@ -331,6 +348,9 @@ func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAu
 	for k, v := range event.Details {
 		attrs = append(attrs, slog.String(k, v))
 	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
+	}
 
 	l.logger().LogAttrs(ctx, level, "Broker auth audit event", attrs...)
 
@@ -369,6 +389,9 @@ func (l *LogAuditLogger) LogInviteAuditEvent(ctx context.Context, event *InviteA
 	}
 	for k, v := range event.Details {
 		attrs = append(attrs, slog.String(k, v))
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
 	}
 
 	l.logger().LogAttrs(ctx, level, "authz: "+string(event.EventType), attrs...)
@@ -423,6 +446,9 @@ func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *Lifec
 	}
 	if event.FailReason != "" {
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
 	}
 
 	l.logger().LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
@@ -489,6 +515,9 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 	if event.FailReason != "" {
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
 	}
 
 	l.logger().LogAttrs(ctx, level, "agent secret read event", attrs...)

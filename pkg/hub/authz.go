@@ -167,6 +167,16 @@ type AuthzRequest struct {
 	Action     Action
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
+
+	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
+	// record for this request regardless of the allow-sampling rate
+	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
+	// audited already; this exists for callers that know in advance they
+	// need an allow decision audited unconditionally too. See also
+	// Decision.AlwaysAudit, its counterpart for a branch inside decide's
+	// body that only learns this partway through evaluation. It never
+	// changes the authorization result.
+	AlwaysAudit bool
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -206,6 +216,24 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// PermissionID is the caller-supplied AuthzRequest.Permission, recorded
+	// only when it is a canonical ID present in the permissions registry.
+	// It is never derived from Resource/Action, and never an unregistered
+	// string: an unset or unrecognized Permission leaves this empty. See
+	// auditPermissionID, the single function that computes it.
+	PermissionID string `json:"permissionId,omitempty"`
+
+	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
+	// record for this decision regardless of the allow-sampling rate, the
+	// same as AuthzRequest.AlwaysAudit — but settable from inside decide's
+	// body, for a branch that determines only partway through evaluation
+	// that this decision must not be sampled away (for example a delegated-
+	// agent branch routed on identity kind after principal/credential
+	// derivation, which the caller building AuthzRequest cannot know to flag
+	// in advance). The single audit exit ORs this with the request-level
+	// flag. Authorization-neutral: it never changes Allowed or Reason.
+	AlwaysAudit bool `json:"-"`
 
 	// DenyCause classifies certain deny decisions structurally, so callers
 	// can react to *why* access was denied without parsing or matching
@@ -305,10 +333,23 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 	})
 }
 
-// Decide evaluates an authorization request through the AK1 kernel.
+// Decide evaluates an authorization request through the AK1 kernel and emits
+// exactly one decision audit record for the outcome, whichever internal
+// return path inside decide produced it. This is a structural guarantee: no
+// return path inside decide can skip the audit, because decide itself never
+// emits — only this wrapper does, once, after decide returns.
+func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+	decision := a.decide(ctx, request)
+	if a.decisionAuditEmitter != nil {
+		a.emitDecisionAudit(ctx, request, decision)
+	}
+	return decision
+}
+
+// decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
-func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -317,8 +358,8 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Evaluated once, after both derivations and before any candidate
 	// gathering, so an unrecognized or misrepresented identity never reaches
 	// step 1 or the kernel below. Every deny here decorates the decision
-	// with, and audits, the DERIVED principal and credential — never the
-	// caller's rejected claim — and emits exactly one audit record.
+	// with the DERIVED principal and credential — never the caller's
+	// rejected claim. Decide's single audit exit records it.
 	//
 	// A request with an omitted Principal.Kind/Credential.Kind derives both
 	// from the identity via the adapter below; an omitted kind never reaches
@@ -353,18 +394,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		denyReason = "credential kind does not match identity"
 	}
 	if denyReason != "" {
-		result := decorateDecision(Decision{Allowed: false, Reason: denyReason}, derivedPrincipal, derivedCredential)
-		// Emit the audit before returning so every entry deny is
-		// diagnosable, matching the broker/federated-service denials below.
-		// The emitted request carries the derived principal, not the
-		// caller's rejected claim, so the whole record — including
-		// PrincipalID — describes the identity actually evaluated.
-		if a.decisionAuditEmitter != nil {
-			auditRequest := request
-			auditRequest.Principal = derivedPrincipal
-			a.emitDecisionAudit(ctx, auditRequest, result)
-		}
-		return result
+		return decorateDecision(Decision{Allowed: false, Reason: denyReason}, derivedPrincipal, derivedCredential, auditPermissionID(request))
 	}
 
 	principal := request.Principal
@@ -385,14 +415,9 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential)
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential, auditPermissionID(request))
 	case PrincipalKindBroker:
-		result := decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential)
-		// Emit the audit before returning so broker denies are diagnosable.
-		if a.decisionAuditEmitter != nil {
-			a.emitDecisionAudit(ctx, request, result)
-		}
-		return result
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential, auditPermissionID(request))
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
@@ -410,7 +435,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential)
+					return decorateDecision(*denied, principal, credential, auditPermissionID(request))
 				}
 			}
 		}
@@ -440,7 +465,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -483,7 +508,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -508,7 +533,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential)
+		return decorateDecision(d, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -673,14 +698,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	result := decorateDecision(decision, principal, credential)
-
-	// Emit decision audit if emitter is configured.
-	if a.decisionAuditEmitter != nil {
-		a.emitDecisionAudit(ctx, request, result)
-	}
-
-	return result
+	return decorateDecision(decision, principal, credential, auditPermissionID(request))
 }
 
 // DecideFromContext evaluates a request using the authenticated principal and
@@ -1685,11 +1703,15 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 }
 
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext) Decision {
+// decorateDecision finalizes a Decision with principal/credential attribution
+// and the audit-recorded permission ID. permID is a value from
+// auditPermissionID(request), never independently derived here.
+func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permID string) Decision {
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
+	decision.PermissionID = permID
 	if decision.MatchedPolicy == "" {
 		decision.MatchedPolicy = decision.BindingID
 	}
@@ -1697,6 +1719,20 @@ func decorateDecision(decision Decision, principal PrincipalContext, credential 
 		decision.MatchedGrant = decision.RoleName
 	}
 	return decision
+}
+
+// auditPermissionID returns the permission ID decision audit records: the
+// exact caller-supplied AuthzRequest.Permission, and only when it is a
+// canonical ID in the permissions registry. It is never derived from
+// Resource/Action, and never an unregistered string — ruling Q7 forbids
+// certifying an ID that does not exist in the catalog. Empty when the
+// caller supplied no Permission, or supplied one the registry does not
+// recognize.
+func auditPermissionID(request AuthzRequest) string {
+	if request.Permission != "" && isKnownPermission(request.Permission) {
+		return request.Permission
+	}
+	return ""
 }
 
 // enforceUATConstraints checks the project and scope restrictions carried by a

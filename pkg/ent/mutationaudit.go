@@ -42,7 +42,21 @@ type MutationAudit struct {
 	CanDelegateResult string `json:"can_delegate_result,omitempty"`
 	// CanDelegateReason holds the value of the "can_delegate_reason" field.
 	CanDelegateReason string `json:"can_delegate_reason,omitempty"`
-	selectValues      sql.SelectValues
+	// CredentialName holds the value of the "credential_name" field.
+	CredentialName string `json:"credential_name,omitempty"`
+	// CredentialBoundaryKind holds the value of the "credential_boundary_kind" field.
+	CredentialBoundaryKind string `json:"credential_boundary_kind,omitempty"`
+	// CredentialBoundaryProjectID holds the value of the "credential_boundary_project_id" field.
+	CredentialBoundaryProjectID string `json:"credential_boundary_project_id,omitempty"`
+	// CredentialLabels holds the value of the "credential_labels" field.
+	CredentialLabels string `json:"credential_labels,omitempty"`
+	// CorrelationID holds the value of the "correlation_id" field.
+	CorrelationID string `json:"correlation_id,omitempty"`
+	// ExecutorKind holds the value of the "executor_kind" field.
+	ExecutorKind string `json:"executor_kind,omitempty"`
+	// ExecutorID holds the value of the "executor_id" field.
+	ExecutorID   string `json:"executor_id,omitempty"`
+	selectValues sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -50,7 +64,7 @@ func (*MutationAudit) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason:
+		case mutationaudit.FieldMutationType, mutationaudit.FieldActorPrincipalKind, mutationaudit.FieldActorPrincipalID, mutationaudit.FieldActorCredentialID, mutationaudit.FieldActorCredentialType, mutationaudit.FieldTargetType, mutationaudit.FieldTargetID, mutationaudit.FieldBeforeSummary, mutationaudit.FieldAfterSummary, mutationaudit.FieldCanDelegateResult, mutationaudit.FieldCanDelegateReason, mutationaudit.FieldCredentialName, mutationaudit.FieldCredentialBoundaryKind, mutationaudit.FieldCredentialBoundaryProjectID, mutationaudit.FieldCredentialLabels, mutationaudit.FieldCorrelationID, mutationaudit.FieldExecutorKind, mutationaudit.FieldExecutorID:
 			values[i] = new(sql.NullString)
 		case mutationaudit.FieldTimestamp:
 			values[i] = new(sql.NullTime)
@@ -149,6 +163,48 @@ func (_m *MutationAudit) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.CanDelegateReason = value.String
 			}
+		case mutationaudit.FieldCredentialName:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_name", values[i])
+			} else if value.Valid {
+				_m.CredentialName = value.String
+			}
+		case mutationaudit.FieldCredentialBoundaryKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_boundary_kind", values[i])
+			} else if value.Valid {
+				_m.CredentialBoundaryKind = value.String
+			}
+		case mutationaudit.FieldCredentialBoundaryProjectID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_boundary_project_id", values[i])
+			} else if value.Valid {
+				_m.CredentialBoundaryProjectID = value.String
+			}
+		case mutationaudit.FieldCredentialLabels:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field credential_labels", values[i])
+			} else if value.Valid {
+				_m.CredentialLabels = value.String
+			}
+		case mutationaudit.FieldCorrelationID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field correlation_id", values[i])
+			} else if value.Valid {
+				_m.CorrelationID = value.String
+			}
+		case mutationaudit.FieldExecutorKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field executor_kind", values[i])
+			} else if value.Valid {
+				_m.ExecutorKind = value.String
+			}
+		case mutationaudit.FieldExecutorID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field executor_id", values[i])
+			} else if value.Valid {
+				_m.ExecutorID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -220,6 +276,27 @@ func (_m *MutationAudit) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("can_delegate_reason=")
 	builder.WriteString(_m.CanDelegateReason)
+	builder.WriteString(", ")
+	builder.WriteString("credential_name=")
+	builder.WriteString(_m.CredentialName)
+	builder.WriteString(", ")
+	builder.WriteString("credential_boundary_kind=")
+	builder.WriteString(_m.CredentialBoundaryKind)
+	builder.WriteString(", ")
+	builder.WriteString("credential_boundary_project_id=")
+	builder.WriteString(_m.CredentialBoundaryProjectID)
+	builder.WriteString(", ")
+	builder.WriteString("credential_labels=")
+	builder.WriteString(_m.CredentialLabels)
+	builder.WriteString(", ")
+	builder.WriteString("correlation_id=")
+	builder.WriteString(_m.CorrelationID)
+	builder.WriteString(", ")
+	builder.WriteString("executor_kind=")
+	builder.WriteString(_m.ExecutorKind)
+	builder.WriteString(", ")
+	builder.WriteString("executor_id=")
+	builder.WriteString(_m.ExecutorID)
 	builder.WriteByte(')')
 	return builder.String()
 }

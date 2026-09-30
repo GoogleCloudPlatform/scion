@@ -17,6 +17,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -459,6 +460,49 @@ func BrokerOnBehalfOfFromContext(ctx context.Context) (BrokerOnBehalfOf, bool) {
 	return obo, ok
 }
 
+// ExecutorContext identifies what is currently executing a request, as
+// distinct from the principal/credential that originally authorized the work
+// (plan §3.5). It is set only by deferred-execution entry points — for
+// example a scheduler firing a persisted scheduled event, or a schedule
+// evaluator materializing a recurrence (E.2b) — never by an ordinary live
+// request. An empty ExecutorContext is exactly what a live request looks
+// like; that emptiness is the discriminator audit/log readers use to tell a
+// live request from deferred execution of an earlier one.
+//
+// Authorization code must not read this: it exists purely for audit/log
+// attribution, mirroring the same rule as CredentialDecoration.
+type ExecutorContext struct {
+	// Kind names the executing subsystem, e.g. "scheduler",
+	// "schedule_evaluator", "broker_dispatch", or "system:<job>".
+	Kind string
+	// ID identifies the specific unit of deferred work, e.g.
+	// "scheduled_event:<id>", "schedule:<id>", or a dispatch ID.
+	ID string
+}
+
+// IsZero reports whether ec carries no executor attribution (the live-request
+// case).
+func (ec ExecutorContext) IsZero() bool {
+	return ec.Kind == "" && ec.ID == ""
+}
+
+// executorContextKey is the context key for ExecutorContext.
+type executorContextKey struct{}
+
+// ContextWithExecutor returns a new context carrying the given executor
+// attribution. Deferred-execution entry points (E.2b) call this before
+// invoking authorization/audit code for the unit of work they are executing.
+func ContextWithExecutor(ctx context.Context, ec ExecutorContext) context.Context {
+	return context.WithValue(ctx, executorContextKey{}, ec)
+}
+
+// ExecutorContextFromContext returns the executor attribution recorded on
+// ctx, if any. Ordinary live requests have none.
+func ExecutorContextFromContext(ctx context.Context) (ExecutorContext, bool) {
+	ec, ok := ctx.Value(executorContextKey{}).(ExecutorContext)
+	return ec, ok
+}
+
 // AuthType constants for request logging.
 const (
 	AuthTypeJWT        = "jwt"
@@ -478,6 +522,39 @@ const (
 )
 
 // contextWithAuthType returns a new context with the auth type set.
+//
+// E.2a (ptone/scion#2127, plan §3.1): every UnifiedAuthMiddleware branch calls
+// this exactly once, after it has already called contextWithIdentity and (for
+// branches that establish a credential) contextWithCredentialContext — so by
+// the time this runs, ctx reflects the branch's full outcome. This is
+// therefore also the single, centralized place to populate the request log's
+// mutable auth fields (logging.SetRequestAuth) for every successful
+// authentication branch, instead of one hand-written call per branch: a
+// branch that is ever added or reordered cannot forget to log auth
+// attribution, because the outcome is derived from ctx rather than
+// hand-carried. Rejections (no identity ever gets set) are logged separately,
+// at the point of rejection — see auth.go's UAT branch.
 func contextWithAuthType(ctx context.Context, authType string) context.Context {
-	return context.WithValue(ctx, logging.AuthTypeKey{}, authType)
+	ctx = context.WithValue(ctx, logging.AuthTypeKey{}, authType)
+	logging.SetRequestAuth(ctx, authType, requestAuthAttrs(ctx)...)
+	return ctx
+}
+
+// requestAuthAttrs builds the request-log attributes for the principal and
+// credential established on ctx. See contextWithAuthType.
+func requestAuthAttrs(ctx context.Context) []slog.Attr {
+	var attrs []slog.Attr
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		attrs = append(attrs, slog.String(logging.AttrUserID, identity.ID()))
+		if pc := principalContextForIdentity(identity); pc.Kind != "" {
+			attrs = append(attrs, slog.String("principal_kind", string(pc.Kind)))
+		}
+	}
+	// The "credential" group is E.1's descriptive decoration (currently UAT
+	// only); other credential kinds are already fully identified by
+	// auth_type and user_id, per plan §3.1(2) ("emit them only when set").
+	if cc := GetCredentialContextFromContext(ctx); cc.Decoration != nil {
+		attrs = append(attrs, slog.Any("credential", *cc.Decoration))
+	}
+	return attrs
 }
