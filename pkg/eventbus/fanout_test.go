@@ -648,12 +648,11 @@ func TestFanOutEventBus_HasSpokeAfterAddRemove(t *testing.T) {
 
 // newSaturatedSubscriberInproc builds an InProcessEventBus with a single
 // subscriber on pattern whose buffer is already full for topic, so the next
-// Publish on topic is guaranteed to be dropped and reported. The caller
-// supplies pattern, topic and msg so the same saturation setup can be
-// reused for both user-message and non-user-message topics. Shared by
+// Publish on topic is guaranteed to be dropped (and, for a user-message
+// topic, reported as ErrSubscriberBufferFull). Shared by
 // TestInProcessEventBus_UserTopicBufferFullReturnsError,
-// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget and the
-// fan-out tests below.
+// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget and
+// TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel.
 func newSaturatedSubscriberInproc(t *testing.T, pattern, topic string, msg *messages.StructuredMessage) *InProcessEventBus {
 	t.Helper()
 	b := NewInProcessEventBus(slog.Default())
