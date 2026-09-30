@@ -42,21 +42,8 @@ func NewBrokerSettingStore(client *ent.Client) *BrokerSettingStore {
 // FOR UPDATE (i.e. Postgres). SQLite uses a single-writer lock instead, so
 // ForUpdate must be skipped — it returns an error on SQLite.
 //
-// The dialect comes straight from the driver (client.Driver().Dialect()), a
-// static property fixed when the *ent.Client was constructed — never a
-// query result. This is the same no-query pattern already used elsewhere in
-// this package: CompositeStore.isPostgres (locking.go), and direct
-// client.Driver().Dialect() reads in ProjectStore, role_store.go,
-// external_store.go and skill_registry_store.go. Earlier revisions of this
-// method instead ran a throwaway Exist() query whose predicate callback
-// captured selector.Dialect() into a sync.Once-cached field — functionally
-// equivalent (ent builds that selector, and therefore invokes the
-// predicate, entirely in-process before issuing any query to the driver, so
-// the callback ran regardless of whether the subsequent round trip
-// succeeded — see GoogleCloudPlatform/scion#2126 review threads
-// discussion_r4144103907 and discussion_r4144103949 for the full trace
-// through ent's sqlgraph.QueryNodes/query.selector), but strictly more
-// complex than reading the driver directly, for no benefit.
+// The dialect is read from the driver (a construction-time property), with
+// no query — same idiom as CompositeStore.isPostgres (locking.go).
 func (s *BrokerSettingStore) usesRowLocks(context.Context) bool {
 	return s.client.Driver().Dialect() == dialect.Postgres
 }
@@ -113,9 +100,7 @@ func (s *BrokerSettingStore) PutBrokerSettings(
 		return nil, fmt.Errorf("put broker settings: marshal: %w", err)
 	}
 
-	// Detect dialect BEFORE opening a transaction — with SQLite's
-	// MaxOpenConns=1 the dialect-probe query would deadlock if the tx
-	// already held the single connection.
+	// usesRowLocks is a pure driver read; computed before Tx for clarity.
 	useLock := s.usesRowLocks(ctx)
 
 	tx, err := s.client.Tx(ctx)

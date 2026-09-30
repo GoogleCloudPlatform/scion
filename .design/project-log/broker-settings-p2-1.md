@@ -149,21 +149,26 @@ permanently caches an empty `dialectName`, so `usesRowLocks` reports `false` for
 on Postgres, that means `PutBrokerSettings` silently stops taking `ForUpdate()` (a lost row lock,
 i.e. a correctness bug on the CAS path), not just a retriable failure.
 
-**Evaluation (done before writing any fix, per the brief).** Traced ent v0.14.5's actual query path
-rather than assuming: `Exist(ctx)` → `FirstID(ctx)` → `sqlAll` → `sqlgraph.QueryNodes`. The
-predicate `Where(...)` callback that captures `sel.Dialect()` runs inside `query.selector(ctx)`,
-which builds the SQL selector as a pure in-memory string-building step — no I/O. `query.nodes` only
-calls `drv.Query(ctx, ...)` (the actual network round trip) *after* `selector(ctx)` returns. So:
+**Evaluation (done before writing any fix, per the brief).** Traced the actual call path `Exist`
+takes in ent v0.14.5 with this repo's generated code, rather than assuming: `Exist(ctx)` →
+`FirstID(ctx)` → `Limit(1).IDs` (`pkg/ent/brokersetting_query.go:88,184`) → `Select(FieldID).Scan` →
+`prepareQuery` → `scanWithInterceptors` → `BrokerSettingSelect.sqlScan` → `root.sqlQuery(ctx)`, where
+the predicates run (`for _, p := range _q.predicates { p(selector) }`) → `driver.Query(...)`. The
+predicate `Where(...)` callback that captures `sel.Dialect()` is applied inside `sqlQuery`, which
+builds the SQL selector as a pure in-memory string-building step — no I/O — and this always
+completes *before* `driver.Query` (the actual network round trip) is called. So:
 
-- A **transient DB error** can only surface from `drv.Query`, which runs strictly after the
+- A **transient DB error** can only surface from `driver.Query`, which runs strictly after the
   predicate already set `s.dialectName`. It cannot prevent the capture.
-- A **cancelled ctx** is likewise only observed by the driver during the round trip (`database/sql`
-  checks `ctx.Err()` around the actual query execution); `query.selector` never inspects `ctx` at
-  all in this codepath.
-- The only way the predicate would *not* run is an SQL-builder-level error inside `selector(ctx)`
-  itself (`selector.Err()`) or a registered ent interceptor short-circuiting earlier — neither of
-  which is a "transient DB error" or "cancelled ctx" in Gemini's framing. Also checked: no ent
-  interceptors are registered on any client anywhere in this codebase.
+- A **cancelled ctx** is likewise only observed by the driver during the round trip; nothing in the
+  selector-building step inspects `ctx` in this codepath.
+- The only earlier exit is `prepareQuery`, and it cannot fail here: there are no interceptors, no
+  traversal path, and the field names are valid — neither of which is a "transient DB error" or
+  "cancelled ctx" in Gemini's framing. Also checked: no ent interceptors are registered on any
+  client anywhere in this codebase.
+
+(Note: `sqlAll`/`sqlgraph.QueryNodes` are the path `All`/`Only` take, not `Exist`/`IDs` — an earlier
+draft of this section named that path incorrectly; corrected in review round 6, F1/F2.)
 
 **Conclusion: the claim's two named triggers (transient DB error, cancelled ctx) do not reach the
 failure mode described.** The `sync.Once` was not, in fact, capable of caching an empty
@@ -227,3 +232,36 @@ backends (13 total including the new test).
 by this PR). All `SCION_*`/`CLAUDE_*` environment variables were unset for every gate invocation.
 See the response note for the exact commands and full output:
 `/scion-volumes/scratchpad/projects/broker-settings/notes/p2-1-upstream-2126-fix.md`.
+
+### Round 6 (text-only REQUEST CHANGES)
+
+Review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-1-6.md`.
+Verdict: REQUEST CHANGES, code logic approved — findings were all in the written reasoning, not the
+fix itself.
+
+- **F1/F2 (Required): wrong call chain.** The doc comment on `usesRowLocks`, the stale
+  dialect-probe-deadlock comment above the `PutBrokerSettings` call site, this log's evaluation
+  section (above), and the notes/draft-reply file all cited `Exist → FirstID → sqlAll →
+  sqlgraph.QueryNodes`. That path belongs to `All`/`Only`, not `Exist`/`IDs` — `sqlAll` is never
+  called for `Exist`. The actual path for `Exist` in this repo's generated code is `Exist → FirstID
+  → Limit(1).IDs → Select(FieldID).Scan → prepareQuery → BrokerSettingSelect.sqlScan →
+  root.sqlQuery(ctx)` (predicates applied here) `→ driver.Query(...)`. The conclusion was unaffected
+  (the predicate still runs during in-memory selector construction, before `driver.Query`), but the
+  chain itself was wrong everywhere it appeared. Fixed by: trimming the `usesRowLocks` doc comment
+  to state only the conclusion (no narrated call chain at all, since it isn't needed to justify the
+  code); rewording the stale deadlock comment (there is no probe query left to deadlock); correcting
+  the chain in this log's evaluation section above; and correcting the chain in the notes file and
+  its draft reply. Text-only changes — no logic touched.
+- **F5: draft reply must not imply CI covers Postgres.** Reworded to say the Postgres branch of
+  `TestUsesRowLocks_ReflectsBackend` was verified locally against a real Postgres 15 instance, and
+  that this repo's CI Postgres job ("T1 Launch Store PostgreSQL Tests") does not currently run the
+  entadapter `BrokerSetting`/`DeleteRuntimeBroker`/`UsesRowLocks` tests (F3).
+- **F3 (Optional follow-up, widen the Postgres CI job's test regex to cover
+  `TestUsesRowLocks_|TestPutBrokerSettings_|TestDeleteBrokerSettings`): declined for this PR.** The
+  EM's call: the shared `Makefile`/CI target ("T1 Launch Store PostgreSQL Tests") is shared
+  infrastructure outside P2.1's scope, and changing its test selection affects every PR that runs
+  that job, not just this one. Routed to the lead as a follow-up rather than changed here.
+- **F4 (FYI, no action):** `usesRowLocks(context.Context)` keeps an unused `ctx` parameter — correct
+  as-is, kept for signature parity with sibling stores' row-lock helpers.
+
+**Fixing commit:** `store(brokersettings): correct the usesRowLocks call-chain description (review round 6, F1/F2/F5)`.
