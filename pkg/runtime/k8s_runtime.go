@@ -1118,13 +1118,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	containerHome := util.GetHomeDir(config.UnixUsername)
+
 	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
 	// Auth files are injected via a K8s Secret rather than hostPath for portability.
 	if config.ResolvedAuth != nil {
 		for k, v := range config.ResolvedAuth.EnvVars {
 			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 		}
-		containerHome := util.GetHomeDir(config.UnixUsername)
 		if len(config.ResolvedAuth.Files) > 0 {
 			volName := "auth-files"
 			extraVolumes = append(extraVolumes, corev1.Volume{
@@ -1150,8 +1151,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			}
 		}
 	}
-
-	containerHome := util.GetHomeDir(config.UnixUsername)
 
 	// Inject GCP telemetry credential path if the well-known secret is present
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
