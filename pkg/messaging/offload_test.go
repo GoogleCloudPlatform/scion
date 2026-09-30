@@ -404,15 +404,38 @@ func TestOffloadForDelivery_WorstCaseBounds(t *testing.T) {
 			legacyText := messages.FormatForDelivery(out)
 			assert.LessOrEqual(t, len(legacyText), 2048, "direct envelope (legacy renderer) must be <= 2048 bytes")
 
-			// Mention envelope.
+			// nit 8 (impl review r1): a real mention envelope carries
+			// mention_source/mention_position metadata (messages.NewMention),
+			// which adds bytes beyond the offloaded body_* keys alone — the
+			// bound must hold with that extra metadata present, not just in
+			// the direct-DM shape.
+			mentionOut := *out
+			mentionMD := make(map[string]string, len(out.Metadata)+2)
+			for k, v := range out.Metadata {
+				mentionMD[k] = v
+			}
+			mentionMD["mention_source"] = "agent:" + slug
+			mentionMD["mention_position"] = "body"
+			mentionOut.Metadata = mentionMD
+			mentionOut.Type = messages.TypeMention
+
 			mentionText := RenderDeliveryText(RenderDeliveryInput{
 				MessageID:  in.MessageID,
 				ConvResult: convResult,
-				Msg:        out,
+				Msg:        &mentionOut,
 				CreatedAt:  time.Now(),
 				IsMention:  true,
 			})
 			assert.LessOrEqual(t, len(mentionText), 2048, "mention envelope (new renderer) must be <= 2048 bytes")
+
+			// nit 8: the legacy-renderer mention case — FormatForDelivery has
+			// no IsMention parameter; a mention is distinguished purely by
+			// Type, and deliveryMetadataAllowlist forwards mention_source/
+			// mention_position too, so the legacy envelope is checked with
+			// the same mention metadata present.
+			legacyMentionText := messages.FormatForDelivery(&mentionOut)
+			assert.LessOrEqual(t, len(legacyMentionText), 2048, "mention envelope (legacy renderer) must be <= 2048 bytes")
+			assert.Contains(t, legacyMentionText, "mention_source")
 		})
 	}
 }
