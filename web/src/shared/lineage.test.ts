@@ -23,6 +23,7 @@ import {
   parentIdOf,
   pruneCollapsed,
   rootUserOf,
+  topologySignature,
   transposeLayout,
   userKey,
   NODE_W,
@@ -319,5 +320,77 @@ describe('transposeLayout', () => {
       expect(e.x1).toBe(u.px + NODE_W);
       expect(e.y1).toBe(u.py + NODE_H / 2);
     }
+  });
+});
+
+describe('topologySignature (#2388 layout cache key)', () => {
+  const root = agent('r1', 'root', ['user-1']);
+  const kid = agent('k1', 'kid', ['user-1', 'r1']);
+  const noCollapse = new Set<string>();
+
+  function sig(
+    agents: Agent[],
+    collapsed: ReadonlySet<string> = noCollapse,
+    showUsers = false,
+    orientation: 'vertical' | 'horizontal' = 'vertical'
+  ): string {
+    return topologySignature(agents, collapsed, showUsers, orientation);
+  }
+
+  it('is stable across agent-array reordering', () => {
+    expect(sig([root, kid])).toBe(sig([kid, root]));
+  });
+
+  it('is unaffected by fields outside id/parentId/name (status-only updates)', () => {
+    const busyRoot = { ...root, phase: 'stopped', activity: 'thinking' } as Agent;
+    const busyKid = {
+      ...kid,
+      _capabilities: { attach: true },
+      _messageability: { canMessage: false, reason: 'x' },
+    } as unknown as Agent;
+    expect(sig([root, kid])).toBe(sig([busyRoot, busyKid]));
+  });
+
+  it('is unaffected by object identity alone', () => {
+    expect(sig([root, kid])).toBe(sig([{ ...root }, { ...kid }]));
+  });
+
+  it('changes when an agent is added', () => {
+    const grandkid = agent('g1', 'grandkid', ['user-1', 'r1', 'k1']);
+    expect(sig([root, kid])).not.toBe(sig([root, kid, grandkid]));
+  });
+
+  it('changes when an agent is removed', () => {
+    expect(sig([root, kid])).not.toBe(sig([root]));
+  });
+
+  it('changes on reparent (ancestry change)', () => {
+    const reparented = agent('k1', 'kid', ['user-1']); // now a root, not root's child
+    expect(sig([root, kid])).not.toBe(sig([root, reparented]));
+  });
+
+  it('changes on rename', () => {
+    const renamed = agent('k1', 'renamed-kid', ['user-1', 'r1']);
+    expect(sig([root, kid])).not.toBe(sig([root, renamed]));
+  });
+
+  it('changes on collapse toggle', () => {
+    expect(sig([root, kid])).not.toBe(sig([root, kid], new Set(['r1'])));
+  });
+
+  it('is unaffected by collapsedIds set insertion order', () => {
+    const a = new Set(['r1', 'k1']);
+    const b = new Set(['k1', 'r1']);
+    expect(sig([root, kid], a)).toBe(sig([root, kid], b));
+  });
+
+  it('changes when showUsers toggles', () => {
+    expect(sig([root, kid], noCollapse, false)).not.toBe(sig([root, kid], noCollapse, true));
+  });
+
+  it('changes when orientation toggles', () => {
+    expect(sig([root, kid], noCollapse, false, 'vertical')).not.toBe(
+      sig([root, kid], noCollapse, false, 'horizontal')
+    );
   });
 });

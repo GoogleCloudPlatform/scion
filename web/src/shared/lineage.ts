@@ -107,6 +107,32 @@ export function rootUserOf(agent: Agent): string | undefined {
 }
 
 /**
+ * A signature that changes iff the rendered topology of the forest would
+ * change: membership (add/remove), structure (reparent, via ancestry), name
+ * (sort order and label), collapse state, the show-users toggle, or
+ * orientation. Two agent lists that differ only in object identity or in
+ * fields outside this set (status, capabilities, messageability, etc.)
+ * produce the same signature. Callers use this to cache layout across
+ * status-only renders, pans, zooms and hovers, and to invalidate it exactly
+ * on the changes that affect topology or geometry.
+ *
+ * Sorted by ID before hashing so the signature is independent of the input
+ * array's order (e.g. after an SSE-triggered re-sort with no real change).
+ */
+export function topologySignature(
+  agents: readonly Agent[],
+  collapsedIds: ReadonlySet<string>,
+  showUsers: boolean,
+  orientation: Orientation
+): string {
+  const rows = agents
+    .map((a) => [a.id, parentIdOf(a) ?? '', a.name] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const collapsed = [...collapsedIds].sort();
+  return JSON.stringify({ rows, collapsed, showUsers, orientation });
+}
+
+/**
  * Builds the lineage forest. An agent is attached under its parent only when
  * the parent is another agent in the given set; otherwise it becomes a root
  * (its parent is a user, filtered out, or deleted). A visited guard keeps
