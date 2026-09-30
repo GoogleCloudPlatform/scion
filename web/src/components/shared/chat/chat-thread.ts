@@ -1416,9 +1416,9 @@ export class ScionChatThread extends LitElement {
         if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
         this._initialWatermarkTimer = setTimeout(() => {
           this._initialWatermarkTimer = null;
-          const lastMsg = this.messages[this.messages.length - 1];
-          if (lastMsg) {
-            void this.advanceReadWatermark(lastMsg.id);
+          const messageId = this.lastReadableMessageId();
+          if (messageId) {
+            void this.advanceReadWatermark(messageId);
           }
         }, delay);
       }
@@ -2413,6 +2413,25 @@ export class ScionChatThread extends LitElement {
     return false;
   }
 
+  /**
+   * The ID of the last message eligible to become the read watermark: skips
+   * messages still keyed by their optimistic-send idempotency key (no SSE
+   * echo or HTTP ack yet). That temporary ID names no persisted message —
+   * POSTing it would advance the watermark to an ID the server (and every
+   * other client) cannot resolve, and if the send is slow (e.g.
+   * sendAgentRouted waiting on agent dispatch) or the SSE connection is
+   * degraded, the 1s/500ms/2s timers below can fire before reconciliation
+   * replaces it (nc-self-unread R1). Returns '' if every message is still
+   * pending.
+   */
+  private lastReadableMessageId(): string {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const id = this.messages[i].id;
+      if (!this._pendingIdempotencyKeys.has(id)) return id;
+    }
+    return '';
+  }
+
   /** Advance the read watermark if conditions are met. */
   private maybeAdvanceReadWatermark(): void {
     if (!this.isV2 || !this._tabFocused || !this.pinnedToBottom) return;
@@ -2421,9 +2440,9 @@ export class ScionChatThread extends LitElement {
     // Debounce
     if (this._readDebounceTimer) clearTimeout(this._readDebounceTimer);
     this._readDebounceTimer = setTimeout(() => {
-      const lastMsg = this.messages[this.messages.length - 1];
-      if (lastMsg) {
-        void this.advanceReadWatermark(lastMsg.id);
+      const messageId = this.lastReadableMessageId();
+      if (messageId) {
+        void this.advanceReadWatermark(messageId);
       }
     }, 1000);
   }
@@ -2433,6 +2452,10 @@ export class ScionChatThread extends LitElement {
     // more often than it changes; re-POSTing the same ID would also re-fan the
     // read-state event out to the peer for nothing.
     if (!messageId || messageId === this._lastAdvancedMessageId) return;
+    // Defence in depth: callers already filter these out via
+    // lastReadableMessageId(), but never let an optimistic temp ID reach the
+    // network regardless of caller.
+    if (this._pendingIdempotencyKeys.has(messageId)) return;
     this._lastAdvancedMessageId = messageId;
 
     // Pin both to the conversation this POST is for: a switch mid-flight makes

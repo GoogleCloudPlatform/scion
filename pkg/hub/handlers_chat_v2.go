@@ -1063,9 +1063,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			return // error response already written by sendAgentRouted
 		}
 		recordIdempotency(msgID)
-		if isDM {
-			s.ensureDMRegistered(ctx, key, user.ID())
-		}
+		// DM registration now happens inside sendAgentRouted, before its
+		// watermark update — see the comment there.
 		return
 	}
 
@@ -1528,13 +1527,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
-	// Update topic/DM watermark and auto-advance the sender's read watermark
-	// *before* publishing the SSE event below. The sender's own client
-	// receives that event immediately and may re-fetch unread state in
-	// response; if the watermark update ran after the publish (as it
-	// previously did, following agent dispatch), that fetch could land in the
-	// gap and briefly report the sender's own message as unread. Advancing
-	// first closes the race rather than narrowing it.
+	// For DMs, ensure DM registry rows exist for both participants. This must
+	// precede the watermark update: touchConversationActivity is a plain
+	// UPDATE and would affect zero rows on the first message of a DM. (Moved
+	// here from the isDM branch in the caller, which ran this after
+	// sendAgentRouted had already returned — too late for the first message's
+	// watermark update below to find a row to update.)
+	if strings.HasPrefix(key, "dm:") {
+		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
@@ -1992,13 +1996,8 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
-	// Update conversation watermark and auto-advance the sender's read
-	// watermark *before* publishing the SSE event below, so their own message
-	// never appears as unread. The sender's own client receives that event
-	// immediately and may re-fetch unread state in response; running these
-	// updates after the publish (as this previously did) left a gap where
-	// such a fetch could land and briefly report the sender's own message as
-	// unread. Advancing first closes the race rather than narrowing it.
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
 	}
@@ -2828,6 +2827,39 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	if body.MessageID == "" {
 		ValidationError(w, "messageId is required", nil)
 		return
+	}
+
+	// Defence in depth against a client-side bug class (nc-self-unread R1):
+	// the watermark must name a real, persisted message, never a client-local
+	// placeholder such as an optimistic send's temporary idempotency-key ID.
+	// Rejected outright (not silently ignored) so a client bug surfaces as a
+	// visible 400 instead of a watermark that quietly never advances.
+	// Membership is checked by ThreadID when the row has one; native
+	// envelope-only agent replies persist only ConversationID (see
+	// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed), so an empty ThreadID is
+	// not treated as a mismatch — same tolerance handlers_chat_v2.go already
+	// applies at the edit/delete ThreadID checks and the `around` anchor check.
+	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
+	if err != nil || targetMsg == nil {
+		ValidationError(w, "messageId does not refer to a message in this conversation", nil)
+		return
+	}
+	if targetMsg.ThreadID != "" && targetMsg.ThreadID != key {
+		ValidationError(w, "messageId does not refer to a message in this conversation", nil)
+		return
+	}
+
+	// Monotonic: never let a stale advance — e.g. an in-flight POST for an
+	// earlier message that lands after a newer auto-advance already ran —
+	// roll the watermark backward and re-mark an already-read conversation
+	// unread (nc-self-unread FYI 2).
+	if existing, rsErr := wcs.GetReadState(ctx, user.ID(), key); rsErr == nil &&
+		existing != nil && existing.LastReadMessageID != "" && existing.LastReadMessageID != body.MessageID {
+		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil &&
+			currentMsg != nil && !targetMsg.CreatedAt.After(currentMsg.CreatedAt) {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
 	}
 
 	if err := wcs.SetReadState(ctx, user.ID(), key, body.MessageID); err != nil {

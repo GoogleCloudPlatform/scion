@@ -275,43 +275,19 @@ describe('ChatUnreadCounter', () => {
     }
   });
 
-  it('never goes unread for the sender-s own message, at any point during the SSE + optimistic-send settle', async () => {
-    // Regression test for the self-unread flash (nc-self-unread). The fix
-    // lives server-side: handlers_chat_v2.go now advances the sender's read
-    // watermark (and the conversation's last-message watermark) *before*
-    // publishing the SSE event for their own message, so by the time
-    // chat-message-received fires — whether from the SSE echo of the
-    // optimistic send, or a second tab — a fetch triggered by it always sees
-    // a caught-up server. Pinned here at every sampled tick, not just the
-    // final value, because a flash is exactly a transient state a
-    // final-value assertion would miss.
-    vi.useFakeTimers();
-    mockChatApi([{ unreadCount: 0 }], [{ hasUnread: false }]);
-    const counter = new ChatUnreadCounter();
-    counter.start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    const samples: number[] = [getUnreadBadge()];
-
-    try {
-      // The SSE echo of the user's own optimistically-sent message.
-      stateManager.dispatchEvent(
-        new CustomEvent('chat-message-received', { detail: { senderId: 'self-user' } })
-      );
-      samples.push(getUnreadBadge());
-
-      for (let i = 0; i < 5; i++) {
-        await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS / 5);
-        samples.push(getUnreadBadge());
-      }
-
-      expect(samples.every((n) => n === 0)).toBe(true);
-    } finally {
-      counter.stop();
-    }
-  });
-
-  it('still goes unread for a message from someone else (no regression)', async () => {
+  // nc-self-unread round 2, R3: this file previously carried two tests
+  // claiming self-send-unread coverage. Neither did — ChatUnreadCounter has
+  // no sender-identity logic (`senderId` in the event detail is never read;
+  // see onNotification/scheduleRefresh above) and the first of the two
+  // always mocked the server to return zero unread, so it passed identically
+  // on unpatched `main` and could not have caught the bug this PR fixes.
+  // The real regression coverage for R1 (optimistic-send temp ID reaching
+  // the read-watermark POST) lives in chat-thread.test.ts, where that logic
+  // actually runs. The one test below that exercised genuine, failable
+  // behaviour of this module — an inbound event driving a real 0→unread
+  // transition through a full refetch — is kept, with the misleading
+  // "self-send guard" wording removed.
+  it('updates the badge to a real unread count after a chat-message-received event', async () => {
     vi.useFakeTimers();
     let serverDMs: UnreadDM[] = [{ hasUnread: false }];
     apiFetch.mockImplementation((url: string) => {
@@ -326,8 +302,6 @@ describe('ChatUnreadCounter', () => {
     expect(getUnreadBadge()).toBe(0);
 
     try {
-      // A message from another user (or an agent) does mark the DM unread —
-      // the self-send guard must not swallow real unread state.
       serverDMs = [{ hasUnread: true }];
       stateManager.dispatchEvent(
         new CustomEvent('chat-message-received', { detail: { senderId: 'other-user' } })

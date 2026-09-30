@@ -915,10 +915,164 @@ func TestChatV2_ConversationRead(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
+	// The watermark must name a real, persisted message (R1 defence in
+	// depth) — "msg-42" would now be rejected as not found.
+	msg := &store.Message{ID: tid("read-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-read", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-read", CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-read/read",
-		map[string]string{"messageId": "msg-42"})
+		map[string]string{"messageId": msg.ID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleConversationRead: watermark validation (nc-self-unread round 2, R1)
+// ---------------------------------------------------------------------------
+
+// TestChatV2_ConversationRead_RejectsUnknownMessageID is the direct
+// regression test for R1: a client that POSTs an optimistic send's temporary
+// idempotency-key ID (never persisted) as the read watermark must be
+// rejected, not silently accepted as if it were a real message.
+func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-reject", ProjectID: proj.ID, Name: "reject", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Same shape as chat-thread.ts's optimistic-send idempotency key
+	// (crypto.randomUUID()) — a well-formed UUID that was never persisted.
+	optimisticTempID := tid("never-persisted-optimistic-id")
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-reject/read",
+		map[string]string{"messageId": optimisticTempID})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unpersisted message ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-reject")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written for a rejected ID, got %+v", rs)
+	}
+}
+
+// TestChatV2_ConversationRead_RejectsMessageFromOtherConversation verifies
+// the ThreadID-membership check: a real, persisted message ID from a
+// different topic must not be usable to advance this topic's watermark.
+func TestChatV2_ConversationRead_RejectsMessageFromOtherConversation(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"topic-a", "topic-b"} {
+		if err := wcs.CreateTopic(ctx, WebChatTopic{
+			ID: id, ProjectID: proj.ID, Name: id, CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("CreateTopic(%s): %v", id, err)
+		}
+	}
+
+	otherMsg := &store.Message{ID: tid("other-topic-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-b", Msg: "hi from B", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-b", CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, otherMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-a/read",
+		map[string]string{"messageId": otherMsg.ID})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a message belonging to a different topic, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed pins the deliberate
+// tolerance in the ThreadID check: native agent replies can persist with
+// ThreadID == "" and only ConversationID set (see
+// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). Such a message
+// must remain usable as a read watermark for the topic it was actually
+// delivered into — the membership guard added for R1 must not regress this.
+func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-envelope", ProjectID: proj.ID, Name: "envelope", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	envelopeMsg := &store.Message{ID: tid("envelope-reply"), ProjectID: proj.ID, Sender: "agent:bot", SenderID: tid("bot"),
+		Recipient: "user:dev@localhost", RecipientID: DevUserID,
+		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: tid("conv-envelope"),
+		CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, envelopeMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-envelope/read",
+		map[string]string{"messageId": envelopeMsg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for an envelope-only reply (empty ThreadID), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatV2_ConversationRead_Monotonic pins FYI 2: a stale /read POST for an
+// older message must not roll the watermark backward once a newer one has
+// already been recorded (e.g. by autoAdvanceSenderReadState on send, or a
+// later user-triggered advance).
+func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-mono", ProjectID: proj.ID, Name: "mono", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-time.Minute)
+	older := &store.Message{ID: tid("mono-older"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-mono", Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base}
+	newer := &store.Message{ID: tid("mono-newer"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-mono", Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base.Add(time.Second)}
+	if err := s.CreateMessage(ctx, older); err != nil {
+		t.Fatalf("CreateMessage(older): %v", err)
+	}
+	if err := s.CreateMessage(ctx, newer); err != nil {
+		t.Fatalf("CreateMessage(newer): %v", err)
+	}
+
+	// Advance straight to the newer message first (simulates
+	// autoAdvanceSenderReadState already having run on send).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-mono/read",
+		map[string]string{"messageId": newer.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to newer: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A stale POST for the older message — e.g. an in-flight request from
+	// before the send — must be a no-op, not a rollback.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-mono/read",
+		map[string]string{"messageId": older.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stale advance to older: expected 200 (ignored, not an error), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-mono")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != newer.ID {
+		t.Errorf("watermark rolled back: got %+v, want LastReadMessageID = %q", rs, newer.ID)
 	}
 }
 
@@ -4795,25 +4949,49 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 }
 
 // readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
-// snapshots the sender's read state for the message's conversation at the
-// moment of the call — i.e. what a client would see if it reacted to the SSE
-// event the instant it arrives. Used to pin down that the sender's read
-// watermark (and the conversation's last-message watermark) are advanced
-// *before* the message is published, not after, closing the self-unread
-// flash race rather than narrowing it.
+// snapshots both halves of the unread computation for the message's
+// conversation at the moment of the call — i.e. what a client would see if
+// it reacted to the SSE event the instant it arrives. `hasUnread` is
+// computed exactly the way the rollup endpoints do it
+// (handlers_chat_v2.go ~L155, ~L384, ~L3439: LastMessageID != LastReadMessageID),
+// so this pins the actual user-visible invariant, not just one of its two
+// inputs. Used to pin down that the sender's read watermark *and* the
+// conversation's last-message watermark are both advanced before the
+// message is published, not after, closing the self-unread flash race
+// rather than narrowing it.
 type readStateAtPublishSpy struct {
 	noopEventPublisher
 	wcs WebChatStore
 
-	called             bool
-	messageID          string
-	readStateAtPublish *WebChatReadState
+	called                 bool
+	messageID              string
+	readStateAtPublish     *WebChatReadState
+	lastMessageIDAtPublish string
+	hasUnreadAtPublish     bool
 }
 
 func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef) {
 	p.called = true
 	p.messageID = msg.ID
 	p.readStateAtPublish, _ = p.wcs.GetReadState(ctx, msg.SenderID, msg.ThreadID)
+
+	if strings.HasPrefix(msg.ThreadID, "dm:") {
+		dms, _ := p.wcs.ListDMs(ctx, msg.SenderID)
+		for _, dm := range dms {
+			if dm.ConversationKey == msg.ThreadID {
+				p.lastMessageIDAtPublish = dm.LastMessageID
+				break
+			}
+		}
+	} else if topic, _ := p.wcs.GetTopic(ctx, msg.ThreadID); topic != nil {
+		p.lastMessageIDAtPublish = topic.LastMessageID
+	}
+
+	lastRead := ""
+	if p.readStateAtPublish != nil {
+		lastRead = p.readStateAtPublish.LastReadMessageID
+	}
+	p.hasUnreadAtPublish = p.lastMessageIDAtPublish != "" && p.lastMessageIDAtPublish != lastRead
 }
 
 // TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish is a
@@ -4856,6 +5034,13 @@ func TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish(t *testing.
 		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
 			"self-send would flash unread until the read state catches up",
 			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+	if spy.lastMessageIDAtPublish != spy.messageID {
+		t.Errorf("topic last-message watermark at publish time = %q, want %q (the sent message)",
+			spy.lastMessageIDAtPublish, spy.messageID)
+	}
+	if spy.hasUnreadAtPublish {
+		t.Error("computed hasUnread at publish time = true, want false — self-send would flash unread")
 	}
 }
 
@@ -4904,6 +5089,13 @@ func TestChatV2_Send_AgentRouted_ReadWatermarkAdvancedBeforePublish(t *testing.T
 		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
 			"self-send would flash unread until the read state catches up",
 			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+	if spy.lastMessageIDAtPublish != spy.messageID {
+		t.Errorf("DM last-message watermark at publish time = %q, want %q (the sent message)",
+			spy.lastMessageIDAtPublish, spy.messageID)
+	}
+	if spy.hasUnreadAtPublish {
+		t.Error("computed hasUnread at publish time = true, want false — self-send would flash unread")
 	}
 }
 

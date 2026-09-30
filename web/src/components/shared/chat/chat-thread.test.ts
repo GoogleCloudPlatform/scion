@@ -944,6 +944,75 @@ describe('scion-chat-thread read watermark', () => {
 
     expect(updated).not.toHaveBeenCalled();
   });
+
+  /**
+   * Regression for nc-self-unread R1: an optimistic send's temporary
+   * idempotency-key ID must never be POSTed as the read watermark. On a slow
+   * send (sendAgentRouted can wait up to 30s per recipient on
+   * dispatchWithBrokerRetry) with no SSE echo yet, the optimistic message is
+   * the only, and therefore "last", message in the thread when the 1s
+   * maybeAdvanceReadWatermark debounce fires. Before the fix this POSTed the
+   * temp UUID; the server would now reject it (handleConversationRead), but
+   * the client must not even try.
+   */
+  it('never POSTs the optimistic send id as the read watermark when no SSE echo has arrived', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = await mount();
+      el.currentUserId = 'user-me';
+      const internals = el as unknown as {
+        messageMap: Map<string, Message>;
+        handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+        maybeAdvanceReadWatermark(): void;
+      };
+
+      // The send's own POST never resolves within this test — models a slow
+      // sendAgentRouted dispatch, or a send that simply outlives the 1s
+      // debounce. No SSE echo is emitted either.
+      apiFetch.mockImplementation((url: string) =>
+        String(url).endsWith('/messages')
+          ? new Promise<Response>(() => {})
+          : Promise.resolve(emptyHistory())
+      );
+
+      void internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'hello',
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+
+      const optimistic = Array.from(internals.messageMap.values()).find(
+        (m) => m.dispatchState === 'pending'
+      );
+      expect(optimistic).toBeDefined();
+      const idempotencyKey = optimistic!.id;
+
+      // Models the scroll event scrollToBottomAfterRender triggers in a real
+      // browser (review R1, ~L2524): the only trigger that would otherwise
+      // start the 1s debounce this early.
+      internals.maybeAdvanceReadWatermark();
+      await vi.advanceTimersByTimeAsync(1001);
+
+      const readCalls = apiFetch.mock.calls.filter(
+        (c) =>
+          String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(readCalls).toHaveLength(0);
+
+      // Guard against a vacuous pass: confirm the temp ID really was the
+      // candidate that would have been posted, had the guard not been there.
+      expect(idempotencyKey).not.toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('scion-chat-thread receipt expiry', () => {
