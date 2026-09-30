@@ -2,11 +2,11 @@
 
 Tracking: `ptone/scion#2061` (design AGREED rev 2, `.design` on the scratchpad volume,
 not this repo). Fixes item 1 of `ptone/scion#2063`. PR: `ptone/scion#2268`
-(branch `scion/broker-settings-p1a`; last substantive commit `a60a738b3`,
-which is the commit this log describes — a trailing commit updates only this
-line, since a commit cannot reference its own hash, and a rebase changes
-every commit's hash including this one's predecessor's — see the PR for the
-current head).
+(branch `scion/broker-settings-p1a`). This PR went through three review
+rounds, each rebasing the branch onto upstream main, which rewrites every
+commit's hash — see the PR page or `git log` on the branch for the current
+head rather than a SHA pinned in this file, which the next rebase would
+invalidate.
 
 ## What changed
 
@@ -155,3 +155,26 @@ seeded definition, per the design.
     PR and remain fully immutable, so that comment is still accurate.
   - F5: this file — corrected the head SHA and the `make test-fast`
     attribution (see Verification above).
+- **Round 3** (`broker-settings-rev-p1a-3`, fresh/independent): APPROVE, with
+  four non-blocking findings, all addressed:
+  - F1: the new "Set the agent cap after deploying" subsection in
+    `hub-setup-cloudrun.md` had been inserted above the pre-existing
+    "To change the Instance size" `deploy.sh` snippet, so that snippet
+    rendered under the new heading. Moved the new subsection below it.
+  - F2: this file still said "~17-18" in one place after the seed.go fix
+    changed to "~19-20", and cited a base SHA (`e1f682eac`) that a later
+    rebase had already moved past. Fixed the figure and reworded the SHA
+    reference to not go stale on the next rebase (see the top of this
+    file).
+  - F3: the PR body's test plan repeated the outdated
+    `pkg/runtimebroker`/`pkg/sciontool/supervisor` env-leakage
+    misattribution and didn't mention the two known upstream CI breaks.
+    Edited directly on the PR (`ptone/scion#2268`), not in this file.
+  - F4: a curl comment in `hub-setup-cloudrun.md` said omitting `name` is
+    "rejected" without specifying it's `400` (not `403` like
+    resourceType/unit), and cited `ptone/scion#2063` inexactly. Fixed the
+    comment.
+  - The reviewer also independently found and reported a second pre-existing
+    base-branch break, `GoogleCloudPlatform/scion#2088`'s `no_sqlite` vet
+    failure (`authzTestSetup` undefined), on top of the already-known
+    `GoogleCloudPlatform/scion#2105`. Both are listed in the PR body now.
