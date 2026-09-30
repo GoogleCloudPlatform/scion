@@ -291,11 +291,13 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 //
 // The general rule is same-kind/same-ID: initiator.PrincipalKind ==
 // exec.Type() && initiator.PrincipalID == exec.ID(). dev_local
-// (ptone/scion#2342 review round 1, finding 1) is the one narrow addition,
+// (ptone/scion#2342 review round 1, finding 1; the PrincipalKind clause
+// below is review round 2, optional item O1) is the one narrow addition,
 // checked ONLY in addition to the general rule, never instead of it, and
-// only for this exact kind:
+// every clause below must hold for this exact kind:
 //
-//	initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
+//	initiator.PrincipalKind == "dev" &&
+//		initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
 //		initiator.PrincipalID == DevUserID &&
 //		exec.ID() == DevUserID &&
 //		exec.Type() == "user"
@@ -309,8 +311,15 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 // and the scheduled-dispatch success audit would never show the dev kind
 // for one (leaving it audited the same as a legacy or different-principal
 // row, contrary to "keep audit and log attribution visibly distinct from
-// ordinary browser/API session credentials"). No other kind is loosened:
-// every kind other than dev_local is decided by the general rule alone.
+// ordinary browser/API session credentials"). The PrincipalKind=="dev"
+// clause costs nothing on any genuine row (captureInitiatorAttribution only
+// ever emits dev_local for a *DevUser, whose Type() is always "dev") and
+// narrows the exception to precisely the case this comment describes. No
+// other kind is loosened: every kind other than dev_local is decided by the
+// general rule alone. TestInitiatorMatchesExecutor mutation-pins every
+// clause of this arm (ptone/scion#2342 review round 2, R1/O1): replacing
+// any one of them with an unconditional true is caught by a dedicated test
+// row.
 //
 // A legacy_unknown initiator, or a nil exec, never matches.
 func initiatorMatchesExecutor(initiator ScheduledInitiator, exec Identity) bool {
@@ -320,7 +329,8 @@ func initiatorMatchesExecutor(initiator ScheduledInitiator, exec Identity) bool 
 	if initiator.PrincipalKind == exec.Type() && initiator.PrincipalID == exec.ID() {
 		return true
 	}
-	return initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
+	return initiator.PrincipalKind == "dev" &&
+		initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
 		initiator.PrincipalID == DevUserID &&
 		exec.ID() == DevUserID &&
 		exec.Type() == "user"

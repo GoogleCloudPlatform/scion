@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1277,11 +1278,18 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		assert.NotEqual(t, string(CredentialKindInteractive), rec.ActorCredentialType)
 	})
 
-	t.Run("dev_local initiator whose PrincipalID is not DevUserID: credential fields left empty", func(t *testing.T) {
-		// CreatedBy is the ordinary owner (exec.ID() != DevUserID), so
-		// neither the general rule (PrincipalKind "dev" != exec.Type()
-		// "user") nor the dev_local addition (requires exec.ID()==DevUserID)
-		// can match — this is the negative mirror of the subtest above.
+	t.Run("dev_local initiator, executor is not DevUserID: credential fields left empty", func(t *testing.T) {
+		// The initiator's PrincipalID IS DevUserID; what varies here is the
+		// executor (CreatedBy is the ordinary owner, so exec.ID() !=
+		// DevUserID). Neither the general rule (PrincipalKind "dev" !=
+		// exec.Type() "user") nor the dev_local addition (requires
+		// exec.ID()==DevUserID) can match — this is the negative mirror of
+		// the subtest above, and it pins initiatorMatchesExecutor's
+		// exec.ID()==DevUserID clause specifically (ptone/scion#2342 review
+		// round 2, R1 — the direct table test TestInitiatorMatchesExecutor
+		// below is the primary pin for every clause of the dev_local arm;
+		// this subtest additionally proves the helper is wired correctly
+		// into the real fire/audit path).
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-devlocal-wrongid-evt"),
 			ProjectID: f.proj.ID,
@@ -1306,9 +1314,150 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		rec := waitForAudit(t, agent.ID)
 		assert.Equal(t, "user", rec.ActorPrincipalKind)
 		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID, "the actor is still the creator/execution identity")
-		assert.Empty(t, rec.ActorCredentialType, "a dev_local initiator whose PrincipalID isn't DevUserID must not pair")
+		assert.Empty(t, rec.ActorCredentialType, "a dev_local initiator paired with a non-DevUserID executor must not pair")
 		assert.Empty(t, rec.ActorCredentialID)
 	})
+}
+
+// TestInitiatorMatchesExecutor is the direct, table-driven unit test for
+// initiatorMatchesExecutor (ptone/scion#2342 review round 2, R1 and O1). The
+// helper is pure, so it needs no server. Each dev_local-arm row is chosen so
+// that replacing any single clause of the arm with an unconditional `true`
+// changes that row's expected result from false to true — see
+// devlocal-handoff.md's mutation table for the row-to-clause mapping this
+// pins.
+func TestInitiatorMatchesExecutor(t *testing.T) {
+	devUserExec := NewAuthenticatedUser(DevUserID, "dev@localhost", "Development User", "admin", "api")
+	otherUserExec := NewAuthenticatedUser(tid("e2b-ime-other-user"), "other@example.com", "Other User", "member", "api")
+	// A non-user identity whose ID is nonetheless DevUserID, to kill the
+	// exec.Type()=="user" clause without also changing exec.ID().
+	nonUserDevIDExec := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: DevUserID}}}
+
+	cases := []struct {
+		name      string
+		initiator ScheduledInitiator
+		exec      Identity
+		want      bool
+	}{
+		// 1. Positive: the dev_local arm's exact case.
+		{
+			name:      "dev_local, DevUserID, user executor DevUserID: pairs",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      devUserExec,
+			want:      true,
+		},
+		// 2. Same shape, other credential kinds — kills the
+		// CredentialKind==dev_local clause (mutating it to `true` would let
+		// any kind pair through the dev_local arm).
+		{
+			name:      "dev, DevUserID, session credential: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession},
+			exec:      devUserExec,
+			want:      false,
+		},
+		{
+			name:      "dev, DevUserID, uat credential: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindUAT},
+			exec:      devUserExec,
+			want:      false,
+		},
+		{
+			name:      "dev, DevUserID, agent credential: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindAgent},
+			exec:      devUserExec,
+			want:      false,
+		},
+		// 3. dev_local naming another principal — kills the
+		// PrincipalID==DevUserID clause.
+		{
+			name:      "dev_local naming a non-DevUserID principal: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: tid("e2b-ime-other-dev"), CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      devUserExec,
+			want:      false,
+		},
+		// 4. Executor is not DevUserID — kills the exec.ID()==DevUserID
+		// clause (also covered end to end by the fire-path subtest above).
+		{
+			name:      "dev_local/DevUserID initiator, executor is a different user: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      otherUserExec,
+			want:      false,
+		},
+		// 5. Executor is not a user — kills the exec.Type()=="user" clause.
+		{
+			name:      "dev_local/DevUserID initiator, executor is DevUserID but not a user: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      nonUserDevIDExec,
+			want:      false,
+		},
+		// O1: PrincipalKind != "dev" but every other dev_local-arm clause
+		// holds, and the general rule doesn't fire either (PrincipalKind
+		// "agent" != exec.Type() "user") — kills the PrincipalKind=="dev"
+		// clause O1 added.
+		{
+			name:      "non-dev PrincipalKind, DevUserID, dev_local credential, user executor DevUserID: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "agent", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      devUserExec,
+			want:      false,
+		},
+		// O1's own suggested row: a "user"-kind dev_local row pairs via the
+		// general rule alone (PrincipalKind == exec.Type() and the IDs
+		// match) — the dev_local arm is neither needed nor reached for this
+		// shape.
+		{
+			name:      "user PrincipalKind, DevUserID, dev_local credential, user executor DevUserID: pairs via the general rule",
+			initiator: ScheduledInitiator{PrincipalKind: "user", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      devUserExec,
+			want:      true,
+		},
+		// 6. Legacy rows never pair, regardless of what other fields say —
+		// this is the top-level guard, checked before either rule.
+		{
+			name:      "legacy_unknown: never pairs",
+			initiator: ScheduledInitiator{LegacyUnknown: true},
+			exec:      devUserExec,
+			want:      false,
+		},
+		{
+			name:      "legacy_unknown carrying dev_local/DevUserID values: never pairs",
+			initiator: ScheduledInitiator{LegacyUnknown: true, PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      devUserExec,
+			want:      false,
+		},
+		// 7. Nil executor never pairs — the other top-level guard.
+		{
+			name:      "nil executor: never pairs",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      nil,
+			want:      false,
+		},
+		// 8. The general rule is unchanged for ordinary kinds: same
+		// kind/ID pairs; a kind or ID mismatch does not.
+		{
+			name:      "uat, kind and ID match: pairs via the general rule",
+			initiator: ScheduledInitiator{PrincipalKind: "user", PrincipalID: tid("e2b-ime-uat-user"), CredentialKind: store.InitiatorCredentialKindUAT},
+			exec:      NewAuthenticatedUser(tid("e2b-ime-uat-user"), "uat@example.com", "UAT User", "member", "api"),
+			want:      true,
+		},
+		{
+			name:      "uat, kind mismatch: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "agent", PrincipalID: tid("e2b-ime-uat-user2"), CredentialKind: store.InitiatorCredentialKindUAT},
+			exec:      NewAuthenticatedUser(tid("e2b-ime-uat-user2"), "uat2@example.com", "UAT User 2", "member", "api"),
+			want:      false,
+		},
+		{
+			name:      "session, ID mismatch: does not pair",
+			initiator: ScheduledInitiator{PrincipalKind: "user", PrincipalID: tid("e2b-ime-session-user"), CredentialKind: store.InitiatorCredentialKindSession},
+			exec:      NewAuthenticatedUser(tid("e2b-ime-session-user-other"), "session@example.com", "Session User", "member", "api"),
+			want:      false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, initiatorMatchesExecutor(tc.initiator, tc.exec))
+		})
+	}
 }
 
 // newScopedUATInitiatorContext builds a live-request context carrying a
