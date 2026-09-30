@@ -805,6 +805,49 @@ func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_UnitChangeForbidden(t *test
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_PaddedFieldsNormalized
+// verifies that trimming happens before the system-seeded comparison
+// (ptone/scion#2343): a PUT that merely pads resource_type/unit with
+// whitespace is normalised and succeeds, while a PUT that still trims to a
+// genuinely different protected field value is rejected.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_PaddedFieldsNormalized(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_padded_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	// Padding that normalises to the existing values: should succeed.
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "  agent  ",
+		Unit:         " count ",
+		DefaultValue: 200,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, "agent", updated.ResourceType)
+	assert.Equal(t, "count", updated.Unit)
+	assert.Equal(t, int64(200), updated.DefaultValue)
+
+	// Padding that still trims to a genuinely different value: still rejected.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: "  project  ",
+		Unit:         "count",
+		DefaultValue: 300,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 // TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_Forbidden_NonAdmin verifies
 // that a caller without quota.update cannot PUT a system limit definition
 // (or any limit definition).

@@ -371,6 +371,15 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Trim before comparing/validating so a PUT that merely pads a field
+	// with whitespace is normalised rather than treated as a change.
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	// unit is trimmed but not required: createLimitDefinition accepts an
+	// empty unit (the admin UI treats it as optional, rendering "—"),
+	// and unit is not read by quota resolution, so requiring it here
+	// would make existing empty-unit rows permanently uneditable.
+	req.Unit = strings.TrimSpace(req.Unit)
+
 	// System-seeded limit definitions: only default_value and description
 	// may be changed (ptone/scion#2061 P1a, ptone/scion#2063). This is the
 	// supported admin path for the hub-wide max_agents_per_broker value
@@ -381,16 +390,10 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	} else {
-		req.ResourceType = strings.TrimSpace(req.ResourceType)
 		if req.ResourceType == "" {
 			BadRequest(w, "resource type is required")
 			return
 		}
-		// unit is trimmed but not required: createLimitDefinition accepts an
-		// empty unit (the admin UI treats it as optional, rendering "—"),
-		// and unit is not read by quota resolution, so requiring it here
-		// would make existing empty-unit rows permanently uneditable.
-		req.Unit = strings.TrimSpace(req.Unit)
 		existing.Name = req.Name
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
