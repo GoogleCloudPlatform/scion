@@ -1161,7 +1161,7 @@ export class ScionPageAdminQuotas extends LitElement {
                                   <div class="meta-text" style="font-size: 0.75rem">
                                     Broker cap:
                                     <span class="mono"
-                                      >${r.brokerAgentLimit !== undefined
+                                      >${r.brokerAgentLimit != null
                                         ? this.formatValue(r.brokerAgentLimit)
                                         : 'unlimited'}</span
                                     >

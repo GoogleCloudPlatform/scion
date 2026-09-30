@@ -517,3 +517,66 @@ Neither failing test is in a file this PR touches, and both are reproducible ind
 commit). Reported to the EM with the reproduction evidence; no fix attempted here, since the fix belongs
 in upstream main / P1b's route registration and in whatever shared state the flaky test needs isolated,
 not in `scion/broker-settings-p2-2`.
+
+## Upstream feedback: GoogleCloudPlatform/scion#2141 (gemini-code-assist), items 1-5
+
+Brief: `/scion-volumes/scratchpad/projects/broker-settings/reviews/upstream-2141-2142-brief.md`. Five
+gemini-code-assist "medium" threads on the upstream mirror PR (GoogleCloudPlatform/scion#2141) routed to
+this branch; items 6-12 (GoogleCloudPlatform/scion#2142) belong to P2.3. Judged each against the actual store contract and the
+repo's own convention for the same callee elsewhere in `pkg/hub`, per the brief's instructions — not
+accepted or rejected mechanically.
+
+**Pre-fix rebase** onto upstream main (branch was 6 commits behind): old head `2bf227ee2`, new head
+`9aa4e56bf`. `git range-diff f671d1a8d..2bf227ee2 upstream-main..9aa4e56bf`: all 21 commits `=`. Diff of
+diffs byte-identical. Clean, no conflicts.
+
+1. **DECLINED** — `handlers_quota.go:732` (`for i, res := range reservations`), nil `res` in the
+   reservations loop. Contract: every element `ListActiveReservations` returns comes from
+   `entUsageReservationToStore` (`pkg/store/entadapter/quota_store.go:71-83`), which unconditionally
+   constructs a new `&store.UsageReservation{...}` literal for every input row — it cannot return nil, and
+   there is exactly one store implementation. Convention: `broker_quota.go:210-213,222-223`
+   (`ReconcileStaleBrokerQuotaReservations`) ranges over the identical `[]*store.UsageReservation` from
+   the identical callee and accesses `res.ResourceID` with no nil check. Adding one here would be
+   inconsistent with the established pattern for guarding against a case the contract rules out.
+2. **DECLINED** — `handlers_quota.go:774` (`for _, broker := range brokers.Items`), nil `brokers` from
+   `ListRuntimeBrokers`. Contract: `pkg/store/entadapter/project_store.go:1043-1060` — every error path
+   returns `(nil, err)` with a non-nil `err`; the success path always constructs and returns a non-nil
+   `*store.ListResult`. `listBrokerScopedActiveReservations` already returns early on `err != nil`
+   (`:769-771`), so by the time `brokers.Items` is reached, `err == nil` and `brokers` cannot be nil.
+   Convention: the same callee is used without a nil check after the error check in
+   `broker_quota.go:187-194`, `handlers_runtime_brokers.go:81-86`, and every other `pkg/hub` call site
+   (checked all 8 non-test call sites of `ListRuntimeBrokers` in `pkg/hub`).
+   - **Also asked:** whether the `ListRuntimeBrokers` `Limit: 10000` silently truncating beyond that many
+     brokers is acceptable. Already reviewed and accepted: round-1 F3 (this same log, "Review round 1")
+     declined a fix for the identical bound on the identical helper, on the EM's ruling that it mirrors
+     `ReconcileStaleBrokerQuotaReservations`'s own established bound exactly and is correct at today's
+     scale, with a single-query store method logged as a follow-up rather than a blocker. No new
+     disposition needed; restated here since GoogleCloudPlatform/scion#2141 asked about it directly.
+3. **FIXED** — `brokers.ts` `renderAgentCapacity`: `broker.agentCount === undefined` →
+   `broker.agentCount == null`, `broker.agentLimit !== undefined` → `broker.agentLimit != null`.
+4. **FIXED** — `brokers.ts` grid stat guard: `broker.agentCount !== undefined` → `broker.agentCount !=
+   null`.
+5. **FIXED** — `admin-quotas.ts` usage-detail cap value: `r.brokerAgentLimit !== undefined` →
+   `r.brokerAgentLimit != null`.
+
+For 3-5: checked `shared/types.ts` — `agentLimit`/`agentCount`/`agentLimitSource` on `RuntimeBroker`, and
+the local `UsageReservation.brokerAgentLimit` in `admin-quotas.ts`, are all optional (`?:`) TS properties,
+never typed to allow an explicit `null`. On the Go side every one of these fields is a pointer with
+`omitempty`, so the wire format omits the key entirely when nil rather than sending JSON `null` — `null`
+cannot occur for these three fields today. `!= null`/`== null` is therefore behaviorally identical to
+`!== undefined`/`=== undefined` for every input the API can currently produce (confirmed: both `brokers.test.ts`
+and `admin-quotas.test.ts` still pass unchanged, 5/5, with no new test needed for a case that cannot
+occur). The fix is accepted anyway because it is cheap, strictly more defensive, and matches an existing
+convention in this codebase for the same shape of field — `diagnostics.ts:335-336`
+(`health.brokerCount != null` / `health.agentCount != null`) already uses loose nullish checks for
+analogous optional wire-sourced counts.
+
+One fix commit on top of the pre-fix rebase. Gates: `go build`/`go vet ./pkg/hub/...` clean (no Go
+changes — items 1-2 are declines); `golangci-lint --new-from-rev=upstream-main ./pkg/hub/...` 0 issues;
+`tsc --noEmit` clean; `vitest run` on both test files, 5/5 pass; `eslint` on the three web files at the
+stated 7-error/44-warning baseline (0 new — the 1 fixable/prettier hit is the pre-existing P1a issue in
+`admin-quotas.ts`, unrelated). Bare-`#N` grep on the commit, this log entry and the reply draft: clean
+(URLs to GoogleCloudPlatform/scion#2141 discussion threads are the only numeric refs, and are fully qualified
+`GoogleCloudPlatform/scion/pull/2141#discussion_r...` URLs, not bare `#N`).
+
+Reply drafts: `/scion-volumes/scratchpad/projects/broker-settings/reviews/upstream-replies-2141.md`.

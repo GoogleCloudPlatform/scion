@@ -267,10 +267,17 @@ export class ScionPageBrokers extends LitElement {
    * hover to learn the cap doesn't apply).
    */
   private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
-    if (broker.agentCount === undefined) {
+    // Loose equality is deliberate here (GoogleCloudPlatform/scion#2141 review): agentCount and
+    // agentLimit are typed as optional (`?:`), and the Go side's omitempty
+    // means the wire format omits the key rather than sending `null`, so in
+    // practice this is only ever undefined — but `== null`/`!= null` also
+    // catches an explicit `null` defensively, matching the same pattern
+    // already used for analogous optional numeric fields elsewhere (e.g.
+    // diagnostics.ts's brokerCount/agentCount).
+    if (broker.agentCount == null) {
       return html`<span class="meta-text">—</span>`;
     }
-    const capLabel = broker.agentLimit !== undefined ? String(broker.agentLimit) : 'unlimited';
+    const capLabel = broker.agentLimit != null ? String(broker.agentLimit) : 'unlimited';
     // mono-cell only applies inside .resource-table-container (the table
     // view); stat-value is unscoped, so it styles the grid card's value too.
     // Shared between the table cell and the grid stat (review round 2, F2)
@@ -399,7 +406,7 @@ export class ScionPageBrokers extends LitElement {
                 </div>
               `
             : ''}
-          ${broker.agentCount !== undefined
+          ${broker.agentCount != null
             ? html`
                 <div class="stat">
                   <span class="stat-label">Agents / Cap</span>
