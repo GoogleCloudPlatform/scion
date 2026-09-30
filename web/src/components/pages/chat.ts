@@ -1890,7 +1890,7 @@ export class ScionPageChat extends LitElement {
         if (parts[1] === 'user' && parts[2] === userId) peerId = parts[4];
         else if (parts[3] === 'user' && parts[4] === userId) peerId = parts[2];
       }
-      this.addUnreadDotUnlessMuted(peerId);
+      this.applyDMMarkedUnread(peerId);
       this.suppressOpenThreadAutoAdvance(key);
       return;
     }
@@ -1903,14 +1903,28 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Add a DM peer to the unread-dot list, unless their DM is muted — muting
-   * suppresses the dot regardless of why the watermark moved (#1029), so a
-   * mark-unread on a muted DM rewinds the watermark without ever showing a
-   * dot for it (round-1 review R2).
+   * Record that a DM peer's conversation was just marked unread: add it to
+   * the unread-dot list unless the DM is muted (muting suppresses the dot
+   * regardless of why the watermark moved — #1029 — so a mark-unread on a
+   * muted DM rewinds the watermark without ever showing a dot for it,
+   * round-1 review R2), and — regardless of mute — update
+   * `v2DMInfoByPeerId[peerId].hasUnread` so the members sidebar's
+   * `canMarkUnread` sees the change immediately.
+   *
+   * Without this second part the map only refreshes on the next
+   * `loadUnreadDMPeers` (on connect, an inbound message, a normal /read, or
+   * the 60s fallback poll), so "Mark unread" stayed offered after a
+   * successful click — indefinitely for a muted DM, since muting also
+   * suppresses the very message traffic that would otherwise trigger a
+   * refresh (round-2 review R1).
    */
-  private addUnreadDotUnlessMuted(peerId: string): void {
-    if (!peerId || this.v2UnreadFromIds.includes(peerId)) return;
-    if (this.v2DMInfoByPeerId[peerId]?.muted) return;
+  private applyDMMarkedUnread(peerId: string): void {
+    if (!peerId) return;
+    const info = this.v2DMInfoByPeerId[peerId];
+    if (info && !info.hasUnread) {
+      this.v2DMInfoByPeerId = { ...this.v2DMInfoByPeerId, [peerId]: { ...info, hasUnread: true } };
+    }
+    if (this.v2UnreadFromIds.includes(peerId) || info?.muted) return;
     this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
   }
 
@@ -2765,14 +2779,17 @@ export class ScionPageChat extends LitElement {
    * A member's DM was marked unread from the members sidebar's context menu.
    * The sidebar already confirmed the request succeeded — this reflects it
    * in the unread-dot state the page owns (respecting mute, same as
-   * loadUnreadDMPeers — round-1 review R2) and, if that DM happens to be the
-   * conversation currently open, suppresses its auto-advance immediately
-   * rather than waiting on the SSE round trip (round-1 review O2).
+   * loadUnreadDMPeers — round-1 review R2) and in `v2DMInfoByPeerId`, so the
+   * sidebar's own "Mark unread" item hides right away instead of staying
+   * offered until the next refresh (round-2 review R1). If that DM happens
+   * to be the conversation currently open, this also suppresses its
+   * auto-advance immediately rather than waiting on the SSE round trip
+   * (round-1 review O2).
    */
   private handleMemberMarkedUnread(e: CustomEvent): void {
     const detail = e.detail as { peerId?: string; conversationKey?: string } | undefined;
     const peerId = detail?.peerId || '';
-    this.addUnreadDotUnlessMuted(peerId);
+    this.applyDMMarkedUnread(peerId);
     if (detail?.conversationKey) {
       this.suppressOpenThreadAutoAdvance(detail.conversationKey);
     }

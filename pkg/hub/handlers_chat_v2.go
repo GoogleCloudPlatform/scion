@@ -2924,6 +2924,15 @@ func (s *Server) writeConversationReadState(
 // handleConversationHistory and nativeDMLastMessage use, honouring the
 // ConversationEnvelopeSwitch when it is on so mark-unread sees the same
 // message set the history view and the DM list's "last message" do.
+//
+// That equivalence is exact for DMs: an unresolved conversation under the
+// switch returns (nil, nil) here, the same empty result history's DM branch
+// returns. For topics it is not quite exact — an unresolved topic falls back
+// to a ThreadID filter here, where history instead returns a 409 — but that
+// is harmless: an unresolved topic has nothing a ThreadID filter would match
+// either, so both paths agree there is nothing to show or act on (round-2
+// review O1).
+
 func (s *Server) conversationRecentMessages(
 	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
 ) ([]store.Message, error) {
