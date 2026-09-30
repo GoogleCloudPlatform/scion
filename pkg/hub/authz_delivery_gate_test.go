@@ -23,6 +23,7 @@ package hub
 import (
 	"context"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -89,6 +90,31 @@ func TestDeliveryGate_KindSetMatchesTable(t *testing.T) {
 		}
 		assert.True(t, found, "delivery kind %q has no table row", k)
 	}
+}
+
+// TestDeliveryGate_ConcurrentReadAndSwap runs deliveryCredentialAdmitted
+// in a goroutine while withDeliveryCredentialKinds swaps and restores the
+// set; under -race it fails if either side skips deliveryCredentialKindsMu.
+func TestDeliveryGate_ConcurrentReadAndSwap(t *testing.T) {
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = deliveryCredentialAdmitted("", ActionDeliver, CredentialKindUAT)
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		t.Run("swap", func(t *testing.T) { withDeliveryCredentialKinds(t, CredentialKindUAT) })
+	}
+	close(stop)
+	wg.Wait()
 }
 
 // The gated permission set is every registry row with the deliver action.

@@ -65,14 +65,13 @@ import (
 //
 // Skipped tests in authz_delivery_gate_test.go (TestDeliveryGate_Part2*)
 // state these rules and cite ptone/scion#2228.
-//
+var deliveryCredentialKinds = map[CredentialKind]struct{}{}
+
 // deliveryCredentialKindsMu guards deliveryCredentialKinds: every read of
 // the set (deliveryCredentialAdmitted) takes an RLock, and every write
 // (withDeliveryCredentialKinds in tests) takes the write Lock around the
 // swap, so a concurrent read and write cannot race.
 var deliveryCredentialKindsMu sync.RWMutex
-
-var deliveryCredentialKinds = map[CredentialKind]struct{}{}
 
 // deliveryGateReason is the deny reason recorded when the gate rejects a
 // request.
