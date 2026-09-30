@@ -395,6 +395,11 @@ var (
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "updated_at", Type: field.TypeTime},
 		{Name: "deadline_at", Type: field.TypeTime, Nullable: true},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
 	}
 	// BrokerDispatchTable holds the schema information for the "broker_dispatch" table.
 	BrokerDispatchTable = &schema.Table{
@@ -406,6 +411,11 @@ var (
 				Name:    "brokerdispatch_broker_id_state",
 				Unique:  false,
 				Columns: []*schema.Column{BrokerDispatchColumns[1], BrokerDispatchColumns[7]},
+			},
+			{
+				Name:    "brokerdispatch_correlation_id",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerDispatchColumns[19]},
 			},
 		},
 	}
@@ -1754,6 +1764,13 @@ var (
 	// SchedulesColumns holds the columns for the "schedules" table.
 	SchedulesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
+		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
+		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "cron_expr", Type: field.TypeString},
@@ -1779,18 +1796,25 @@ var (
 			{
 				Name:    "schedule_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{SchedulesColumns[1], SchedulesColumns[2]},
+				Columns: []*schema.Column{SchedulesColumns[8], SchedulesColumns[9]},
 			},
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[7]},
+				Columns: []*schema.Column{SchedulesColumns[14]},
 			},
 		},
 	}
 	// ScheduledEventsColumns holds the columns for the "scheduled_events" table.
 	ScheduledEventsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
+		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
+		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "fire_at", Type: field.TypeTime},
@@ -1811,17 +1835,17 @@ var (
 			{
 				Name:    "scheduledevent_fire_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[3]},
+				Columns: []*schema.Column{ScheduledEventsColumns[10]},
 			},
 			{
 				Name:    "scheduledevent_project_id",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[1]},
+				Columns: []*schema.Column{ScheduledEventsColumns[8]},
 			},
 			{
 				Name:    "scheduledevent_status",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledEventsColumns[5]},
+				Columns: []*schema.Column{ScheduledEventsColumns[12]},
 			},
 		},
 	}

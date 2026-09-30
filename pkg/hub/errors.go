@@ -199,6 +199,17 @@ const (
 	// remove the last direct-user project-owner binding.
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeInvalidCursor is returned for every authorizedList pagination
+	// cursor failure: malformed input, truncation, a tampered byte, a
+	// legacy (pre-opaque-cursor) plaintext cursor, a cursor sealed under a
+	// key the Hub does not currently hold (for example after key
+	// rotation), or one bound to a different endpoint, filter or caller
+	// than it was issued for. All of these are indistinguishable to the
+	// client on purpose (ptone/scion#2124, ptone/scion#2151) and get the
+	// same response: discard the cursor and restart pagination from the
+	// first page (an empty cursor).
+	ErrCodeInvalidCursor = "invalid_cursor"
 )
 
 // writeError writes a JSON error response.
@@ -274,6 +285,10 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable
 		message = err.Error()
+	case errors.Is(err, errInvalidCursor):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidCursor
+		message = "invalid cursor: restart pagination from the first page"
 	default:
 		statusCode = http.StatusInternalServerError
 		code = ErrCodeInternalError

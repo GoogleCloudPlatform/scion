@@ -472,6 +472,10 @@ func (s *Scheduler) scheduleTimer(ctx context.Context, evt store.ScheduledEvent)
 // database status. wasExpired indicates the timer was past its fire_at when
 // loaded on startup.
 func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, wasExpired bool) {
+	// E.2b: mark this as deferred execution of an earlier request, distinct
+	// from the initiator recorded on evt. Covers one-shot fires and restart
+	// replay of overdue events alike, since both paths call fireEvent.
+	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
 	handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

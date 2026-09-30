@@ -1,6 +1,6 @@
 /**
- * Isolated fixture for the native chat quick command palette (Phase 1: the
- * Agents/DM slice). Mounts the real `scion-page-chat` (which lazy-loads the
+ * Isolated fixture for the native chat quick command palette. Mounts the
+ * real `scion-page-chat` (which lazy-loads the
  * real `scion-chat-switcher`) and, on demand, a real `scion-terminal-pane`
  * with a real xterm — network/SSE/clipboard boundaries are supplied by
  * Playwright's request interception, not by a production mock mode.

@@ -1943,6 +1943,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	target, err := s.projectScopedTarget(ctx, id, projectID)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, ErrAgentListUnavailable) {
+			AgentLookupUnavailable(w, err, id, "stop", "")
+			return
+		}
 		RuntimeError(w, "Failed to stop agent: "+err.Error())
 		return
 	}
@@ -2059,6 +2063,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// without starting a second container — otherwise a runtime hiccup
 		// during the stop-target lookup would leave two containers running
 		// for the same agent.
+		if errors.Is(err, ErrAgentListUnavailable) {
+			AgentLookupUnavailable(w, err, id, "restart", "")
+			return
+		}
 		RuntimeError(w, "Failed to restart agent: "+err.Error())
 		return
 	}
@@ -2252,6 +2260,21 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	// both — execing an empty target would fall back to slug resolution inside
 	// the runtime and reintroduce the cross-project collision.
 	target, err := s.LookupContainerID(ctx, id, projectID)
+	if errors.Is(err, ErrAgentListUnavailable) {
+		// The container runtime itself failed to respond, not "no such
+		// agent" — tell the caller to retry rather than reporting the agent
+		// missing (mirrors the PTY attach path in pty_handlers.go).
+		AgentLookupUnavailable(w, err, id, "exec", "")
+		return
+	}
+	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
+	// ambiguous match) reflects a real problem resolving the agent and must
+	// be surfaced as an error rather than reported as "not found", mirroring
+	// projectScopedTarget's use by stopAgent and restartAgent.
+	if err != nil && !errors.Is(err, ErrAgentNotFound) {
+		RuntimeError(w, "Failed to execute command: "+err.Error())
+		return
+	}
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
 		return
@@ -2299,6 +2322,21 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 
 	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
 	target, err := s.LookupContainerID(ctx, id, projectID)
+	if errors.Is(err, ErrAgentListUnavailable) {
+		// The container runtime itself failed to respond, not "no such
+		// agent" — tell the caller to retry rather than reporting the agent
+		// missing (mirrors the PTY attach path in pty_handlers.go).
+		AgentLookupUnavailable(w, err, id, "reset_auth", "")
+		return
+	}
+	// A lookup failure other than a genuine ErrAgentNotFound (e.g. an
+	// ambiguous match) reflects a real problem resolving the agent and must
+	// be surfaced as an error rather than reported as "not found", mirroring
+	// projectScopedTarget's use by stopAgent and restartAgent.
+	if err != nil && !errors.Is(err, ErrAgentNotFound) {
+		RuntimeError(w, "Failed to reset auth: "+err.Error())
+		return
+	}
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
 		return
