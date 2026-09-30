@@ -917,4 +917,82 @@ describe('scion-page-admin-server-config', () => {
       );
     });
   });
+
+  // ── Agent Secrets card (design ptone/scion#2291 §8, §10 test 10) ──
+
+  describe('Agent Secrets card', () => {
+    function agentSecretsSwitch(el: HTMLElement): HTMLElement | undefined {
+      return queryAll(el, 'sl-switch').find((s) =>
+        (s.textContent ?? '').includes('Restrict agent-written secrets to profile scope')
+      ) as HTMLElement | undefined;
+    }
+
+    it('shows the card with its explanatory hint', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(shadowText(element)).toContain('Agent Secrets');
+      expect(shadowText(element)).toContain(
+        'Project-scope writes from agents are rejected. Existing project secrets are'
+      );
+      expect(shadowText(element)).toContain(
+        'not removed. Users can still manage project secrets.'
+      );
+    });
+
+    it('switch loads unchecked when agent_secrets is absent', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(false);
+    });
+
+    it('switch loads checked when agent_secrets.user_scope_only is true', async () => {
+      const config = makeBaseConfig({ agent_secrets: { user_scope_only: true } });
+      element = await createComponent(createFetchHandler(config));
+
+      const sw = agentSecretsSwitch(element);
+      expect(sw).not.toBeUndefined();
+      expect(sw!.hasAttribute('checked')).toBe(true);
+    });
+
+    it('both payload builders send agent_secrets.user_scope_only on save', async () => {
+      let capturedPayload: Record<string, unknown> | null = null;
+      const config = makeBaseConfig({ agent_secrets: { user_scope_only: true } });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      const agentSecrets = capturedPayload!.agent_secrets as Record<string, unknown> | undefined;
+      expect(agentSecrets?.user_scope_only).toBe(true);
+    });
+
+    it('env-overridden agent_secrets.user_scope_only renders read-only with env badge', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        agent_secrets: { user_scope_only: true },
+        env_overrides: ['agent_secrets.user_scope_only'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badges = queryAll(element, '.read-only-badge');
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+
+      // The switch itself must not render while the field is env-pinned.
+      expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
 });
