@@ -2223,6 +2223,9 @@ func TestIsZeroStruct(t *testing.T) {
 	if !isZeroStruct(&config.QuotaSettings{}) {
 		t.Error("expected zero QuotaSettings")
 	}
+	if !isZeroStruct(&config.AutoExposePortsSettings{}) {
+		t.Error("expected zero AutoExposePortsSettings")
+	}
 
 	// Non-zero structs.
 	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
@@ -2240,6 +2243,10 @@ func TestIsZeroStruct(t *testing.T) {
 	enforced := false
 	if isZeroStruct(&config.QuotaSettings{EnforceBrokerQuotas: &enforced}) {
 		t.Error("QuotaSettings with EnforceBrokerQuotas set should not be zero")
+	}
+	autoExposeEnabled := true
+	if isZeroStruct(&config.AutoExposePortsSettings{Enabled: &autoExposeEnabled}) {
+		t.Error("AutoExposePortsSettings with Enabled set should not be zero")
 	}
 
 	// Nil.

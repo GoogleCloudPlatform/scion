@@ -320,6 +320,11 @@ func (s *Server) createLimitDefinition(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
+	// unit is trimmed but not required: it is optional (the admin UI treats
+	// it as optional, rendering "—"), and unit is not read by quota
+	// resolution. Matches the update path's trimming (updateLimitDefinition).
+	req.Unit = strings.TrimSpace(req.Unit)
+
 	if req.DefaultValue < 0 {
 		BadRequest(w, "default_value must be non-negative (0 means unlimited)")
 		return

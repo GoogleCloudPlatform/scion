@@ -654,7 +654,8 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		if req.AutoExposePorts.Enabled != nil {
+		// Section-generic zero check; see the Quotas block below.
+		if !isZeroStruct(req.AutoExposePorts) {
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
 			delete(raw, "auto_expose_ports")
