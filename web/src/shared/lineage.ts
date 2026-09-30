@@ -149,8 +149,10 @@ export function topologySignature(
  * Builds the lineage forest. An agent is attached under its parent only when
  * the parent is another agent in the given set; otherwise it becomes a root
  * (its parent is a user, filtered out, or deleted). A visited guard keeps
- * malformed cyclic ancestry from hanging the layout: any agent not reachable
- * from a root is promoted to a root.
+ * malformed cyclic ancestry from hanging the layout: for each cycle among
+ * agents unreachable from any legitimate root, exactly one member (the
+ * lowest id) is promoted to a root, and the rest of that cycle — plus any
+ * ordinary descendants hanging off it — attach beneath it as usual.
  */
 export function buildLineageForest(agents: Agent[]): LineageNode[] {
   const byId = new Map<string, LineageNode>();
@@ -183,8 +185,8 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
 
   // Walk the forest, assigning depths. Dropping already-visited children as
   // we go turns any malformed cyclic ancestry into plain tree edges instead
-  // of infinite recursion; nodes unreachable from a root (cycle members) are
-  // then promoted to roots.
+  // of infinite recursion; nodes still unreachable afterward are handled
+  // below by promoting one member per cycle.
   const visited = new Set<string>();
   const visit = (node: LineageNode, depth: number) => {
     if (visited.has(node.agent.id)) return;
@@ -194,24 +196,15 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     for (const child of node.children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
-  // Anything still unvisited is unreachable from a legitimate root, which
-  // only happens via a cycle in the (malformed) ancestry data: every
-  // unvisited node's parent exists and is itself unvisited (a node reachable
-  // from a root, or a root itself, would already be visited above), so
-  // following parent pointers from any unvisited node cannot terminate — it
-  // must eventually repeat, and that repeat is a cycle.
-  //
-  // Promoting *every* unvisited node in id order (as opposed to only actual
-  // cycle members) is wrong: a node whose only path to a root runs through a
-  // cycle (a real descendant of a cycle member, not part of the cycle
-  // itself) would be promoted as its own isolated root if its id happens to
-  // sort first, silently dropping its real parent edge. Instead, for each
-  // unvisited starting point, walk up to find the cycle it hangs off, then
-  // promote only that cycle's lowest-id member and let `visit` walk back
-  // down through it — reaching every real descendant, cycle member or not,
-  // via their already-correct `children` entries. Sorted by id — not input
-  // array order — so which member gets promoted is deterministic and stays
-  // a pure function of topologySignature's (order-independent) inputs.
+  // Every unvisited node's parent exists and is itself unvisited (otherwise
+  // the node would already be visited above), so walking up from it must
+  // eventually repeat — that repeat is the cycle it hangs off, which may be
+  // itself or an ancestor further up a tail. Promote only that cycle's
+  // lowest-id member and let `visit` walk back down through it: this reaches
+  // every real descendant via its existing `children` entry, dropping no
+  // edge except the one into the promoted member. Starting points are
+  // processed in id order (not input-array order) so which member wins a
+  // multi-cycle tie is deterministic across equal `topologySignature`s.
   const unvisitedAscending = [...byId.values()]
     .filter((n) => !visited.has(n.agent.id))
     .sort((a, b) => compareIds(a.agent.id, b.agent.id));
@@ -223,15 +216,9 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     while (!pathIndexById.has(cur.agent.id)) {
       pathIndexById.set(cur.agent.id, path.length);
       path.push(cur);
-      // cur's parent is guaranteed to exist and be unvisited: see comment above.
-      cur = byId.get(parentIdOf(cur.agent)!)!;
+      cur = byId.get(parentIdOf(cur.agent)!)!; // guaranteed to exist and be unvisited; see above
     }
-    // (Assigning to an explicitly-typed local, rather than passing the `!`-
-    // asserted value straight to `.slice()`, because `.slice()`'s parameter
-    // is optional and so already accepts `number | undefined` — the
-    // assertion would be a silent no-op there, flagged by
-    // no-unnecessary-type-assertion, even though `undefined` here would
-    // silently slice from 0 instead of the cycle's actual start.)
+    // typed local: slice() accepts undefined, so a bare "!" is a lint no-op
     const cycleStartIndex: number = pathIndexById.get(cur.agent.id)!;
     const cycle = path.slice(cycleStartIndex);
     const cycleRoot = cycle.reduce((min, n) =>

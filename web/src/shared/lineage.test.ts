@@ -509,3 +509,78 @@ describe('cycle with a non-cycle descendant (#2388 review round-3 F1)', () => {
     expect(descendantFirst).toEqual(['x>child', 'x>y']); // x wins the id tie-break
   });
 });
+
+describe('order-independence across multiple cycles (#2388 review round-4 T1)', () => {
+  // Two disjoint 2-cycles, each with its own tail: b<->c (tail a->b) and
+  // e<->f (tail d->f). Within a single cycle, F1 already proves the
+  // promoted member is order-independent (it's always the minimum id,
+  // regardless of which node's walk discovers the cycle). What this test
+  // guards is different: unvisitedAscending's own sort decides which
+  // cycle's promotion happens *first*, which decides the relative x-order
+  // the two promoted roots are appended to `roots` in — and therefore their
+  // relative position in the layout. Without that sort, two input orders
+  // producing the same (order-independent) topologySignature could still
+  // lay out differently: exactly the stale-layout-on-cache-hit hazard.
+  const a = agent('a', 'a', ['u', 'b']);
+  const b = agent('b', 'b', ['u', 'c']);
+  const c = agent('c', 'c', ['u', 'b']);
+  const d = agent('d', 'd', ['u', 'f']);
+  const e = agent('e', 'e', ['u', 'f']);
+  const f = agent('f', 'f', ['u', 'e']);
+  const all = [a, b, c, d, e, f];
+  // Orders chosen so the tails (a, d) interleave with the cycles in
+  // different relative sequences — in particular so 'd' precedes 'a' in at
+  // least one order, which is what actually exercises the sort.
+  const orders: Agent[][] = [all, [...all].reverse(), [d, e, f, a, b, c], [c, a, f, b, d, e]];
+
+  it('promotes the same two roots — the lowest id in each cycle — for every input order', () => {
+    for (const order of orders) {
+      expect(buildLineageForest(order).map((n) => n.agent.id)).toEqual(['b', 'e']);
+    }
+  });
+
+  it('produces the same layout for every input order (matches the order-independent signature)', () => {
+    const noCollapse = new Set<string>();
+    const signatures = orders.map((order) =>
+      topologySignature(order, noCollapse, false, 'vertical')
+    );
+    expect(new Set(signatures).size).toBe(1); // sanity: still order-independent
+
+    const layouts = orders.map((order) => layoutForest(buildLineageForest(order)));
+    const posById = (layout: (typeof layouts)[number]) =>
+      new Map(layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+
+    const reference = posById(layouts[0]);
+    for (const layout of layouts.slice(1)) {
+      expect(posById(layout)).toEqual(reference);
+    }
+  });
+});
+
+describe('cycle promotion pins the lowest id, not merely the first member met while walking (#2388 review round-4 optional)', () => {
+  // A 3-cycle p->q->r->p (parent pointers), with a tail attached to r — the
+  // highest-id cycle member, not the lowest. The tail's id ('a') sorts
+  // before p/q/r, so its walk is what discovers this cycle, entering at r
+  // (the tail's direct parent): r is the first cycle member *met*, but p is
+  // the *lowest id*. If promotion picked "the first cycle member met while
+  // walking" (equivalent to `cycle[0]`) instead of the documented "lowest
+  // id", it would promote r here — this is exactly the case the round-3
+  // x/y/c test (where the walk happened to meet the lowest-id member first)
+  // could not distinguish.
+  const tail = agent('a', 'tail', ['u', 'r']);
+  const p = agent('p', 'p', ['u', 'q']);
+  const q = agent('q', 'q', ['u', 'r']);
+  const r = agent('r', 'r', ['u', 'p']);
+
+  it('promotes p (the lowest id), not r (the cycle member the walk meets first)', () => {
+    const roots = buildLineageForest([tail, p, q, r]).map((n) => n.agent.id);
+    expect(roots).toEqual(['p']);
+  });
+
+  it('keeps every real edge', () => {
+    const layout = layoutForest(buildLineageForest([tail, p, q, r]));
+    const edges = layout.edges.map((e) => `${e.parentId}>${e.childId}`).sort();
+    // tail's agent id is 'a', so its edge reads "r>a".
+    expect(edges).toEqual(['p>r', 'r>a', 'r>q']);
+  });
+});
