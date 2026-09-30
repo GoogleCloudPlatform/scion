@@ -57,6 +57,11 @@ variable "subpath_root" {
   description = "Subdirectory under the hub's NFS export that holds per-project workspaces."
   type        = string
   default     = "projects"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,63}$", var.subpath_root))
+    error_message = "subpath_root must match ^[A-Za-z0-9_-]{1,63}$ (letters, digits, underscore, dash; 1-63 characters)."
+  }
 }
 
 variable "capacity" {

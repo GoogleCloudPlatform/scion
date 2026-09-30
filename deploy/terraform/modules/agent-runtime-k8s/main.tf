@@ -161,9 +161,18 @@ resource "kubernetes_job_v1" "nfs_init" {
           name    = "nfs-init"
           image   = var.init_job_image
           command = ["sh", "-c"]
+          # subpath_root is passed via env rather than interpolated straight
+          # into the shell script text, so the script body itself is a fixed
+          # string regardless of the configured value (defense in depth
+          # alongside the variable's own validation block).
           args = [
-            "mkdir -p /mnt/share/${var.hub_name}/${var.subpath_root} && chown ${var.nfs_uid}:${var.nfs_gid} /mnt/share/${var.hub_name} /mnt/share/${var.hub_name}/${var.subpath_root}"
+            "mkdir -p \"/mnt/share/${var.hub_name}/$SUBPATH_ROOT\" && chown ${var.nfs_uid}:${var.nfs_gid} \"/mnt/share/${var.hub_name}\" \"/mnt/share/${var.hub_name}/$SUBPATH_ROOT\""
           ]
+
+          env {
+            name  = "SUBPATH_ROOT"
+            value = var.subpath_root
+          }
 
           volume_mount {
             name       = "share-root"
