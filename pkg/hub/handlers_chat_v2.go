@@ -2932,7 +2932,6 @@ func (s *Server) writeConversationReadState(
 // is harmless: an unresolved topic has nothing a ThreadID filter would match
 // either, so both paths agree there is nothing to show or act on (round-2
 // review O1).
-
 func (s *Server) conversationRecentMessages(
 	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
 ) ([]store.Message, error) {

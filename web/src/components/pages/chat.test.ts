@@ -575,26 +575,45 @@ describe('chat page — mark-unread page-level handling', () => {
    * These pages are never appended to the document (by this file's own
    * design — see the file header — so connectedCallback's network calls
    * never fire), which means Lit never creates a real shadowRoot to query.
-   * Replace the accessor with a fake one that answers just the one selector
-   * a test needs, rather than mounting the whole page to get a real one.
+   * Replace the accessor with a fake one backed by a selector→element map, so
+   * more than one stub (rail and thread) can coexist on the same page — a
+   * single-selector version silently resolved every other selector to null,
+   * which is why the topic SSE test below used to assert less than its title
+   * claimed (round-3 review N3).
    */
-  function stubShadowRoot(el: any, selector: string, found: unknown): void {
-    const fakeShadowRoot = { querySelector: (sel: string) => (sel === selector ? found : null) };
+  function stubShadowRoot(el: any, found: Record<string, unknown>): void {
+    const fakeShadowRoot = { querySelector: (sel: string) => found[sel] ?? null };
     Object.defineProperty(el, 'shadowRoot', { value: fakeShadowRoot, configurable: true });
   }
 
   /** Stub the open thread element so suppressOpenThreadAutoAdvance has something to call. */
   function stubThread(el: any): { suppressAutoAdvance: ReturnType<typeof vi.fn> } {
     const thread = { suppressAutoAdvance: vi.fn() };
-    stubShadowRoot(el, 'scion-chat-thread', thread);
+    stubShadowRoot(el, { 'scion-chat-thread': thread });
     return thread;
   }
 
   /** Stub the rail element so markThreadUnread calls are observable. */
   function stubRail(el: any): { markThreadUnread: ReturnType<typeof vi.fn> } {
     const rail = { markThreadUnread: vi.fn() };
-    stubShadowRoot(el, 'scion-chat-space-rail', rail);
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail });
     return rail;
+  }
+
+  /**
+   * Stub both the rail and the open thread on the same page — needed for the
+   * topic branch of _handleOwnReadStateSSE, which looks up both: the rail to
+   * mark the thread unread, and (if it is the open conversation) the thread
+   * to suppress its auto-advance.
+   */
+  function stubRailAndThread(el: any): {
+    rail: { markThreadUnread: ReturnType<typeof vi.fn> };
+    thread: { suppressAutoAdvance: ReturnType<typeof vi.fn> };
+  } {
+    const rail = { markThreadUnread: vi.fn() };
+    const thread = { suppressAutoAdvance: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail, 'scion-chat-thread': thread });
+    return { rail, thread };
   }
 
   describe('_handleOwnReadStateSSE unread gate (round-1 R1)', () => {
@@ -613,10 +632,10 @@ describe('chat page — mark-unread page-level handling', () => {
       expect(rail.markThreadUnread).not.toHaveBeenCalled();
     });
 
-    it('a self event with unread:true for a topic marks the rail thread unread and suppresses if open', () => {
+    it('a self event with unread:true for a topic marks the rail thread unread and suppresses the open thread', () => {
       const el = createPage();
       el.v2Conversation = { conversationKey: 'topic-1' };
-      const rail = stubRail(el);
+      const { rail, thread } = stubRailAndThread(el);
 
       el._handleOwnReadStateSSE(
         new CustomEvent('chat-read-state-updated', {
@@ -627,6 +646,7 @@ describe('chat page — mark-unread page-level handling', () => {
       );
 
       expect(rail.markThreadUnread).toHaveBeenCalledWith('topic-1');
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
     });
 
     it('a self event with unread:true for a DM updates the dot, hasUnread, and suppresses if open', () => {
@@ -692,6 +712,28 @@ describe('chat page — mark-unread page-level handling', () => {
       expect(el.v2DMInfoByPeerId).toEqual({});
       // No mute info to check against, so the dot still goes on — matches
       // round-1 behaviour for a peer loadUnreadDMPeers hasn't captured yet.
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+    });
+
+    // Round-3 review: noted as an unkilled, idempotency-only mutant (M8) —
+    // dropping the `v2UnreadFromIds.includes(peerId)` duplicate guard. Not
+    // user-visible (a Set-like list either way), but cheap to pin: the local
+    // click and the SSE echo of the same mark-unread both call this, and a
+    // duplicate id would be a real (if harmless) bug.
+    it('does not duplicate the dot when applied twice for the same peer', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: false, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
       expect(el.v2UnreadFromIds).toEqual(['user-1']);
     });
   });

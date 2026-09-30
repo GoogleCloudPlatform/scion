@@ -1914,9 +1914,9 @@ export class ScionPageChat extends LitElement {
    * Without this second part the map only refreshes on the next
    * `loadUnreadDMPeers` (on connect, an inbound message, a normal /read, or
    * the 60s fallback poll), so "Mark unread" stayed offered after a
-   * successful click — indefinitely for a muted DM, since muting also
-   * suppresses the very message traffic that would otherwise trigger a
-   * refresh (round-2 review R1).
+   * successful click until that next refresh — up to 60s on a quiet DM,
+   * muted or not, since `/chat/dms` reports `hasUnread` independently of
+   * mute (round-2 review R1; round-3 review N4 corrected "indefinitely").
    */
   private applyDMMarkedUnread(peerId: string): void {
     if (!peerId) return;

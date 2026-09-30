@@ -1959,10 +1959,9 @@ export class ScionChatThread extends LitElement {
    * Also cancels any debounce timer already in flight. In single-threaded
    * JS this clearTimeout always wins over a pending callback — there is no
    * "queued before the clear takes effect" race to close — so this is
-   * belt-and-braces with maybeAdvanceReadWatermark's own re-check (O1)
-   * rather than load-bearing on its own. It only matters if some future
-   * caller ever sets `_autoAdvanceSuppressed` directly instead of going
-   * through this method (round-2 review O2).
+   * belt-and-braces with maybeAdvanceReadWatermark's own re-check (O1) and
+   * never load-bearing on its own: whichever of the two runs first already
+   * prevents the stale advance (round-2 review N2).
    */
   suppressAutoAdvance(): void {
     this._autoAdvanceSuppressed = true;
