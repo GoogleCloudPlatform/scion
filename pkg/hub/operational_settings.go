@@ -1505,7 +1505,7 @@ type ExperimentsReadResult struct {
 //
 //	row absent (store.ErrNotFound)             → {Overrides: {}, Revision: 0}
 //	row present, ParseExperimentsDoc ok        → {Overrides, Revision}
-//	row present, ParseExperimentsDoc malformed → {Revision, Malformed: true}
+//	row present, ParseExperimentsDoc malformed → {Overrides: {}, Revision, Malformed: true}
 //	store error                                → {Err}
 func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) ExperimentsReadResult {
 	setting, err := o.store.GetHubSetting(ctx, "experiments")

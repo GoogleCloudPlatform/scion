@@ -181,13 +181,24 @@ func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
 }
 
 // All returns every active experiment in stable order (by Name). The
-// returned slice is a copy; mutating it does not affect the Registry.
-func (r *Registry) All() []Experiment { return slices.Clone(r.ordered) }
+// returned slice, and each entry's Layers slice, are copies: mutating either
+// does not affect the Registry or any other caller's result.
+func (r *Registry) All() []Experiment {
+	out := slices.Clone(r.ordered)
+	for i := range out {
+		out[i].Layers = slices.Clone(out[i].Layers)
+	}
+	return out
+}
 
 // Lookup returns the named active experiment, or false if it is unknown or
-// retired.
+// retired. The returned Experiment's Layers slice is a copy; mutating it
+// does not affect the Registry or any other caller's result.
 func (r *Registry) Lookup(name string) (Experiment, bool) {
 	e, ok := r.byName[name]
+	if ok {
+		e.Layers = slices.Clone(e.Layers)
+	}
 	return e, ok
 }
 

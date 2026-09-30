@@ -232,6 +232,10 @@ func TestRequireExperiment_PanicsAtRegistration(t *testing.T) {
 // predicate"). It reads the cached sectionState.Malformed directly (not
 // through ExperimentsSnapshot, which re-parses and would hide a disagreement
 // between Refresh's ingest-time check and ParseExperimentsDoc).
+//
+// Only the Refresh side needs this table: Update rejects a schema-invalid
+// document (including a non-boolean override value) in opsettings.Validate
+// before writing, so its post-write sec.New() check never sees one.
 func TestRefreshMalformedPredicateMatchesParseExperimentsDoc(t *testing.T) {
 	tests := []struct {
 		name string

@@ -157,6 +157,22 @@ func TestAll_ReturnsIndependentCopies(t *testing.T) {
 	if second[0].Name != "web.a" {
 		t.Fatalf("All() after mutating a previous All() result: got %q, want %q", second[0].Name, "web.a")
 	}
+
+	// Mutating the Layers backing array through an All() result must not
+	// reach the Registry: a later Lookup must still report LayerWeb only.
+	first[0].Layers[0] = LayerServer
+	if e, _ := r.Lookup("web.a"); !e.HasLayer(LayerWeb) || e.HasLayer(LayerServer) {
+		t.Fatalf("Lookup after mutating All()[0].Layers[0]: %+v, want unaffected (LayerWeb only)", e)
+	}
+
+	// Mutating the Layers backing array through a Lookup() result must not
+	// reach the Registry either: a later Lookup must still report LayerWeb
+	// only.
+	looked, _ := r.Lookup("web.a")
+	looked.Layers[0] = LayerServer
+	if e, _ := r.Lookup("web.a"); !e.HasLayer(LayerWeb) || e.HasLayer(LayerServer) {
+		t.Fatalf("Lookup after mutating a previous Lookup()'s Layers[0]: %+v, want unaffected (LayerWeb only)", e)
+	}
 }
 
 // --- DEFAULT_ON_FLAGS consistency (ptone/scion#2217) ---
