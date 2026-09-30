@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -394,17 +395,16 @@ func TestReconcileHarnessConfigColumn_PagingAdvancesCursor(t *testing.T) {
 }
 
 // TestReconcileHarnessConfigColumn_Idempotent is the ptone/scion#2146 review
-// R4-2/R4-5 idempotency coverage: after the marker gate was dropped in favor
-// of an every-boot reconcile scoped to harness_config IS NULL (R4-5, option
-// (b)), idempotency now comes from that WHERE clause rather than a marker —
-// a second call must be a cheap no-op for rows already populated, and must
-// NOT clobber an already-populated column even if applied_config changes
-// afterward (this is also the R4-4 IsNil-guard-closes-the-overwrite-window
-// property, and it is the flip side of the mixed-version-rollout residual
-// documented on ReconcileHarnessConfigColumn's own doc comment, R6-3: a
-// row's harness_config, once non-NULL — real value or the R5-1 ""
-// sentinel — is never re-derived from a later applied_config change by
-// this migration, only by CreateAgent/UpdateAgent's own sync).
+// R4-2/R4-5 idempotency coverage: a second call's SELECT (scoped to
+// harness_config IS NULL) simply doesn't return a row that's already
+// non-NULL, so a second call is a cheap no-op and never re-derives a row's
+// harness_config from a later applied_config change — only
+// CreateAgent/UpdateAgent's own sync does that. This is a different
+// property from the UPDATE-side Where(HarnessConfigIsNil()) guard (R7-2),
+// which protects the narrower window between one reconcile call's own
+// SELECT and its own UPDATE, not across two separate calls like this test
+// exercises — see TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite
+// for that case.
 func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -435,22 +435,13 @@ func TestReconcileHarnessConfigColumn_Idempotent(t *testing.T) {
 }
 
 // TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete is the
-// ptone/scion#2146 review R5-5 fix: a row that is hard-deleted between the
-// reconcile's page read and its per-row update must be skipped (logged),
-// not treated as a boot failure — reachable in normal operation now that
-// every replica runs this on every boot.
-// TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete is the
-// ptone/scion#2146 review R5-5/R6-1 fix: it forces the actual race — a
-// concurrent hard delete landing between ReconcileHarnessConfigColumn's
-// SELECT and its per-row UPDATE — deterministically, via an ent mutation
-// hook, rather than deleting the row before the reconcile runs at all (an
-// earlier version of this test did that, which meant the row was never
-// selected in the first place and the ent.IsNotFound branch was never
-// exercised — review R6-1 mutation-verified this: with that branch
-// disabled entirely, the old test still passed). The hook here intercepts
-// exactly the UpdateOne for the targeted row and deletes it first, so the
-// UPDATE that follows genuinely hits a gone row and genuinely returns
-// ent's NotFound.
+// ptone/scion#2146 review R5-5 fix (R6-1: rewritten to force the real
+// race): a concurrent hard delete landing between
+// ReconcileHarnessConfigColumn's SELECT and its per-row UPDATE must be
+// skipped (logged), not treated as a boot failure. An ent mutation hook
+// intercepts exactly the UpdateOne for the targeted row and deletes it
+// first, so the UPDATE that follows genuinely hits a gone row and
+// genuinely returns ent's NotFound.
 func TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete(t *testing.T) {
 	ctx := context.Background()
 	cs, projectUID := newHarnessBackfillTestStore(t)
@@ -487,6 +478,78 @@ func TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete(t *testing.T) {
 
 	_, err = cs.client.Agent.Get(ctx, deleted)
 	assert.True(t, ent.IsNotFound(err), "the deleted row must actually be gone")
+}
+
+// TestReconcileHarnessConfigColumn_PreservesUpdatedTimestamp is the
+// ptone/scion#2146 review R7-1 fix: this migration is a derived-column
+// backfill, not a user-visible update, so its per-row UPDATE must not let
+// ent's UpdateDefault(time.Now) bump the agent's `updated` column. Real
+// consumers of that column include `scion list --sort updated`, the Hub's
+// chat-v2 agent-roster last-activity fallback, and the notification
+// stale-event guard — all of which would misbehave for every agent touched
+// by a first-boot-after-upgrade reconcile if `updated` jumped to boot time.
+func TestReconcileHarnessConfigColumn_PreservesUpdatedTimestamp(t *testing.T) {
+	ctx := context.Background()
+	cs, projectUID := newHarnessBackfillTestStore(t)
+
+	id := createLegacyAgent(t, cs, projectUID, "preserve-updated", `{"harnessConfig":"claude"}`)
+
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := cs.client.Agent.UpdateOneID(id).SetUpdated(past).Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx))
+
+	got, err := cs.client.Agent.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "claude", got.HarnessConfig)
+	assert.True(t, got.Updated.Equal(past),
+		"the reconcile must not bump updated: got %v, want %v", got.Updated, past)
+}
+
+// TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite is the
+// ptone/scion#2146 review R7-2 fix: a concurrent writer (e.g. another,
+// already-serving replica's UpdateAgent call, such as the broker's harness
+// overwrite) that sets a fresh, non-NULL harness_config between this
+// reconcile's SELECT and its own UPDATE must win — the reconcile's own,
+// by-then-stale value must never overwrite it. Uses the same
+// ent-mutation-hook technique as
+// TestReconcileHarnessConfigColumn_ToleratesConcurrentDelete to force the
+// real interleaving, guarded by a one-shot flag so the injected write
+// (itself an UpdateOne) doesn't re-trigger the hook recursively.
+func TestReconcileHarnessConfigColumn_DoesNotOverwriteConcurrentWrite(t *testing.T) {
+	ctx := context.Background()
+	cs, projectUID := newHarnessBackfillTestStore(t)
+
+	id := createLegacyAgent(t, cs, projectUID, "concurrent-write", `{"harnessConfig":"claude"}`)
+
+	var injected bool
+	cs.client.Agent.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !injected {
+				if am, ok := m.(*ent.AgentMutation); ok && am.Op() == ent.OpUpdateOne {
+					if mid, ok := am.ID(); ok && mid == id {
+						injected = true
+						if _, err := cs.client.Agent.UpdateOneID(id).
+							SetAppliedConfig(`{"harnessConfig":"gemini"}`).
+							SetHarnessConfig("gemini").
+							Save(ctx); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	require.NoError(t, cs.ReconcileHarnessConfigColumn(ctx),
+		"a concurrent writer's fresher value must not turn into a reconcile failure")
+
+	got, err := cs.client.Agent.Get(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini", got.HarnessConfig,
+		"the concurrent writer's value must survive; the reconcile's own stale value must not overwrite it")
 }
 
 func TestMigrateRunsHarnessConfigReconcile(t *testing.T) {

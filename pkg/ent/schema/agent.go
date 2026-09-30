@@ -133,18 +133,12 @@ func (Agent) Fields() []ent.Field {
 		// "harnessConfig" key, kept in sync by every write to applied_config
 		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf
 		// helper) and reconciled at every startup for any row that hasn't
-		// caught up (CompositeStore.ReconcileHarnessConfigColumn — an
-		// every-boot operation, not a one-shot backfill, since round 4's
-		// R4-5). It exists solely so the CLI --harness filter
-		// (AgentFilter.HarnessConfig) can use a plain, dialect-independent
-		// equality predicate instead of parsing/pattern-matching the
-		// applied_config JSON document at query time — two prior attempts at
-		// the latter (a CASE+validity-checked JSON extract, then a
-		// strpos/to_json substring search) each had a real correctness bug
-		// (a Postgres version floor, then false positives from a same-named
-		// nested key) that a real column eliminates by construction
-		// (ptone/scion#2146 review R3-1). It is not part of store.Agent —
-		// nothing outside the HarnessConfig filter predicate reads it; the
+		// caught up (CompositeStore.ReconcileHarnessConfigColumn). It exists
+		// solely so the CLI --harness filter (AgentFilter.HarnessConfig) can
+		// use a plain, dialect-independent equality predicate instead of
+		// parsing/pattern-matching the applied_config JSON document at query
+		// time (ptone/scion#2146 review R3-1). It is not part of store.Agent
+		// — nothing outside the HarnessConfig filter predicate reads it; the
 		// enriched, response-facing store.Agent.HarnessConfig field is
 		// unrelated and still derived from applied_config at response time,
 		// unchanged.

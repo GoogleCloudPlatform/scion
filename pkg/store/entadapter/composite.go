@@ -693,67 +693,51 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 // JSON document. New rows never need this: CreateAgent/UpdateAgent keep the
 // column in sync going forward (agent_store.go's harnessConfigOf).
 //
-// This runs on **every boot**, not once behind a marker (ptone/scion#2146
-// review R4-5, option (b); named Backfill* through round 4, renamed here per
-// review R5-11 since "backfill" no longer describes an every-boot
-// operation). The one-shot version left a gap during a mixed-version
-// rollout: an old-binary replica can still create or update agents with a
-// NULL harness_config after a new-binary replica has already run the
-// backfill and set the marker, and those rows would then never be
-// reconciled. Running on every boot closes that gap for the common case (a
-// new-binary boot eventually reconciles what an old-binary replica left
-// behind).
+// Runs on every boot (ptone/scion#2146 review R4-5), not once behind a
+// one-shot marker: a marker-gated version would never reconcile a row an
+// old-binary replica writes after a new-binary replica has already run and
+// marked the migration done, during a mixed-version rollout.
 //
-// Residual (ptone/scion#2146 review R6-3): a row an upgraded binary already
-// wrote (non-NULL harness_config, real value or the "" sentinel) whose
-// applied_config harness a pre-upgrade binary later changes keeps its stale
-// column value until an upgraded binary next updates it — this reconcile
-// only selects NULL rows, so a restart alone does not fix it.
+// Residual: a row an upgraded binary already wrote (non-NULL
+// harness_config, real value or the "" sentinel) whose applied_config
+// harness a pre-upgrade binary later changes keeps its stale column value
+// until an upgraded binary next updates it — this reconcile only selects
+// NULL rows, so a restart alone does not fix it.
 //
-// NULL means exactly one thing: "never reconciled or synced by any binary
-// that knows this column exists." Every write path other than a raw,
-// pre-column INSERT/legacy row writes a real, non-NULL value:
-// CreateAgent/UpdateAgent call SetHarnessConfig(harnessConfigOf(cfg))
-// UNCONDITIONALLY (agent_store.go) — including "" when there's no harness —
-// and this function does the same for every row it visits, including a row
-// whose applied_config has no harness, doesn't parse as JSON at all, or
-// uses the legacy pre-0be8382 "harness" key (R4-10) instead of
-// "harnessConfig". "" is not ambiguous with "not yet reconciled" (NULL) and
-// never matches a --harness filter: agentFilterPredicates only emits
-// agent.HarnessConfigEQ when the filter value is itself non-empty
-// (agent_store.go's agentFilterPredicates), so a filter can never be set to
-// "" to begin with. This is the fix for review R5-1's finding that an
-// earlier version of this function (and its doc, and dev-notes) wrongly
-// claimed "a caught-up Hub does one empty-result query per boot" while
-// actually leaving every no-harness, invalid-JSON, and legacy-key row NULL
-// forever — re-selected, re-fetched, and (for invalid JSON) re-logged on
-// every single boot, with the reconcile set only ever growing. Writing ""
-// instead means every row this function ever touches leaves the
-// `harness_config IS NULL` set permanently, so a caught-up Hub really does
-// reach a stable, empty result.
+// NULL means exactly "never reconciled or synced by any binary that knows
+// this column exists." Every write path other than a raw, pre-column
+// legacy row writes a real, non-NULL value: CreateAgent/UpdateAgent call
+// SetHarnessConfig(harnessConfigOf(cfg)) unconditionally (agent_store.go)
+// — including "" when there's no harness — and this function does the same
+// for every row it visits, including one whose applied_config has no
+// harness, doesn't parse as JSON at all, or uses the legacy pre-0be8382
+// "harness" key (R4-10) instead of "harnessConfig". "" never matches a
+// --harness filter (agentFilterPredicates only emits agent.HarnessConfigEQ
+// for a non-empty requested value), so writing "" instead of leaving NULL
+// is invisible to callers, and it's what makes this query converge to
+// empty on a caught-up Hub (R5-1) instead of re-selecting the same
+// no-harness/invalid/legacy rows on every boot forever.
 //
 // A row whose applied_config fails to parse as JSON at all does not fail
 // the whole migration — matching entAgentToStore's own tolerance for
-// corrupt applied_config (log and continue), not BackfillEmptyAgentRoles'
-// stricter fail-the-whole-migration behavior above — but, per the sentinel
-// rule just above, it still gets "" written rather than being left NULL
-// (ptone/scion#2146 review R3-1, R5-1).
+// corrupt applied_config (log and continue) — but still gets "" written
+// per the sentinel rule above (R3-1, R5-1).
 //
 // A row that parses but needed sanitizing (parseAppliedConfig returns a
-// non-nil cfg AND a non-nil error — e.g. an invalid GCP metadata mode) is
+// non-nil cfg AND a non-nil error, e.g. an invalid GCP metadata mode) is
 // NOT treated as invalid: its HarnessConfig is used exactly like a clean
-// row. entAgentToStore applies the identical tolerance to build the
-// response-facing store.Agent.HarnessConfig, so treating "sanitized" the
-// same as "corrupt" here would silently and permanently diverge from what
-// the API actually reports for that agent (ptone/scion#2146 review R4-1).
+// row, matching entAgentToStore's identical tolerance for the
+// response-facing store.Agent.HarnessConfig (R4-1).
 //
-// A row that no longer exists by the time its update runs (ent.IsNotFound —
-// e.g. a concurrent hard delete by another replica between this replica's
-// page read and its write) is logged and skipped, not treated as a boot
-// failure: every replica now runs this on every boot, so this race is
-// reachable in normal multi-replica operation, not just a rare edge case
-// (ptone/scion#2146 review R5-5). Any other update error still aborts
-// startup, same as before.
+// The per-row update is conditioned on Where(HarnessConfigIsNil()) and
+// preserves the row's own Updated timestamp via SetUpdated, so this
+// migration never overwrites a value another writer set concurrently and
+// never bumps updated as a side effect of a purely internal column sync
+// (R7-1, R7-2). An ent.IsNotFound from either that guard (another writer
+// already reconciled the row) or a genuine concurrent delete is logged and
+// skipped, not treated as a boot failure — every replica runs this on
+// every boot, so both races are reachable in normal multi-replica
+// operation (R5-5, R7-2). Any other update error still aborts startup.
 func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error {
 	pageSize := harnessConfigReconcilePageSize
 	var (
@@ -769,7 +753,7 @@ func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error
 		if lastID != uuid.Nil {
 			query = query.Where(agent.IDGT(lastID))
 		}
-		agents, err := query.Select(agent.FieldID, agent.FieldAppliedConfig).All(ctx)
+		agents, err := query.Select(agent.FieldID, agent.FieldAppliedConfig, agent.FieldUpdated).All(ctx)
 		if err != nil {
 			return fmt.Errorf("query agents for harness_config reconcile: %w", err)
 		}
@@ -817,12 +801,20 @@ func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error
 			}
 
 			if err := c.client.Agent.UpdateOneID(a.ID).
+				Where(agent.HarnessConfigIsNil()).
 				SetHarnessConfig(harnessValue).
+				SetUpdated(a.Updated).
 				Exec(ctx); err != nil {
 				if ent.IsNotFound(err) {
-					// Concurrently deleted by another replica between our
-					// page read and this write — not a boot failure (R5-5).
-					slog.Debug("harness_config reconcile: agent no longer exists, skipping",
+					// Either the row was concurrently deleted, or another
+					// writer already synced its harness_config (via
+					// CreateAgent/UpdateAgent or a concurrent reconcile run)
+					// between our page read and this write, so the
+					// Where(HarnessConfigIsNil()) guard no longer matches —
+					// neither is a boot failure. Not overwriting a
+					// concurrent writer's fresher value is exactly the
+					// point of the guard (ptone/scion#2146 review R7-2).
+					slog.Debug("harness_config reconcile: agent no longer exists or was already reconciled by another writer, skipping",
 						"agent_id", a.ID)
 					continue
 				}
