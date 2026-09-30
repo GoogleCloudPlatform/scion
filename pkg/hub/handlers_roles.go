@@ -1600,18 +1600,16 @@ func (s *Server) deleteSystemSuperAdminBinding(
 
 		// Synchronous transactional audit.
 		auditActor := s.buildAuditActorFromContext(ctx)
-		if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-			MutationType:        "role_binding_delete",
-			ActorPrincipalKind:  auditActor.kind,
-			ActorPrincipalID:    auditActor.id,
-			ActorCredentialID:   auditActor.credID,
-			ActorCredentialType: auditActor.credType,
-			TargetType:          "role_binding",
-			TargetID:            binding.ID,
-			BeforeSummary:       fmt.Sprintf(`{"principal_type":%q,"principal_id":%q,"role":%q,"scope_type":%q}`, binding.PrincipalType, binding.PrincipalID, store.SystemRoleSuperAdmin, binding.ScopeType),
-			AfterSummary:        `{"deleted":true,"source":"generic_delete_endpoint"}`,
-			Timestamp:           time.Now(),
-		}); err != nil {
+		record := &store.MutationAuditRecord{
+			MutationType:  "role_binding_delete",
+			TargetType:    "role_binding",
+			TargetID:      binding.ID,
+			BeforeSummary: fmt.Sprintf(`{"principal_type":%q,"principal_id":%q,"role":%q,"scope_type":%q}`, binding.PrincipalType, binding.PrincipalID, store.SystemRoleSuperAdmin, binding.ScopeType),
+			AfterSummary:  `{"deleted":true,"source":"generic_delete_endpoint"}`,
+			Timestamp:     time.Now(),
+		}
+		auditActor.ApplyActor(record)
+		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("audit super-admin binding delete: %w", err)
 		}
 

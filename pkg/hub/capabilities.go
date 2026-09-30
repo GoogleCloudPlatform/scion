@@ -158,11 +158,13 @@ func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
 		ID:      sa.ID,
 		OwnerID: sa.CreatedBy,
 	}
-	// Only project-scoped service accounts are children of a project, so the
-	// project owner/admin bypass applies to them alone (mirrors
-	// harnessConfigResource). For hub- and user-scoped accounts ScopeID is a hub
-	// or user ID, not a project ID: claiming a project parent there would hand
-	// the bypass to the owner of whatever project happened to share that ID.
+	// Only project-scoped service accounts get a project ParentType/ParentID
+	// (mirrors harnessConfigResource). That link — not any SA-specific rule in
+	// the kernel — is what makes the ComputeCapabilities owner/admin
+	// short-circuit below apply to project-scoped accounts alone. For hub- and
+	// user-scoped accounts ScopeID is a hub or user ID, not a project ID:
+	// giving them a project parent would hand the short-circuit to the owner
+	// of whatever project happened to share that ID.
 	if sa.Scope == store.ScopeProject && sa.ScopeID != "" {
 		r.ParentType = "project"
 		r.ParentID = sa.ScopeID

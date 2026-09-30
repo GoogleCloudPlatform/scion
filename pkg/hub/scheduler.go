@@ -90,9 +90,10 @@ type Scheduler struct {
 
 // RecurringHandler defines a periodic task driven by the root ticker.
 type RecurringHandler struct {
-	Name     string                    // Human-readable name for logging
-	Interval int                       // Run every N ticks (must be >= 1)
-	Fn       func(ctx context.Context) // The work to perform
+	Name      string                    // Human-readable name for logging
+	Interval  int                       // Run every N ticks (must be >= 1)
+	Fn        func(ctx context.Context) // The work to perform
+	Singleton bool                      // true if registered via RegisterRecurringSingleton
 }
 
 // scheduledTimer wraps a time.Timer with metadata for one-shot events.
@@ -175,13 +176,23 @@ func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
 // Tick-Zero Behavior: All recurring handlers run immediately on startup (tick 0)
 // because 0 % N == 0 for any interval N. This is intentional.
 func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(ctx context.Context)) {
+	s.registerRecurring(name, intervalMinutes, fn, false)
+}
+
+// registerRecurring is the shared implementation behind RegisterRecurring and
+// RegisterRecurringSingleton. singleton records the registration mode on the
+// resulting RecurringHandler so callers (and tests) can tell which path a
+// handler was registered through without relying on function identity, which
+// inlining can make ambiguous.
+func (s *Scheduler) registerRecurring(name string, intervalMinutes int, fn func(ctx context.Context), singleton bool) {
 	if intervalMinutes < 1 {
 		intervalMinutes = 1
 	}
 	s.recurring = append(s.recurring, RecurringHandler{
-		Name:     name,
-		Interval: intervalMinutes,
-		Fn:       fn,
+		Name:      name,
+		Interval:  intervalMinutes,
+		Fn:        fn,
+		Singleton: singleton,
 	})
 }
 
@@ -196,7 +207,7 @@ func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(
 // If the store does not implement store.AdvisoryLocker, the handler runs
 // unguarded (correct for a single replica).
 func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
-	s.RegisterRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn))
+	s.registerRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn), true)
 }
 
 // singletonGuard wraps fn so it only runs while this replica holds the named

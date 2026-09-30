@@ -66,8 +66,8 @@ func addProjectEdge(t *testing.T, s store.Store, delegatorType, delegatorID, del
 	return id
 }
 
-// decodeAPIError decodes an error response body.
-func decodeAPIError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
+// decodeTargetAPIError decodes an error response body.
+func decodeTargetAPIError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
 	t.Helper()
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body: %s", rec.Body.String())
@@ -79,7 +79,7 @@ func decodeAPIError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
 func assertAgentTargetDenied(t *testing.T, rec *httptest.ResponseRecorder, ceiling bool) {
 	t.Helper()
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	apiErr := decodeAPIError(t, rec)
+	apiErr := decodeTargetAPIError(t, rec)
 	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
 	assert.Equal(t, agentTargetDenyMessage, apiErr.Message)
 	if ceiling {
@@ -220,7 +220,7 @@ func TestAgentTargetAction_CeilingDeniedByDetail(t *testing.T) {
 		rec := httptest.NewRecorder()
 		require.False(t, f.srv.authorize(rec, req, agentResource(foreign), ActionLifecycle))
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		apiErr := decodeAPIError(t, rec)
+		apiErr := decodeTargetAPIError(t, rec)
 		assert.Equal(t, ErrCodeForbidden, apiErr.Code)
 		assert.Equal(t, map[string]interface{}{
 			"resource_type": "agent",
@@ -232,7 +232,7 @@ func TestAgentTargetAction_CeilingDeniedByDetail(t *testing.T) {
 	t.Run("cross-project concealment stays a bare 404", func(t *testing.T) {
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.stranger.ID, nil)
 		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-		assert.Empty(t, decodeAPIError(t, rec).Details)
+		assert.Empty(t, decodeTargetAPIError(t, rec).Details)
 	})
 
 	t.Run("scope pre-gate denial has no ceiling detail", func(t *testing.T) {

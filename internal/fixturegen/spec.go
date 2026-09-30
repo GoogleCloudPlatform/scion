@@ -401,6 +401,15 @@ func Spec() []TableFixture {
 				"create_time": baseTime, "update_time": baseTime,
 			},
 		}},
+		{Table: "launch_reaper_states", Rows: []row{
+			{ // the single row the launch reaper reads/writes (id is fixed:
+				// launchReaperStateID in pkg/store/entadapter/launch_reaper.go);
+				// populated ok_at/armed_since exercise the non-NULL path, the
+				// nil-means-disarmed NULL path is exercised by production code
+				// creating the row with both unset on its first tick.
+				"id": "agent-launch-reaper", "ok_at": baseTime, "armed_since": baseTime.Add(-time.Hour),
+			},
+		}},
 		{Table: "integration_configs", Rows: []row{
 			{
 				"id": "ic000000-0000-0000-0000-000000000001", "integration": "github",

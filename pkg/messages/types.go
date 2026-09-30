@@ -98,6 +98,11 @@ const (
 	SystemCategoryScheduler      = "scheduler"
 	SystemCategoryPortForward    = "port-forward"
 	SystemCategoryDeliveryFailed = "delivery-failed"
+	// SystemCategoryDeliveryDeferred marks the notice sent to an agent
+	// sender when the migration gate (design agent-reincarnate §3.7)
+	// deferred their message instead of dispatching it — distinct from
+	// SystemCategoryDeliveryFailed: the message was saved, not dropped.
+	SystemCategoryDeliveryDeferred = "delivery-deferred"
 )
 
 // validTypes is the set of valid message types.

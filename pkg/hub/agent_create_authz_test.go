@@ -71,7 +71,7 @@ func grantFixtureRole(t *testing.T, f *bypassAgentsFixture, userID, role string)
 func assertAgentCreateDenied(t *testing.T, rec *httptest.ResponseRecorder, ceiling bool) {
 	t.Helper()
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	apiErr := decodeAPIError(t, rec)
+	apiErr := decodeTargetAPIError(t, rec)
 	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
 	assert.Equal(t, agentCreateDenyMessage, apiErr.Message)
 	if ceiling {
@@ -241,12 +241,12 @@ func TestAgentCreate_AgentScopeAndProjectChecks(t *testing.T) {
 	rec := f.asAgent(t, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
 		CreateAgentRequest{Name: "scope-less"}, ScopeAgentStatusUpdate)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, "Missing required scope: "+string(ScopeAgentCreate), decodeAPIError(t, rec).Message)
+	assert.Equal(t, "Missing required scope: "+string(ScopeAgentCreate), decodeTargetAPIError(t, rec).Message)
 
 	rec = f.asAgent(t, http.MethodPost, "/api/v1/agents",
 		CreateAgentRequest{Name: "cross-project", ProjectID: f.other.ID}, ScopeAgentCreate)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, "Agents can only create sub-agents within their own project", decodeAPIError(t, rec).Message)
+	assert.Equal(t, "Agents can only create sub-agents within their own project", decodeTargetAPIError(t, rec).Message)
 }
 
 // TestAgentCreate_ExplicitRoleAboveParentDenied pins that an agent caller
@@ -261,7 +261,7 @@ func TestAgentCreate_ExplicitRoleAboveParentDenied(t *testing.T) {
 
 	rec := createAsAgent(t, f, parent.ID, CreateAgentRequest{Name: "role-full", AgentRole: string(AgentRoleFull)})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, decodeAPIError(t, rec).Message, "Cannot grant sub-agent role")
+	assert.Contains(t, decodeTargetAPIError(t, rec).Message, "Cannot grant sub-agent role")
 	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "role-full")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
@@ -332,8 +332,11 @@ func TestAgentCreate_ScheduledCreatorRequiresLiveDelegator(t *testing.T) {
 // for assigning a service account to an agent's child is evaluated on the
 // actual account:
 //   - a project-scoped account in the agent's project is assignable while the
-//     agent's live delegator holds assign on that account (here as its
-//     registrar); an account the delegator holds nothing on, or a deleted
+//     agent's live delegator holds assign on that account: through a built-in
+//     project role (every built-in project role carries
+//     gcp_service_account.assign since GoogleCloudPlatform/scion#2062), or,
+//     for a delegator bound to a custom role without it, as the account's
+//     registrar; an account such a delegator holds nothing on, or a deleted
 //     delegator, denies at the delegation ceiling;
 //   - for a hub-scoped account, a user delegator's authority includes the
 //     hub-member assign relationship, while the agent itself holds no assign
@@ -342,24 +345,37 @@ func TestAgentCreate_ScheduledCreatorRequiresLiveDelegator(t *testing.T) {
 func TestAgentCreate_ServiceAccountParentAuthority(t *testing.T) {
 	t.Run("project-scoped account", func(t *testing.T) {
 		f := newParentCeilingFixture(t, "projsa")
-		parent := tid("pc-projsa-parent")
-		f.chain(t, parent)
-		// The delegator registered sa and holds nothing on other.
-		sa := gcpServiceAccountResource(&store.GCPServiceAccount{
-			ID: tid("pc-projsa-sa"), CreatedBy: f.userID,
-			Scope: store.ScopeProject, ScopeID: f.projectID, CreatedAt: time.Now(),
-		})
 		other := gcpServiceAccountResource(&store.GCPServiceAccount{
 			ID: tid("pc-projsa-other"), CreatedBy: tid("pc-projsa-registrar"),
 			Scope: store.ScopeProject, ScopeID: f.projectID, CreatedAt: time.Now(),
 		})
 
-		d := decidePerm(f.authz, f.agent(parent), sa, ActionAssign, "gcp_service_account.assign", false)
+		// The fixture's project-owner delegator holds assign on every
+		// project-scoped account in the project through its role.
+		ownerParent := tid("pc-projsa-owner-parent")
+		f.chain(t, ownerParent)
+		d := decidePerm(f.authz, f.agent(ownerParent), other, ActionAssign, "gcp_service_account.assign", false)
+		assert.True(t, d.Allowed, "project-role delegator holds assign: reason %q", d.Reason)
+
+		// A delegator bound to a custom project role without assign holds it
+		// only as the registrar of sa, and holds nothing on other.
+		delegator := tid("pc-projsa-delegator")
+		scaCreateDelegatorWithoutAssign(t, f.store, delegator, "projsa-delegator@pc.test", f.projectID)
+		parent := tid("pc-projsa-parent")
+		createDCAgent(t, f.store, parent, f.projectID, delegator, AgentRoleFull)
+		createDCEdge(t, f.store, store.DelegationPrincipalUser, delegator, store.DelegationPrincipalAgent, parent,
+			store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+		sa := gcpServiceAccountResource(&store.GCPServiceAccount{
+			ID: tid("pc-projsa-sa"), CreatedBy: delegator,
+			Scope: store.ScopeProject, ScopeID: f.projectID, CreatedAt: time.Now(),
+		})
+
+		d = decidePerm(f.authz, f.agent(parent), sa, ActionAssign, "gcp_service_account.assign", false)
 		assert.True(t, d.Allowed, "live delegator owns the account: reason %q", d.Reason)
 		d = decidePerm(f.authz, f.agent(parent), other, ActionAssign, "gcp_service_account.assign", false)
 		assertCeilingDeny(t, d, "delegator holds no assign authority on the account")
 
-		require.NoError(t, f.store.DeleteUser(context.Background(), f.userID))
+		require.NoError(t, f.store.DeleteUser(context.Background(), delegator))
 		d = decidePerm(f.authz, f.agent(parent), sa, ActionAssign, "gcp_service_account.assign", false)
 		assertCeilingDeny(t, d, "deleted delegator")
 	})
@@ -380,7 +396,9 @@ func TestAgentCreate_ServiceAccountParentAuthority(t *testing.T) {
 		assert.True(t, ok, "hub-member delegator: reason %q", reason)
 
 		nonMember := tid("pc-hubsa-nonmember")
-		createDCUser(t, f.store, nonMember, "hubsa-nonmember@pc.test", f.projectID, store.ProjectRoleMember)
+		// A custom project role without assign: every built-in project role
+		// carries gcp_service_account.assign (GoogleCloudPlatform/scion#2062).
+		scaCreateDelegatorWithoutAssign(t, f.store, nonMember, "hubsa-nonmember@pc.test", f.projectID)
 		ok, reason, err = f.authz.evaluateUserDelegatorAuthority(context.Background(), nonMember,
 			sa, ActionAssign, "gcp_service_account.assign", store.RoleScopeProject, f.projectID)
 		require.NoError(t, err)

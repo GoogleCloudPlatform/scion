@@ -60,6 +60,23 @@ func (MutationAudit) Fields() []ent.Field {
 			Optional(),
 		field.String("can_delegate_reason").
 			Optional(),
+
+		// E.2a additive fields (ptone/scion#2127, plan §3.3). All optional,
+		// default "".
+		field.String("credential_name").
+			Optional(),
+		field.String("credential_boundary_kind").
+			Optional(),
+		field.String("credential_boundary_project_id").
+			Optional(),
+		field.String("credential_labels").
+			Optional(),
+		field.String("correlation_id").
+			Optional(),
+		field.String("executor_kind").
+			Optional(),
+		field.String("executor_id").
+			Optional(),
 	}
 }
 
@@ -76,6 +93,8 @@ func (MutationAudit) Indexes() []ent.Index {
 		index.Fields("actor_credential_id"),
 		// Target queries
 		index.Fields("target_type", "target_id"),
+		// Request correlation (E.2a)
+		index.Fields("correlation_id"),
 	}
 }
 

@@ -145,12 +145,18 @@ func ceilingReadAllowance(resource Resource, action Action, permissionID string)
 //     and the walk continues to its own delegator.
 //   - The walk is bounded by maxDelegationDepth and a repeated delegate denies.
 //   - The Grandfathered flag is provenance metadata only.
+//
+// cause, when non-nil, receives a structural classification of the deny
+// (see DenyCause) for the specific sub-cases callers need to distinguish.
+// It is left at its zero value ("") for every other outcome, including
+// allows and denials with no dedicated classification.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
 	req AuthzRequest,
 	permissionID string,
 	agentID string,
 	explain *[]DecisionStep,
+	cause *DenyCause,
 ) (bool, string, error) {
 	// scopeType is fixed to RoleScopeProject: delegation edges are
 	// project-scoped.
@@ -175,7 +181,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	}
 
 	attested := req.Principal.Identity != nil && AncestryIsHubAttested(req.Principal.Identity)
-	return a.walkDelegationChain(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain)
+	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause)
 }
 
 // maxDelegationDepth limits the delegation chain walk.
@@ -196,9 +202,34 @@ func (a *AuthzService) walkDelegationChain(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 ) (bool, string, error) {
+	return a.walkDelegationChainWithCause(ctx, resource, action, permissionID, agentID, attested, scopeType, scopeID, explain, nil)
+}
+
+// walkDelegationChainWithCause is walkDelegationChain that also records a
+// DenyCause when cause is non-nil: DenyCauseCeilingOrphaned for a delegator
+// that does not resolve or is deleted and for a migration-provenance deny,
+// and DenyCauseCeilingDelegatorLacksPermission for a live-looking delegator
+// that does not hold the permission. A lookup error is returned as an error
+// and classified by the caller. Every other deny leaves cause unchanged.
+func (a *AuthzService) walkDelegationChainWithCause(
+	ctx context.Context,
+	resource Resource,
+	action Action,
+	permissionID string,
+	agentID string,
+	attested bool,
+	scopeType, scopeID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+) (bool, string, error) {
 	addStep := func(step, detail string) {
 		if explain != nil {
 			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
+		}
+	}
+	setCause := func(c DenyCause) {
+		if cause != nil {
+			*cause = c
 		}
 	}
 
@@ -281,7 +312,11 @@ func (a *AuthzService) walkDelegationChain(
 		}
 
 		if isMigrationSentinel(edge) {
-			return a.migrationSentinelCeiling(resource, action, delegateID, edge, permissionID, explain)
+			allowed, reason, err := a.migrationSentinelCeiling(resource, action, delegateID, edge, permissionID, explain)
+			if !allowed && err == nil {
+				setCause(DenyCauseCeilingOrphaned)
+			}
+			return allowed, reason, err
 		}
 
 		switch edge.DelegatorType {
@@ -291,6 +326,7 @@ func (a *AuthzService) walkDelegationChain(
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
 						fmt.Sprintf("delegator user %s does not exist", edge.DelegatorID))
+					setCause(DenyCauseCeilingOrphaned)
 					return false, fmt.Sprintf("delegator %s is not live", edge.DelegatorID), nil
 				}
 				addStep("delegation_ceiling_error", fmt.Sprintf("delegator user lookup failed: %v", err))
@@ -299,6 +335,7 @@ func (a *AuthzService) walkDelegationChain(
 			if !allowed {
 				addStep("delegation_ceiling_denied",
 					fmt.Sprintf("delegator user %s does not hold %s: %s", edge.DelegatorID, permissionID, reason))
+				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator %s does not hold %s", edge.DelegatorID, permissionID), nil
 			}
 			addStep("delegation_ceiling_allowed",
@@ -311,6 +348,7 @@ func (a *AuthzService) walkDelegationChain(
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
 						fmt.Sprintf("delegator agent %s does not exist", edge.DelegatorID))
+					setCause(DenyCauseCeilingOrphaned)
 					return false, fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID), nil
 				}
 				addStep("delegation_ceiling_error", fmt.Sprintf("delegator agent lookup failed: %v", err))
@@ -319,6 +357,7 @@ func (a *AuthzService) walkDelegationChain(
 			if !allowed {
 				addStep("delegation_ceiling_denied",
 					fmt.Sprintf("delegator agent %s does not hold %s: %s", edge.DelegatorID, permissionID, reason))
+				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator agent %s does not hold %s: %s", edge.DelegatorID, permissionID, reason), nil
 			}
 			addStep("delegation_ceiling_link_allowed",

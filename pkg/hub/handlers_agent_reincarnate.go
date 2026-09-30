@@ -381,7 +381,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// container mid-flight, which would cancel r.Context() and abort the
 	// worker if it inherited it — exactly the self-deletion
 	// context-cancellation hazard §3.0 identifies for the rejected design.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff)
+	// claimedAt (Nit, p2a-r1 review): the preamble's catch-up window start is
+	// this exact claim instant, not rec.RequestedAt — the store stamps that
+	// a few ms later inside CreateAgentReincarnation, after the gate in the
+	// three delivery paths could already have started deferring messages.
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
 		AgentID:    agent.ID,

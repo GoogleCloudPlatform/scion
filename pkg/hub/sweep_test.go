@@ -124,3 +124,37 @@ func TestBrokerMessageSweepHandler_FailsPendingMessagesWithMissingRecipient(t *t
 	require.NotNil(t, got.DispatchFailureReason)
 	assert.Equal(t, missingRecipientFailureReason, *got.DispatchFailureReason)
 }
+
+// TestBrokerMessageSweepHandler_ExpiresStuckPendingWithSharedReason pins the
+// sweep's TTL-expiry reason string to store.MessageExpiredStuckPendingReason
+// — the same constant cmd/boot_non_agent_dispatch_state_backfill.go matches
+// on to find and repair rows the sweep mislabeled (nc-promote-busy round 3
+// M9). Before this constant existed, the two sites carried independent
+// literals that could silently drift; this test fails if sweep.go is ever
+// edited back to a hand-written string instead of the shared constant.
+func TestBrokerMessageSweepHandler_ExpiresStuckPendingWithSharedReason(t *testing.T) {
+	srv, cs := newSweepTestServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	stuck := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:a", Msg: "hi",
+		CreatedAt: time.Now().Add(-25 * time.Hour), // past stuckMessageExpireTTL (24h)
+	}
+	require.NoError(t, cs.CreateMessage(ctx, stuck))
+	assert.Equal(t, store.MessageDispatchPending, stuck.DispatchState)
+
+	srv.brokerMessageSweepHandler()(ctx)
+
+	got, err := cs.GetMessage(ctx, stuck.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+	require.NotNil(t, got.DispatchFailureReason)
+	assert.Equal(t, store.MessageExpiredStuckPendingReason, *got.DispatchFailureReason)
+}
