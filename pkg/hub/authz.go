@@ -66,6 +66,13 @@ const (
 	// so a system-scoped binding carrying only these IDs does not
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
+
+	// ActionDeliver and ActionUse distinguish launch-time material delivery
+	// from an agent's own runtime retrieval or token-mint request. Neither
+	// is listed in isReadOnlyOperation: a material decision always runs the
+	// delegation ceiling.
+	ActionDeliver Action = "deliver"
+	ActionUse     Action = "use"
 )
 
 // Resource represents the target of an authorization check.
@@ -102,9 +109,9 @@ type Resource struct {
 
 	// ScopeUserID is the owning user of a user-scoped skill
 	// (store.Skill.ScopeID when ScopeKind is store.SkillScopeUser), set only
-	// by skillScopeResource/skillResource. It lets the agent creator
-	// user-skill relationship grant (agentCreatorUserSkillGrant) match the
-	// same column the skill list predicate filters on. Empty otherwise.
+	// by skillScopeResource/skillResource. It lets the personal-skill progeny
+	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
+	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
 }
 
@@ -144,15 +151,19 @@ type PrincipalContext struct {
 }
 
 // CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials.
+// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
+// the UAT's normalized permission ceiling — the single source every
+// credential-scope restriction evaluates through, for every ceiling
+// version.
 type CredentialContext struct {
 	Kind      CredentialKind
 	ID        string
 	Type      string
 	ProjectID string
 	Scopes    []string
+	Ceiling   permissions.FrozenPermissionCeiling
 
-	// E.1 descriptive credential metadata. Decoration is additive,
+	// Descriptive credential metadata. Decoration is additive,
 	// server-derived attribution (token name/boundary/purpose/labels) for
 	// logs and audit. It is never read by authorization decisions — see
 	// TestCredentialDecorationNotReadByAuthzCode.
@@ -331,12 +342,25 @@ type AuthzService struct {
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
-	return &AuthzService{
+	svc := &AuthzService{
 		store:                   s,
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
 	}
+	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
+	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
+	// Registration only fails for a programming error, so a failure here is
+	// logged, not fatal. Without a registered adapter, progenyAdapter returns
+	// none for "skill" (it is not a built-in store-adapter kind), and the
+	// progeny candidate's fact stage rejects it ("no sharing-source adapter")
+	// — fail closed, never open.
+	if err := svc.RegisterProgenyAdapter(skillProgenyAdapter{}); err != nil {
+		if logger != nil {
+			logger.Error("failed to register skill progeny adapter", "error", err)
+		}
+	}
+	return svc
 }
 
 // SetDecisionAuditEmitter configures the decision audit emitter.
@@ -422,6 +446,28 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 		}
 		permissionID = resolved
+	}
+
+	// ── Step 0: Delivery credential gate (ptone/scion#2228) ───────────
+	// Deliver permissions are admitted only for a delivery credential kind.
+	// The gate precedes every grant stage, so a role binding, synthetic
+	// agent binding or relationship grant cannot admit deliver for any
+	// other credential kind. Passing the gate is necessary, not
+	// sufficient: see authz_delivery_gate.go for the contract a delivery
+	// credential kind must meet before it joins the set.
+	if !deliveryCredentialAdmitted(permissionID, request.Action, credential.Kind) {
+		d := Decision{Allowed: false, Reason: deliveryGateReason}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				DenyReasons:     []string{deliveryGateReason},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
@@ -600,9 +646,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// ── Step 7: Build restrictions ────────────────────────────────────
 	var restrictions []Restriction
 
-	// 7a. UAT credential scope restriction.
-	if credential.Kind == CredentialKindUAT && len(credential.Scopes) > 0 {
-		restrictions = append(restrictions, uatScopeRestriction(credential.Scopes))
+	// 7a. UAT credential permission ceiling restriction. Every UAT request
+	// applies this restriction, including one whose ceiling has no
+	// permission IDs at all: an empty or malformed ceiling denies every
+	// permission rather than lifting the restriction.
+	if credential.Kind == CredentialKindUAT {
+		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
 	}
 
 	// 7b. Agent JWT scope restriction.
@@ -631,8 +680,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
 	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign, creator user skill) are evaluated as typed
-	// candidates through the common stages in authz_relationship_rules.go:
+	// hub-member assign) are evaluated as typed candidates through the
+	// common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
@@ -1145,31 +1194,16 @@ func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 // Restriction builders
 // =============================================================================
 
-// uatScopeRestriction builds a kernel Restriction from UAT credential scopes.
-// Only permissions whose agent scope strings match the UAT scopes are allowed.
-func uatScopeRestriction(scopes []string) Restriction {
-	// UAT scopes are in "resource:action" format. Map them to permission IDs.
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		scopeSet[s] = true
-		for _, implied := range permissions.LegacyUATScopeImplications[s] {
-			scopeSet[implied] = true
-		}
-	}
-	// Build the set of allowed permission IDs from the scopes.
-	allowed := make(map[string]struct{})
-	for _, p := range permissions.Registry {
-		scopeKey := p.Resource + ":" + p.Action
-		if scopeSet[scopeKey] {
-			allowed[p.ID] = struct{}{}
-		}
-	}
+// ceilingRestriction builds a kernel Restriction from a UAT's permission
+// ceiling. It defers entirely to FrozenPermissionCeiling.Allows: an empty,
+// zero-value, or unknown-version ceiling denies every permission rather
+// than lifting the restriction, and no scope ever implies another.
+func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction {
 	return Restriction{
 		Kind:        "credential_scope",
-		Description: "UAT credential scope restriction",
+		Description: "UAT credential permission ceiling",
 		Check: func(permissionID string) bool {
-			_, ok := allowed[permissionID]
-			return ok
+			return ceiling.Allows(permissionID)
 		},
 	}
 }
@@ -1433,12 +1467,27 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
-		// E.1: carry the descriptive decoration, if ValidateToken attached
-		// one, through to the credential context. This is the single copy
-		// point named in the E.1 design (plan §2.2); decoration is never
-		// otherwise derived here. Decoration() already returns a deep copy,
-		// so this assignment cannot alias the identity's stored value.
+		if scoped == nil {
+			// A typed-nil *ScopedUserIdentity satisfies this type assertion
+			// (ok == true, scoped == nil) even though identity == nil above
+			// was false, so this is reachable only through that Go
+			// interface/pointer distinction, never through a plain nil
+			// Identity. Keep Kind == CredentialKindUAT rather than falling
+			// through to the zero CredentialContext: callers key the UAT
+			// ceiling restriction (Decide step 7a) on Kind ==
+			// CredentialKindUAT, and a zero Kind reads as "no credential
+			// restriction," which would authorize the request exactly as an
+			// unrestricted principal. The zero-value Ceiling denies every
+			// permission (FrozenPermissionCeiling.Allows), so this stays
+			// fail-closed instead.
+			return CredentialContext{Kind: CredentialKindUAT}
+		}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
+		// Carry the descriptive decoration, if ValidateToken attached one,
+		// through to the credential context. This is the single copy point;
+		// decoration is never otherwise derived here. Decoration() already
+		// returns a deep copy, so this assignment cannot alias the
+		// identity's stored value.
 		cc.Decoration = scoped.Decoration()
 		return cc
 	}

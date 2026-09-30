@@ -652,6 +652,20 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	if records == 0 {
 		return nil
 	}
+	// The usage deriver sees every request whose wire format is valid, on the
+	// raw pre-policy input — mirroring handleLogs's validateLogs guard, even
+	// though processMetrics has no per-metric filter to route around (design
+	// §3.3). Matched metric names are consumed below, after policy
+	// processing, on the GCP path only. Gated on HasMetricRule so a harness
+	// with no metric-sourced rule (every one except copilot today) pays
+	// neither this extra validateMetrics pass nor ProcessResourceMetrics's
+	// walk over the batch.
+	var matchedUsageMetrics map[string]bool
+	if deriver := p.usageDeriver.Load(); deriver.HasMetricRule() {
+		if err := validateMetrics(resourceMetrics); err == nil {
+			matchedUsageMetrics = deriver.ProcessResourceMetrics(ctx, resourceMetrics)
+		}
+	}
 	if err := p.budget.reserve(bytes, records); err != nil {
 		p.metricDiagnostics.rejected.Add(int64(records))
 		return err
@@ -672,6 +686,15 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	}
 	processed := decision.Data
 	p.metricDiagnostics.filtered.Add(decision.Filtered)
+	if len(matchedUsageMetrics) > 0 && p.config.IsGCP() {
+		// Design §3.3 "Consume semantics for metric-sourced rules": on GCP,
+		// matched native metrics are removed here, before metricStreams.add,
+		// so they are neither rejected (which would fail the whole request)
+		// nor admitted. Generic OTLP leaves processed untouched, so they are
+		// forwarded as-is alongside the canonical counters the deriver just
+		// emitted over loopback.
+		processed = stripMatchedUsageMetrics(processed, matchedUsageMetrics)
+	}
 	if len(processed) == 0 {
 		return nil
 	}

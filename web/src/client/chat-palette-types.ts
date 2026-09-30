@@ -16,13 +16,14 @@
 
 /**
  * Shared discriminated target/candidate/group-state types for the native
- * chat quick command palette (Phase 1: the Agents/DM slice only).
+ * chat quick command palette, covering the Agents/DM, Threads, and People
+ * groups.
  *
  * Type-only module: importing this file must not eagerly pull in the
- * `<scion-chat-switcher>` component or any API client. Later phases add
- * 'threads' | 'people' | 'documents' to {@link PaletteGroup} and extend
- * {@link PaletteTarget}; the shapes below are written so those additions are
- * additive, not breaking.
+ * `<scion-chat-switcher>` component or any API client. A future 'documents'
+ * candidate kind can reuse the `PaletteGroup`/`PaletteTarget` shapes already
+ * declared below; the shapes are written so that addition is additive, not
+ * breaking.
  */
 
 /** The kind of DM peer: an agent or a human user. */
@@ -37,17 +38,46 @@ export interface PaletteDmTarget {
 }
 
 /**
- * The navigable result of a palette selection. Phase 1 only produces `dm`
- * targets (Agents group); `thread` and `document` targets are added by
- * phases 2 and 4 respectively.
+ * Selecting a Threads row switches conversation context in-page via the
+ * existing `handleThreadSelect` path. `projectSlug` is the space's *known*
+ * slug at candidate-build time — absent (never an empty string,
+ * exactOptionalPropertyTypes) when the space has none, in which case the
+ * navigation handler must route by `projectId` rather than guess another
+ * project's slug.
  */
-export type PaletteTarget = PaletteDmTarget;
+export interface PaletteThreadTarget {
+  kind: 'thread';
+  projectId: string;
+  threadId: string;
+  projectSlug?: string;
+  threadName: string;
+  defaultAgent?: string;
+}
+
+/**
+ * The navigable result of a palette selection: `dm` targets (Agents/People
+ * groups) or `thread` targets (Threads group). A future `document` target
+ * kind can extend this union the same way.
+ */
+export type PaletteTarget = PaletteDmTarget | PaletteThreadTarget;
 
 /**
  * The four groups the full palette renders (Agents, Threads, People,
- * Documents, in that reading order). Phase 1 only ever populates 'agents'.
+ * Documents, in that reading order). This exact array is the single source
+ * of truth for that reading/Tab order — the ranking comparator
+ * (`chat-palette-match.ts`) and the palette's own Tab/Shift+Tab cycling
+ * (`chat-switcher.ts`) both derive their group ordering from it so the two
+ * can never independently drift apart.
  */
 export type PaletteGroup = 'agents' | 'threads' | 'people' | 'documents';
+
+/** Reading/Tab order for the four palette groups: Agents, Threads, People, Documents. */
+export const PALETTE_GROUP_ORDER: readonly PaletteGroup[] = [
+  'agents',
+  'threads',
+  'people',
+  'documents',
+];
 
 /** One row in the palette result list. */
 export interface PaletteCandidate {
@@ -70,6 +100,15 @@ export interface GroupState {
   status: 'loading' | 'ready' | 'error';
   candidates: PaletteCandidate[];
   error?: string;
+  /**
+   * True when `candidates` is a coherent but incomplete snapshot: some of the
+   * group's underlying list requests failed while others succeeded (Threads:
+   * one or more spaces' thread lists). The group stays `'ready'` and its
+   * successful rows remain selectable, with this flag driving a visible
+   * incomplete-results notice, rather than flipping to `'error'`, which
+   * would hide rows that loaded fine.
+   */
+  incomplete?: boolean;
 }
 
 /** Detail for the `palette-select` event. */
@@ -97,4 +136,15 @@ export interface PaletteRetryDetail {
  */
 export function dmCandidateId(peerKind: PeerKind, peerId: string): string {
   return JSON.stringify(['dm', peerKind, peerId]);
+}
+
+/**
+ * Build the stable candidate ID for a Thread target: a JSON-encoded tuple,
+ * matching {@link dmCandidateId}'s shape and stability guarantee.
+ * `projectId` is included (not just `threadId`) so an ID never collides
+ * across projects even though thread IDs are already globally unique in
+ * practice.
+ */
+export function threadCandidateId(projectId: string, threadId: string): string {
+  return JSON.stringify(['thread', projectId, threadId]);
 }

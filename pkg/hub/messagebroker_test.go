@@ -1426,3 +1426,50 @@ func TestDeliverToUser_MentionExcludedFromDMActivity(t *testing.T) {
 		t.Fatalf("TypeInstruction: expected 1 DM row for recipient, got %d", len(dms))
 	}
 }
+
+// TestMessageBrokerProxy_SubscribesAgentResumedAfterStart: an agent that is
+// not running when the proxy starts (a hub restart while it was stopped) gets
+// the project subscriptions when it later reports running, so its replies to
+// users are delivered instead of silently dropped.
+func TestMessageBrokerProxy_SubscribesAgentResumedAfterStart(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "resumed-agent", "stopped")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = b.Close() })
+
+	dispatcher := &brokerMockDispatcher{}
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	userTopic := eventbus.TopicAllUserMessages(projectID)
+	agentTopic := eventbus.TopicAgentMessages(projectID, "resumed-agent")
+	subscribed := func(topic string) bool {
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		return proxy.subscribedTopics[topic]
+	}
+	if subscribed(userTopic) {
+		t.Fatal("user-message topic subscribed before any agent was running")
+	}
+
+	agent.Phase = "running"
+	if err := s.UpdateAgent(context.Background(), agent); err != nil {
+		t.Fatal(err)
+	}
+	events.PublishAgentStatus(context.Background(), agent)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !(subscribed(userTopic) && subscribed(agentTopic)) {
+		if time.Now().After(deadline) {
+			t.Fatalf("after a running status: user topic %v, agent topic %v; want both subscribed",
+				subscribed(userTopic), subscribed(agentTopic))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

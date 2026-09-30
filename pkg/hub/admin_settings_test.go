@@ -214,6 +214,144 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 	}
 }
 
+// Upstream review finding (GoogleCloudPlatform/scion#2115 follow-up,
+// ptone/scion#2315): deciding whether to delete the whole auto_expose_ports
+// section by checking the single named field Enabled != nil is fragile once
+// AutoExposePortsSettings gains a second field — a request that sets only
+// the new field, with Enabled omitted, would wrongly delete the section.
+// applySettingsUpdates now uses isZeroStruct (the same helper already used
+// for the quotas section) so the decision is section-generic: it looks at
+// every field, not one hardcoded name. This is directly exercised by
+// isZeroStruct's own tests (TestIsZeroStruct) for the current single-field
+// AutoExposePortsSettings; this test locks in the equivalent behavior through
+// the actual applySettingsUpdates entry point.
+func TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck(t *testing.T) {
+	// A struct with every field nil/zero must delete the section, regardless
+	// of which field(s) AutoExposePortsSettings has.
+	raw := map[string]interface{}{
+		"schema_version":    "1",
+		"auto_expose_ports": map[string]interface{}{"enabled": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{}})
+	if _, ok := raw["auto_expose_ports"]; ok {
+		t.Error("expected auto_expose_ports to be deleted when every field of AutoExposePortsSettings is nil")
+	}
+
+	// Any field being set must keep the section.
+	enabled := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{Enabled: &enabled}})
+	if _, ok := raw2["auto_expose_ports"]; !ok {
+		t.Error("expected auto_expose_ports to be kept when a field of AutoExposePortsSettings is set")
+	}
+}
+
+func TestApplySettingsUpdates_QuotasNilEnforceBrokerQuotas(t *testing.T) {
+	// When Quotas is provided but EnforceBrokerQuotas is nil, the key should
+	// be deleted to avoid persisting an empty quotas: {} block.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas": map[string]interface{}{
+			"enforce_broker_quotas": false,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{
+			EnforceBrokerQuotas: nil, // nil signals deletion
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["quotas"]; ok {
+		t.Error("expected quotas key to be deleted when EnforceBrokerQuotas is nil")
+	}
+}
+
+func TestApplySettingsUpdates_QuotasWithEnforceBrokerQuotas(t *testing.T) {
+	// When Quotas is provided with a non-nil EnforceBrokerQuotas, the key
+	// should be set normally.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+	}
+
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{
+			EnforceBrokerQuotas: &enforced,
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	q, ok := raw["quotas"]
+	if !ok {
+		t.Fatal("expected quotas key to be present")
+	}
+	qMap, ok := q.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected quotas to be a map, got %T", q)
+	}
+	if qMap["enforce_broker_quotas"] != false {
+		t.Errorf("expected enforce_broker_quotas=false, got %v", qMap["enforce_broker_quotas"])
+	}
+}
+
+func TestApplySettingsUpdates_QuotasNilRequest(t *testing.T) {
+	// When Quotas itself is nil in the request, the existing value should be
+	// preserved (no change).
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas": map[string]interface{}{
+			"enforce_broker_quotas": false,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		Quotas: nil,
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["quotas"]; !ok {
+		t.Error("expected quotas to be preserved when request field is nil")
+	}
+}
+
+// Upstream review finding (GoogleCloudPlatform/scion#2115, gemini-code-assist,
+// pkg/hub/admin_settings.go): deciding whether to delete the whole quotas
+// section by checking the single named field EnforceBrokerQuotas != nil is
+// fragile once QuotaSettings gains a second field — a request that sets only
+// the new field, with EnforceBrokerQuotas omitted, would wrongly delete the
+// section. applySettingsUpdates now uses isZeroStruct (the same helper
+// admin_settings_db.go already uses for this exact "is anything meaningfully
+// set" question), so the decision is section-generic: it looks at every
+// field, not one hardcoded name. This is directly exercised by isZeroStruct's
+// own tests (TestIsZeroStruct) for the current single-field QuotaSettings;
+// this test locks in the equivalent behavior through the actual
+// applySettingsUpdates entry point.
+func TestApplySettingsUpdates_QuotasSectionGenericZeroCheck(t *testing.T) {
+	// A struct with every field nil/zero must delete the section, regardless
+	// of which field(s) QuotaSettings has.
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"quotas":         map[string]interface{}{"enforce_broker_quotas": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{}})
+	if _, ok := raw["quotas"]; ok {
+		t.Error("expected quotas to be deleted when every field of QuotaSettings is nil")
+	}
+
+	// Any field being set must keep the section.
+	enabled := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enabled}})
+	if _, ok := raw2["quotas"]; !ok {
+		t.Error("expected quotas to be kept when a field of QuotaSettings is set")
+	}
+}
+
 // TestApplySettingsUpdates_ClearFieldsToBlank is a regression test for
 // ptone/scion#860: clearing a field to blank in the admin UI should delete
 // the key from settings.yaml, not preserve the old value.
@@ -376,5 +514,43 @@ func TestHandlePutServerConfig_DefaultUserRole_ViewerPersistedAndApplied(t *test
 	}
 	if got := srv.DefaultUserRole(); got != "viewer" {
 		t.Errorf("live DefaultUserRole() = %q after reload, want viewer", got)
+	}
+}
+
+// Test 8 (design 4.7 P1b): file-mode PUT of quotas.enforce_broker_quotas
+// persists it to settings.yaml and applies it live via reloadSettings,
+// without a restart.
+func TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRestart(t *testing.T) {
+	srv := &Server{}
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
+
+	// A real settings.yaml always has a "server" key (hub port, etc.) by the
+	// time an admin edits Layer-1 settings; include one here so the file-mode
+	// reload path (loadServerFromSettingsFile) recognizes the file as
+	// versioned settings, exactly like a deployed hub's settings.yaml would.
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"server":{"hub":{"port":9810}},"quotas":{"enforce_broker_quotas":false}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	quotas, _ := raw["quotas"].(map[string]interface{})
+	if got, ok := quotas["enforce_broker_quotas"].(bool); !ok || got != false {
+		t.Errorf("persisted quotas.enforce_broker_quotas = %v, want false (settings.yaml: %s)", quotas["enforce_broker_quotas"], data)
+	}
+
+	// No restart: the in-memory config must already reflect the new value.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after PUT, without a restart")
 	}
 }

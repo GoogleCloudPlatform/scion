@@ -441,11 +441,13 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 	switch v := actor.(type) {
 	case *ScopedUserIdentity:
 		if v != nil {
-			scopes := v.ScopedScopes()
-			if len(scopes) > 0 {
-				r := uatScopeRestriction(scopes)
-				restriction = &r
-			}
+			// Always apply the ceiling restriction, even when it has no
+			// permission IDs at all: an empty or malformed ceiling denies
+			// delegation of every permission rather than lifting the
+			// restriction. CanDelegate applies the same ceiling as Decide;
+			// no scope implies another.
+			r := ceilingRestriction(v.Ceiling())
+			restriction = &r
 		}
 	case AgentIdentity:
 		r := agentScopeRestriction(v)

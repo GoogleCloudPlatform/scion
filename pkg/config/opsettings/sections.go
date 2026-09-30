@@ -19,6 +19,8 @@
 package opsettings
 
 import (
+	"encoding/json"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -134,6 +136,15 @@ type ProfilesSettings = map[string]config.V1ProfileConfig
 // The entire map is stored as a single JSONB document in hub_settings.
 type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 
+// QuotaSettings holds Layer-1 quota enforcement settings.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent. When false, usage is
+	// still counted (reservations, release, reconcile, backfill all run) —
+	// only the reject is skipped (design P1-D5).
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //
@@ -154,8 +165,46 @@ type MessagingSettings struct {
 	// This is a security-critical flag requiring revision/ETag concurrency.
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
 
+	// OffloadThresholdRunes is the rune-count threshold above which an
+	// agent-recipient DM body is replaced by a fetch stub at dispatch
+	// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Compiled
+	// default 0 (disabled); negative values are treated as 0. Nothing in
+	// Phase 1/2 wires `offload_fetch_by_id` — that setting is added in
+	// Phase 3.
+	OffloadThresholdRunes *int `json:"offload_threshold_runes,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
 	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
+}
+
+// ExperimentsSettings stores only explicit admin overrides for the
+// pkg/experiments registry. An absent key means "use the registry default".
+// Absent row = no overrides.
+//
+// DB-only (runtime state), no settings.yaml representation: experiment names
+// contain dots, and koanf uses "." as its key delimiter, so a koanf-backed
+// map keyed by experiment name would split "web.terminal_workspace" into
+// nested keys (ptone/scion#2217).
+type ExperimentsSettings struct {
+	Overrides map[string]bool `json:"overrides,omitempty"`
+}
+
+// ParseExperimentsDoc applies exactly the Refresh/Update malformed predicate
+// (operational_settings.go): malformed = the raw bytes are not valid JSON, or
+// they do not unmarshal into ExperimentsSettings. Schema validity is
+// deliberately NOT part of this predicate — a parseable but schema-invalid
+// document (e.g. an extra top-level key) is not "malformed" in this sense,
+// even though Validate rejects it on write. Refresh and Update keep their
+// generic check through sec.New(), which is the same predicate for this
+// struct; ReadAuthoritativeExperiments calls this function directly.
+func ParseExperimentsDoc(raw json.RawMessage) (doc ExperimentsSettings, malformed bool) {
+	if !json.Valid(raw) {
+		return ExperimentsSettings{}, true
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ExperimentsSettings{}, true
+	}
+	return doc, false
 }

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -79,6 +80,19 @@ type OutboundMessageRequest struct {
 	// message delivery (#1691). Only meaningful for agent-to-agent DMs;
 	// ignored for user and group recipients (zero resumes invoked).
 	Wake bool `json:"wake,omitempty"`
+
+	// Deliberately no Raw field (ptone/scion#2192 inventory): this is the
+	// agent-to-user/agent-to-agent outbound path
+	// (handleAgentOutboundMessage). A "raw" key in the request body is an
+	// unrecognized field, dropped by JSON decoding rather than tombstoned.
+	// This is a deliberate decision, not an oversight: raw keystroke
+	// delivery only applies when the *recipient* is an agent runtime with
+	// an attached terminal. For a user recipient there is never a terminal;
+	// for an agent-to-agent DM sent via this outbound path, "raw" has no
+	// defined semantics either (the direct single-agent raw shape this
+	// phase preserves is reached through handleAgentMessage's inbound DM
+	// fork, not here). Do not add a Raw field or a rejection guard for it
+	// unless a future phase defines outbound raw semantics.
 }
 
 // deliveryPath identifies how an outbound message should be persisted and dispatched.
@@ -577,16 +591,12 @@ func (s *Server) resolveOutboundRouting(
 				return nil, parseErr
 			}
 			// The authenticated sender is one side of the DM; the other is the addressee.
-			derivedAuthKind, derivedAuthID := authenticatedSender(ctx)
-			var addrKind, addrID string
-			if kindA == derivedAuthKind && idA == derivedAuthID {
-				addrKind, addrID = kindB, idB
-			} else if kindB == derivedAuthKind && idB == derivedAuthID {
-				addrKind, addrID = kindA, idA
-			} else {
+			addrKind, addrID, ok := nonSenderDMSide(ctx, kindA, idA, kindB, idB)
+			if !ok {
 				// Sender is not named in the DM key.
+				senderKind, senderID := authenticatedSender(ctx)
 				s.messageLog.Error("DEF-152: authenticated sender not found in DM key",
-					"auth_kind", derivedAuthKind, "auth_id", derivedAuthID,
+					"auth_kind", senderKind, "auth_id", senderID,
 					"external_ref", convResult.ExternalRef)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 					"failed to derive addressee: sender not found in conversation", nil)
@@ -733,6 +743,11 @@ func (s *Server) resolveOutboundRouting(
 				}
 
 			case "direct":
+				// A supplied dm: thread_id must match the conversation's own key.
+				if err := s.checkDirectThreadIDMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, req.ThreadID); err != nil {
+					return nil, err
+				}
+
 				// DEF-158: backfill ThreadID with the DM key for direct conversations.
 				// F5: validDMKey guard intentionally removed — ParseDMKey in S5 already
 				// validated the key format. The DM key cannot reach this point unparsed.
@@ -740,14 +755,10 @@ func (s *Server) resolveOutboundRouting(
 					req.ThreadID = convResult.ExternalRef
 				}
 
-				// DEF-161 (direct half): when the caller supplied an explicit recipient
-				// alongside a direct conv-ref, validate that the recipient is actually
-				// named in the DM key. For direct conversations the DM key IS the ACL
-				// and is derivable — a mismatch is an authorization-shaped error, not a
-				// shape mismatch. Do NOT silently overwrite (contrast with the group half
-				// above where overwriting is the correct action).
+				// DEF-161 (direct half): an explicit recipient must match the DM
+				// key's non-sender participant; do NOT silently overwrite it.
 				explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
-				if err := s.checkDirectRecipientMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, recipientID, explicitRecipient); err != nil {
+				if err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient); err != nil {
 					return nil, err
 				}
 
@@ -788,8 +799,13 @@ func (s *Server) resolveOutboundRouting(
 	// and no conversation_ref is rejected earlier), so it is always false
 	// here.
 	if !convRefResolved && asserted && convResult.Kind == "direct" {
+		// Same dm: thread_id consistency check as the conv-ref path above.
+		if err := s.checkDirectThreadIDMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, req.ThreadID); err != nil {
+			return nil, err
+		}
+
 		explicitRecipient := req.Recipient != "" || req.RecipientID != ""
-		if err := s.checkDirectRecipientMatchesDMKey(w, convResult.ConversationID, convResult.ExternalRef, recipientID, explicitRecipient); err != nil {
+		if err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient); err != nil {
 			return nil, err
 		}
 	}
@@ -835,19 +851,40 @@ func (s *Server) resolveOutboundRouting(
 	return result, nil
 }
 
-// checkDirectRecipientMatchesDMKey applies the DEF-161 direct-conversation
+// nonSenderDMSide returns the DM key participant that is NOT the
+// authenticated sender. This is the canonical "who is the other side of this
+// DM" selection: it is used by S5 addressee derivation to pick the addressee,
+// and reused below so the direct-conversation recipient check agrees with
+// derivation on which half of the key is "the recipient". ok is false when
+// the authenticated sender is not named in the key at all (should not happen
+// once S4 has authorized the conversation; callers fail closed on !ok).
+func nonSenderDMSide(ctx context.Context, kindA, idA, kindB, idB string) (addrKind, addrID string, ok bool) {
+	senderKind, senderID := authenticatedSender(ctx)
+	switch {
+	case kindA == senderKind && idA == senderID:
+		return kindB, idB, true
+	case kindB == senderKind && idB == senderID:
+		return kindA, idA, true
+	default:
+		return "", "", false
+	}
+}
+
+// checkDirectRecipientMatchesDMKey applies the ptone/scion#2212 direct-conversation
 // recipient check: when the caller supplied an explicit recipient alongside
-// an asserted direct conversation, that recipient must be one of the two
-// participants named in the conversation's DM key. For direct conversations
-// the DM key IS the ACL and is derivable — a mismatch is an
-// authorization-shaped error, not a shape mismatch. This is shared by both
-// ways a caller can assert a direct conversation: a resolved
-// conversation_ref and a raw conversation_id, so the two behave identically.
-func (s *Server) checkDirectRecipientMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, recipientID string, explicitRecipientSupplied bool) error {
+// an asserted direct conversation, that recipient must match the DM key's
+// non-sender participant by ID, and by kind when the recipient carries one —
+// the same participant S5 addressee derivation would have picked (see
+// nonSenderDMSide). For direct conversations the DM key IS the ACL and is
+// derivable — a mismatch is an authorization-shaped error, not a shape
+// mismatch. This is shared by both ways a caller can assert a direct
+// conversation: a resolved conversation_ref and a raw conversation_id, so the
+// two behave identically.
+func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.ResponseWriter, conversationID, externalRef, recipient, recipientID string, explicitRecipientSupplied bool) error {
 	if !explicitRecipientSupplied {
 		return nil
 	}
-	_, idA, _, idB, parseErr := messages.ParseDMKey(externalRef)
+	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(externalRef)
 	if parseErr != nil {
 		s.messageLog.Error("DEF-161: cannot parse DM key for recipient validation",
 			"external_ref", externalRef, "conversation_id", conversationID, "error", parseErr)
@@ -855,21 +892,55 @@ func (s *Server) checkDirectRecipientMatchesDMKey(w http.ResponseWriter, convers
 			"conversation has an invalid DM key; cannot validate recipient", nil)
 		return parseErr
 	}
-	// The supplied recipientID must match one of the two participants.
-	if recipientID != idA && recipientID != idB {
-		s.messageLog.Warn("DEF-161: supplied recipient does not match DM key participants",
-			"recipient_id", recipientID, "dm_key_idA", idA, "dm_key_idB", idB,
+	addrKind, addrID, ok := nonSenderDMSide(ctx, kindA, idA, kindB, idB)
+	if !ok {
+		s.messageLog.Error("DEF-161: authenticated sender not found in DM key for recipient validation",
+			"external_ref", externalRef, "conversation_id", conversationID)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"cannot validate recipient: sender not found in conversation", nil)
+		return fmt.Errorf("sender not in DM key")
+	}
+	// The supplied recipient must match the non-sender participant by ID,
+	// and by kind when a kind was supplied — not merely appear somewhere in
+	// the key — otherwise a caller could supply their own ID (always "in"
+	// the key) or the right ID under the wrong kind, and both would
+	// incorrectly read as consistent. A recipient with no kind (recipient_id
+	// only) carries no kind to compare, so it cannot be "the wrong kind";
+	// the ID comparison alone still rejects the sender's own ID.
+	recipientKind, hasKind := messages.PrincipalKindFromAddress(recipient)
+	if (hasKind && recipientKind != addrKind) || recipientID != addrID {
+		s.messageLog.Warn("DEF-161: supplied recipient does not match the direct conversation's non-sender participant",
+			"recipient_kind", recipientKind, "recipient_id", recipientID,
+			"dm_key_addr_kind", addrKind, "dm_key_addr_id", addrID,
 			"external_ref", externalRef)
-		// This helper serves both the conversation_ref and the raw
-		// conversation_id paths (see the doc comment above), so the body
-		// deliberately says "direct conversation" rather than "conversation
-		// reference" — it reads correctly no matter which way the caller
-		// named the conversation. Both call sites share this single body;
-		// do not fork it per path.
+		// Both call sites share this single body; do not fork it per path.
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"a recipient may not be supplied with a direct conversation — "+
 				"the conversation is the address; remove the recipient and retry", nil)
-		return fmt.Errorf("recipient not in DM key")
+		return fmt.Errorf("recipient does not match DM key non-sender participant")
+	}
+	return nil
+}
+
+// checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation
+// thread_id check: when the caller supplied a dm:-prefixed thread_id
+// alongside an asserted direct conversation, that thread_id must equal the
+// conversation's own DM key (ExternalRef) — a mismatched dm: thread_id names
+// a different conversation than the one the caller just asserted. A no-op
+// when thread_id is empty (still backfilled elsewhere) or not dm:-prefixed
+// (some other addressing scheme). Shared by both the conversation_ref and
+// the raw conversation_id paths, so the two behave identically.
+func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversationID, externalRef, threadID string) error {
+	if !strings.HasPrefix(threadID, "dm:") {
+		return nil
+	}
+	if threadID != externalRef {
+		s.messageLog.Warn("supplied dm: thread_id does not match the direct conversation's key",
+			"thread_id", threadID, "external_ref", externalRef, "conversation_id", conversationID)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"thread_id does not match the direct conversation's key — "+
+				"omit thread_id or use the conversation's own dm: key", nil)
+		return fmt.Errorf("thread_id does not match DM key")
 	}
 	return nil
 }
@@ -1137,6 +1208,20 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg); err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
 					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
+					// The in-process bus could not queue this delivery for at
+					// least one matching subscriber, normally the per-project
+					// persistence subscriber, so hub persistence most likely did
+					// not happen. At-least-once caveats (ptone/scion#2311): other
+					// fan-out spokes (e.g. an external chat channel) may already
+					// have the message, so a retry can duplicate it there; if the
+					// drop hit a non-delivering pattern subscriber, the message may
+					// in fact be persisted; attachments ingested above are
+					// re-ingested on retry.
+					writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
+					return
+				}
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
 					"Message delivery failed: "+err.Error(), nil)
 				return
@@ -1520,6 +1605,26 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Phase 0.2 (ptone/scion#2192): reject unsafe raw combinations before any
+	// side effect. Raw is normalized above (top-level req.Raw OR'd onto the
+	// nested StructuredMessage.Raw, GoogleCloudPlatform/scion#2053
+	// compatibility); this guard must run before mention validation,
+	// conversation resolution, attachment ingestion, wake handling and
+	// persistence, all of which start below.
+	if v := evaluateRawMessageGuard(rawMessageGuardInput{
+		Msg:              structuredMsg,
+		ExplicitMentions: len(req.Mentions),
+		Wake:             req.Wake,
+		Interrupt:        req.Interrupt,
+		Surface:          req.Surface,
+		ExternalRef:      req.ExternalRef,
+		ParentRef:        req.ParentRef,
+		IsGroupRecipient: structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient),
+	}); v != nil {
+		writeRawGuardViolation(w, v)
+		return
+	}
+
 	// Validate the assembled message through the new envelope choke point.
 	// The structuredMsg is still the primary type during the transition;
 	// ValidateLegacyMessage converts internally and validates both old and
@@ -1580,6 +1685,66 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					Agent:      agent.Slug,
 					AgentPhase: agent.Phase,
 				})
+				return
+			}
+		}
+	}
+
+	// Phase 0.2 (ptone/scion#2192): raw to a managed-runtime target is
+	// rejected here, before any persistence, mention or
+	// conversation-resolution side effects, so raw never reaches a managed
+	// backend (CreateInteraction). managedAgentMessage below only accepts a
+	// plain-text body.
+	if structuredMsg != nil && structuredMsg.Raw && isManagedAgentRuntime(agent.Runtime) {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawManagedUnsupported,
+			"raw delivery is not supported for managed-runtime agents"))
+		return
+	}
+
+	// Phase 0.2 (ptone/scion#2192): reject cross-project agent-sender raw
+	// here, before conversation resolution starts further down
+	// (storeMsg/conversation build begins later in this function).
+	// agent_dm_operation.go step 4b applies the same check again inside
+	// ExecuteAgentDM as a second check, so a rejected cross-project raw
+	// send is refused here — before any conversation is created — and
+	// again there.
+	//
+	// Compares the stored sender record (not the token claim) with the same
+	// crossProjectRawUnsupported predicate as ExecuteAgentDM step 4b, so
+	// this early check is never weaker than that backstop.
+	if structuredMsg != nil && structuredMsg.Raw {
+		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+			senderAgentRecord, senderErr := s.store.GetAgent(ctx, senderAgent.ID())
+			if senderErr != nil {
+				s.messageLog.Error("raw guard: sender agent lookup failed",
+					"sender_id", senderAgent.ID(), "error", senderErr)
+				writeErrorFromErr(w, senderErr, "")
+				return
+			}
+			if senderAgentRecord == nil {
+				s.messageLog.Error("raw guard: sender agent lookup returned nil record",
+					"sender_id", senderAgent.ID())
+				writeErrorFromErr(w, store.ErrNotFound, "")
+				return
+			}
+			if crossProjectRawUnsupported(senderAgentRecord.ProjectID, agent.ProjectID) {
+				LogCrossProjectDecision(CrossProjectAuditEntry{
+					Timestamp:        time.Now(),
+					Action:           "deny",
+					SenderID:         senderAgentRecord.ID,
+					SenderProjectID:  senderAgentRecord.ProjectID,
+					RecipientID:      agent.ID,
+					RecipientProject: agent.ProjectID,
+					DecisionCode:     MessageDenialCrossProjectRawUnsupported,
+					Reason:           "cross-project raw keystroke delivery not supported",
+					CrossProject:     true,
+					Surface:          "agent_msg",
+				})
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability,
+					"cross-project raw message delivery is not supported",
+					map[string]interface{}{
+						"reason": string(MessageDenialCrossProjectRawUnsupported),
+					})
 				return
 			}
 		}
@@ -1826,6 +1991,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
+	// actually rendered a second time and dispatched below; it defaults to
+	// today's structuredMsg (possibly nil) and is only replaced with an
+	// offloaded copy on the human/broker-sender branch, after persistence
+	// and the unchanged first render. Nothing derived after dispatch
+	// (mention fan-out, observers, the HTTP response) may read it — those
+	// keep using structuredMsg / plainMessage.
+	dispatchMsg := structuredMsg
 	// F2b (design doc §3.3): the resolved conversation's ID when it is a
 	// group conversation, hoisted above the conversation-resolution block
 	// (like persistedMsgID) so every processMentions call site below —
@@ -1890,6 +2063,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
+		// assertedConvRow holds the *store.Conversation row looked up below
+		// when the caller supplied an authorized conversation_id (design
+		// auto-offload-large-dm §4.3, r4 #6). The offload check after
+		// dispatch-text rendering reuses this row instead of a second
+		// lookup; for every other conversation source (ConversationRef, the
+		// derived path, or none held) it stays nil and the offload check
+		// falls back to GetConversation(storeMsg.ConversationID) itself,
+		// only when the body actually qualifies.
+		var assertedConvRow *store.Conversation
 		// groupConvIsExistingReference is true only when the group
 		// conversation came from the caller referencing an
 		// already-existing conversation by ID (looked up and checked below,
@@ -1935,6 +2117,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"caller-supplied conversation_id does not exist", nil)
 				return
 			}
+			assertedConvRow = conv
 
 			// Authority differs by conversation kind. Direct conversations
 			// have ProjectID == nil (global), so project scoping cannot be
@@ -2205,22 +2388,33 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// referenced this group conversation by an existing,
 			// already-authorized ID, never one minted on demand from
 			// free-text thread_id.
-			var groupConv *messaging.ConversationResult
-			if convResult != nil && convResult.Kind == "group" {
-				groupConv = convResult
+			//
+			// Phase 0.2 (ptone/scion#2192): skipped entirely for raw.
+			// fanOutAgentMentions extracts mentions from the message body
+			// text itself (messages.ExtractProseMentions), not just the
+			// explicit Mentions field the raw guard already checks earlier
+			// in this function — a literal "@agent-slug" inside a raw
+			// keystroke payload must never be parsed as a mention or
+			// fanned out.
+			var mentionResults []messages.MentionResult
+			if !structuredMsg.Raw {
+				var groupConv *messaging.ConversationResult
+				if convResult != nil && convResult.Kind == "group" {
+					groupConv = convResult
+				}
+				mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+					Sender:             senderAgentRec,
+					SenderIdent:        senderAgentIdent,
+					Primary:            agent,
+					Msg:                plainMessage,
+					Type:               structuredMsg.Type,
+					Explicit:           req.Mentions,
+					ParentConv:         groupConv,
+					ParentConvVerified: groupConvIsExistingReference,
+					ParentMessageID:    dmResult.MessageID,
+					Channel:            structuredMsg.Channel,
+				})
 			}
-			mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
-				Sender:             senderAgentRec,
-				SenderIdent:        senderAgentIdent,
-				Primary:            agent,
-				Msg:                plainMessage,
-				Type:               structuredMsg.Type,
-				Explicit:           req.Mentions,
-				ParentConv:         groupConv,
-				ParentConvVerified: groupConvIsExistingReference,
-				ParentMessageID:    dmResult.MessageID,
-				Channel:            structuredMsg.Channel,
-			})
 
 			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689),
 			// "deferred" while the recipient is mid-migration (design
@@ -2251,6 +2445,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
+		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
+		// hub-reserved offload metadata keys before persist/render/dispatch,
+		// so a client cannot spoof body_offloaded/body_chars/body_sha256.
+		structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
@@ -2276,6 +2475,41 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Msg:        structuredMsg,
 				CreatedAt:  storeMsg.CreatedAt,
 			})
+		}
+
+		// #2257 (design auto-offload-large-dm §4.4): offload an
+		// over-threshold body onto the DISPATCHED copy. The persisted row
+		// and the DeliveryText rendered just above keep the full body.
+		// persistedMsgID == "" (CreateMessage failed) means Qualifies'
+		// MessageID guard never offloads — the body is delivered inline, as
+		// today.
+		pol := s.offloadPolicy()
+		if messaging.Qualifies(storeMsg.Msg, structuredMsg.Raw, structuredMsg.Plain, pol) {
+			convRow := assertedConvRow
+			if convRow == nil && storeMsg.ConversationID != "" {
+				convRow, _ = s.store.GetConversation(ctx, storeMsg.ConversationID)
+			}
+			canRead := convRow != nil && s.recipientCanReadConversation(ctx, convRow, agent)
+
+			deliverMsg, off := messaging.OffloadForDelivery(messaging.OffloadInput{
+				Msg:                  structuredMsg,
+				PersistedBody:        storeMsg.Msg,
+				MessageID:            persistedMsgID,
+				ConversationID:       storeMsg.ConversationID,
+				RecipientCanReadConv: canRead,
+				FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
+			}, pol)
+			if off.Offloaded {
+				if s.writeDenyEnabled() {
+					deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+						MessageID:  storeMsg.ID,
+						ConvResult: convResult,
+						Msg:        deliverMsg,
+						CreatedAt:  storeMsg.CreatedAt,
+					})
+				}
+				dispatchMsg = deliverMsg
+			}
 		}
 	}
 
@@ -2348,7 +2582,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer retryCancel()
 
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
 					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -2372,7 +2606,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// #1687: For cross-project DMs, strip body and attachment metadata from
 			// the observer message so unrelated project members receive no content
 			// through the broker publication sink.
-			if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
+			//
+			// Phase 0.2 (ptone/scion#2192): do not mirror terminal input to
+			// message observers — raw carries literal keystrokes, not a
+			// message body, so it must never reach this publication.
+			if !structuredMsg.Raw && strings.HasPrefix(structuredMsg.Sender, "agent:") &&
 				strings.HasPrefix(structuredMsg.Recipient, "agent:") {
 				if bp := s.GetMessageBrokerProxy(); bp != nil {
 					observerMsg := *structuredMsg
@@ -2501,6 +2739,12 @@ type GroupMessageResponse struct {
 // handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
 func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
 	ctx := r.Context()
+
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before any recipient copy is rendered or
+	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
+	// map, so stripping it once here covers all of them.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
@@ -2978,6 +3222,23 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Phase 0.2 (ptone/scion#2192): raw delivery is a single-agent-only
+	// compatibility shape; broadcast fan-out is always rejected before
+	// sender identity is stamped, targets are computed, or anything is
+	// published. Check Plain first so raw+plain answers 400 here exactly as
+	// it does on every other route (raw+plain is a request-shape conflict,
+	// independent of which route received it; raw-without-plain is then the
+	// broadcast-specific 422).
+	if req.StructuredMessage.Raw && req.StructuredMessage.Plain {
+		writeRawGuardViolation(w, rawPlainConflict())
+		return
+	}
+	if req.StructuredMessage.Raw {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBroadcastUnsupported,
+			"raw delivery does not support broadcast"))
+		return
+	}
+
 	// B5 SECURITY FIX: ALWAYS derive sender identity from the
 	// authenticated context, same as handleAgentMessage. Client-supplied
 	// Sender and SenderID are untrusted and must not be used as DM key
@@ -3143,6 +3404,13 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		return false
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before any recipient copy is rendered or
+	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
+	// map, so stripping it once here covers all of them. No offload here —
+	// broadcast rows have no ConversationID (design §10 P4 site 2).
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	for _, agent := range runningAgents {
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
@@ -3256,6 +3524,15 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		return nil
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys on originalMsg before any copy is derived from
+	// it. messages.NewMention below builds each mention's own fresh
+	// metadata map (not copied from originalMsg), so this is currently a
+	// defence-in-depth no-op for the mention copies themselves — it is kept
+	// here (rather than relying only on the caller's own strip) so this
+	// function's behaviour does not depend on caller discipline.
+	originalMsg.Metadata = messaging.StripReservedMetadata(originalMsg.Metadata)
+
 	// List project agents for resolution.
 	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
 	if err != nil {
@@ -3319,6 +3596,9 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// conversation (if any); the primary message's thread_id is never
 		// copied onto it.
 		mentionMsg.ThreadID = groupConversationThreadKey
+		// #2257 P2: strip on this copy too (U5(a) row), even though
+		// NewMention's own metadata never carries client input today.
+		mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of

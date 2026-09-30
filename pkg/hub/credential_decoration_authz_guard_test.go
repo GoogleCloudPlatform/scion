@@ -77,6 +77,7 @@ var decorationGuardAllowed = map[string]bool{
 
 	// Function/method-level carriage and rendering points.
 	"identity.go:NewScopedUserIdentityWithDecoration":            true,
+	"identity.go:NewScopedUserIdentityWithCeilingAndDecoration":  true,
 	"identity.go:(*ScopedUserIdentity).Decoration":               true,
 	"useraccesstoken.go:(*UserAccessTokenService).ValidateToken": true,
 	"authz.go:credentialContextForIdentity":                      true,
@@ -113,9 +114,10 @@ type decorationHit struct {
 // decorationSymbols are the identifiers/selectors that indicate a reference
 // to E.1's credential decoration.
 var decorationSymbols = map[string]bool{
-	"CredentialDecoration":                true,
-	"CredentialDecorationFromContext":     true,
-	"NewScopedUserIdentityWithDecoration": true,
+	"CredentialDecoration":                          true,
+	"CredentialDecorationFromContext":               true,
+	"NewScopedUserIdentityWithDecoration":           true,
+	"NewScopedUserIdentityWithCeilingAndDecoration": true,
 }
 
 // exprMentionsCredentialDecoration reports whether expr's type expression

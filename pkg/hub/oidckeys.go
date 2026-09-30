@@ -412,6 +412,23 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 
 	// 1. Try the secret backend (e.g. GCP Secret Manager)
 	if hasBackend {
+		// Mirrors ensureSigningKey's copy-forward in server.go: an OIDC
+		// signing key created before ptone/scion#2152 only exists under the
+		// legacy (pre hub-prefix) GCP SM name. Copy it forward — and repair
+		// the DB ref to point at the new name — before the Get below, so
+		// this read actually resolves through the prefixed name instead of
+		// silently continuing to read the legacy copy via a stale ref
+		// (review finding 5: .design/secret-id-hub-refactor.md §7 names
+		// oidc_signing_key explicitly as one of the keys this applies to).
+		// Idempotent;
+		// best-effort — a failure here just means the existing (legacy-ref)
+		// resolution below is used instead.
+		if gcpBackend, ok := cfg.Backend.(*secret.GCPBackend); ok {
+			if copyErr := gcpBackend.CopyHubSecretForward(ctx, keyName); copyErr != nil && copyErr != store.ErrNotFound {
+				m.log.Warn("Failed to copy OIDC signing key forward to hub-prefixed GCP SM name", "key", keyName, "error", copyErr)
+			}
+		}
+
 		sv, err := cfg.Backend.Get(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil {
 			m.log.Info("Loading OIDC signing key from secret backend", "key", keyName)

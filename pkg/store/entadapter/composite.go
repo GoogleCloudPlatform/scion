@@ -99,6 +99,7 @@ type CompositeStore struct {
 	*SkillStore
 	*SkillRegistryStore
 	*HubSettingStore
+	*BrokerSettingStore
 	*SkillInjectionStore
 	*ProjectPreStartHookStore
 	*AgentSessionMetricsStore
@@ -116,6 +117,13 @@ type CompositeStore struct {
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
+
+	// uatCeilingBackfillPageSize overrides BackfillUATCeilings's page size
+	// when non-zero; see defaultUATCeilingBackfillPageSize. Tests set this
+	// per instance to exercise pagination without creating hundreds of
+	// rows, and without a package-level variable that every store instance
+	// (and every test running concurrently) would otherwise share.
+	uatCeilingBackfillPageSize int
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -179,6 +187,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		SkillStore:               NewSkillStore(client),
 		SkillRegistryStore:       NewSkillRegistryStore(client),
 		HubSettingStore:          NewHubSettingStore(client),
+		BrokerSettingStore:       NewBrokerSettingStore(client),
 		SkillInjectionStore:      NewSkillInjectionStore(client),
 		ProjectPreStartHookStore: NewProjectPreStartHookStore(client),
 		AgentSessionMetricsStore: NewAgentSessionMetricsStore(client),
@@ -497,6 +506,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.ReconcileHarnessConfigColumn(ctx); err != nil {
 		return fmt.Errorf("harness_config column reconcile: %w", err)
+	}
+	if err := c.BackfillUATCeilings(ctx); err != nil {
+		return fmt.Errorf("user access token ceiling backfill: %w", err)
 	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.

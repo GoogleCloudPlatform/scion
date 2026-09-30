@@ -216,6 +216,46 @@ unknown_field: value
 	assert.True(t, found, "should report error about unknown_field, got: %v", errors)
 }
 
+// Review finding O1 (ptone/scion#2270 round 3): design 4.4 lists the
+// settings-v1 schema as in scope for the quotas.enforce_broker_quotas
+// toggle. Without a "quotas" entry, the top-level "additionalProperties":
+// false rejected a saved settings.yaml as soon as an admin flipped the
+// switch in file mode, so `scion config validate` (and `config migrate`)
+// would report it as invalid even though the hub itself loads and applies
+// it fine.
+func TestValidateSettings_Quotas(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: false
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "a valid quotas.enforce_broker_quotas should produce no errors, got: %v", errors)
+}
+
+func TestValidateSettings_QuotasInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean enforce_broker_quotas should produce a validation error")
+}
+
+func TestValidateSettings_QuotasUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under quotas should produce a validation error")
+}
+
 func TestValidateSettings_InvalidSchemaVersion(t *testing.T) {
 	data := []byte(`
 schema_version: "2"

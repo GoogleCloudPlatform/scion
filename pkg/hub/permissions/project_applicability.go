@@ -124,7 +124,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.lifecycle_hooks.read": false, "hub.lifecycle_hooks.update": false,
 	"hub.allow_list.read": false, "hub.allow_list.update": false,
 	"hub.project_defaults.read": false, "hub.project_defaults.update": false,
-	"hub.messaging.update": false, "hub.auth_reset.execute": false,
+	"hub.messaging.update": false, "hub.experiments.update": false, "hub.auth_reset.execute": false,
 	"hub.scheduler.read": false, "hub.scheduler.update": false,
 	"hub.federation.read": false, "hub.federation.update": false,
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
@@ -153,6 +153,12 @@ var ProjectTargetApplicability = map[string]bool{
 	"scheduled_event.delete": true, "scheduled_event.update": true,
 
 	"project.secret_read": true,
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129): every
+	// one of them can apply to an existing project target (a project-scope
+	// secret/env var/skill, or a project-parented GCP service account).
+	"secret.deliver": true, "env_var.deliver": true, "skill_injection.deliver": true,
+	"secret.use": true, "gcp_service_account.use": true,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for

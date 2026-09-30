@@ -60,6 +60,34 @@ func (_c *UserAccessTokenCreate) SetScopes(v string) *UserAccessTokenCreate {
 	return _c
 }
 
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_c *UserAccessTokenCreate) SetCeilingVersion(v int32) *UserAccessTokenCreate {
+	_c.mutation.SetCeilingVersion(v)
+	return _c
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_c *UserAccessTokenCreate) SetNillableCeilingVersion(v *int32) *UserAccessTokenCreate {
+	if v != nil {
+		_c.SetCeilingVersion(*v)
+	}
+	return _c
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_c *UserAccessTokenCreate) SetCeilingPermissionIds(v string) *UserAccessTokenCreate {
+	_c.mutation.SetCeilingPermissionIds(v)
+	return _c
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_c *UserAccessTokenCreate) SetNillableCeilingPermissionIds(v *string) *UserAccessTokenCreate {
+	if v != nil {
+		_c.SetCeilingPermissionIds(*v)
+	}
+	return _c
+}
+
 // SetRevoked sets the "revoked" field.
 func (_c *UserAccessTokenCreate) SetRevoked(v bool) *UserAccessTokenCreate {
 	_c.mutation.SetRevoked(v)
@@ -193,6 +221,10 @@ func (_c *UserAccessTokenCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *UserAccessTokenCreate) defaults() {
+	if _, ok := _c.mutation.CeilingVersion(); !ok {
+		v := useraccesstoken.DefaultCeilingVersion
+		_c.mutation.SetCeilingVersion(v)
+	}
 	if _, ok := _c.mutation.Revoked(); !ok {
 		v := useraccesstoken.DefaultRevoked
 		_c.mutation.SetRevoked(v)
@@ -246,6 +278,9 @@ func (_c *UserAccessTokenCreate) check() error {
 		if err := useraccesstoken.ScopesValidator(v); err != nil {
 			return &ValidationError{Name: "scopes", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.scopes": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.CeilingVersion(); !ok {
+		return &ValidationError{Name: "ceiling_version", err: errors.New(`ent: missing required field "UserAccessToken.ceiling_version"`)}
 	}
 	if _, ok := _c.mutation.Revoked(); !ok {
 		return &ValidationError{Name: "revoked", err: errors.New(`ent: missing required field "UserAccessToken.revoked"`)}
@@ -312,6 +347,14 @@ func (_c *UserAccessTokenCreate) createSpec() (*UserAccessToken, *sqlgraph.Creat
 	if value, ok := _c.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
 		_node.Scopes = value
+	}
+	if value, ok := _c.mutation.CeilingVersion(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+		_node.CeilingVersion = value
+	}
+	if value, ok := _c.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString, value)
+		_node.CeilingPermissionIds = &value
 	}
 	if value, ok := _c.mutation.Revoked(); ok {
 		_spec.SetField(useraccesstoken.FieldRevoked, field.TypeBool, value)
@@ -458,6 +501,42 @@ func (u *UserAccessTokenUpsert) SetScopes(v string) *UserAccessTokenUpsert {
 // UpdateScopes sets the "scopes" field to the value that was provided on create.
 func (u *UserAccessTokenUpsert) UpdateScopes() *UserAccessTokenUpsert {
 	u.SetExcluded(useraccesstoken.FieldScopes)
+	return u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *UserAccessTokenUpsert) SetCeilingVersion(v int32) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldCeilingVersion, v)
+	return u
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateCeilingVersion() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldCeilingVersion)
+	return u
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *UserAccessTokenUpsert) AddCeilingVersion(v int32) *UserAccessTokenUpsert {
+	u.Add(useraccesstoken.FieldCeilingVersion, v)
+	return u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsert) SetCeilingPermissionIds(v string) *UserAccessTokenUpsert {
+	u.Set(useraccesstoken.FieldCeilingPermissionIds, v)
+	return u
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *UserAccessTokenUpsert) UpdateCeilingPermissionIds() *UserAccessTokenUpsert {
+	u.SetExcluded(useraccesstoken.FieldCeilingPermissionIds)
+	return u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsert) ClearCeilingPermissionIds() *UserAccessTokenUpsert {
+	u.SetNull(useraccesstoken.FieldCeilingPermissionIds)
 	return u
 }
 
@@ -647,6 +726,48 @@ func (u *UserAccessTokenUpsertOne) SetScopes(v string) *UserAccessTokenUpsertOne
 func (u *UserAccessTokenUpsertOne) UpdateScopes() *UserAccessTokenUpsertOne {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.UpdateScopes()
+	})
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *UserAccessTokenUpsertOne) SetCeilingVersion(v int32) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetCeilingVersion(v)
+	})
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *UserAccessTokenUpsertOne) AddCeilingVersion(v int32) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.AddCeilingVersion(v)
+	})
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateCeilingVersion() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateCeilingVersion()
+	})
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsertOne) SetCeilingPermissionIds(v string) *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetCeilingPermissionIds(v)
+	})
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertOne) UpdateCeilingPermissionIds() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateCeilingPermissionIds()
+	})
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsertOne) ClearCeilingPermissionIds() *UserAccessTokenUpsertOne {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearCeilingPermissionIds()
 	})
 }
 
@@ -1011,6 +1132,48 @@ func (u *UserAccessTokenUpsertBulk) SetScopes(v string) *UserAccessTokenUpsertBu
 func (u *UserAccessTokenUpsertBulk) UpdateScopes() *UserAccessTokenUpsertBulk {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.UpdateScopes()
+	})
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (u *UserAccessTokenUpsertBulk) SetCeilingVersion(v int32) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetCeilingVersion(v)
+	})
+}
+
+// AddCeilingVersion adds v to the "ceiling_version" field.
+func (u *UserAccessTokenUpsertBulk) AddCeilingVersion(v int32) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.AddCeilingVersion(v)
+	})
+}
+
+// UpdateCeilingVersion sets the "ceiling_version" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateCeilingVersion() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateCeilingVersion()
+	})
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsertBulk) SetCeilingPermissionIds(v string) *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.SetCeilingPermissionIds(v)
+	})
+}
+
+// UpdateCeilingPermissionIds sets the "ceiling_permission_ids" field to the value that was provided on create.
+func (u *UserAccessTokenUpsertBulk) UpdateCeilingPermissionIds() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.UpdateCeilingPermissionIds()
+	})
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (u *UserAccessTokenUpsertBulk) ClearCeilingPermissionIds() *UserAccessTokenUpsertBulk {
+	return u.Update(func(s *UserAccessTokenUpsert) {
+		s.ClearCeilingPermissionIds()
 	})
 }
 

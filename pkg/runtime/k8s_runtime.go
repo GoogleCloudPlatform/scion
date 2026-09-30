@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -383,7 +384,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	}
 
 	if config.HomeDir != "" {
-		destHome := fmt.Sprintf("/home/%s", config.UnixUsername)
+		destHome := util.GetHomeDir(config.UnixUsername)
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		err = r.syncWithRetry(ctx, func() error {
@@ -1050,7 +1051,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 				case "file":
-					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
 					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 						Name:      "secrets-store",
 						MountPath: target,
@@ -1095,7 +1096,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "file" {
-					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
 					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 						Name:      "agent-secrets",
 						MountPath: target,
@@ -1106,10 +1107,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			}
 
 			if hasVariableSecrets {
-				scionDir := fmt.Sprintf("/home/%s/.scion", config.UnixUsername)
+				secretsJSONPath := filepath.Join(util.GetHomeDir(config.UnixUsername), ".scion", "secrets.json")
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 					Name:      "agent-secrets",
-					MountPath: scionDir + "/secrets.json",
+					MountPath: secretsJSONPath,
 					SubPath:   "secrets.json",
 					ReadOnly:  true,
 				})
@@ -1117,13 +1118,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	containerHome := util.GetHomeDir(config.UnixUsername)
+
 	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
 	// Auth files are injected via a K8s Secret rather than hostPath for portability.
 	if config.ResolvedAuth != nil {
 		for k, v := range config.ResolvedAuth.EnvVars {
 			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 		}
-		containerHome := fmt.Sprintf("/home/%s", config.UnixUsername)
 		if len(config.ResolvedAuth.Files) > 0 {
 			volName := "auth-files"
 			extraVolumes = append(extraVolumes, corev1.Volume{
@@ -1151,11 +1153,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// Inject GCP telemetry credential path if the well-known secret is present
-	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, fmt.Sprintf("/home/%s", config.UnixUsername)); credPath != "" {
+	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: telemetryGCPCredentialsEnvVar, Value: credPath})
 	}
-
-	containerHome := fmt.Sprintf("/home/%s", config.UnixUsername)
 
 	// Pass host user UID/GID for container user synchronization
 	envVars = append(envVars, corev1.EnvVar{Name: "SCION_HOST_UID", Value: fmt.Sprintf("%d", os.Getuid())})
@@ -2122,6 +2122,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			Kubernetes: &api.AgentK8sMetadata{
 				Namespace: p.Namespace,
 				PodName:   p.Name,
+				UID:       string(p.UID),
 			},
 		})
 	}
@@ -2406,7 +2407,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 			return err
 		}
 		if homeDir != "" && username != "" {
-			destHome := fmt.Sprintf("/home/%s", username)
+			destHome := util.GetHomeDir(username)
 			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
 			if err := r.syncWithRetry(ctx, func() error {
 				return r.syncFromPod(ctx, namespace, agent.ContainerID, destHome, homeDir)
@@ -2424,7 +2425,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return err
 	}
 	if homeDir != "" && username != "" {
-		destHome := fmt.Sprintf("/home/%s", username)
+		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, agent.ContainerID, homeDir, destHome)
@@ -2444,6 +2445,27 @@ func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (
 // exposing them via a process's command line. See #1355.
 func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	return r.execWithOptionalStdin(ctx, id, cmd, stdin)
+}
+
+// wrapExecStreamError builds the error execWithOptionalStdin returns for a
+// failed exec stream. It normally embeds stderr for diagnostics, but when
+// ctx is marked via WithSensitiveExec it omits stderr entirely: the target
+// process's stderr, or (for a stdin-delivered call such as SendKeys's tmux
+// invocation) its stdin, can carry caller-supplied content, and embedding it
+// here would defeat suppression done anywhere else in the stack. Factored
+// out from execWithOptionalStdin so it can be unit-tested without a real
+// Kubernetes API server (see TestWrapExecStreamError_SensitiveOmitsStderr).
+//
+// execWithOptionalStdin's own call site is not separately covered: driving
+// a real failing exec stream through remotecommand.NewSPDYExecutor needs a
+// server speaking the Kubernetes exec subprotocol, not just a fake
+// clientset, and that scaffolding was judged not worth adding for one call
+// site that does nothing but forward to this already-tested helper.
+func wrapExecStreamError(ctx context.Context, err error, stderr string) error {
+	if IsSensitiveExec(ctx) {
+		return fmt.Errorf("exec failed: %w", err)
+	}
+	return fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr)
 }
 
 // execWithOptionalStdin is the shared implementation behind Exec and
@@ -2505,7 +2527,7 @@ func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string
 	})
 
 	if err != nil {
-		return stdout.String(), fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr.String())
+		return stdout.String(), wrapExecStreamError(ctx, err, stderr.String())
 	}
 
 	return stdout.String(), nil

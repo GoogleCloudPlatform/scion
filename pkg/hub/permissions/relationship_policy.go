@@ -20,11 +20,12 @@ package permissions
 // reference the same rows here, so there is never a second, drifting
 // action allowlist for the same rule. At most two rows per (Relationship,
 // PrincipalKind, ResourceType), and only with disjoint PermissionIDs and
-// differing MintEligible (enforced by TestRelationshipPolicy_Consistency in
-// pkg/hub); ResourceType is always explicit, never a wildcard.
+// differing in MintEligible or ReadOnly (enforced by
+// TestRelationshipPolicy_Consistency in pkg/hub); ResourceType is always
+// explicit, never a wildcard.
 type RelationshipPolicy struct {
 	// Relationship is the canonical rule name: "owner", "ancestor",
-	// "progeny", "hub_member_sa_assign", "creator_user_skill" — matching
+	// "progeny", "hub_member_sa_assign" — matching
 	// hub.RelationshipType / B.1's RelationshipRuleID strings.
 	Relationship string
 	// PrincipalKinds lists which principal kinds this row applies to, e.g.
@@ -48,9 +49,9 @@ type RelationshipPolicy struct {
 
 // RelationshipPolicies ships with the two rows A.1 needs for agent
 // owner/ancestor attach and port access. B.1 extends this table (progeny,
-// hub_member_sa_assign, creator_user_skill, additional PrincipalKinds such
-// as agent-ancestor) from its characterization of today's
-// owner/ancestor/progeny-reachable permissions.
+// hub_member_sa_assign, additional PrincipalKinds such as agent-ancestor)
+// from its characterization of today's owner/ancestor/progeny-reachable
+// permissions.
 var RelationshipPolicies = []RelationshipPolicy{
 	{
 		Relationship:   "owner",
@@ -197,12 +198,31 @@ var RelationshipPolicies = []RelationshipPolicy{
 		PermissionIDs:  []string{"gcp_service_account.assign"},
 	},
 	{
-		// creator_user_skill/agent/skill (TestRelationshipCharacterization_CreatorUserSkill).
-		Relationship:   "creator_user_skill",
+		// progeny/agent/skill: an agent reads its origin user's personal
+		// skills, keyed on the skill's owning bucket rather than a per-record
+		// creator field (TestRelationshipCharacterization_ProgenySkillRead).
+		Relationship:   "progeny",
 		PrincipalKinds: []string{"agent"},
 		ResourceType:   ResourceSkill,
 		PermissionIDs:  []string{"skill.read"},
 		ReadOnly:       true,
+	},
+	{
+		// progeny/agent/secret exact pairs (ptone/scion#2129): runtime use and
+		// launch delivery of an opted-in user-scope secret. Not read only;
+		// each ID is a reviewed exact pair in pkg/hub progenyExactPairs.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.use", "secret.deliver"},
+	},
+	{
+		// progeny/agent/env_var exact pair (ptone/scion#2129): launch delivery
+		// of an opted-in user-scope env var. Not read only.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
 	},
 }
 

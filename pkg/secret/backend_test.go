@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -245,6 +246,65 @@ func TestSecretFetch_MissingRecordNotResolvedByName(t *testing.T) {
 			t.Errorf("expected store.ErrNotFound (no name-based fallback), got value=%q err=%v", res.Value, res.Err)
 		}
 	})
+}
+
+// TestSecretFetch_NoStoredRefFallsBackToLegacyName covers the
+// ptone/scion#2152 (hub-prefixed Secret Manager names) /
+// GoogleCloudPlatform/scion#2085 (FetchValues) interaction: unlike the
+// no-DB-record case above, a DB record that DOES exist but has no stored ref
+// yet -- not yet touched by `migrate-names` or hub-boot copy-forward -- is
+// not "missing" for FetchValues' purposes, so it resolves the value through
+// GCPBackend's computed-name fallback (the hub-prefixed name, then the
+// legacy pre-prefix name with a WARN log), the same way Get already does for
+// this case. Only the no-DB-record path is name-fallback-free.
+func TestSecretFetch_NoStoredRefFallsBackToLegacyName(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	ctx := context.Background()
+
+	legacyName := backend.legacyGCPSecretName("LEGACY_KEY", ScopeUser, "user-1")
+	seedMockSecret(t, mock, backend.projectID, legacyName, "legacy-only-value")
+
+	rec := &store.Secret{ID: tid("fetch-no-ref"), Key: "LEGACY_KEY", Scope: ScopeUser, ScopeID: "user-1"}
+	if err := backend.store.CreateSecret(ctx, rec); err != nil {
+		t.Fatalf("CreateSecret failed: %v", err)
+	}
+	if rec.SecretRef != "" {
+		t.Fatalf("test setup: expected no stored ref, got %q", rec.SecretRef)
+	}
+	meta := fromStoreSecretMeta(rec)
+
+	orig := slog.Default()
+	h := &recordingHandler{}
+	slog.SetDefault(slog.New(h))
+	defer slog.SetDefault(orig)
+
+	results, err := backend.FetchValues(ctx, []SecretMeta{*meta})
+	if err != nil {
+		t.Fatalf("FetchValues failed: %v", err)
+	}
+	res := results[meta.ID]
+	if res.Err != nil {
+		t.Errorf("expected the legacy-name fallback to resolve the value, got err=%v", res.Err)
+	}
+	if res.Value != "legacy-only-value" {
+		t.Errorf("expected the legacy value, got %q", res.Value)
+	}
+	if !h.hasWarnContaining("legacy") {
+		t.Error("expected a WARN log mentioning the legacy fallback")
+	}
+	h.mu.Lock()
+	for _, r := range h.records {
+		if strings.Contains(r.Message, "legacy-only-value") {
+			t.Errorf("log record must not contain the secret value: %q", r.Message)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), "legacy-only-value") {
+				t.Errorf("log record attribute must not contain the secret value: %s=%q", a.Key, a.Value)
+			}
+			return true
+		})
+	}
+	h.mu.Unlock()
 }
 
 // ============================================================================

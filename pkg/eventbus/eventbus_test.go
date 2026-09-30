@@ -16,6 +16,7 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -268,6 +269,35 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 
 	if callCount != 0 {
 		t.Fatalf("expected 0 calls for non-matching topic, got %d", callCount)
+	}
+}
+
+// TestInProcessEventBus_UserTopicBufferFullReturnsError is a regression test
+// for ptone/scion#2311: a user-message publish that cannot be queued because
+// the matching subscriber's buffer is full must be reported to the caller
+// instead of silently dropped.
+func TestInProcessEventBus_UserTopicBufferFullReturnsError(t *testing.T) {
+	topic := "scion.project.g1.user.alice.messages"
+	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.user.*.messages", topic, msg)
+
+	// The buffer is now full: the next publish must be dropped and reported.
+	if err := b.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
+		t.Fatalf("expected ErrSubscriberBufferFull, got %v", err)
+	}
+}
+
+// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget guards the
+// size-gated scope of the ptone/scion#2311 fix: every topic other than
+// user-messages keeps the historical fire-and-forget behaviour — the drop is
+// logged but Publish still returns nil.
+func TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget(t *testing.T) {
+	topic := "scion.project.g1.agent.myagent.messages"
+	msg := messages.NewInstruction("user:alice", "agent:myagent", "hi")
+	b := newSaturatedSubscriberInproc(t, "scion.project.g1.agent.*.messages", topic, msg)
+
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("expected nil error for non-user-message topic drop (fire-and-forget unchanged), got %v", err)
 	}
 }
 

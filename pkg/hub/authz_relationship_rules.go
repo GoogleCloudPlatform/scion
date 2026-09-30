@@ -17,9 +17,8 @@ package hub
 // Relationship candidates (ptone/scion#2119).
 //
 // A named relationship (owner, ancestor, progeny, hub-member service-account
-// assign, creator user skill) produces a typed candidate for the requested
-// permission. Every candidate passes the same ordered stages before it may
-// grant anything:
+// assign) produces a typed candidate for the requested permission. Every
+// candidate passes the same ordered stages before it may grant anything:
 //
 //  1. relationship_policy  — the permission is listed for the relationship,
 //     principal kind and resource type in permissions.RelationshipPolicies;
@@ -54,7 +53,6 @@ const (
 	RelationshipRuleAncestor          RelationshipRuleID = "ancestor"
 	RelationshipRuleProgeny           RelationshipRuleID = "progeny"
 	RelationshipRuleHubMemberSAAssign RelationshipRuleID = "hub_member_sa_assign"
-	RelationshipRuleCreatorUserSkill  RelationshipRuleID = "creator_user_skill"
 
 	// Association relationships are typed so delivery rules can name them.
 	// They have no policy rows until their permissions are registered, so
@@ -92,7 +90,7 @@ func relationshipAncestryAttested(principal PrincipalContext) bool {
 // RelationshipSource identifies the record a relationship derives from.
 // It carries identifiers only, never material.
 type RelationshipSource struct {
-	// Kind is the source kind, e.g. "secret", "user_skill".
+	// Kind is the source kind, e.g. "secret", "skill".
 	Kind string `json:"kind"`
 	// ID is the source record ID. Recorded only for accepted candidates.
 	ID string `json:"id,omitempty"`
@@ -197,68 +195,60 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		})
 	}
 
-	// Creator user skill: an agent reads its origin user's user-scoped
-	// skills. The origin user is the root of the ancestry chain.
-	if isAgentPrincipal(principal.Kind) && resource.Type == "skill" &&
-		resource.ScopeKind == store.SkillScopeUser && resource.ScopeUserID != "" {
-		if agent, ok := principal.Identity.(AgentIdentity); ok && agent.OriginUserID() != "" &&
-			agent.OriginUserID() == resource.ScopeUserID {
-			src := &SharingSource{
-				Kind:    "user_skill",
-				ID:      resource.ID,
-				OwnerID: agent.OriginUserID(),
-				Policy:  SharingPolicyOriginDescendants,
-			}
-			out = append(out, relationshipCandidate{
-				rule:         RelationshipRuleCreatorUserSkill,
-				usesAncestry: true,
-				// agentCreatorUserSkillGrant (authz_skill_scope.go) remains
-				// the definition of the rule's shape.
-				fact: func(context.Context) (*SharingSource, bool, string) {
-					if _, ok := agentCreatorUserSkillGrant(principal, resource, action); !ok {
-						return src, false, "creator user-skill shape does not hold"
-					}
-					return src, true, ""
-				},
-				decision: Decision{
-					Allowed:      true,
-					Reason:       "relationship grant: creator user skill",
-					Scope:        ScopeTypeRelationship,
-					MatchedGrant: "creator-user-skill",
-				},
-			})
-		}
-	}
-
-	// Progeny: an agent reads a sharing source opted in by a member of its
-	// ancestry chain. Only read actions match. Every kind with a progeny
-	// adapter (built-in or registered) gets a candidate, so point reads and
-	// ProgenyListPredicate evaluate the same kinds.
-	if isAgentPrincipal(principal.Kind) && action == ActionRead {
+	// Progeny: an agent reads, uses or receives a sharing source that a
+	// member of its ancestry chain opted in, or, for an origin-descendants
+	// source such as a personal skill, one owned by the agent's origin
+	// (root) user — not merely owned by any member of the chain. The action
+	// gate admits read actions and the reviewed exact (permission, action)
+	// pairs in progenyExactPairs (progenyActionAdmitted). ptone/scion#2128
+	// consolidated the former dedicated creator-user-skill grant into this
+	// common path: the registered "skill" adapter (skillProgenyAdapter,
+	// authz_skill_progeny.go) supplies the per-kind fact-resource-ID and
+	// shape refusal. Every kind with a progeny adapter (built-in or
+	// registered) gets a candidate, so point reads and ProgenyListPredicate
+	// evaluate the same kinds.
+	if isAgentPrincipal(principal.Kind) && progenyActionAdmitted(permissionID, action) {
 		if relType := a.progenyRelationshipType(resource.Type); relType != "" {
 			if agent, ok := principal.Identity.(AgentIdentity); ok {
-				resourceID := resource.ID
 				resourceType := resource.Type
-				granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
-				out = append(out, relationshipCandidate{
-					rule:         RelationshipRuleProgeny,
-					usesAncestry: true,
-					fact: func(ctx context.Context) (*SharingSource, bool, string) {
-						return a.progenySourceFor(ctx, agent, resourceType, resourceID, permissionID)
-					},
-					decision: Decision{
-						Allowed:      true,
-						Reason:       "relationship grant: " + string(relType),
-						Scope:        ScopeTypeRelationship,
-						MatchedGrant: granted.Provenance.RoleName,
-						BindingID:    granted.Provenance.BindingID,
-					},
-				})
+				resourceID, eligible := a.progenyFactResourceID(resourceType, resource)
+				if eligible {
+					granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
+					out = append(out, relationshipCandidate{
+						rule:         RelationshipRuleProgeny,
+						usesAncestry: true,
+						fact: func(ctx context.Context) (*SharingSource, bool, string) {
+							return a.progenySourceFor(ctx, agent, resourceType, resourceID, permissionID)
+						},
+						decision: Decision{
+							Allowed:      true,
+							Reason:       "relationship grant: " + string(relType),
+							Scope:        ScopeTypeRelationship,
+							MatchedGrant: granted.Provenance.RoleName,
+							BindingID:    granted.Provenance.BindingID,
+						},
+					})
+				}
 			}
 		}
 	}
 
 	return out
+}
+
+// progenyFactResourceID resolves the ID a progeny candidate's fact should
+// query the kind's registered adapter with, and whether resource is
+// eligible for a progeny candidate of this kind at all. An adapter that
+// implements ProgenyFactResourceIDer (for example skillProgenyAdapter)
+// decides both; every other adapter, and a kind with none registered, is
+// queried on resource.ID and is always eligible (the fact stage itself
+// reports a missing adapter through the usual relationship_fact rejection).
+func (a *AuthzService) progenyFactResourceID(kind string, resource Resource) (string, bool) {
+	adapter, _ := a.progenyAdapter(kind)
+	if fr, ok := adapter.(ProgenyFactResourceIDer); ok {
+		return fr.FactResourceID(resource)
+	}
+	return resource.ID, true
 }
 
 // evaluateRelationshipCandidates runs every structural candidate through
@@ -449,8 +439,10 @@ type ProgenyQuery struct {
 type ProgenyFactAdapter interface {
 	// Kind is the resource type the adapter serves (e.g. "secret").
 	Kind() string
-	// ReadPermissions lists the registered read-class permissions a
-	// progeny candidate of this kind may carry. RegisterProgenyAdapter
+	// ReadPermissions lists the registered permissions a progeny
+	// candidate of this kind may carry: read-class permissions, and
+	// reviewed exact pairs from progenyExactPairs on the adapter's own
+	// resource type. RegisterProgenyAdapter
 	// reads the set once, validates it and stores a copy; decisions use
 	// that stored copy and do not call ReadPermissions again.
 	ReadPermissions() []string
@@ -458,9 +450,66 @@ type ProgenyFactAdapter interface {
 	Sources(ctx context.Context, q ProgenyQuery) ([]SharingSource, error)
 }
 
+// ProgenyFactResourceIDer is an optional interface a ProgenyFactAdapter may
+// implement when its sharing-source fact is not keyed by Resource.ID. For
+// example, a personal skill's sharing source is its owning-user bucket
+// (Resource.ScopeUserID), not a per-skill record ID, so the same fact
+// evaluation serves both a concrete skill (Resource.ID set) and the
+// ID-less bucket probe agentSkillAccessScope uses (Resource.ID empty,
+// Resource.ScopeUserID set).
+//
+// FactResourceID reports the ID to query the adapter's Sources with for
+// resource, and whether resource is eligible for a progeny candidate of
+// this adapter's kind at all — an adapter also decides per-resource
+// shape refusals here (for example a skill Resource with no ScopeKind).
+// An adapter that does not implement this interface is queried on
+// Resource.ID directly, unconditionally eligible.
+type ProgenyFactResourceIDer interface {
+	FactResourceID(resource Resource) (id string, eligible bool)
+}
+
 // relationshipReadClassActions are the registry actions a read-only
 // relationship (and a progeny adapter) may carry.
 var relationshipReadClassActions = map[string]bool{"read": true, "list": true, "verify": true, "secret_read": true}
+
+// progenyExactPairs lists the reviewed non-read (permission, action) pairs a
+// progeny candidate may carry, keyed by the exact canonical permission (F
+// design f2-material-selection section 4.6 and 4.8; ptone/scion#2129):
+//
+//   - secret.use with ActionUse: runtime retrieval of a user-scope secret;
+//   - secret.deliver and env_var.deliver with ActionDeliver: launch delivery
+//     of a user-scope item.
+//
+// Each value is the registry action of its permission. Use and deliver are
+// not read-class: they are absent from relationshipReadClassActions and from
+// isReadOnlyOperation, so the delegation ceiling fails closed for them. A
+// deliver permission has no agent JWT scope, so an agent token cannot
+// satisfy it. skill_injection.deliver is granted by skill_default, not by
+// progeny, and is not listed.
+var progenyExactPairs = map[string]Action{
+	"secret.use":      ActionUse,
+	"secret.deliver":  ActionDeliver,
+	"env_var.deliver": ActionDeliver,
+}
+
+// progenyExactPair reports whether (permissionID, action) is a reviewed
+// progeny pair in progenyExactPairs.
+func progenyExactPair(permissionID string, action Action) bool {
+	want, ok := progenyExactPairs[permissionID]
+	return ok && want == action
+}
+
+// progenyActionAdmitted is the progeny candidate's action gate. A read
+// action is admitted for any permission outside progenyExactPairs (the
+// relationship policy and the adapter's permission set decide which); any
+// other action is admitted only as a reviewed exact pair.
+func progenyActionAdmitted(permissionID string, action Action) bool {
+	if action == ActionRead {
+		_, exact := progenyExactPairs[permissionID]
+		return !exact
+	}
+	return progenyExactPair(permissionID, action)
+}
 
 // registryPermission returns the registry entry for a permission ID.
 func registryPermission(id string) (permissions.Permission, bool) {
@@ -480,7 +529,9 @@ var errProgenyAdapter = errors.New("invalid progeny adapter")
 // store adapter. Their sources are shared only through an explicit opt-in:
 // a source of one of these kinds with any other SharingPolicy is never
 // shared, whichever adapter supplies it.
-var progenyOptInKinds = map[string]bool{"secret": true, "envvar": true, "skill_injection": true}
+// "env_var" is the registry resource type and "envvar" the relationship
+// adapter's original string; both are served from the env var store.
+var progenyOptInKinds = map[string]bool{"secret": true, "envvar": true, "env_var": true, "skill_injection": true}
 
 // registeredProgenyAdapter is an adapter together with the read
 // permissions validated at registration.
@@ -501,7 +552,9 @@ type progenyAdapterRegistry struct {
 }
 
 // RegisterProgenyAdapter registers an adapter for one sharing-source kind.
-// Every read permission must be a registered read-class permission; a kind
+// Every permission must be registered and either read-class or a reviewed
+// exact pair (progenyExactPairs) whose registry resource is the adapter's
+// kind; a kind
 // may be registered once. A kind served by the built-in store adapter
 // (progenyOptInKinds) is refused. The validated permission set is copied
 // and stored with the adapter; decisions read that copy.
@@ -518,8 +571,11 @@ func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error 
 		if !ok {
 			return fmt.Errorf("%w: %s: permission %q is not registered", errProgenyAdapter, adapter.Kind(), id)
 		}
-		if !relationshipReadClassActions[p.Action] {
-			return fmt.Errorf("%w: %s: permission %q is not read-class", errProgenyAdapter, adapter.Kind(), id)
+		if relationshipReadClassActions[p.Action] {
+			continue
+		}
+		if !progenyExactPair(id, Action(p.Action)) || p.Resource != adapter.Kind() {
+			return fmt.Errorf("%w: %s: permission %q is neither read-class nor a reviewed progeny pair for this kind", errProgenyAdapter, adapter.Kind(), id)
 		}
 	}
 	a.progenyAdapters.mu.Lock()
@@ -537,9 +593,9 @@ func (a *AuthzService) RegisterProgenyAdapter(adapter ProgenyFactAdapter) error 
 	return nil
 }
 
-// progenyAdapter returns the adapter for a kind and its read permissions:
-// a registered adapter with the set stored at registration, or the
-// built-in store adapter for secret, envvar and skill_injection with its
+// progenyAdapter returns the adapter for a kind and its permissions: a
+// registered adapter with the set stored at registration, or the built-in
+// store adapter for secret, env_var, envvar and skill_injection with its
 // fixed set. The returned slice is a copy.
 func (a *AuthzService) progenyAdapter(kind string) (ProgenyFactAdapter, []string) {
 	a.progenyAdapters.mu.RLock()
@@ -598,11 +654,19 @@ type storeProgenyAdapter struct {
 
 func (s storeProgenyAdapter) Kind() string { return s.kind }
 
+// ReadPermissions returns the built-in permission set per kind: the
+// compatibility read project.secret_read plus the reviewed exact pairs for
+// secret, and env_var.deliver for env_var. envvar and skill_injection carry
+// none through Decide.
 func (s storeProgenyAdapter) ReadPermissions() []string {
-	if s.kind == "secret" {
-		return []string{permissionProjectSecretRead}
+	switch s.kind {
+	case "secret":
+		return []string{permissionProjectSecretRead, "secret.use", "secret.deliver"}
+	case "env_var":
+		return []string{"env_var.deliver"}
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (s storeProgenyAdapter) Sources(ctx context.Context, q ProgenyQuery) ([]SharingSource, error) {
@@ -622,7 +686,7 @@ func (s storeProgenyAdapter) Sources(ctx context.Context, q ProgenyQuery) ([]Sha
 		for _, r := range records {
 			add(r.ID, r.CreatedBy, r.AllowProgeny)
 		}
-	case "envvar":
+	case "envvar", "env_var":
 		records, err := s.store.ListProgenyEnvVars(ctx, q.Ancestry)
 		if err != nil {
 			return nil, fmt.Errorf("ListProgenyEnvVars: %w", err)
@@ -685,7 +749,9 @@ func (p ProgenyPredicate) Matches(src SharingSource) bool {
 
 // ProgenyListPredicate returns the predicate for list filtering of one
 // kind. A principal that is not a hub-attested agent, or a kind with no
-// adapter or no progeny policy row, gets a predicate that matches nothing.
+// adapter or no read-class progeny policy row, gets a predicate that matches
+// nothing. List filtering is a read: the reviewed use and deliver pairs
+// (progenyExactPairs) never make a kind listable.
 // The request's credential restrictions are applied by the per-record
 // Decide call, not by the predicate.
 func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal PrincipalContext, kind string) ProgenyPredicate {
@@ -703,6 +769,9 @@ func (a *AuthzService) ProgenyListPredicate(ctx context.Context, principal Princ
 	}
 	allowed := false
 	for _, id := range perms {
+		if _, exact := progenyExactPairs[id]; exact {
+			continue
+		}
 		if permissions.RelationshipPolicyAllows(string(RelationshipRuleProgeny), "agent", kind, id) {
 			allowed = true
 			break
@@ -741,7 +810,7 @@ func (a *AuthzService) progenySourceFor(ctx context.Context, agent AgentIdentity
 		return nil, false, "no sharing-source adapter for " + kind
 	}
 	if !adapterServesPermission(perms, permissionID) {
-		return nil, false, "permission is not a read permission of the sharing-source adapter"
+		return nil, false, "permission is not served by the sharing-source adapter"
 	}
 	sources, err := adapter.Sources(ctx, ProgenyQuery{Kind: kind, ResourceID: resourceID, Ancestry: ancestry})
 	if err != nil {

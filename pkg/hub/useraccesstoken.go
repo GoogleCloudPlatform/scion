@@ -147,23 +147,6 @@ func (s *UserAccessTokenService) createAuditRecord(ctx context.Context, txStore 
 	return txStore.CreateMutationAudit(ctx, record)
 }
 
-// scopeToPermissionIDs converts UAT scope strings (resource:action) to
-// permission IDs using the production permissions.Registry.
-func scopeToPermissionIDs(scopes []string) []string {
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		scopeSet[s] = true
-	}
-	var ids []string
-	for _, p := range permissions.Registry {
-		scopeKey := p.Resource + ":" + p.Action
-		if scopeSet[scopeKey] {
-			ids = append(ids, p.ID)
-		}
-	}
-	return ids
-}
-
 // enforceSessionCredential enforces the A1 credential caveat and actor/user
 // binding at the service boundary:
 //
@@ -192,45 +175,62 @@ func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context, u
 	return nil
 }
 
-// CreateToken generates a new user access token with issuer ceiling,
-// target-project authorization, atomic audit, and concurrency-safe cap.
-// Returns the plaintext token (shown only once) and the stored metadata.
-func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
-	return s.CreateTokenWithMetadata(ctx, userID, name, projectID, scopes, expiresAt, TokenMetadata{})
-}
-
-// TokenMetadata carries E.1's optional, bounded, issuer-supplied descriptive
+// TokenMetadata carries optional, bounded, issuer-supplied descriptive
 // fields for a new token. Metadata is immutable after issuance: there is no
-// update path (E.1 ruling Q1). Use TokenMetadata{} for no metadata.
+// update path. Use TokenMetadata{} for no metadata.
 type TokenMetadata struct {
 	Purpose string
 	Labels  map[string]string
 }
 
-// CreateTokenWithMetadata is CreateToken plus E.1's bounded, issuer-supplied
-// purpose/labels. CreateToken is kept as a thin wrapper over this method so
-// existing callers are unaffected.
-func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time, metadata TokenMetadata) (string, *store.UserAccessToken, error) {
+// CreateTokenParams collects the inputs for minting a token in one struct,
+// so a future field (e.g. a hub-vs-project boundary kind) can be added
+// without growing a positional argument list.
+type CreateTokenParams struct {
+	UserID    string
+	Name      string
+	ProjectID string
+	Scopes    []string
+	ExpiresAt *time.Time
+	Metadata  TokenMetadata
+}
+
+// CreateToken generates a new user access token with issuer ceiling,
+// target-project authorization, atomic audit, and concurrency-safe cap.
+// Returns the plaintext token (shown only once) and the stored metadata.
+//
+// Deprecated: prefer CreateTokenWithParams. Retained as a thin wrapper over
+// it so existing positional call sites keep compiling during incremental
+// migration to CreateTokenParams.
+func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
+	return s.CreateTokenWithParams(ctx, CreateTokenParams{
+		UserID: userID, Name: name, ProjectID: projectID, Scopes: scopes, ExpiresAt: expiresAt,
+	})
+}
+
+// CreateTokenWithParams is CreateToken's implementation, taking
+// CreateTokenParams directly.
+func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, params CreateTokenParams) (string, *store.UserAccessToken, error) {
 	// A1: Credential caveat at service boundary.
-	if err := s.enforceSessionCredential(ctx, userID); err != nil {
+	if err := s.enforceSessionCredential(ctx, params.UserID); err != nil {
 		return "", nil, err
 	}
 
 	// --- Input validation (typed errors) ---
-	if name == "" {
+	if params.Name == "" {
 		return "", nil, ErrUATNameRequired
 	}
-	if projectID == "" {
+	if params.ProjectID == "" {
 		return "", nil, ErrUATProjectIDEmpty
 	}
-	// E.1: bounded validation of name/purpose/labels at issuance. Metadata
-	// is immutable afterward, so this is the only place it is checked.
-	if err := ValidateCredentialMetadata(name, metadata.Purpose, metadata.Labels); err != nil {
+	// Bounded validation of name/purpose/labels at issuance. Metadata is
+	// immutable afterward, so this is the only place it is checked.
+	if err := ValidateCredentialMetadata(params.Name, params.Metadata.Purpose, params.Metadata.Labels); err != nil {
 		return "", nil, err
 	}
 
 	// Expand and validate scopes against the registry.
-	expanded := expandScopes(scopes)
+	expanded := expandScopes(params.Scopes)
 	for _, scope := range expanded {
 		if !store.UATValidScopes[scope] {
 			return "", nil, fmt.Errorf("%w: %s", ErrInvalidUATScope, scope)
@@ -242,6 +242,7 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 
 	// Validate / default expiry.
 	now := s.nowFunc()
+	expiresAt := params.ExpiresAt
 	if expiresAt == nil {
 		defaultExpiry := now.Add(store.UATDefaultExpiry)
 		expiresAt = &defaultExpiry
@@ -253,9 +254,9 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- B1/A2/B2: Issuer ceiling at mint (target-project only) with oracle resistance ---
+	// --- Issuer ceiling at mint (target-project only) with oracle resistance ---
 	// Resolve only project-scoped permissions for the target project. System/hub
-	// authority must not enlarge the token (frozen decision A2).
+	// authority must not enlarge the token.
 	//
 	// getProjectScopedPermissions filters to ScopeType==project && ScopeID==projectID
 	// while retaining group-expanded principals (transitive membership), activation
@@ -269,30 +270,32 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 	// of token scopes and the user's current permissions, and (2) token minting
 	// only reads authority state, it does not mutate it. See O1 documentation in
 	// rs4_credential_test.go.
-	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, userID, projectID)
+	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, params.UserID, params.ProjectID)
 	if err != nil {
 		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
-			"user_id", userID, "project_id", projectID, "error", err)
+			"user_id", params.UserID, "project_id", params.ProjectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
 	}
 	if len(actorPerms) == 0 {
 		return "", nil, ErrUATProjectForbidden
 	}
 
-	// Convert requested scopes to permission IDs and verify the issuer holds
-	// each one in the target project. Fail closed if any valid scope does not
-	// map to exactly one registered permission (F1 defense).
-	requiredPermIDs := scopeToPermissionIDs(expanded)
-	if len(requiredPermIDs) < len(expanded) {
-		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scopes have no registered permission",
-			"expanded_count", len(expanded), "mapped_count", len(requiredPermIDs))
+	// Resolve the requested scopes to a CeilingVersionV1 ceiling and verify
+	// the issuer holds every resulting permission in the target project;
+	// that same ceiling is persisted below and is what runtime authorization
+	// and delegation enforce. Fail closed if any valid scope does not
+	// resolve.
+	ceiling, ceilingOK := permissions.BuildCeilingFromSelectors(expanded)
+	if !ceilingOK {
+		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scope has no resolvable selector",
+			"expanded_count", len(expanded))
 		return "", nil, ErrUATScopeViolation
 	}
 	actorPermSet := make(map[string]bool, len(actorPerms))
 	for _, p := range actorPerms {
 		actorPermSet[p] = true
 	}
-	for _, permID := range requiredPermIDs {
+	for _, permID := range ceiling.PermissionIDs {
 		if !actorPermSet[permID] {
 			return "", nil, ErrUATScopeViolation
 		}
@@ -304,11 +307,11 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 
 	txErr := s.store.WithTx(ctx, func(tx store.Store) error {
 		// B5/G7: Concurrency-safe token cap inside the transaction.
-		if lockErr := tx.LockUserForTokens(ctx, userID); lockErr != nil {
+		if lockErr := tx.LockUserForTokens(ctx, params.UserID); lockErr != nil {
 			return fmt.Errorf("failed to acquire token lock: %w", lockErr)
 		}
 
-		count, countErr := tx.CountUserAccessTokens(ctx, userID)
+		count, countErr := tx.CountUserAccessTokens(ctx, params.UserID)
 		if countErr != nil {
 			return fmt.Errorf("failed to check token count: %w", countErr)
 		}
@@ -329,23 +332,25 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 		hashStr := hex.EncodeToString(hash[:])
 
 		token = &store.UserAccessToken{
-			ID:        uuid.New().String(),
-			UserID:    userID,
-			Name:      name,
-			Prefix:    prefix,
-			KeyHash:   hashStr,
-			ProjectID: projectID,
-			Scopes:    expanded,
-			ExpiresAt: expiresAt,
-			Created:   now,
+			ID:                   uuid.New().String(),
+			UserID:               params.UserID,
+			Name:                 params.Name,
+			Prefix:               prefix,
+			KeyHash:              hashStr,
+			ProjectID:            params.ProjectID,
+			Scopes:               expanded,
+			CeilingVersion:       ceiling.Version,
+			CeilingPermissionIDs: ceiling.PermissionIDs,
+			ExpiresAt:            expiresAt,
+			Created:              now,
 		}
-		// E.1 descriptive credential metadata: set only when supplied.
-		trimmedPurpose := strings.TrimSpace(metadata.Purpose)
+		// Descriptive credential metadata: set only when supplied.
+		trimmedPurpose := strings.TrimSpace(params.Metadata.Purpose)
 		if trimmedPurpose != "" {
 			token.Purpose = &trimmedPurpose
 		}
-		if len(metadata.Labels) > 0 {
-			token.Labels = metadata.Labels
+		if len(params.Metadata.Labels) > 0 {
+			token.Labels = params.Metadata.Labels
 		}
 
 		if createErr := tx.CreateUserAccessToken(ctx, token); createErr != nil {
@@ -355,12 +360,12 @@ func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, us
 		// B3/G3: Atomic audit — commit or roll back with the token.
 		scopesJSON, _ := json.Marshal(expanded)
 		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
-			token.ID, string(scopesJSON), projectID)
-		// E.1: record that purpose/label metadata was set and which label
-		// keys were used, without recording label or purpose values in
-		// audit (values are issuer-supplied and unbounded-trust text).
-		if trimmedPurpose != "" || len(metadata.Labels) > 0 {
-			afterSummary = appendCredentialMetadataAuditFields(afterSummary, trimmedPurpose != "", metadata.Labels)
+			token.ID, string(scopesJSON), params.ProjectID)
+		// Record that purpose/label metadata was set and which label keys
+		// were used, without recording label or purpose values in audit
+		// (values are issuer-supplied and unbounded-trust text).
+		if trimmedPurpose != "" || len(params.Metadata.Labels) > 0 {
+			afterSummary = appendCredentialMetadataAuditFields(afterSummary, trimmedPurpose != "", params.Metadata.Labels)
 		}
 
 		return s.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
@@ -423,15 +428,15 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, &UATRejection{err: ErrUserSuspended, Reason: "user_suspended", Found: true, TokenID: token.ID}
 	}
 
-	// E.1: derive the descriptive credential decoration from the
+	// Derive the descriptive credential decoration from the
 	// server-validated token row this function already loaded. This is the
 	// single trustworthy derivation point — no header, query parameter, or
 	// body field ever contributes to it.
 	//
 	// D.1 has not yet persisted a boundary column on the UAT row, so this
-	// builds A.1's TokenBoundary inline from the token's stored project ID
-	// (every UAT is project-scoped today). This is the one call site that
-	// changes when D.1 lands, per the E.1 handoff note.
+	// builds TokenBoundary inline from the token's stored project ID (every
+	// UAT is project-scoped today). This is the one call site that changes
+	// when D.1 lands.
 	decoration := &CredentialDecoration{
 		Kind:      CredentialKindUAT,
 		TokenID:   token.ID,
@@ -449,11 +454,12 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		decoration.Labels = labels
 	}
 
-	return NewScopedUserIdentityWithDecoration(
+	return NewScopedUserIdentityWithCeilingAndDecoration(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
 		token.Scopes,
 		token.ID,
+		token.NormalizedCeiling(),
 		decoration,
 	), nil
 }

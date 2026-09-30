@@ -39,6 +39,13 @@ const (
 	ResourceRoleBinding       = "role_binding"
 	ResourceScheduledEvent    = "scheduled_event"
 	ResourceAccessConstraint  = "access_constraint"
+	// ResourceSecret, ResourceEnvVar and ResourceSkillInjection are the
+	// material-delivery resource types (ptone/scion#2129): the typed target
+	// of an agent secret, stored environment variable or stored skill
+	// reference, as distinct from ResourceProject/ResourceSkill.
+	ResourceSecret         = "secret"
+	ResourceEnvVar         = "env_var"
+	ResourceSkillInjection = "skill_injection"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -65,6 +72,12 @@ const (
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
+	// ActionDeliver and ActionUse distinguish launch-time material delivery
+	// from an agent's own runtime retrieval or token-mint request over the
+	// same or a related resource (ptone/scion#2129). Neither is a read-only
+	// action.
+	ActionDeliver = "deliver"
+	ActionUse     = "use"
 
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
@@ -222,6 +235,7 @@ var Registry = []Permission{
 	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
+	{ID: "hub.experiments.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Read and update hub-wide experiment overrides", Enforcement: []string{"pkg/hub/route_metadata.go:admin.experiments", "pkg/hub/admin_experiments.go:handleAdminExperiments"}},
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -278,6 +292,25 @@ var Registry = []Permission{
 	{ID: "agent.token_refresh", Resource: ResourceAgent, Action: "token_refresh", AgentScopes: []string{"agent:token:refresh"}, Description: "Refresh own agent token", NonRouteUse: []string{"agent token refresh endpoint"}},
 	{ID: "agent.port_forward", Resource: ResourceAgent, Action: "port_forward", AgentScopes: []string{"agent:port:forward"}, Description: "Register and hold forwarded ports", NonRouteUse: []string{"agent port tunnel endpoints"}},
 	{ID: "agent.identity_token", Resource: ResourceAgent, Action: "identity_token", AgentScopes: []string{"agent:identity:token"}, Description: "Request OIDC identity tokens", NonRouteUse: []string{"agent identity token endpoint"}},
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129).
+	// *.deliver governs launch-time delivery of a secret, stored environment
+	// variable or stored skill reference to a target agent. It carries no
+	// AgentScopes and is intended for the internal hub-delivery credential
+	// only (ptone/scion#2228), never an agent JWT. Holding *.deliver through a
+	// role never substitutes for the association, progeny or skill-default
+	// grant required for the selected item.
+	// secret.use governs an agent's own runtime retrieval and is admitted
+	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
+	// has no AgentScopes: the GCP token scope is per service account
+	// (project:gcp:token:<sa-id>) and cannot be matched statically, so no
+	// credential satisfies it until the slice that wires the token-mint
+	// check adds that mapping.
+	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
+	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.
@@ -388,23 +421,6 @@ func uatScopesForResource(resource string) []string {
 	return out
 }
 
-// LegacyUATScopeImplications maps a UAT scope to additional scopes it
-// implicitly carries for tokens minted before a permission split. Before
-// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
-// through agent.attach, and agent:manage expanded (at mint time) to include
-// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
-// so that existing CI tokens continue to work (miller79/scion#88).
-//
-// NOTE: this map is NOT honored on the Decide path today
-// (enforceUATConstraints uses exact HasScope) — only inconsistently through
-// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
-// attach does not imply lifecycle. Any future alignment must narrow
-// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
-// match CanDelegate.
-var LegacyUATScopeImplications = map[string][]string{
-	"agent:attach": {"agent:lifecycle"},
-}
-
 // BoundaryKind identifies the credential-side boundary a UAT is issued
 // under: confined to one project, or spanning the hub (including
 // cross-project use, subject to the holder's live authority on each
@@ -434,13 +450,12 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it is the replacement for useraccesstoken.go's
-// scopeToPermissionIDs, which reconstructs "resource:action" and would
-// silently collapse two permissions sharing a resource/action pair (e.g.
+// selector vocabulary: a resource:action reconstruction would silently
+// collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable. A.2 owns wiring the
-// mint/runtime call sites to this table; A.1 owns the table and its
-// build/validate logic.
+// selector once either becomes UAT-selectable. Mint resolves selectors
+// through this table, and runtime authorization and delegation enforce the
+// ceiling persisted from that resolution.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string

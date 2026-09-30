@@ -120,7 +120,7 @@ When running on GKE Autopilot, Scion automatically detects the environment and a
 | EmptyDir (workspace) | Supported | Default workspace volume, always created |
 | GCS FUSE CSI | Supported | Requires `gcsfuse.csi.storage.gke.io` CSI driver; GKE only |
 | Local/bind-mount | Not supported | Logged as warning, skipped. Use tar sync instead |
-| PersistentVolumeClaim | Not supported | Future enhancement |
+| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `workspace_storage` backend; requires a pre-provisioned PV/PVC (for example, Filestore-backed) and `workspace_storage.backend: nfs` in `settings.yaml` |
 
 ### Secret Modes
 
@@ -169,6 +169,8 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 ## Required Permissions
 
 The user or service account running scion needs the following RBAC permissions in the target namespace:
+
+When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails (for example, `gke-gcloud-auth-plugin` is not on the process `PATH`), it falls back to Application Default Credentials and requests the `cloud-platform` and `userinfo.email` scopes. The `userinfo.email` scope makes GKE see the caller as its service account email rather than its numeric ID, so RBAC bindings whose subject is the email match. On a plain GCE VM, the instance's access scopes must already include `userinfo.email` for this to work.
 
 ### Minimum RBAC
 

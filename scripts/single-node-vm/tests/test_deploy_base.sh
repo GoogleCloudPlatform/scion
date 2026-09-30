@@ -143,6 +143,19 @@ test_deploy_base_create_provisions_expected_resources() {
   assert_contains "$create_line" "--no-address" "the VM must have no public IP"
   assert_contains "$create_line" "--boot-disk-size=200GB" "disk_size_gb must become the boot-disk-size flag"
   assert_contains "$create_line" "--service-account=${SA_EMAIL}" "the VM must run as its own service account"
+  # Required for a custom-mode "default" network (the GCE API requires an
+  # explicit subnetwork there; auto-mode tolerates it too, since the
+  # per-region subnet is also named "default") -- see the hardened-org
+  # addendum. Not conditional on anything: every create passes it.
+  assert_contains "$create_line" "--subnet=default" \
+    "the VM must specify --subnet=default so the create doesn't fail on a custom-mode default network"
+  # Paired with --subnet=default so the create fails clearly instead of
+  # silently landing in another VPC's "default" subnet in REGION (subnet
+  # names are unique per project and region regardless of network, so
+  # --subnet alone can't be ambiguous, but it also can't check which
+  # network it resolved to).
+  assert_contains "$create_line" "--network=default" \
+    "the VM must specify --network=default alongside --subnet=default so a mismatched subnet fails the create instead of silently attaching to the wrong VPC"
 
   assert_eq "1" "$(echo "$log" | grep -c "^compute routers create ${ROUTER_NAME} " || true)" \
     "a fresh create must create exactly one Cloud Router"

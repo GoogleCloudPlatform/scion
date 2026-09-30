@@ -85,6 +85,16 @@ func Scopes(v string) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldScopes, v))
 }
 
+// CeilingVersion applies equality check predicate on the "ceiling_version" field. It's identical to CeilingVersionEQ.
+func CeilingVersion(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldCeilingVersion, v))
+}
+
+// CeilingPermissionIds applies equality check predicate on the "ceiling_permission_ids" field. It's identical to CeilingPermissionIdsEQ.
+func CeilingPermissionIds(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldCeilingPermissionIds, v))
+}
+
 // Revoked applies equality check predicate on the "revoked" field. It's identical to RevokedEQ.
 func Revoked(v bool) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldRevoked, v))
@@ -453,6 +463,121 @@ func ScopesEqualFold(v string) predicate.UserAccessToken {
 // ScopesContainsFold applies the ContainsFold predicate on the "scopes" field.
 func ScopesContainsFold(v string) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldContainsFold(FieldScopes, v))
+}
+
+// CeilingVersionEQ applies the EQ predicate on the "ceiling_version" field.
+func CeilingVersionEQ(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldCeilingVersion, v))
+}
+
+// CeilingVersionNEQ applies the NEQ predicate on the "ceiling_version" field.
+func CeilingVersionNEQ(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNEQ(FieldCeilingVersion, v))
+}
+
+// CeilingVersionIn applies the In predicate on the "ceiling_version" field.
+func CeilingVersionIn(vs ...int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIn(FieldCeilingVersion, vs...))
+}
+
+// CeilingVersionNotIn applies the NotIn predicate on the "ceiling_version" field.
+func CeilingVersionNotIn(vs ...int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotIn(FieldCeilingVersion, vs...))
+}
+
+// CeilingVersionGT applies the GT predicate on the "ceiling_version" field.
+func CeilingVersionGT(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGT(FieldCeilingVersion, v))
+}
+
+// CeilingVersionGTE applies the GTE predicate on the "ceiling_version" field.
+func CeilingVersionGTE(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGTE(FieldCeilingVersion, v))
+}
+
+// CeilingVersionLT applies the LT predicate on the "ceiling_version" field.
+func CeilingVersionLT(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLT(FieldCeilingVersion, v))
+}
+
+// CeilingVersionLTE applies the LTE predicate on the "ceiling_version" field.
+func CeilingVersionLTE(v int32) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLTE(FieldCeilingVersion, v))
+}
+
+// CeilingPermissionIdsEQ applies the EQ predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsNEQ applies the NEQ predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNEQ(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsIn applies the In predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIn(FieldCeilingPermissionIds, vs...))
+}
+
+// CeilingPermissionIdsNotIn applies the NotIn predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNotIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotIn(FieldCeilingPermissionIds, vs...))
+}
+
+// CeilingPermissionIdsGT applies the GT predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsGT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGT(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsGTE applies the GTE predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsGTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGTE(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsLT applies the LT predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsLT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLT(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsLTE applies the LTE predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsLTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLTE(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsContains applies the Contains predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsContains(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContains(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsHasPrefix applies the HasPrefix predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsHasPrefix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasPrefix(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsHasSuffix applies the HasSuffix predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsHasSuffix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasSuffix(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsIsNil applies the IsNil predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsIsNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIsNull(FieldCeilingPermissionIds))
+}
+
+// CeilingPermissionIdsNotNil applies the NotNil predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsNotNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotNull(FieldCeilingPermissionIds))
+}
+
+// CeilingPermissionIdsEqualFold applies the EqualFold predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsEqualFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEqualFold(FieldCeilingPermissionIds, v))
+}
+
+// CeilingPermissionIdsContainsFold applies the ContainsFold predicate on the "ceiling_permission_ids" field.
+func CeilingPermissionIdsContainsFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContainsFold(FieldCeilingPermissionIds, v))
 }
 
 // RevokedEQ applies the EQ predicate on the "revoked" field.

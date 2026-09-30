@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "federation"}
+		"project_defaults", "auto_expose_ports", "quotas", "federation", "experiments"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -69,6 +69,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 	dbOnlySections := map[string]bool{
 		"maintenance": true,
 		"messaging":   true,
+		"experiments": true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -115,6 +116,7 @@ func TestOwningSection(t *testing.T) {
 		{"server.github_app.webhooks_enabled", "github_app"},
 		{"server.notification_channels", "notifications"},
 		{"auto_expose_ports.enabled", "auto_expose_ports"},
+		{"quotas.enforce_broker_quotas", "quotas"},
 		{"server.federation.enabled", "federation"},
 		{"server.federation.trusted_issuers", "federation"},
 		{"server.federation.algorithms", "federation"},
@@ -227,6 +229,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"project_defaults", `{}`},
 		{"auto_expose_ports", `{"enabled":true}`},
 		{"auto_expose_ports", `{}`},
+		{"quotas", `{"enforce_broker_quotas":true}`},
+		{"quotas", `{"enforce_broker_quotas":false}`},
+		{"quotas", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
@@ -256,6 +261,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"github_app", `{"app_id":"not-a-number"}`, "wrong type for int64"},
 		{"project_defaults", `{"default_scratchpad":"yes"}`, "wrong type for boolean"},
 		{"project_defaults", `{"unknown_field":true}`, "additional property"},
+		{"quotas", `{"enforce_broker_quotas":"yes"}`, "wrong type for boolean"},
+		{"quotas", `{"unknown_field":true}`, "additional property"},
 		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
@@ -382,9 +389,10 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack", "params": map[string]interface{}{"url": "https://hooks.slack.com/test"}},
 		},
-		"server.database.driver":    "postgres",
-		"server.hub.port":           9810,
-		"auto_expose_ports.enabled": true,
+		"server.database.driver":       "postgres",
+		"server.hub.port":              9810,
+		"auto_expose_ports.enabled":    true,
+		"quotas.enforce_broker_quotas": false,
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)
@@ -443,6 +451,11 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		{"auto_expose_ports", func(t *testing.T, doc map[string]interface{}) {
 			if doc["enabled"] != true {
 				t.Errorf("expected enabled=true, got %v", doc["enabled"])
+			}
+		}},
+		{"quotas", func(t *testing.T, doc map[string]interface{}) {
+			if doc["enforce_broker_quotas"] != false {
+				t.Errorf("expected enforce_broker_quotas=false, got %v", doc["enforce_broker_quotas"])
 			}
 		}},
 	}
@@ -541,9 +554,10 @@ func TestRoundTrip(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack"},
 		},
-		"server.database.driver":    "postgres",
-		"server.hub.port":           9810,
-		"auto_expose_ports.enabled": true,
+		"server.database.driver":       "postgres",
+		"server.hub.port":              9810,
+		"auto_expose_ports.enabled":    true,
+		"quotas.enforce_broker_quotas": false,
 	}
 	if err := k.Load(confmap.Provider(original, "."), nil); err != nil {
 		t.Fatalf("load original: %v", err)
@@ -576,6 +590,7 @@ func TestRoundTrip(t *testing.T) {
 		{"server.github_app.app_id", nil},
 		{"server.github_app.webhooks_enabled", true},
 		{"auto_expose_ports.enabled", true},
+		{"quotas.enforce_broker_quotas", false},
 	}
 
 	for _, c := range checks {
@@ -1252,6 +1267,65 @@ func TestAutoExposePortsEmptyExtract(t *testing.T) {
 	}
 	if len(doc) != 0 {
 		t.Errorf("expected empty doc for absent auto_expose_ports, got %v", doc)
+	}
+}
+
+// TestQuotasKoanfRoundTrip verifies that quotas can be extracted from koanf
+// and loaded back without data loss.
+func TestQuotasKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"quotas.enforce_broker_quotas": false,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "quotas")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["enforce_broker_quotas"] != false {
+		t.Errorf("expected enforce_broker_quotas=false in extracted doc, got %v", doc["enforce_broker_quotas"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"quotas": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("quotas.enforce_broker_quotas") {
+		t.Fatal("expected quotas.enforce_broker_quotas to exist in reloaded koanf")
+	}
+	if reloaded.Bool("quotas.enforce_broker_quotas") != false {
+		t.Errorf("expected quotas.enforce_broker_quotas=false, got %v", reloaded.Get("quotas.enforce_broker_quotas"))
+	}
+}
+
+// TestQuotasEmptyExtract verifies that ExtractSectionFromKoanf returns an
+// empty doc when quotas is not set.
+func TestQuotasEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "quotas")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent quotas, got %v", doc)
 	}
 }
 
