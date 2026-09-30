@@ -348,7 +348,7 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

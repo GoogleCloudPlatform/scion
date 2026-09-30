@@ -167,7 +167,7 @@ func (s *Server) handleHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createHarnessConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -484,7 +484,7 @@ func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request,
 	case http.MethodDelete:
 		s.deleteHarnessConfig(w, r, hc)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -656,7 +656,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 // handleHarnessConfigUpload handles requests for upload URLs.
 func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -703,7 +703,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -757,7 +757,7 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 // POST /api/v1/harness-configs/{id}/check-image
 func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -861,7 +861,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.
 func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -894,7 +894,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 // handleHarnessConfigValidate validates a harness-config's storage consistency.
 func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -914,7 +914,7 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 // handleHarnessConfigClone creates a copy of a harness config.
 func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request, source *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1089,7 +1089,7 @@ type ReimportHarnessConfigRequest struct {
 // source_url (or an override URL). POST /api/v1/harness-configs/{id}/reimport
 func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1195,7 +1195,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 // GET /api/v1/harness-configs/{id}/image-status
 func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1383,7 +1383,7 @@ func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage
 // DELETE /api/v1/harness-configs/{id}/local-image?broker_id=...
 func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -1449,7 +1449,7 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 // POST /api/v1/harness-configs/{id}/pull-image?broker_id=...
 func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

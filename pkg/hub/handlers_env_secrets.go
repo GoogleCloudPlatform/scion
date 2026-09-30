@@ -213,7 +213,7 @@ func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listEnvVars(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *Server) handleEnvVarByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteEnvVar(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -613,7 +613,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listSecrets(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -671,7 +671,7 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteSecret(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -1059,7 +1059,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 		// Fall through to existing PUT logic below.
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
 
@@ -1624,7 +1624,7 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1751,7 +1751,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -1872,7 +1872,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1983,7 +1983,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -2128,7 +2128,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		case http.MethodPost:
 			s.addProjectProvider(w, r, projectID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -2139,7 +2139,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.removeProjectProvider(w, r, projectID, brokerID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -2442,7 +2442,7 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -2550,7 +2550,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

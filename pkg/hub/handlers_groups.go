@@ -94,7 +94,7 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createGroup(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -347,7 +347,7 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteGroup(w, r, groupID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -505,7 +505,7 @@ func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, grou
 	case http.MethodPost:
 		s.addGroupMember(w, r, group)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -846,7 +846,7 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 	case http.MethodDelete:
 		s.removeGroupMember(w, r, group, memberType, memberID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 

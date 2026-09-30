@@ -460,7 +460,7 @@ func (s *Server) handleGitHubAppInstallationByID(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -568,7 +568,7 @@ func (s *Server) handleProjectGitHubInstallation(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -582,7 +582,7 @@ func (s *Server) handleProjectGitHubStatus(w http.ResponseWriter, r *http.Reques
 	case http.MethodPost:
 		s.handleCheckProjectGitHubStatus(w, r, project)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -671,7 +671,7 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -717,7 +717,7 @@ func (s *Server) handleProjectGitIdentity(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -730,7 +730,7 @@ var timeNow = func() time.Time { return time.Now() }
 // permissions the app no longer has.
 func (s *Server) handleGitHubAppSyncPermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

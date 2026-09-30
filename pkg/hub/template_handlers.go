@@ -149,7 +149,7 @@ func (s *Server) handleTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createTemplateV2(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -455,7 +455,7 @@ func (s *Server) handleTemplateCRUD(w http.ResponseWriter, r *http.Request, id s
 	case http.MethodDelete:
 		s.deleteTemplateV2(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -675,7 +675,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 // handleTemplateUpload handles requests for upload URLs.
 func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -743,7 +743,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 // handleTemplateFinalize finalizes a template after file upload.
 func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -800,7 +800,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 // handleTemplateDownload returns signed URLs for downloading template files.
 func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -858,7 +858,7 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 // handleTemplateValidate validates a template's storage consistency.
 func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -889,7 +889,7 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 // handleTemplateClone creates a copy of a template.
 func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

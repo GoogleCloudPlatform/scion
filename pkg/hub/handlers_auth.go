@@ -633,8 +633,7 @@ type AdminStatusResponse struct {
 // which admin sections are visible, and to allow access to admin routes.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -718,7 +717,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleCreateToken(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -739,7 +738,7 @@ func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			s.handleRevokeToken(w, r, parts[0])
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 		return
 	}
@@ -752,7 +751,7 @@ func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleDeleteToken(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -945,7 +944,7 @@ func tokenResponsePtr(t *store.UserAccessToken) *TokenResponse {
 // This endpoint generates an OAuth authorization URL for CLI login.
 func (s *Server) handleCLIAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1008,7 +1007,7 @@ func (s *Server) handleCLIAuthAuthorize(w http.ResponseWriter, r *http.Request) 
 // This endpoint returns configured OAuth providers for a given client type.
 func (s *Server) handleCLIAuthProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1051,7 +1050,7 @@ func (s *Server) handleCLIAuthProviders(w http.ResponseWriter, r *http.Request) 
 // This endpoint exchanges an OAuth authorization code for Hub tokens.
 func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1185,7 +1184,7 @@ type CLIDeviceTokenResponse struct {
 // This endpoint initiates the device authorization flow.
 func (s *Server) handleCLIDeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1238,7 +1237,7 @@ func (s *Server) handleCLIDeviceAuthorize(w http.ResponseWriter, r *http.Request
 // This endpoint polls for the device authorization result.
 func (s *Server) handleCLIDeviceToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1708,7 +1707,7 @@ func hasUIPromotedBinding(ctx context.Context, st store.Store, userID string) bo
 // handleInviteRedeem handles POST /api/v1/auth/invite/redeem.
 func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1805,7 +1804,7 @@ type AuthScopesResponse struct {
 // Returns all valid UAT scopes from the permissions registry.
 func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

@@ -54,7 +54,7 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 		}
 		s.handlePutProjectDefaults(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 

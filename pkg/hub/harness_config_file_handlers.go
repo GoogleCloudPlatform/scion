@@ -45,7 +45,7 @@ func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request
 		case http.MethodPost:
 			s.handleHarnessConfigFileUpload(w, r, hc)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -58,7 +58,7 @@ func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request
 	case http.MethodDelete:
 		s.handleHarnessConfigFileDelete(w, r, hc, filePath)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
