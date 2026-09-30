@@ -974,6 +974,22 @@ type SecretStore interface {
 	// Returns ErrNotFound if the secret doesn't exist.
 	UpdateSecret(ctx context.Context, secret *Secret) error
 
+	// UpdateSecretRefIfMatches conditionally updates only the SecretRef column,
+	// applying the change and incrementing Version only if the row's current
+	// SecretRef equals expectedRef AND its current Version equals
+	// expectedVersion. Returns applied=false (no error) if the row doesn't
+	// exist or either check fails — e.g. a concurrent Set() raced ahead and
+	// updated the value and the ref, or an old binary rewrote the value
+	// through a ref string that happens to read back unchanged (Version
+	// still increments on every write, so the version check catches that
+	// same-ref case the ref check alone would miss — ptone/scion#2152
+	// round-4 review finding 1). Every other column is left untouched, so
+	// callers that only need to repoint the ref (such as GCP SM
+	// name-migration tooling) never clobber a concurrent metadata edit the
+	// way a GetSecret-then-UpdateSecret read-modify-write would
+	// (ptone/scion#2152 round-2 review finding 11).
+	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
+
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.
 	UpsertSecret(ctx context.Context, secret *Secret) (created bool, err error)
