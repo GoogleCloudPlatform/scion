@@ -34,7 +34,9 @@ import type {
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
   MessageMode,
+  RuntimeBroker,
 } from '../../shared/types.js';
+import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import type { EnvEntry } from '../shared/env-editor.js';
@@ -76,6 +78,8 @@ interface AppliedConfig {
     harness_config?: string;
   };
   agentRole?: string;
+  /** The runtime profile this agent was dispatched with, if any (api/types.go RunConfig.Profile). */
+  profile?: string;
 }
 
 interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
@@ -135,10 +139,26 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private gcpServiceAccountId = '';
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
 
+  /** The agent's own runtime broker, loaded to determine its runtime kind for the GCP Identity picker. */
+  @state() private targetBroker: RuntimeBroker | null = null;
+
   private agentId = '';
 
   private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
+  }
+
+  /**
+   * Whether this agent's runtime broker/profile is reliably known to be
+   * Kubernetes. Block is not offered in that case (ptone/scion#2328 Phase 2).
+   * Unknown until targetBroker has loaded, which reads as false — the same
+   * "do not guess" default as agent-create.ts.
+   */
+  private get targetRuntimeIsKubernetesOnly(): boolean {
+    return isTargetKubernetesOnly(
+      this.targetBroker ?? undefined,
+      this.agent?.appliedConfig?.profile ?? ''
+    );
   }
 
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
@@ -153,6 +173,19 @@ export class ScionPageAgentConfigure extends LitElement {
       }
     } catch {
       // Non-critical — just won't show assign option
+    }
+  }
+
+  /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
+  private async loadTargetBroker(brokerId: string): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${brokerId}`);
+      if (res.ok) {
+        this.targetBroker = (await res.json()) as RuntimeBroker;
+      }
+    } catch {
+      // Non-critical — an unknown broker just leaves the target unknown,
+      // which is the same "do not guess" default as no broker at all.
     }
   }
 
@@ -386,10 +419,33 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   `;
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    super.willUpdate(changedProperties);
+    // Block is not offered for a Kubernetes runtime target. Re-check whenever
+    // the target broker (loaded asynchronously, after populateForm has
+    // already read the agent's stored mode) or the mode itself changes, and
+    // fall back to passthrough — mirroring agent-create.ts's
+    // normalizeGcpModeForTarget. This never touches the agent's persisted
+    // config: only Save/Start submit a new value, and both are guarded below.
+    if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
+      this.normalizeGcpModeForTarget();
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  /**
+   * Corrects gcpMetadataMode away from "block" when this agent's target is
+   * reliably known to be Kubernetes (see targetRuntimeIsKubernetesOnly).
+   */
+  private normalizeGcpModeForTarget(): void {
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
+      this.gcpMetadataMode = 'passthrough';
     }
   }
 
@@ -439,6 +495,9 @@ export class ScionPageAgentConfigure extends LitElement {
       }
 
       void this.loadGCPServiceAccounts(this.agent.projectId);
+      if (this.agent.runtimeBrokerId) {
+        void this.loadTargetBroker(this.agent.runtimeBrokerId);
+      }
       this.populateForm();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -628,6 +687,13 @@ export class ScionPageAgentConfigure extends LitElement {
       return;
     }
 
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
+      this.saving = false;
+      return;
+    }
+
     try {
       const config = this.buildConfig();
       const body: Record<string, unknown> = { config };
@@ -675,6 +741,13 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      this.starting = false;
+      return;
+    }
+
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.starting = false;
       return;
     }
@@ -1126,7 +1199,9 @@ export class ScionPageAgentConfigure extends LitElement {
             }
           }}
         >
-          <sl-option value="block">Block</sl-option>
+          ${this.targetRuntimeIsKubernetesOnly
+            ? nothing
+            : html`<sl-option value="block">Block</sl-option>`}
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : nothing}
@@ -1138,6 +1213,9 @@ export class ScionPageAgentConfigure extends LitElement {
             : this.gcpMetadataMode === 'assign'
               ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
               : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${this.targetRuntimeIsKubernetesOnly
+            ? ' Block is not available for a Kubernetes runtime target.'
+            : ''}
         </div>
       </div>
 

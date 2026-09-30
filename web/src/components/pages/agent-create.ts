@@ -44,6 +44,7 @@ interface HarnessConfigEntry {
 }
 
 import { isSharedWorkspace } from '../../shared/types.js';
+import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
@@ -159,14 +160,7 @@ export class ScionPageAgentCreate extends LitElement {
   private get targetRuntimeIsKubernetesOnly(): boolean {
     if (!this.brokerId) return false;
     const broker = this.brokers.find((b) => b.id === this.brokerId);
-    if (!broker) return false;
-    if (this.profile) {
-      const selected = broker.profiles?.find((p) => p.name === this.profile);
-      return selected?.type === 'kubernetes';
-    }
-    const available = broker.profiles?.filter((p) => p.available) ?? [];
-    if (available.length === 0) return false;
-    return available.every((p) => p.type === 'kubernetes');
+    return isTargetKubernetesOnly(broker, this.profile);
   }
 
   /** The currently selected project */
@@ -415,22 +409,47 @@ export class ScionPageAgentCreate extends LitElement {
     void this.loadFormData();
   }
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    super.willUpdate(changedProperties);
+    // Block is not offered for a Kubernetes runtime target. Re-check whenever
+    // the broker/profile selection, the broker list itself, or the mode
+    // changes, and fall back to passthrough rather than leaving a selection
+    // this page no longer renders an option for. This runs in willUpdate
+    // (before render), not updated, so the correction lands in the same
+    // update cycle instead of scheduling a second one.
+    //
+    // This alone does not cover every path: loadGCPServiceAccounts sets
+    // gcpMetadataMode directly (its own default, and a project default of
+    // "block") *after* the broker is already selected, in the same task —
+    // that assignment does not itself change brokerId/profile/brokers, so it
+    // would not otherwise re-trigger this check before the value is read
+    // elsewhere. normalizeGcpModeForTarget is called explicitly at the end
+    // of loadGCPServiceAccounts to cover that path too.
+    if (
+      changedProperties.has('brokerId') ||
+      changedProperties.has('profile') ||
+      changedProperties.has('brokers') ||
+      changedProperties.has('gcpMetadataMode')
+    ) {
+      this.normalizeGcpModeForTarget();
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-    // Block is not offered for a Kubernetes runtime target. Re-check whenever
-    // the broker/profile selection (or the broker list itself, once loaded)
-    // changes, and fall back to passthrough rather than silently submitting a
-    // selection the create request would otherwise still carry.
-    if (
-      (changedProperties.has('brokerId') ||
-        changedProperties.has('profile') ||
-        changedProperties.has('brokers')) &&
-      this.gcpMetadataMode === 'block' &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
+  }
+
+  /**
+   * Corrects gcpMetadataMode away from "block" when the current broker/
+   * profile target is reliably known to be Kubernetes (see
+   * targetRuntimeIsKubernetesOnly). Idempotent and safe to call from
+   * anywhere that just changed the broker, profile, or mode.
+   */
+  private normalizeGcpModeForTarget(): void {
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
       this.gcpMetadataMode = 'passthrough';
     }
   }
@@ -733,35 +752,44 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
 
-    if (!this.projectId) return;
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-        this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
-      }
-    } catch {
-      // Non-critical
-    }
-
-    // Apply project default GCP identity if configured
-    const settings = await this.fetchProjectSettings(this.projectId);
-    if (settings?.defaultGCPIdentityMode) {
-      const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
-      if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
-        const verified = this.verifiedGCPServiceAccounts;
-        const match = verified.find((sa) => sa.id === settings.defaultGCPIdentityServiceAccountID);
-        if (match) {
-          this.gcpMetadataMode = 'assign';
-          this.gcpServiceAccountId = match.id;
+    if (this.projectId) {
+      try {
+        const res = await apiFetch(
+          `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
+          this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
         }
-      } else if (mode === 'passthrough' || mode === 'block') {
-        this.gcpMetadataMode = mode;
+      } catch {
+        // Non-critical
+      }
+
+      // Apply project default GCP identity if configured
+      const settings = await this.fetchProjectSettings(this.projectId);
+      if (settings?.defaultGCPIdentityMode) {
+        const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
+        if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
+          const verified = this.verifiedGCPServiceAccounts;
+          const match = verified.find(
+            (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
+          );
+          if (match) {
+            this.gcpMetadataMode = 'assign';
+            this.gcpServiceAccountId = match.id;
+          }
+        } else if (mode === 'passthrough' || mode === 'block') {
+          this.gcpMetadataMode = mode;
+        }
       }
     }
+
+    // The assignments above are this method's own default and a project
+    // default read from settings — neither changes brokerId/profile/brokers,
+    // so willUpdate's reactive check would not otherwise re-run before this
+    // value is read elsewhere (submit, or the picker's rendered options).
+    // Call it explicitly (ptone/scion#2332 review round 1, finding 2).
+    this.normalizeGcpModeForTarget();
   }
 
   private async fetchProjectSettings(projectId: string): Promise<{
@@ -1719,13 +1747,14 @@ export class ScionPageAgentCreate extends LitElement {
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">
+          ${this.gcpMetadataMode === 'block'
+            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+            : this.gcpMetadataMode === 'assign'
+              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
           ${this.targetRuntimeIsKubernetesOnly
-            ? 'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.'
-            : this.gcpMetadataMode === 'block'
-              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-              : this.gcpMetadataMode === 'assign'
-                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+            ? ' Block is not available for a Kubernetes runtime target.'
+            : ''}
         </div>
       </div>
 

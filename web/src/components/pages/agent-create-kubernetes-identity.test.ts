@@ -69,6 +69,75 @@ function stubFetch(): void {
   );
 }
 
+/** Records every request URL/method, for asserting a create request was never sent. */
+function stubFetchTrackingCalls(): { calls: string[] } {
+  const calls: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+      } as Response);
+    })
+  );
+  return { calls };
+}
+
+/**
+ * Routes the initial page-load fetches so a single online kubernetes-only
+ * broker is auto-selected, and the project's stored GCP identity default is
+ * "block" — reproducing the path in loadGCPServiceAccounts that applies a
+ * project default *after* the broker is already known (finding 2, PR 2332
+ * review round 1).
+ */
+function stubFetchForKubernetesProjectDefaultBlock(): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/v1/projects?')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ projects: [{ id: 'p1', name: 'P1' }] }),
+        } as Response);
+      }
+      if (url.includes('/api/v1/runtime-brokers')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            brokers: [
+              {
+                id: 'broker-k8s',
+                name: 'k8s-broker',
+                status: 'online',
+                profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+              },
+            ],
+          }),
+        } as Response);
+      }
+      if (url.includes('/api/v1/projects/p1/settings')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ defaultGCPIdentityMode: 'block' }),
+        } as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({}),
+      } as Response);
+    })
+  );
+}
+
 beforeEach(() => {
   stubFetch();
 });
@@ -97,13 +166,17 @@ function internals(el: MountedEl): AgentCreateInternals {
 /** The GCP Identity <sl-select>, located by its field label. */
 function gcpIdentitySelect(el: MountedEl): Element | null {
   const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity');
+  const field = fields.find(
+    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
+  );
   return field?.querySelector('sl-select') ?? null;
 }
 
 function gcpIdentityHint(el: MountedEl): string {
   const fields = Array.from(el.shadowRoot?.querySelectorAll('.form-field') ?? []);
-  const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity');
+  const field = fields.find(
+    (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
+  );
   return field?.querySelector('.hint')?.textContent?.trim() ?? '';
 }
 
@@ -214,5 +287,115 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     const select = gcpIdentitySelect(el);
     expect(select!.querySelector('sl-option[value="block"]')).not.toBeNull();
+  });
+
+  it('keeps Block offered when the broker has profiles but none is available', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-unavailable',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: false }],
+      },
+    ];
+    page.brokerId = 'broker-unavailable';
+    await el.updateComplete;
+
+    const select = gcpIdentitySelect(el);
+    expect(select!.querySelector('sl-option[value="block"]')).not.toBeNull();
+  });
+
+  it.each(['k8s', 'remote'])(
+    'hides Block for a single available profile of type "%s" (accepted spelling)',
+    async (type) => {
+      const el = await mountAgentCreate();
+      const page = internals(el);
+      page.brokers = [
+        {
+          id: 'broker-alias',
+          name: 'alias-broker',
+          status: 'online',
+          profiles: [{ name: 'default', type, available: true }],
+        },
+      ];
+      page.brokerId = 'broker-alias';
+      await el.updateComplete;
+
+      const select = gcpIdentitySelect(el);
+      expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
+    }
+  );
+
+  it('corrects the mode when it is set to block after the broker is already known-Kubernetes', async () => {
+    // Reversed order from the "corrects an existing block selection" test
+    // above: here the broker is known FIRST, and something sets the mode to
+    // block afterward (this is what loadGCPServiceAccounts does on its own
+    // default and on a project default of block — finding 2, PR 2332 review
+    // round 1). The old updated() hook only watched brokerId/profile/brokers,
+    // so a later mode change alone was never re-checked.
+    const el = await mountAgentCreate();
+    const page = internals(el);
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+    expect(page.gcpMetadataMode).not.toBe('block');
+
+    page.gcpMetadataMode = 'block';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).not.toBe('block');
+  });
+
+  it('does not leave the mode on block when the initial load applies a project default of block for a known-Kubernetes broker', async () => {
+    stubFetchForKubernetesProjectDefaultBlock();
+    const el = await mountAgentCreate();
+    const page = internals(el);
+
+    expect(page.brokerId).toBe('broker-k8s');
+    expect(page.gcpMetadataMode).not.toBe('block');
+
+    const select = gcpIdentitySelect(el);
+    expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
+  });
+
+  it('rejects submit when the mode is block for a known-Kubernetes target, without dispatching a create request', async () => {
+    const tracker = stubFetchTrackingCalls();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      error: string | null;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    // Force the mode to block synchronously, with no intervening await, so
+    // this exercises the submit-time guard directly rather than the
+    // reactive willUpdate correction that would otherwise fix it first.
+    page.gcpMetadataMode = 'block';
+
+    tracker.calls.length = 0;
+    await page.handleSubmit(new Event('submit'));
+
+    expect(page.error).toContain('not available for a Kubernetes runtime target');
+    expect(tracker.calls.some((c) => c.includes('/api/v1/agents'))).toBe(false);
   });
 });

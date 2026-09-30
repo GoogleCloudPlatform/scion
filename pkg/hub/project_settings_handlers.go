@@ -229,7 +229,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		if !s.validateDefaultGCPIdentity(w, ctx, project.ID, &req) {
+		if !s.validateDefaultGCPIdentity(w, ctx, project, &req) {
 			return
 		}
 
@@ -263,15 +263,25 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 // default back into the silent-block path. That residue is deliberately not
 // handled here — it is tracked separately against the consumption site, because
 // no amount of write-time validation can subsume it.
-func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, projectID string, req *hubclient.ProjectSettings) bool {
-	// block is not offered for a Kubernetes-bound project: the broker rejects
-	// it at dispatch anyway, so saving it here would reproduce the same
-	// silent-defect shape the assign/no-SA check below exists to prevent. This
-	// only fires for a project whose linked brokers are reliably known to be
-	// Kubernetes-only (see projectIsKubernetesBound) — a project with no
-	// linked broker, or with a mix of runtime types, is left alone.
-	if req.DefaultGCPIdentityMode == store.GCPMetadataModeBlock {
-		k8sBound, err := s.projectIsKubernetesBound(ctx, projectID)
+func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, project *store.Project, req *hubclient.ProjectSettings) bool {
+	// block is not offered as a NEW selection for a Kubernetes-bound project:
+	// the broker rejects it at dispatch anyway, so saving it here would
+	// reproduce the same silent-defect shape the assign/no-SA check below
+	// exists to prevent. This only fires for a project whose linked brokers
+	// are reliably known to be Kubernetes-only (see projectIsKubernetesBound)
+	// — a project with no linked broker, or with a mix of runtime types, is
+	// left alone.
+	//
+	// It must not fire on a no-op re-save of an already-stored "block": PUT is
+	// a full replace and the settings page resends the current value on every
+	// save (project-settings.ts), so treating every "block" in the body as new
+	// would turn this into a forced migration of stored values, which the
+	// ruling explicitly rules out ("stored block defaults are NOT migrated or
+	// rewritten"). Comparing against the stored annotation is what makes this
+	// a check on the transition, not on the value.
+	if req.DefaultGCPIdentityMode == store.GCPMetadataModeBlock &&
+		(project.Annotations == nil || project.Annotations[projectSettingDefaultGCPIdentityMode] != store.GCPMetadataModeBlock) {
+		k8sBound, err := s.projectIsKubernetesBound(ctx, project.ID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return false
@@ -316,7 +326,7 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return false
 	}
 
-	if !sa.ReachableFromProject(projectID) {
+	if !sa.ReachableFromProject(project.ID) {
 		BadRequest(w, notAvailable)
 		return false
 	}
@@ -331,16 +341,35 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	return true
 }
 
-// brokerIsKubernetesOnly reports whether every profile registered on broker is
-// of type "kubernetes". A broker with no registered profiles is not
-// considered Kubernetes-only — there is nothing to confirm the type from, and
-// this must not guess.
+// isKubernetesRuntimeType reports whether a BrokerProfile.Type names the
+// Kubernetes runtime, under any spelling the runtime factory accepts
+// (pkg/runtime/factory.go): "kubernetes" itself, the "k8s" alias, and
+// "remote" (normalized to "kubernetes" before dispatch). A profile's Type is
+// the runtime config's map key name, not a resolved type
+// (cmd/server_broker.go, pkg/runtimebroker/handlers.go build it directly from
+// the settings profile map) — a custom-named profile whose settings declare
+// `runtime: kubernetes` still reports its own name here, not "kubernetes".
+// That gap needs the broker to report a resolved type instead; out of scope
+// for this check (ptone/scion#2332 review round 1, finding 4).
+func isKubernetesRuntimeType(t string) bool {
+	switch t {
+	case "kubernetes", "k8s", "remote":
+		return true
+	default:
+		return false
+	}
+}
+
+// brokerIsKubernetesOnly reports whether every profile registered on broker
+// names the Kubernetes runtime (isKubernetesRuntimeType). A broker with no
+// registered profiles is not considered Kubernetes-only — there is nothing to
+// confirm the type from, and this must not guess.
 func brokerIsKubernetesOnly(broker *store.RuntimeBroker) bool {
 	if broker == nil || len(broker.Profiles) == 0 {
 		return false
 	}
 	for _, p := range broker.Profiles {
-		if p.Type != "kubernetes" {
+		if !isKubernetesRuntimeType(p.Type) {
 			return false
 		}
 	}
@@ -352,11 +381,24 @@ func brokerIsKubernetesOnly(broker *store.RuntimeBroker) bool {
 // runtime broker (project_providers), and every linked broker is
 // Kubernetes-only per brokerIsKubernetesOnly.
 //
-// A project with no linked broker, with a broker whose type cannot be read,
-// or with a mix of runtime types across its linked brokers, is NOT reliably
-// Kubernetes-bound — this returns false rather than guess in those cases,
-// which is the deliberately permissive side: it only ever blocks a write it
-// can confirm the broker will reject anyway.
+// A project with no linked broker, with a broker whose type cannot be
+// confirmed not to exist (store.ErrNotFound), or with a mix of runtime types
+// across its linked brokers, is NOT reliably Kubernetes-bound — this returns
+// false rather than guess in those cases, which is the deliberately
+// permissive side: it only ever blocks a write it can confirm the broker will
+// reject anyway. A real store error (anything other than ErrNotFound) is
+// propagated rather than silently treated as "allow": that failure mode is a
+// backend problem the caller should see as a 500, not a policy decision.
+//
+// This enumerates ALL of the project's project_providers rows, unfiltered.
+// The web UI's equivalent check (project-settings.ts, isBrokerKubernetesOnly)
+// instead uses GET /api/v1/runtime-brokers?projectId=, which is scoped to
+// brokers the caller may read and excludes scion.io/plugin-labelled brokers
+// (handlers_runtime_brokers.go). The two can disagree — e.g. the UI may
+// disable Block because the caller cannot see a linked docker broker, while
+// this function (and therefore the actual write) does not, and allows it.
+// That is acceptable: the UI's role here is cosmetic (hide/disable an option
+// this function would reject anyway), and this function is the actual gate.
 func (s *Server) projectIsKubernetesBound(ctx context.Context, projectID string) (bool, error) {
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
@@ -368,8 +410,13 @@ func (s *Server) projectIsKubernetesBound(ctx context.Context, projectID string)
 	for _, provider := range providers {
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil {
-			// Cannot confirm this broker's runtime type; do not guess.
-			return false, nil
+			if err == store.ErrNotFound {
+				// The provider link outlived its broker record (or points at
+				// one this caller cannot resolve). Cannot confirm this
+				// broker's runtime type; do not guess.
+				return false, nil
+			}
+			return false, err
 		}
 		if !brokerIsKubernetesOnly(broker) {
 			return false, nil

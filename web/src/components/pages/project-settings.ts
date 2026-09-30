@@ -38,6 +38,7 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -1373,12 +1374,16 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private get projectIsKubernetesOnly(): boolean {
     if (this.brokers.length === 0) return false;
-    return this.brokers.every((b) => {
-      const profiles = b.profiles ?? [];
-      if (profiles.length === 0) return false;
-      return profiles.every((p) => p.type === 'kubernetes');
-    });
+    return this.brokers.every((b) => isBrokerKubernetesOnly(b));
   }
+
+  /** DOM id of the Kubernetes explanation span, linked from the select via aria-describedby. */
+  private static readonly gcpIdentityK8sHintId = 'gcp-identity-k8s-hint';
+
+  /** Explanation text shared by the hint span and the disabled option's tooltip. */
+  private static readonly gcpIdentityK8sHintText =
+    'Block is not supported on the Kubernetes runtime: this project’s runtime brokers are ' +
+    'Kubernetes. Choose Passthrough or Assign Service Account instead.';
 
   /**
    * Short explanation shown next to the GCP identity picker when this
@@ -1388,9 +1393,8 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private renderKubernetesBlockHint() {
     if (!this.projectIsKubernetesOnly) return nothing;
-    return html`<span class="field-help"
-      >Block is not available for this project: its runtime brokers are Kubernetes. Choose
-      Passthrough or Assign Service Account.</span
+    return html`<span class="field-help" id=${ScionPageProjectSettings.gcpIdentityK8sHintId}
+      >${ScionPageProjectSettings.gcpIdentityK8sHintText}</span
     >`;
   }
 
@@ -1425,6 +1429,13 @@ export class ScionPageProjectSettings extends LitElement {
       return html`<span class="field-help"
         >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
         on other brokers get "Block".</span
+      >`;
+    }
+    if (mode.hubValue === 'block' && this.projectIsKubernetesOnly) {
+      return html`<span class="field-help"
+        >Inherited from hub: the hub default is "Block", but this project's runtime brokers are
+        Kubernetes, which rejects it at dispatch. Set a project-level default of Passthrough or
+        Assign Service Account.</span
       >`;
     }
     return nothing;
@@ -2411,6 +2422,9 @@ export class ScionPageProjectSettings extends LitElement {
                 <sl-select
                   value=${this.configDefaultGCPIdentityMode || 'inherit'}
                   ?disabled=${!canEdit}
+                  aria-describedby=${this.projectIsKubernetesOnly
+                    ? ScionPageProjectSettings.gcpIdentityK8sHintId
+                    : nothing}
                   @sl-change=${(e: Event) => {
                     const val = (e.target as HTMLSelectElement).value;
                     this.configDefaultGCPIdentityMode = val === 'inherit' ? '' : val;
@@ -2422,10 +2436,17 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="inherit"
                     >${this.hubSelectLabel(
                       'scion.io/default-gcp-identity-mode',
-                      'None (default to block)'
+                      this.projectIsKubernetesOnly
+                        ? 'None (default to passthrough)'
+                        : 'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option value="block" ?disabled=${this.projectIsKubernetesOnly}
+                  <sl-option
+                    value="block"
+                    ?disabled=${this.projectIsKubernetesOnly}
+                    title=${this.projectIsKubernetesOnly
+                      ? ScionPageProjectSettings.gcpIdentityK8sHintText
+                      : nothing}
                     >Block</sl-option
                   >
                   <sl-option value="passthrough">Passthrough</sl-option>
