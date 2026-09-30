@@ -492,8 +492,12 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go generate ./harnesses/`, which stamps a `GENERATED FILE` header; external
-bundles just track the canonical file.)
+`go run ./harnesses/gen`, which stamps a `GENERATED FILE` header; external
+bundles just track the canonical file. Run it from the repo root — the
+`//go:generate` directive on this file resolves `gen`'s paths against the
+package directory, not the repo root, so `go generate ./harnesses/...`
+itself fails with "no such file or directory"; `go run ./harnesses/gen` is
+the command that actually works.)
 
 Key API surface:
 
@@ -763,8 +767,8 @@ permanent; check whether they've been fixed.
   dialects; bundled `dialect.yaml` dialects work but are undocumented there.
 - **Vendored-lib drift for external bundles** is manual: nothing warns when
   your vendored `scion_harness.py` falls behind the canonical copy (in-repo
-  bundles are covered by `go generate` + a sync test). The host logs the
-  staged `LIB_VERSION` at provision time — check it when debugging.
+  bundles are covered by `go run ./harnesses/gen` + a sync test). The host
+  logs the staged `LIB_VERSION` at provision time — check it when debugging.
 - **`HasSystemPrompt`** checks for the native system-prompt file on disk, but
   the file is only written at pre-start, so host-side checks before first
   start can misreport.
