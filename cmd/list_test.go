@@ -1488,17 +1488,17 @@ func TestResolveOwnerID(t *testing.T) {
 	const directID = "22222222-2222-2222-2222-222222222222"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/auth/me":
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
 			_ = json.NewEncoder(w).Encode(hubclient.User{ID: meID, Email: "me@example.com"})
-		case r.URL.Path == "/api/v1/users/"+directID:
+		case "/api/v1/users/" + directID:
 			_ = json.NewEncoder(w).Encode(hubclient.User{ID: directID, Email: "direct@example.com"})
-		case r.URL.Path == "/api/v1/users/by-name" || r.URL.Path == "/api/v1/users/alice" || r.URL.Path == "/api/v1/users/ambiguous" || r.URL.Path == "/api/v1/users/nobody":
+		case "/api/v1/users/by-name", "/api/v1/users/alice", "/api/v1/users/ambiguous", "/api/v1/users/nobody":
 			// These are name/email lookups mis-tried as direct IDs — 404 so
 			// resolveOwnerID falls back to the search branch below.
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
-		case r.URL.Path == "/api/v1/users":
+		case "/api/v1/users":
 			search := r.URL.Query().Get("search")
 			var users []hubclient.User
 			switch search {
@@ -1625,15 +1625,15 @@ func TestResolveReferenceAgent_FallsBackOn403(t *testing.T) {
 	const peerID = "66666666-6666-6666-6666-666666666666"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+peerID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + peerID:
 			// A single-resource GET on a peer is forbidden for this identity
 			// (agent.read has no AgentScopes mapping — see
 			// TestBypassAgents_LegitimateFlowsStillWork), even though the
 			// agent genuinely exists and is listable.
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			// The list endpoint, by contrast, is authorized and includes the
 			// peer — whether narrowed by id[] or returned in a bare page.
 			ids := r.URL.Query()["id"]
@@ -1666,10 +1666,10 @@ func TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter(t *testing.T) {
 	var bareListCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			ids := r.URL.Query()["id"]
 			if len(ids) == 0 {
 				bareListCalled = true
@@ -1707,10 +1707,10 @@ func TestResolveReferenceAgent_UUIDMismatchedIDNotFound(t *testing.T) {
 	const unexpectedAgentID = "88888888-8888-8888-8888-888888888888"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+ref:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + ref:
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			assert.Equal(t, []string{ref}, r.URL.Query()["id"])
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: unexpectedAgentID, Slug: "unexpected-agent"}},
@@ -1737,10 +1737,10 @@ func TestResolveReferenceAgent_UUIDDuplicateMatchErrors(t *testing.T) {
 	const ref = "99999999-9999-9999-9999-999999999999"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+ref:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + ref:
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			assert.Equal(t, []string{ref}, r.URL.Query()["id"])
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{
@@ -1769,10 +1769,10 @@ func TestResolveReferenceAgent_PagesThroughNameMatches(t *testing.T) {
 	const targetID = "88888888-8888-8888-8888-888888888888"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/target-name":
+		switch r.URL.Path {
+		case "/api/v1/agents/target-name":
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			if r.URL.Query().Get("cursor") == "" {
 				// First page: no match, but says there's more.
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1810,12 +1810,12 @@ func TestListAgentsViaHub_AttributeFilterQueryParams(t *testing.T) {
 	var gotQuery map[string][]string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/users/"+ownerID:
+		switch r.URL.Path {
+		case "/api/v1/users/" + ownerID:
 			_ = json.NewEncoder(w).Encode(hubclient.User{ID: ownerID})
-		case r.URL.Path == "/api/v1/runtime-brokers/"+brokerID:
+		case "/api/v1/runtime-brokers/" + brokerID:
 			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{ID: brokerID, Name: "broker-x"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			gotQuery = map[string][]string(r.URL.Query())
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
@@ -1861,10 +1861,10 @@ func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
 	var gotAncestorID string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Name: "ref-agent"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			gotAncestorID = r.URL.Query().Get("ancestorId")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
@@ -1911,12 +1911,12 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 	var agentsCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent", Ancestry: []string{"anc-1", "anc-2"}})
-		case r.URL.Path == "/api/v1/agents/"+emptyRefID:
+		case "/api/v1/agents/" + emptyRefID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: emptyRefID, Slug: "empty-ref-agent"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			agentsCalled = true
 			gotIDs = r.URL.Query()["id"]
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
@@ -2161,10 +2161,10 @@ func TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked(t *tes
 	var listCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			listCalled = true
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
@@ -2204,10 +2204,10 @@ func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *t
 	var listCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			listCalled = true
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
@@ -2252,10 +2252,10 @@ func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t
 	var listCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/agents/"+refID:
+		switch r.URL.Path {
+		case "/api/v1/agents/" + refID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: refID, Slug: "ref-agent"})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			listCalled = true
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 		default:
@@ -2355,20 +2355,20 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	var agentsCalled bool
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/auth/me":
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
 			_ = json.NewEncoder(w).Encode(hubclient.User{ID: callingUserID, Email: "me@example.com"})
-		case r.URL.Path == "/api/v1/agents/"+callingAgentID:
+		case "/api/v1/agents/" + callingAgentID:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
-		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents/"+callingAgentID:
+		case "/api/v1/projects/" + agentProjectID + "/agents/" + callingAgentID:
 			// Agent mode's default (non-`--all`) path goes through the
 			// project-scoped endpoint.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
-		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents":
+		case "/api/v1/projects/" + agentProjectID + "/agents":
 			agentsCalled = true
 			gotAncestorID = r.URL.Query().Get("ancestorId")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
-		case r.URL.Path == "/api/v1/agents":
+		case "/api/v1/agents":
 			agentsCalled = true
 			gotAncestorID = r.URL.Query().Get("ancestorId")
 			gotLineageRootID = r.URL.Query().Get("lineageRootId")
