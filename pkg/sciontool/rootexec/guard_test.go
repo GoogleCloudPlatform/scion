@@ -118,7 +118,7 @@ var execSiteAllowlist = map[string]string{
 	// closed with services.ErrPrivilegeDropRequired under
 	// requirePrivilegeDrop) before any service is started — the identical
 	// Go-level drop-before-exec model as supervisor.Run.
-	"pkg/sciontool/services/manager.go:391": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/services/manager.go:392": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// runExec's outer sh: suCmd is built by execAsUserCmd, which resolves
 	// "sh"/"su"/"whoami" via rootexec.Resolve (execResolve in tests) before
