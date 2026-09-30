@@ -818,6 +818,17 @@ export class ScionPageBrokerDetail extends LitElement {
    * moment they're deciding whether to clear the override, named by its
    * actual source (hub default vs. entitlement), with 0 shown as
    * "unlimited" rather than the bare number. */
+  /** Whether the current form state would fail saveBrokerSettings's
+   * validation (review round 4, F1) — used to disable Save proactively
+   * rather than relying solely on the post-click rejection. */
+  private get customValueInvalid(): boolean {
+    if (this.brokerSettingsMode !== 'custom') return false;
+    const raw = this.brokerSettingsCustomValue.trim();
+    if (raw === '') return true;
+    const parsed = Number(raw);
+    return !Number.isInteger(parsed) || parsed < 0;
+  }
+
   private inheritedRadioLabel(inherited: InheritedSetting): string {
     if (inherited.value === null) return 'Use hub default';
     const value = inherited.value === 0 ? 'unlimited' : String(inherited.value);
@@ -858,7 +869,16 @@ export class ScionPageBrokerDetail extends LitElement {
     if (this.brokerSettingsMode === 'default') {
       maxAgents = null;
     } else {
-      const parsed = Number(this.brokerSettingsCustomValue);
+      const raw = this.brokerSettingsCustomValue.trim();
+      if (raw === '') {
+        // Number('') is 0, which is a legitimate value (unlimited) — an
+        // empty/whitespace-only field must be rejected explicitly, or a
+        // blank Custom field (e.g. the initial state when there is no
+        // override) silently saves as maxAgents=0 (review round 4, F1).
+        this.brokerSettingsError = 'Enter a whole number 0 or greater (0 means unlimited).';
+        return;
+      }
+      const parsed = Number(raw);
       if (!Number.isInteger(parsed) || parsed < 0) {
         this.brokerSettingsError = 'Enter a whole number 0 or greater (0 means unlimited).';
         return;
@@ -983,7 +1003,7 @@ export class ScionPageBrokerDetail extends LitElement {
                 size="small"
                 style="margin-top: 0.5rem;"
                 ?loading=${this.brokerSettingsSaving}
-                ?disabled=${this.brokerSettingsSaving}
+                ?disabled=${this.brokerSettingsSaving || this.customValueInvalid}
                 @click=${() => this.saveBrokerSettings()}
               >
                 Save

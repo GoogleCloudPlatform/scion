@@ -1,7 +1,8 @@
 # Broker settings P2.1: per-broker `maxAgents` vertical slice (ptone/scion#2061 P2, ptone/scion#2177)
 
-Base: PR ptone/scion#2168, frozen at `e8013da1` on `origin/feat/provider-capacity` (not yet merged
-upstream at time of writing). Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md`
+Base: started stacked on PR ptone/scion#2168 (frozen at `e8013da1` on `origin/feat/provider-capacity`);
+that PR has since landed upstream as GoogleCloudPlatform/scion#2097, and this branch is rebased onto
+`upstream-main` on top of it. Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md`
 §5, especially §5.1–§5.4, §5.6, §5.7 P2.1, §5.9. Branch `scion/broker-settings-p2-1`.
 
 ## What shipped
