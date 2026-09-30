@@ -381,12 +381,24 @@ supports_backend_search = false'''
     # only its own alias sub-table, not the whole shared [model.*] table
     # (which also holds _write_vertex_config's own vertex-grok block and
     # possibly a user's [model.custom]).
-    if scion_harness.write_toml_if_preserves(
+    if not scion_harness.write_toml_if_preserves(
         ctx, config_path, original, content,
         managed_keys={("model", alias_name)},
         what=f"vertex-ai model alias '{alias_name}'",
     ):
-        ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
+        # Without this alias block, grok falls back to the direct xAI API
+        # for --model <alias_name> and gets a 401 when vertex-ai auth is in
+        # use — the same guaranteed-broken-if-missing outcome
+        # _write_vertex_config's own raise is about, so this must also fail
+        # loudly instead of warning and continuing into a misleading
+        # success log (ptone/scion#2427 review round 2, R2-a).
+        raise scion_harness.ProvisionError(
+            f"vertex-ai: failed to write model alias '{alias_name}' to "
+            f"{config_path}; grok would fall back to the direct xAI API "
+            "for this model and fail auth (see the preceding warning for "
+            "what blocked the write)"
+        )
+    ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
 
 # ---------------------------------------------------------------------------

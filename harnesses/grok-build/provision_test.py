@@ -27,6 +27,7 @@ import tomllib
 import unittest
 from contextlib import contextmanager
 from typing import Any
+from unittest import mock
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("grok_build_provision", PROVISION_PATH)
@@ -49,6 +50,47 @@ def temporary_home(path: str):
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = old_home
+
+
+@contextmanager
+def _also_strip_sections_damaging(header: str):
+    """Force real damage for backstop/upper-bound tests (ptone/scion#2427
+    review round 2, R2-b): monkeypatch scion_harness.strip_toml_sections so
+    every call also (wrongly) strips the top-level section `header` (an
+    exact "[table]" string) in addition to whatever the real predicate
+    matches, simulating a bug in the line-oriented strip that corrupts
+    something it doesn't own. Callers assert the resulting write is
+    rejected (or, for _write_vertex_config/_write_vertex_model_alias,
+    raises) — a managed_keys set that's too wide, or a key-path wrongly
+    reverted to a bare top-level key, would make the check (wrongly) accept
+    the damage instead."""
+    real_strip = scion_harness.strip_toml_sections
+
+    def damaging(content, predicate):
+        content = real_strip(content, predicate)
+        return real_strip(content, lambda h, hdr=header: h == hdr)
+
+    with mock.patch.object(scion_harness, "strip_toml_sections", side_effect=damaging):
+        yield
+
+
+@contextmanager
+def _force_is_header(fake_header_line: str):
+    """Force real damage by making scion_harness.is_toml_table_header report
+    True for the exact raw line `fake_header_line`, regardless of its
+    actual depth (ptone/scion#2427 review round 2, R2-b) — simulating a
+    (currently hypothetical, since the known string-tracking gaps are
+    closed) bug where a line that is really inside a multi-line string gets
+    mistaken for a genuine table header."""
+    real_is_header = scion_harness.is_toml_table_header
+
+    def wrapper(line, depth):
+        if line == fake_header_line:
+            return True
+        return real_is_header(line, depth)
+
+    with mock.patch.object(scion_harness, "is_toml_table_header", side_effect=wrapper):
+        yield
 
 
 def _make_ctx(
@@ -392,10 +434,14 @@ class MCPTomlWriteTest(unittest.TestCase):
                 self.assertIn("[other]", content)
 
     def test_write_mcp_toml_preserves_cli_and_features_overlay(self) -> None:
-        # ptone/scion#2427 review round 1 ("Optional", do it): pins the
-        # upper bound of managed_keys={"mcp_servers"} — [cli]/[features]
-        # (the exact tables the reviewer's own managed_keys-widening
-        # mutation added here) must survive untouched.
+        # Happy-path sanity check: [cli]/[features] survive a normal write.
+        # This alone does NOT pin managed_keys={"mcp_servers"} — the strip
+        # never touches those tables regardless of what's declared as
+        # managed, so widening managed_keys to also cover them (M10 in the
+        # review) would pass this test too (ptone/scion#2427 review round 2,
+        # R2-b). See
+        # test_write_mcp_toml_rejects_write_that_also_damages_overlay_table
+        # below for the test that actually pins the upper bound.
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
             with temporary_home(tmp):
@@ -410,6 +456,31 @@ class MCPTomlWriteTest(unittest.TestCase):
         self.assertEqual(data["cli"], {"auto_update": False})
         self.assertEqual(data["features"], {"telemetry": False})
         self.assertEqual(data["mcp_servers"]["new-server"]["command"], "new-cmd")
+
+    def test_write_mcp_toml_rejects_write_that_also_damages_overlay_table(self) -> None:
+        # ptone/scion#2427 review round 2 (R2-b): force real damage — strip
+        # is patched to also (wrongly) drop [cli] — and assert
+        # write_toml_if_preserves' managed_keys={"mcp_servers"} check
+        # rejects the resulting damage. Widening managed_keys to also cover
+        # "cli" (M10 in the review) would make this test fail, since the
+        # check would then (wrongly) accept the damage.
+        original = '[cli]\nauto_update = false\n\n[features]\ntelemetry = false\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                with _also_strip_sections_damaging("[cli]"):
+                    provision._write_mcp_toml(ctx, {"new-server": {"command": "new-cmd"}})
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit would drop an unmanaged table")
+        self.assertEqual(len(warnings), 1)
 
     def test_write_mcp_toml_strips_stale_server_alongside_multiline_string_with_brackets(self) -> None:
         # Regression test for ptone/scion#2427 review round 1 (R1): an
@@ -484,19 +555,14 @@ class MCPTomlWriteTest(unittest.TestCase):
         self.assertEqual(data["mcp_servers"]["foo"]["command"], "new-cmd")
 
     def test_write_mcp_toml_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
-        # write_toml_if_preserves backstop: an escaped closing-delimiter
-        # sequence inside a multi-line basic string (the narrow residual
-        # gap remaining after ptone/scion#2427 review round 1) must not be
-        # silently corrupted.
-        original = (
-            'notes = """\n'
-            'literal triple quote: \\"""\n'
-            "[mcp_servers.fake]\n"
-            'command = "not real"\n'
-            '"""\n'
-            "[other]\n"
-            "k = 1\n"
-        )
+        # write_toml_if_preserves backstop must not silently write a
+        # corrupting edit. Originally used a header-shaped line, then an
+        # escaped closing-delimiter sequence, inside a multi-line string to
+        # trigger this; both are now correctly handled (ptone/scion#2427
+        # review rounds 1 and 2). Per review round 2 (R2-b), this now forces
+        # real damage instead: strip_toml_sections is patched to also
+        # (wrongly) drop [other].
+        original = 'notes = "keep me"\n[other]\nk = 1\n'
         self.assertEqual(tomllib.loads(original)["other"]["k"], 1, "sanity: original must be valid TOML")
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
@@ -508,7 +574,8 @@ class MCPTomlWriteTest(unittest.TestCase):
                     f.write(original)
                 warnings: list[str] = []
                 ctx.warn = warnings.append  # type: ignore[method-assign]
-                provision._write_mcp_toml(ctx, {"real": {"command": "x"}})
+                with _also_strip_sections_damaging("[other]"):
+                    provision._write_mcp_toml(ctx, {"real": {"command": "x"}})
                 with open(config_path) as f:
                     after = f.read()
         self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
@@ -572,14 +639,16 @@ class ConfigHardeningTest(unittest.TestCase):
                 self.assertIn("# BEGIN SCION MANAGED", content)
 
     def test_hardening_preserves_overlay_table_next_to_managed_keys(self) -> None:
-        # ptone/scion#2427 review round 1 ("Optional", do it): pins the
-        # upper bound of managed_keys — an unrelated overlay table (here
-        # [tools], not one of "cli"/"features"/"memory"/"subagents") sitting
-        # right alongside the managed sections must survive byte-for-byte.
-        # A managed_keys set accidentally widened to also cover "tools"
-        # would still pass every other hardening test, since nothing else
-        # here writes to "tools" — this is the test that would actually
-        # notice the widening damaging real content.
+        # Happy-path sanity check: an unrelated overlay table (here [tools],
+        # not one of "cli"/"features"/"memory"/"subagents") survives a
+        # normal hardening write. This alone does NOT pin managed_keys — the
+        # line-oriented strip never touches [tools] regardless of what's
+        # declared as managed, so a managed_keys set widened to also cover
+        # "tools" would pass this test too (ptone/scion#2427 review round 2,
+        # R2-b). See
+        # test_hardening_rejects_write_that_also_damages_overlay_table below
+        # for the test that actually pins the upper bound, by forcing real
+        # damage and asserting it gets rejected.
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
             with temporary_home(tmp):
@@ -593,6 +662,32 @@ class ConfigHardeningTest(unittest.TestCase):
                     data = tomllib.load(f)
         self.assertEqual(data["tools"], {"custom_flag": "keep-me"})
         self.assertEqual(data["cli"]["auto_update"], False)
+
+    def test_hardening_rejects_write_that_also_damages_overlay_table(self) -> None:
+        # ptone/scion#2427 review round 2 (R2-b): force real damage — strip
+        # is patched to also (wrongly) drop [tools] — and assert
+        # write_toml_if_preserves' managed_keys=
+        # {"cli","features","memory","subagents"} check rejects the
+        # resulting damage. Widening managed_keys to also cover "tools" (M9
+        # in the review) would make this test fail, since the check would
+        # then (wrongly) accept the damage.
+        original = '[cli]\nauto_update = true\n\n[tools]\ncustom_flag = "keep-me"\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                with _also_strip_sections_damaging("[tools]"):
+                    provision._harden_config(ctx)
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit would drop an unmanaged table")
+        self.assertEqual(len(warnings), 1)
 
     def test_hardening_replaces_existing_managed_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -640,22 +735,14 @@ class ConfigHardeningTest(unittest.TestCase):
         self.assertNotIn("BEGIN SCION MANAGED", data)
 
     def test_hardening_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
-        # write_toml_if_preserves backstop: an escaped closing-delimiter
-        # sequence inside a multi-line basic string is the narrow residual
-        # gap remaining after ptone/scion#2427 review round 1 (R1) — the
-        # raw (unescaped-for-our-purposes) "\"\"\"" closes the string early,
-        # so the "[cli]" that follows inside the string body is mistaken
-        # for a real header and stripped, corrupting the string. The edit
-        # must be rejected and the original file left on disk untouched.
-        original = (
-            'notes = """\n'
-            'literal triple quote: \\"""\n'
-            "[cli]\n"
-            "more text\n"
-            '"""\n'
-            "[other]\n"
-            "k = 1\n"
-        )
+        # write_toml_if_preserves backstop: a rejected edit must leave the
+        # original file on disk untouched. Originally used a header-shaped
+        # line, then an escaped closing-delimiter sequence, inside a
+        # multi-line string to trigger this; both are now correctly handled
+        # (ptone/scion#2427 review rounds 1 and 2). Per review round 2
+        # (R2-b), this now forces real damage instead: strip_toml_sections
+        # is patched to also (wrongly) drop [other].
+        original = 'notes = "keep me"\n[other]\nk = 1\n'
         self.assertEqual(tomllib.loads(original)["other"]["k"], 1, "sanity: original must be valid TOML")
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
@@ -667,7 +754,8 @@ class ConfigHardeningTest(unittest.TestCase):
                     f.write(original)
                 warnings: list[str] = []
                 ctx.warn = warnings.append  # type: ignore[method-assign]
-                provision._harden_config(ctx)
+                with _also_strip_sections_damaging("[other]"):
+                    provision._harden_config(ctx)
                 with open(config_path) as f:
                     after = f.read()
         self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
@@ -1010,27 +1098,23 @@ class VertexConfigTomlWriteTest(unittest.TestCase):
     def test_write_vertex_config_raises_and_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(
         self,
     ) -> None:
-        # A plain header-shaped line inside a well-formed multi-line string
-        # (balanced brackets) is now correctly handled after
-        # ptone/scion#2427 review round 1 — see
-        # test_write_vertex_config_strips_header_whitespace_variant and
-        # scion_harness_test.py's repro tests. This uses the narrower
-        # residual gap that remains: an escaped closing-delimiter sequence
-        # inside a multi-line basic string closes it early.
+        # A plain header-shaped line inside a well-formed multi-line string,
+        # then an escaped closing-delimiter sequence, were both previously
+        # used to trigger this; both are now correctly handled
+        # (ptone/scion#2427 review rounds 1 and 2). Per review round 2
+        # (R2-b), this now forces real damage instead — strip_toml_sections
+        # is patched to also (wrongly) drop an unrelated sibling
+        # [auth_provider.other] block — which also directly pins the
+        # key-path scoping (M6 in the review): if the key-paths were ever
+        # reverted to bare "auth_provider"/"model", this damage would fall
+        # inside the exempted top-level "auth_provider" key and the test
+        # would fail to see a raise.
         #
         # Per review round 1 (R2): a vertex-auth agent with no vertex config
         # is guaranteed broken, so a rejected write must fail loudly
         # (ProvisionError) rather than continue as if it had succeeded.
-        original = (
-            'notes = """\n'
-            'literal triple quote: \\"""\n'
-            "[models]\n"
-            "looks like a header but isn't\n"
-            '"""\n'
-            "[other]\n"
-            "k = 1\n"
-        )
-        self.assertEqual(tomllib.loads(original)["other"]["k"], 1, "sanity: original must be valid TOML")
+        original = '[auth_provider.other]\ncommand = "other-cmd"\n'
+        self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
             with temporary_home(tmp):
@@ -1041,19 +1125,33 @@ class VertexConfigTomlWriteTest(unittest.TestCase):
                     f.write(original)
                 warnings: list[str] = []
                 ctx.warn = warnings.append  # type: ignore[method-assign]
-                with self.assertRaises(scion_harness.ProvisionError):
-                    provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
+                with _also_strip_sections_damaging("[auth_provider.other]"):
+                    with self.assertRaises(scion_harness.ProvisionError):
+                        provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
                 with open(config_path) as f:
                     after = f.read()
         self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
         self.assertEqual(len(warnings), 1)
         self.assertIn("vertex-ai auth/model config", warnings[0])
 
-    def test_write_vertex_model_alias_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
-        # A plain header-shaped line inside a well-formed multi-line string
-        # is now correctly handled after ptone/scion#2427 review round 1;
-        # this uses the narrower residual gap that remains: an escaped
-        # closing-delimiter sequence inside a multi-line basic string.
+    def test_write_vertex_model_alias_raises_and_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(
+        self,
+    ) -> None:
+        # A plain header-shaped line, then an escaped closing-delimiter
+        # sequence, inside a multi-line string were both previously used to
+        # trigger this; both are now correctly handled (ptone/scion#2427
+        # review rounds 1 and 2). Per review round 2 (R2-b), this now forces
+        # real damage instead — strip_toml_sections is patched to also
+        # (wrongly) drop a sibling [model.custom] block — which also
+        # directly pins the key-path scoping (M7 in the review): if
+        # ("model", alias_name) were ever reverted to bare "model", this
+        # damage would fall inside the exempted top-level "model" key and
+        # the test would fail to see a raise.
+        #
+        # Per review round 2 (R2-a): the alias write is part of the same
+        # guaranteed-broken-if-missing path as the primary vertex config, so
+        # a rejected write must raise instead of warning and continuing
+        # into a misleading success log.
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _make_ctx()
             with temporary_home(tmp):
@@ -1063,20 +1161,15 @@ class VertexConfigTomlWriteTest(unittest.TestCase):
                 provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
                 with open(config_path) as f:
                     baseline = f.read()
-                original = (
-                    baseline
-                    + '\nnotes = """\n'
-                    'literal triple quote: \\"""\n'
-                    '[model."grok-4.2"]\n'
-                    "looks like a header but isn't\n"
-                    '"""\n'
-                )
+                original = baseline + '\n[model.custom]\nurl = "keep-me"\n'
                 self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
                 with open(config_path, "w") as f:
                     f.write(original)
                 warnings: list[str] = []
                 ctx.warn = warnings.append  # type: ignore[method-assign]
-                provision._write_vertex_model_alias(ctx, "https://example/v1", "xai/grok-4.6", "grok-4.2")
+                with _also_strip_sections_damaging("[model.custom]"):
+                    with self.assertRaises(scion_harness.ProvisionError):
+                        provision._write_vertex_model_alias(ctx, "https://example/v1", "xai/grok-4.6", "grok-4.2")
                 with open(config_path) as f:
                     after = f.read()
         self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
@@ -1893,24 +1986,20 @@ class VertexAIAuthTest(unittest.TestCase):
                 grok_dir = os.path.join(tmp, ".grok")
                 os.makedirs(grok_dir, exist_ok=True)
                 config_path = os.path.join(grok_dir, "config.toml")
-                # An escaped closing-delimiter sequence inside a multi-line
-                # basic string closes it early, so the [models] line that
-                # follows is (wrongly) treated as a real header — the
-                # residual gap that remains after review round 1's
-                # multi-line-string fix.
-                original = (
-                    'notes = """\n'
-                    'literal triple quote: \\"""\n'
-                    "[models]\n"
-                    "looks like a header but isn't\n"
-                    '"""\n'
-                )
+                # Originally used an escaped closing-delimiter sequence to
+                # force a rejection; that gap is closed as of
+                # ptone/scion#2427 review round 2 ("Consider 2"). Per review
+                # round 2 (R2-b), this now forces real damage instead:
+                # strip_toml_sections is patched to also (wrongly) drop an
+                # unrelated sibling [auth_provider.other] block.
+                original = '[auth_provider.other]\ncommand = "other-cmd"\n'
                 self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
                 with open(config_path, "w") as f:
                     f.write(original)
 
-                with self.assertRaises(scion_harness.ProvisionError):
-                    provision._configure_vertex_ai(ctx, env)
+                with _also_strip_sections_damaging("[auth_provider.other]"):
+                    with self.assertRaises(scion_harness.ProvisionError):
+                        provision._configure_vertex_ai(ctx, env)
 
                 with open(config_path) as f:
                     after = f.read()
