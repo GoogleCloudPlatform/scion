@@ -886,7 +886,7 @@ describe('idle entries (design ptone/scion#2278)', () => {
     expect(root.layoutManager.getState().single[0]).toBe(session2.state.key);
   });
 
-  it('idle and metadata: a stopped agent stays idle; selecting it after it runs connects; selecting while still stopped shows unavailable', async () => {
+  it('idle and metadata: a stopped agent stays idle; selecting it while still stopped shows unavailable', async () => {
     agentPhase = 'stopped';
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,
@@ -917,6 +917,31 @@ describe('idle entries (design ptone/scion#2278)', () => {
     await flush();
     await vi.waitFor(() => expect(session.state.connection).toBe('unavailable'));
     expect(['agent-phase', 'agent-stopped']).toContain(session.state.disconnectReason);
+  });
+
+  it('idle and metadata: a stopped agent stays idle until selected; selecting it once it is running connects', async () => {
+    agentPhase = 'stopped';
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i5b',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    expect(session.state.connection).toBe('idle');
+
+    // The agent restarts before the user ever selects the idle entry. Idle
+    // entries ignore the SSE bridge's running-rearm branch regardless (it
+    // only acts on 'unavailable' sessions), but selecting always drives a
+    // fresh connect() / attach() that sees the agent's current state.
+    agentPhase = 'running';
+    root.select(session);
+    await flush();
+    expect(session.state.connection).not.toBe('idle');
+    await vi.waitFor(() =>
+      expect(fetcher.mock.calls.some(([url]) => String(url).includes('/pty'))).toBe(true)
+    );
   });
 
   it('idle and metadata: a deleted agent shows "Agent was deleted." and selecting it starts no attempt', async () => {

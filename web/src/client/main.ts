@@ -976,7 +976,7 @@ async function renderRoute(path: string): Promise<void> {
       // agent path) restores. Phase 2 computes urlIntent from the route
       // being rendered and merges restore with the URL-driven paths above
       // and below; until then, those paths are unaffected by restore.
-      if (pathname === '/terminals' && !layoutUrl && terminalPersistence) {
+      if (pathname === '/terminals' && !layoutUrl && coordinator && terminalPersistence) {
         await terminalPersistence.restore(false);
         if (thisNav !== navigationId) return;
       }

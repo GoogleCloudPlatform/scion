@@ -57,6 +57,14 @@ type GenerationState =
   | { readonly status: 'merged'; baseline: TerminalWorkspaceDoc | null }
   | { readonly status: 'failed' };
 
+/**
+ * `null` = the request itself failed (network error). `'invalid-response'` =
+ * the request succeeded (HTTP 200) but the body did not pass validation, so
+ * it is not known whether the write landed. A `number` is a non-200 HTTP
+ * status the server returned.
+ */
+type PutFailureStatus = number | null | 'invalid-response';
+
 export interface TerminalWorkspacePersistenceDeps {
   coordinator: TerminalCoordinator;
   workspace: TerminalWorkspaceRoot;
@@ -88,7 +96,15 @@ function isValidDoc(body: unknown): body is {
     !b.agentIds.every((id) => typeof id === 'string' && uuid.test(id))
   )
     return false;
-  if (b.frontmostAgentId !== null && typeof b.frontmostAgentId !== 'string') return false;
+  if (b.frontmostAgentId !== null) {
+    // The hub validates this on write, but the response is otherwise
+    // untrusted (design section 3.5.0): a frontmost that is not a member of
+    // agentIds must not be treated as valid, or merge() would pick a
+    // connectId that restoreEntries never creates (every restored entry
+    // would be deferConnect, auto-select suspended, and nothing selected).
+    if (typeof b.frontmostAgentId !== 'string' || !b.agentIds.includes(b.frontmostAgentId))
+      return false;
+  }
   if (typeof b.revision !== 'number') return false;
   if (typeof b.pruned !== 'number') return false;
   if (b.updatedAt !== null && typeof b.updatedAt !== 'string') return false;
@@ -122,6 +138,10 @@ export class TerminalWorkspacePersistence {
   private putInFlight = false;
   private dirtyDuringPut = false;
   private disposed = false;
+  /** Set once a PUT failure has been logged for the current generation, so a
+   *  repeated failure (the same body re-sent on every debounce fire) does not
+   *  spam the console. Reset on a new generation and on the next success. */
+  private putFailureLogged = false;
 
   constructor(deps: TerminalWorkspacePersistenceDeps) {
     this.coordinator = deps.coordinator;
@@ -153,6 +173,7 @@ export class TerminalWorkspacePersistence {
       this.generation = generation;
       this.state = { status: 'loading' };
       this.inflightGet = null;
+      this.putFailureLogged = false;
       this.installNotificationListeners(generation);
     }
     if (this.state?.status !== 'loading') return; // already merged or failed this generation
@@ -182,10 +203,17 @@ export class TerminalWorkspacePersistence {
 
   /**
    * Before the merge, notifications are ignored and never arm the debounce
-   * (design section 3.5.5): the merge reads the live snapshot anyway.
+   * (design section 3.5.5): the merge reads the live snapshot anyway. Also
+   * requires this.generation to still be the coordinator's current
+   * generation: a stale generation's 'merged' status must not authorize a
+   * write in a generation this instance has not restored in. Today the
+   * coordinator cannot regain ownership after losing it (only stop()
+   * releases, and it disables re-claiming); this guard keeps the section
+   * 3.4 invariant if that ever changes.
    */
   private onChange(generation: string): void {
     if (this.disposed || generation !== this.generation) return;
+    if (generation !== this.coordinator.generation) return;
     if (this.state?.status !== 'merged') return;
     this.armDebounce();
   }
@@ -201,12 +229,30 @@ export class TerminalWorkspacePersistence {
     if (this.disposed || generation !== this.generation || this.coordinator.tornDown) return;
     if (!doc) {
       this.state = { status: 'failed' };
+      // TODO(Phase 2): retry the GET within the generation instead of
+      // disabling saving for the rest of it. Phase 1 has no such retry —
+      // restore() returns early once the status is 'failed' (see its doc
+      // comment) — so say "for this session", not "until a later attempt
+      // succeeds", which would promise a retry that does not exist yet.
       console.warn(
-        '[Terminal] restoring the saved terminal list failed; saving stays disabled until a later attempt succeeds.'
+        '[Terminal] restoring the saved terminal list failed; saving stays disabled for this session.'
       );
       return;
     }
-    this.merge(generation, doc, urlIntent);
+    try {
+      this.merge(generation, doc, urlIntent);
+    } catch (err) {
+      // coordinator.restoreEntries/workspace.select can throw (a disposed
+      // pane or registry, for example). A throw here must not reject
+      // restore()'s "never rejects" contract or leave this generation stuck
+      // 'loading' with inflightGet already cleared (which would otherwise
+      // let a later bare /terminals visit send a second GET and re-merge).
+      this.state = { status: 'failed' };
+      console.warn(
+        '[Terminal] failed to apply the restored terminal list; saving stays disabled.',
+        err
+      );
+    }
   }
 
   /**
@@ -256,36 +302,86 @@ export class TerminalWorkspacePersistence {
   private async fire(): Promise<void> {
     if (this.disposed || !this.coordinator.isOwner || this.coordinator.tornDown) return;
     if (this.state?.status !== 'merged') return;
+    if (this.generation !== this.coordinator.generation) return; // see onChange's doc comment
+
+    // Check putInFlight before comparing against the baseline: while a PUT
+    // is in flight, this.state.baseline is still the PREVIOUS saved doc, not
+    // the one the in-flight PUT is about to establish. Comparing against it
+    // here would let a change that returns to that previous doc (a revert)
+    // hit the sameDoc early return and never mark dirty — so once the
+    // in-flight PUT lands and advances the baseline to what it sent, the
+    // user's revert is never saved, silently leaving the hub out of sync
+    // with what the viewer shows (design section 3.4: "A change during an
+    // in-flight PUT marks the state dirty"). Marking dirty unconditionally
+    // here is safe even when the change is ultimately a no-op against
+    // whatever baseline the in-flight PUT settles on: the re-armed fire()
+    // re-evaluates snapshot() against the (by then current) baseline itself.
+    if (this.putInFlight) {
+      this.dirtyDuringPut = true;
+      return;
+    }
+
     const generation = this.generation;
     const snap = this.snapshot();
     const baseline = this.state.baseline;
     if (baseline !== null && sameDoc(baseline, snap)) return; // no-op change (or the usual reload)
 
-    if (this.putInFlight) {
-      this.dirtyDuringPut = true;
-      return;
-    }
     this.putInFlight = true;
     try {
-      const stored = await this.putWorkspace(snap);
+      const result = await this.putWorkspace(snap);
       if (this.disposed || generation !== this.generation || this.coordinator.tornDown) return;
-      if (stored) {
+      if (result.ok) {
         this.state = {
           status: 'merged',
-          baseline: { agentIds: stored.agentIds, frontmostAgentId: stored.frontmostAgentId },
+          baseline: {
+            agentIds: result.doc.agentIds,
+            frontmostAgentId: result.doc.frontmostAgentId,
+          },
         };
+        this.putFailureLogged = false;
+      } else {
+        // A rejected/failed PUT does not advance the baseline (design
+        // section 3.5.4): the unsaved snapshot goes out with the next
+        // debounced send, which the next change triggers. There is no PUT
+        // retry timer. Logged once per generation (design section 3.5.4)
+        // so a persistent failure does not spam the console on every send.
+        this.logPutFailure(result.status);
       }
-      // A rejected/failed PUT does not advance the baseline (design section
-      // 3.5.4): the unsaved snapshot goes out with the next debounced send,
-      // which the next change triggers. There is no PUT retry timer.
-    } catch {
-      // network error: same as above, baseline not advanced.
+    } catch (err) {
+      // putWorkspace does not throw in normal operation (it catches its own
+      // fetch and treats a validation failure as a failed result), but this
+      // guards fire() itself against an unexpected throw so it cannot become
+      // an unhandled rejection.
+      this.logPutFailure(null);
+      console.warn('[Terminal] unexpected error while saving the terminal list.', err);
     } finally {
       this.putInFlight = false;
       if (this.dirtyDuringPut) {
         this.dirtyDuringPut = false;
         this.armDebounce();
       }
+    }
+  }
+
+  private logPutFailure(status: PutFailureStatus): void {
+    if (this.putFailureLogged) return;
+    this.putFailureLogged = true;
+    if (status === null) {
+      console.warn(
+        '[Terminal] saving the terminal list failed (network error); it will be retried on the next change.'
+      );
+    } else if (status === 'invalid-response') {
+      console.warn(
+        '[Terminal] saving the terminal list got an unreadable response (HTTP 200 with an invalid body); it will be retried on the next change.'
+      );
+    } else if (status >= 500) {
+      console.warn(
+        `[Terminal] saving the terminal list failed (HTTP ${status}); it will be retried on the next change.`
+      );
+    } else {
+      console.warn(
+        `[Terminal] saving the terminal list was rejected (HTTP ${status}); it will be retried on the next change.`
+      );
     }
   }
 
@@ -328,16 +424,30 @@ export class TerminalWorkspacePersistence {
     return this.parseResponse(response);
   }
 
-  private async putWorkspace(doc: TerminalWorkspaceDoc): Promise<ServerTerminalWorkspace | null> {
+  private async putWorkspace(
+    doc: TerminalWorkspaceDoc
+  ): Promise<{ ok: true; doc: ServerTerminalWorkspace } | { ok: false; status: PutFailureStatus }> {
     const options: ApiFetchOptions = {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agentIds: doc.agentIds, frontmostAgentId: doc.frontmostAgentId }),
       keepalive: true,
     };
-    const response = await this.fetchImpl(TERMINAL_WORKSPACE_PATH, options);
-    if (response.status !== 200) return null;
-    return this.parseResponse(response);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(TERMINAL_WORKSPACE_PATH, options);
+    } catch {
+      return { ok: false, status: null };
+    }
+    if (response.status !== 200) return { ok: false, status: response.status };
+    const parsed = await this.parseResponse(response);
+    // A 200 whose body fails validation is not the server rejecting the
+    // write (it never got far enough to have an opinion); it is an
+    // unexpected/malformed response (e.g. a proxy or dev-server fallback).
+    // Keep it out of the "rejected (HTTP <status>)" case below so the log
+    // doesn't claim the write was refused when it may well have landed.
+    if (!parsed) return { ok: false, status: 'invalid-response' };
+    return { ok: true, doc: parsed };
   }
 
   /**

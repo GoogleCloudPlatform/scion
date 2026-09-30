@@ -863,7 +863,7 @@ describe('claimOwnership()', () => {
     vi.stubGlobal(
       'EventSource',
       class extends EventTarget {
-        close() {}
+        close(): void {}
       }
     );
     // Insecure context: coordination is unsupported from construction.
@@ -902,7 +902,7 @@ describe('claimOwnership()', () => {
     vi.stubGlobal(
       'EventSource',
       class extends EventTarget {
-        close() {}
+        close(): void {}
       }
     );
     vi.stubGlobal('isSecureContext', true);
@@ -984,7 +984,7 @@ describe('restoreEntries()', () => {
     vi.stubGlobal(
       'EventSource',
       class extends EventTarget {
-        close() {}
+        close(): void {}
       }
     );
     vi.stubGlobal('isSecureContext', true);

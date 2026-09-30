@@ -2100,7 +2100,7 @@ export class ScionTerminalPane extends LitElement {
         ></scion-status-badge>
         <div class="status-indicator">
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-          ${this.connected ? 'Connected' : 'Disconnected'}
+          ${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
         </div>
         ${!this.connected && !this.idle
           ? html`

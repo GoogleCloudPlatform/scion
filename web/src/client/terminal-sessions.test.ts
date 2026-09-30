@@ -237,7 +237,7 @@ describe('terminal sessions', () => {
 });
 
 describe('idle sessions (design ptone/scion#2278)', () => {
-  it('deferConnect gives idle and does not call the initializer', async () => {
+  it('deferConnect gives idle and does not call the initializer', () => {
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize, { deferConnect: true });
     expect(session.state.connection).toBe('idle');
