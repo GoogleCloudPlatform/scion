@@ -349,7 +349,7 @@ func TestProcessMentions_R3_MigratingMentionedAgentDeferred(t *testing.T) {
 	originalMsg := messages.NewInstruction("user:tester", "agent:r3-mention-primary", "hey @r3-mention-target")
 	originalMsg.SenderID = tid("r3-mention-user")
 
-	results := srv.processMentions(mentionCtx, []string{"r3-mention-target"}, primary, originalMsg, "")
+	results := srv.processMentions(mentionCtx, []string{"r3-mention-target"}, primary, originalMsg, "", "")
 	require.Len(t, results, 1)
 	assert.Equal(t, "deferred", results[0].Status)
 

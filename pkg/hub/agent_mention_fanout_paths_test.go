@@ -232,20 +232,20 @@ func TestMentionFanout_AgentToAgentStructured_BodyMentionFannedOut(t *testing.T)
 // sender<->mentioned-agent DM instead, exactly as it does when there is no
 // group context at all.
 func TestMentionFanout_StructuredMessageFreeTextThreadIDNeverCopiedOntoMentionRow(t *testing.T) {
+	// A "dm:agent:<target>:user:<sender>" case is deliberately absent here:
+	// the /message ownership check now requires the authenticated principal
+	// to actually be a user, not merely have a UUID that matches the "user"
+	// slot (design agent-reincarnate §3.7 Amendment A25.7 R2, closing the
+	// phantom "user:<agent-uuid>" participant row an agent sender could
+	// otherwise write). An agent sender supplying any "dm:"-prefixed
+	// thread_id is now denied (400) before fan-out ever runs, so that shape
+	// is no longer a reachable input to this invariant — it is covered
+	// instead by TestHandleAgentMessage_A257_R2_AgentSenderPhantomUserSlotDenied
+	// (reincarnation_gate_r7_test.go), which asserts the denial itself.
 	cases := []struct {
 		name     string
 		threadID func(sender, target *store.Agent) string
 	}{
-		{"a DM key naming the sender and the primary recipient", func(sender, target *store.Agent) string {
-			// The /message ownership check (parseDMKeyIDs) only recognizes
-			// "dm:agent:<id>:user:<id>" and requires the agent side to be
-			// the primary recipient and the user side to be the
-			// authenticated sender (an agent sender falls back to its own
-			// ID there) — this is the only dm:-shaped value this endpoint
-			// accepts for an agent sender; anything else is rejected before
-			// fan-out ever runs.
-			return "dm:agent:" + target.ID + ":user:" + sender.ID
-		}},
 		{"an agent-prefixed identifier", func(sender, target *store.Agent) string {
 			return "agent:" + target.ID
 		}},
