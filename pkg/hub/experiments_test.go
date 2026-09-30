@@ -396,6 +396,37 @@ func TestReadAuthoritativeExperiments(t *testing.T) {
 	}
 }
 
+// overridesMatch reports whether got holds exactly the entries of want. It
+// uses the comma-ok form so a key absent from got is never mistaken for a
+// present zero-value (false) match: a plain got[k] read cannot distinguish
+// "absent" from "present and false".
+func overridesMatch(got, want map[string]bool) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for k, v := range want {
+		gotVal, ok := got[k]
+		if !ok || gotVal != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestOverridesMatch_DetectsMissingKeyWantedFalse proves overridesMatch
+// fails when got is missing a key that want expects to be false. Same
+// length as want, so the length check alone cannot catch this: got is
+// missing "hub.test_gate" (wanted false) and has an unrelated key instead.
+// A plain got[k] read would return the zero value (false) for the missing
+// key, which equals the wanted false and would wrongly report a match.
+func TestOverridesMatch_DetectsMissingKeyWantedFalse(t *testing.T) {
+	got := map[string]bool{"other.flag": true}
+	want := map[string]bool{"hub.test_gate": false}
+	if overridesMatch(got, want) {
+		t.Fatal("overridesMatch must report false when got is missing a key wanted as false")
+	}
+}
+
 // assertOverrides checks that got is non-nil and holds exactly the entries
 // of want. Every caller in this file expects a non-nil map (absent or
 // malformed still means "{}", not nil; ptone/scion#2217), because 1a-ii's
@@ -406,13 +437,8 @@ func assertOverrides(t *testing.T, got, want map[string]bool) {
 	if got == nil {
 		t.Fatalf("Overrides is nil, want non-nil map %v", want)
 	}
-	if len(got) != len(want) {
+	if !overridesMatch(got, want) {
 		t.Fatalf("Overrides = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("Overrides[%q] = %v, want %v", k, got[k], v)
-		}
 	}
 }
 
