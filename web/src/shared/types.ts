@@ -808,14 +808,21 @@ export interface RuntimeBroker {
   agentCount?: number;
   /**
    * The precedence step that produced agentLimit: "broker" | "entitlement" |
-   * "hub_default" | "unlimited". This names the step, not whether the result
-   * is a cap: when the effective limit is <= 0 (unlimited), agentLimit is
-   * absent but agentLimitSource is still whichever step produced it
-   * ("broker" for a settings.maxAgents=0 override, "entitlement"/
-   * "hub_default" for a 0 binding or default). "unlimited" itself means no
-   * limit definition or no quota service is configured hub-wide — in that
-   * case resolution does not count either, and all three fields
-   * (agentLimit/agentCount/agentLimitSource) are absent together.
+   * "hub_default" | "unlimited" | "not_enforced". This names the step, not
+   * whether the result is a cap: when the effective limit is <= 0
+   * (unlimited), agentLimit is absent but agentLimitSource is still
+   * whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide — in that case resolution does not count either,
+   * and all three fields (agentLimit/agentCount/agentLimitSource) are
+   * absent together.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: agentLimit keeps whatever the precedence steps resolved
+   * (a cap, or absent when that resolves to unlimited, exactly as above),
+   * but the value is informational only — it is not currently applied.
+   * Renderers must show this visibly, not only in a tooltip.
    */
   agentLimitSource?: string;
 }

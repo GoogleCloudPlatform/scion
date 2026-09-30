@@ -85,14 +85,22 @@ interface UsageReservation {
   brokerAgentLimit?: number;
   /**
    * The precedence step that produced brokerAgentLimit: "broker" |
-   * "entitlement" | "hub_default" | "unlimited". This names the step, not
-   * whether the result is a cap: when the broker is unlimited,
-   * brokerAgentLimit is absent but brokerAgentLimitSource is still whichever
-   * step produced it ("broker" for a settings.maxAgents=0 override,
-   * "entitlement"/"hub_default" for a 0 binding or default). "unlimited"
-   * itself means no limit definition or no quota service is configured
-   * hub-wide, a state in which this reservation (which requires quota
-   * enforcement to have run) would not exist to display in the first place.
+   * "entitlement" | "hub_default" | "unlimited" | "not_enforced". This names
+   * the step, not whether the result is a cap: when the broker is
+   * unlimited, brokerAgentLimit is absent but brokerAgentLimitSource is
+   * still whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide, a state in which this reservation (which requires
+   * quota enforcement to have run) would not exist to display in the first
+   * place.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: brokerAgentLimit keeps whatever the precedence steps
+   * resolved (a cap, or absent when that resolves to unlimited, exactly as
+   * above), but the value is informational only — it is not currently
+   * applied. The usage detail must show this visibly, not only in a
+   * tooltip.
    */
   brokerAgentLimitSource?: string;
 }
@@ -1163,8 +1171,14 @@ export class ScionPageAdminQuotas extends LitElement {
                                     a state this reservation (which requires
                                     quota enforcement to have run) can't
                                     actually reach — kept to avoid ever
-                                    rendering the redundant "(unlimited)". -->
-                                    ${r.brokerAgentLimitSource === 'unlimited'
+                                    rendering the redundant "(unlimited)".
+                                    "not_enforced" is suppressed here too: the
+                                    ".not-enforced-marker" pill below already
+                                    says "not enforced", so showing the raw
+                                    "(not_enforced)" token alongside it would
+                                    render the same fact twice. -->
+                                    ${r.brokerAgentLimitSource === 'unlimited' ||
+                                    r.brokerAgentLimitSource === 'not_enforced'
                                       ? nothing
                                       : html`<span title="Precedence source"
                                           >(${r.brokerAgentLimitSource})</span

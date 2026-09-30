@@ -49,21 +49,22 @@ const LIMIT_DEFINITION = {
   updatedAt: new Date().toISOString(),
 };
 
-const NOT_ENFORCED_RESERVATION = {
-  id: 'res-1',
-  limitDefinitionId: LIMIT_ID,
-  subjectId: 'broker-1',
-  scopeType: 'broker',
-  scopeId: 'broker-1',
-  resourceId: 'agent-1',
-  reserved: 1,
-  createdAt: new Date().toISOString(),
-  // Stubbed: the backend doesn't produce this source yet (P1b in progress).
-  brokerAgentLimit: 30,
-  brokerAgentLimitSource: 'not_enforced',
-};
+function makeReservation(source: string) {
+  return {
+    id: 'res-1',
+    limitDefinitionId: LIMIT_ID,
+    subjectId: 'broker-1',
+    scopeType: 'broker',
+    scopeId: 'broker-1',
+    resourceId: 'agent-1',
+    reserved: 1,
+    createdAt: new Date().toISOString(),
+    brokerAgentLimit: 30,
+    brokerAgentLimitSource: source,
+  };
+}
 
-function createFetchHandler() {
+function createFetchHandler(reservation: ReturnType<typeof makeReservation>) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
     if (path.endsWith('/api/v1/admin/limits')) {
@@ -81,7 +82,7 @@ function createFetchHandler() {
       return Promise.resolve(
         jsonResponse({
           limitDefinition: LIMIT_DEFINITION,
-          reservations: [NOT_ENFORCED_RESERVATION],
+          reservations: [reservation],
           totalActive: 1,
         })
       );
@@ -90,10 +91,10 @@ function createFetchHandler() {
   };
 }
 
-async function mountAdminQuotasPage(): Promise<
-  HTMLElement & { updateComplete: Promise<boolean> }
-> {
-  vi.stubGlobal('fetch', vi.fn(createFetchHandler()));
+async function mountAdminQuotasPage(
+  reservation: ReturnType<typeof makeReservation>
+): Promise<HTMLElement & { updateComplete: Promise<boolean> }> {
+  vi.stubGlobal('fetch', vi.fn(createFetchHandler(reservation)));
   const el = document.createElement('scion-page-admin-quotas') as HTMLElement & {
     updateComplete: Promise<boolean>;
   };
@@ -102,6 +103,17 @@ async function mountAdminQuotasPage(): Promise<
   await new Promise((resolve) => setTimeout(resolve, 20));
   await el.updateComplete;
   return el;
+}
+
+async function expandFirstRow(
+  element: HTMLElement & { updateComplete: Promise<boolean> }
+): Promise<void> {
+  const row = element.shadowRoot?.querySelector('tr.clickable');
+  expect(row).not.toBeNull();
+  (row as HTMLElement).click();
+  await element.updateComplete;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await element.updateComplete;
 }
 
 describe('scion-page-admin-quotas — not_enforced marker (design.md Amendment A1)', () => {
@@ -118,23 +130,30 @@ describe('scion-page-admin-quotas — not_enforced marker (design.md Amendment A
     vi.unstubAllGlobals();
   });
 
-  it('shows a visible "not enforced" marker next to the broker cap in the usage detail', async () => {
-    element = await mountAdminQuotasPage();
-
-    // Expand the max_agents_per_broker row to load its usage detail.
-    const row = element.shadowRoot?.querySelector('tr.clickable');
-    expect(row).not.toBeNull();
-    (row as HTMLElement).click();
-    await element.updateComplete;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await element.updateComplete;
+  it('shows a visible "not enforced" marker and keeps the cap value when the source is not_enforced', async () => {
+    // Stubbed: the backend doesn't produce this source yet (P1b in progress).
+    element = await mountAdminQuotasPage(makeReservation('not_enforced'));
+    await expandFirstRow(element);
 
     const text = element.shadowRoot?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
     expect(text).toContain('Broker cap:');
+    // The value must be kept (A1: "keep the resolved value"), not omitted.
+    expect(text).toContain('Broker cap: 30');
     expect(text.toLowerCase()).toContain('not enforced');
 
     const marker = element.shadowRoot?.querySelector('.not-enforced-marker');
     expect(marker).not.toBeNull();
     expect(marker?.textContent?.toLowerCase()).toContain('not enforced');
+  });
+
+  it('does not show the marker for an enforced source (hub_default)', async () => {
+    element = await mountAdminQuotasPage(makeReservation('hub_default'));
+    await expandFirstRow(element);
+
+    const text = element.shadowRoot?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    expect(text).toContain('Broker cap: 30');
+    expect(text).toContain('(hub_default)');
+    expect(text.toLowerCase()).not.toContain('not enforced');
+    expect(element.shadowRoot?.querySelector('.not-enforced-marker')).toBeNull();
   });
 });

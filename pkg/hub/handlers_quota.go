@@ -114,13 +114,13 @@ type usageReservationView struct {
 	BrokerAgentLimit *int64 `json:"brokerAgentLimit,omitempty"`
 	// BrokerAgentLimitSource is one of the BrokerLimitSource* constants
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
-	// "unlimited". Empty only when this row isn't a max_agents_per_broker
-	// broker-scoped reservation, or brokerCapacity's own resolution failed
-	// outright (BrokerCapacity{}, both fields zero). It is the precedence
-	// step that produced the result, not a statement about whether the
-	// result is a cap: when the effective limit is <= 0 (unlimited),
-	// BrokerAgentLimit is absent but BrokerAgentLimitSource is still
-	// whichever step produced it ("broker" for a settings.maxAgents=0
+	// "unlimited" | "not_enforced". Empty only when this row isn't a
+	// max_agents_per_broker broker-scoped reservation, or brokerCapacity's
+	// own resolution failed outright (BrokerCapacity{}, both fields zero).
+	// It is the precedence step that produced the result, not a statement
+	// about whether the result is a cap: when the effective limit is <= 0
+	// (unlimited), BrokerAgentLimit is absent but BrokerAgentLimitSource is
+	// still whichever step produced it ("broker" for a settings.maxAgents=0
 	// override, "entitlement"/"hub_default" for a 0 binding or default).
 	// "unlimited" itself needs a nil limitDef or a nil quotaService in
 	// effectiveBrokerLimit; neither can occur here: def is this request's
@@ -129,9 +129,10 @@ type usageReservationView struct {
 	// NewServer (server.go).
 	//
 	// "not_enforced" (design.md Amendment A1, ptone/scion#2270/P1b, not yet
-	// wired as of this field) means the P1b enforcement switch is off:
-	// BrokerAgentLimit is still the real, resolved cap — not omitted, unlike
-	// the "unlimited" case above — but it is informational only and is not
+	// wired as of this field) means the P1b enforcement switch is off.
+	// BrokerAgentLimit keeps whatever the precedence steps resolved — a cap,
+	// or absent when that resolves to unlimited, exactly as in every other
+	// source above — but the value is informational only and is not
 	// currently enforced by Reserve. The usage page must render this
 	// visibly (not tooltip-only) next to the cap, since a limit shown
 	// without that context would look enforced when it is not.

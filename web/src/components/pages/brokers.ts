@@ -116,6 +116,7 @@ export class ScionPageBrokers extends LitElement {
       .not-enforced-marker {
         display: inline-flex;
         align-items: center;
+        align-self: flex-start;
         margin-left: 0.375rem;
         padding: 0.0625rem 0.375rem;
         border-radius: 9999px;

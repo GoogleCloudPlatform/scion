@@ -415,3 +415,60 @@ baseline (0 new); the two new `.test.ts` files themselves hit a pre-existing, re
 by linting `admin-users.test.ts` in isolation) — not something introduced here, and not part of any
 gate this project runs. `go build ./pkg/hub/...` / `go vet ./pkg/hub/...` clean (Go changes are
 comments-only).
+
+## Review round 7 (Amendment A1 commit): REQUEST CHANGES, then closed
+
+Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-7.md`.
+Scoped to the single Amendment A1 commit (`fd324e4e`). Verdict REQUEST CHANGES on one Required finding;
+everything else non-blocking. Disposition, one follow-up commit:
+
+- **F1 (Required, fixed):** the hand-written TS field comments (`shared/types.ts` `agentLimitSource`,
+  the local `admin-quotas.ts` `brokerAgentLimitSource`) still enumerated only `"broker" | "entitlement" |
+  "hub_default" | "unlimited"` and called the field "the precedence step" — a closed set that excluded
+  `not_enforced`, while the same commit's own code already branched on `=== 'not_enforced'` and the Go
+  comments already documented it. The project log's A1 section had defended leaving the TS comments
+  alone as intentional scope control; the reviewer's point that this specific comment *now contradicts
+  the code in the same diff* (not just "incomplete relative to a future feature") is correct — that is
+  exactly the doc/code drift class this PR's whole review history exists to catch, so it applies here
+  too. Added `"not_enforced"` to both enumerations and a paragraph mirroring the Go wording (resolved
+  value kept, informational only, must render visibly).
+- **F2 (Optional, fixed):** `admin-quotas.test.ts` only covered the positive (`not_enforced`) case.
+  Parameterized the reservation's source, added a `hub_default` case asserting `.not-enforced-marker` is
+  absent, and asserted `"Broker cap: 30"` explicitly in both cases (the value-kept half of A1, not just
+  that a marker appears).
+- **F3 (Nit, fixed):** the usage-detail card rendered the fact twice for a `not_enforced` row —
+  `"Broker cap: 30 (not_enforced) not enforced"`. Extended the existing "suppress the raw source token"
+  condition (already applied to `unlimited`) to also cover `not_enforced`, so only the pill renders.
+- **F4 (Nit, fixed):** the grid's `.not-enforced-marker` sat in a `flex-direction: column` container
+  (`.stat`) with the default `align-items: stretch`, blockifying and left-stretching the pill instead of
+  letting it hug its text. Added `align-self: flex-start`. In the table cell (not a flex container) the
+  property is a no-op, so nothing there changes.
+- **F5 (Nit, fixed):** "AgentLimit/BrokerAgentLimit is still the real, resolved cap — not omitted" was
+  true only when the resolved value is positive; under A1 a `not_enforced` broker whose resolved limit is
+  <= 0 still has the field absent, same as every other source. Reworded to "keeps whatever the precedence
+  steps resolved (a cap, or absent when that resolves to unlimited)" in both Go comments, and added
+  `"not_enforced"` to the value list at the top of each so the follow-up paragraph doesn't read as an
+  afterthought.
+- **F6 (Consider, declined):** the 11-line `.not-enforced-marker` CSS rule is duplicated in `brokers.ts`
+  and `admin-quotas.ts`. The EM's instruction was to fix it only if there is a shared stylesheet both
+  files *already* use — there is not: `brokers.ts` imports `listPageStyles`/`brokerTypeBadgeStyles` from
+  `resource-styles.ts`, but `admin-quotas.ts` imports no shared stylesheet at all and defines every rule
+  (including its pre-existing `.system-badge`) inline. Introducing a shared import into a file that has
+  none, to deduplicate one 11-line rule, is a larger structural change than this fix warrants and cuts
+  against "keep it localized" — declined for this PR. `resource-styles.ts`'s existing `.badge`/
+  `.badge.sensitive` rules are a reasonable base for that refactor if it's done later, deliberately,
+  across both files' badge styling at once rather than as a side effect of this fix.
+
+Re-verified: `tsc --noEmit` clean; `vitest run` on both test files, 5/5 pass (F2 added one); `eslint` on
+the two changed page files stays at the stated 7/44 baseline (0 new); `go build ./pkg/hub/...` /
+`go vet ./pkg/hub/...` clean (Go changes remain comments-only); bare-`#N` grep empty.
+
+### Local `pkg/hub` SQLite suite: a stray FAIL, traced to output truncation, not a regression
+
+While waiting on this round, a local `make test-hub-sqlite`-equivalent run for the upstream-main rebase
+came back `FAIL` for the top-level `pkg/hub` package (every subpackage still `ok`). The run had been
+piped through `tail -200` for readability, which discarded the actual `--- FAIL: TestName` line along
+with the rest of the output — the failure existed in the log, but its identity did not survive the pipe.
+A follow-up untruncated re-run was launched to recover the specific test name; see the message log to the
+EM for its result once available. CI's own "pkg/hub SQLite Tests" job (which is what actually gates this
+PR) was still pending at the time and is unaffected by this local-only truncation issue either way.
