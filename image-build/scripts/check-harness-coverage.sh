@@ -121,8 +121,11 @@ with open(sys.argv[1]) as f:
 names = set()
 mismatched = []
 prefix = 'harnesses/'
-for step in doc.get('steps') or []:
-    d = step.get('dir', '')
+steps = doc.get('steps') or [] if isinstance(doc, dict) else []
+for step in steps:
+    if not isinstance(step, dict):
+        continue
+    d = step.get('dir') or ''
     if not d.startswith(prefix):
         continue
     name = d[len(prefix):]
