@@ -44,9 +44,11 @@ func withDeliveryCredentialKinds(t *testing.T, kinds ...CredentialKind) {
 }
 
 // deliveryGateKindCases lists every credential kind the gate is evaluated
-// against, with whether the kind is a delivery credential. Registering a
-// delivery credential kind adds it to deliveryCredentialKinds and adds a
-// row here with delivery set to true.
+// against, with whether the kind is a delivery credential. A kind joins
+// deliveryCredentialKinds, and gains a row here with delivery set to true,
+// only together with the rest of the ptone/scion#2228 part 2 contract (see
+// authz_delivery_gate.go): the bound target agent, non-attestation and
+// non-substitution for the item grant.
 var deliveryGateKindCases = []struct {
 	kind     CredentialKind
 	delivery bool

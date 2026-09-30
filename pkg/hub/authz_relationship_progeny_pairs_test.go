@@ -152,15 +152,20 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 		res    Resource
 		action Action
 		perm   string
+		// gated states whether the delivery credential gate applies: the
+		// action is deliver or the permission is a deliver permission. It
+		// is written out per case so the expectation does not depend on
+		// the production isDeliverRequest.
+		gated bool
 	}{
-		{"use permission with read action", secret, ActionRead, "secret.use"},
-		{"use permission with deliver action", secret, ActionDeliver, "secret.use"},
-		{"deliver permission with use action", secret, ActionUse, "secret.deliver"},
-		{"deliver permission with read action", secret, ActionRead, "secret.deliver"},
-		{"compatibility permission with use action", secret, ActionUse, permissionProjectSecretRead},
-		{"env deliver with use action", Resource{Type: "env_var", ID: f.envVarID}, ActionUse, "env_var.deliver"},
-		{"use with an unrelated action", secret, ActionUpdate, "secret.use"},
-		{"skill injection deliver is not a progeny pair", skill, ActionDeliver, "skill_injection.deliver"},
+		{"use permission with read action", secret, ActionRead, "secret.use", false},
+		{"use permission with deliver action", secret, ActionDeliver, "secret.use", true},
+		{"deliver permission with use action", secret, ActionUse, "secret.deliver", true},
+		{"deliver permission with read action", secret, ActionRead, "secret.deliver", true},
+		{"compatibility permission with use action", secret, ActionUse, permissionProjectSecretRead, false},
+		{"env deliver with use action", Resource{Type: "env_var", ID: f.envVarID}, ActionUse, "env_var.deliver", true},
+		{"use with an unrelated action", secret, ActionUpdate, "secret.use", false},
+		{"skill injection deliver is not a progeny pair", skill, ActionDeliver, "skill_injection.deliver", true},
 	}
 	assertNoProgeny := func(t *testing.T, d Decision) {
 		t.Helper()
@@ -171,11 +176,10 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 		}
 	}
 	for _, tc := range cases {
-		gated := isDeliverRequest(tc.perm, tc.action)
 		t.Run(tc.name, func(t *testing.T) {
 			d := decidePerm(f.authz, agent, tc.res, tc.action, tc.perm, true)
 			assertNoProgeny(t, d)
-			if gated {
+			if tc.gated {
 				assert.Equal(t, deliveryGateReason, d.Reason, "the delivery gate rejects first")
 			} else {
 				assert.NotEqual(t, deliveryGateReason, d.Reason)
@@ -185,7 +189,7 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 
 	withDeliveryCredentialKinds(t, CredentialKindAgentJWT)
 	for _, tc := range cases {
-		if !isDeliverRequest(tc.perm, tc.action) {
+		if !tc.gated {
 			continue
 		}
 		t.Run(tc.name+"/pair check", func(t *testing.T) {

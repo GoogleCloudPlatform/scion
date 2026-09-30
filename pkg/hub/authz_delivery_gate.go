@@ -41,8 +41,10 @@ import "github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 //     hub-attested facts for relationship evaluation.
 //   - Non-substitution: holding a *.deliver permission in a role never
 //     substitutes for the association, progeny or skill-default grant
-//     required for the selected item. A role binding alone does not admit
-//     deliver, for any credential kind, including the delivery kind.
+//     required for the selected item. A role binding alone must not admit
+//     deliver, for any credential kind, including the delivery kind; part 2
+//     enforces this before its kind joins the set, and the skipped
+//     TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant pins it.
 //
 // Binding preconditions for adding any kind to this set (ptone/scion#2228
 // part 2 scope):
