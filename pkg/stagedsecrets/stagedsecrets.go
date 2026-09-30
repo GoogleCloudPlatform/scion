@@ -20,8 +20,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 // EnvVar is the environment variable used to pass serialized
@@ -64,13 +65,13 @@ func Write(homeDir string, staged *Staged) error {
 	var uid, gid int
 	if os.Getuid() == 0 {
 		if uidStr := os.Getenv("SCION_HOST_UID"); uidStr != "" {
-			if id, err := strconv.Atoi(uidStr); err == nil {
-				uid = id
+			if id, err := rootexec.ValidWorkloadID(uidStr, true); err == nil {
+				uid = int(id)
 			}
 		}
 		if gidStr := os.Getenv("SCION_HOST_GID"); gidStr != "" {
-			if id, err := strconv.Atoi(gidStr); err == nil {
-				gid = id
+			if id, err := rootexec.ValidWorkloadID(gidStr, true); err == nil {
+				gid = int(id)
 			}
 		}
 	}

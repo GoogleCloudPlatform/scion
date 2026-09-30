@@ -330,6 +330,18 @@ func newLifecycleManager(agentHome string, targetUID, targetGID int, requirePriv
 	return lifecycleManager, requirePrivilegeDrop
 }
 
+// runNewLifecycleManager and runEnforceTokenFileOwnerChecks are RunInit's own
+// seams onto newLifecycleManager and hub.EnforceTokenFileOwnerChecks: a test
+// substitutes both to pin the exact arguments RunInit's call site passes —
+// agentHome, targetUID, targetGID, and opts.RequirePrivilegeDrop into the
+// former, and the LATTER's OWN SECOND RETURN VALUE (not a separately
+// re-derived RequirePrivilegeDrop) into the latter — without needing a real
+// enforced-mode call site's own argument-threading with a non-root test
+// process. Production code always leaves both at their default; only a test
+// replaces them.
+var runNewLifecycleManager = newLifecycleManager
+var runEnforceTokenFileOwnerChecks = hub.EnforceTokenFileOwnerChecks
+
 // RunInit runs the sciontool init logic: it sets up the container user,
 // clones the workspace, runs lifecycle hooks, launches the child process
 // under supervision, and reports status/heartbeats to the Hub until the
@@ -485,8 +497,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// sync. Still runs before any ReadTokenFile/ChownTokenFile call in the
 	// rest of RunInit — see EnforceTokenFileOwnerChecks's own doc comment
 	// for why every other caller leaves this at its default.
-	lifecycleManager, enforceTokenOwnerChecks := newLifecycleManager(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop)
-	hub.EnforceTokenFileOwnerChecks(enforceTokenOwnerChecks)
+	lifecycleManager, enforceTokenOwnerChecks := runNewLifecycleManager(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop)
+	runEnforceTokenFileOwnerChecks(enforceTokenOwnerChecks)
 
 	// Register status and logging handlers for lifecycle events
 	// These handlers update agent-info.json and agent.log on container lifecycle events
@@ -1893,12 +1905,17 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 		return 0, 0, false // Continue as root
 	}
 
-	validUID, err := rootexec.ValidWorkloadID(hostUID)
+	// refuseZero == requirePrivilegeDrop: outside RequirePrivilegeDrop, a
+	// SCION_HOST_UID/GID of 0 keeps the pre-existing behavior of proceeding
+	// as root rather than refusing outright; under RequirePrivilegeDrop it
+	// is refused, since the whole point of the mode is to never regain root.
+	// Either way, an out-of-range or non-numeric value is refused.
+	validUID, err := rootexec.ValidWorkloadID(hostUID, requirePrivilegeDrop)
 	if err != nil {
 		log.Error("Invalid SCION_HOST_UID: %v", err)
 		return 0, 0, false
 	}
-	validGID, err := rootexec.ValidWorkloadID(hostGID)
+	validGID, err := rootexec.ValidWorkloadID(hostGID, requirePrivilegeDrop)
 	if err != nil {
 		log.Error("Invalid SCION_HOST_GID: %v", err)
 		return 0, 0, false

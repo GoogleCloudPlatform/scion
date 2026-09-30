@@ -19,6 +19,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -953,6 +954,93 @@ func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
 			}
 			if len(gotNames) != 1 || gotNames[0] != "order-probe" {
 				t.Errorf("specs reaching runServicesStart = %v, want [order-probe] — the parse-time gate should have dropped the invalid entry before this seam ever saw it", gotNames)
+			}
+		})
+	}
+}
+
+// TestRunInit_PinsLifecycleManagerAndTokenOwnerCheckCallSites pins RunInit's
+// own call site onto runNewLifecycleManager and runEnforceTokenFileOwnerChecks:
+// the former receives agentHome, the exact targetUID/targetGID
+// runSetupHostUser returned, and opts.RequirePrivilegeDrop; the latter
+// receives runNewLifecycleManager's own second return value, not a value
+// re-derived directly from opts.RequirePrivilegeDrop. The stub returns a
+// fixed enforceTokenOwnerChecks value that DIFFERS from
+// RequirePrivilegeDrop in the false case specifically to prove the second
+// claim — if the call site read opts.RequirePrivilegeDrop again instead of
+// the stub's return value, this test's false case would see false where it
+// expects true.
+func TestRunInit_PinsLifecycleManagerAndTokenOwnerCheckCallSites(t *testing.T) {
+	for _, requirePrivilegeDrop := range []bool{true, false} {
+		t.Run(fmt.Sprintf("RequirePrivilegeDrop=%v", requirePrivilegeDrop), func(t *testing.T) {
+			agentHome := t.TempDir()
+			setupRunInitAsRootlessScion(t, agentHome)
+
+			// The real process uid/gid, not an arbitrary pair: supervisor.Run's
+			// own home-directory chown targets a fixed "/home/scion" path
+			// unrelated to agentHome, and only succeeds (as a self-chown,
+			// without CAP_CHOWN) when the target uid already owns the path —
+			// an arbitrary uid would fail loudly there for reasons unrelated
+			// to what this test checks.
+			stubUID, stubGID := os.Getuid(), os.Getgid()
+			origSetupHostUser := runSetupHostUser
+			runSetupHostUser = func(rpd bool) (int, int, bool) {
+				return stubUID, stubGID, false
+			}
+			t.Cleanup(func() { runSetupHostUser = origSetupHostUser })
+
+			withRunGitCloneWorkspace(t, func(uid, gid int, home string, requirePrivilegeDrop bool) error { return nil })
+			withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error { return nil })
+			withRunFetchSecretOverrides(t, func(*hub.Client, []string) map[string]string { return nil })
+			withRunPostPreStartOwnershipFixup(t, func(uid, gid int, home string, rpd bool) {})
+			withRunServicesStart(t, func(context.Context, *services.Manager, []api.ServiceSpec, int, int, string, bool) error { return nil })
+
+			type lifecycleArgs struct {
+				agentHome            string
+				targetUID, targetGID int
+				requirePrivilegeDrop bool
+			}
+			var gotLifecycleArgs *lifecycleArgs
+			// Deliberately the OPPOSITE of requirePrivilegeDrop: proves the
+			// EnforceTokenFileOwnerChecks call site forwards THIS value, not
+			// a fresh read of opts.RequirePrivilegeDrop.
+			stubEnforceTokenOwnerChecks := !requirePrivilegeDrop
+			origNewLifecycleManager := runNewLifecycleManager
+			runNewLifecycleManager = func(agentHome string, targetUID, targetGID int, requirePrivilegeDrop bool) (*hooks.LifecycleManager, bool) {
+				gotLifecycleArgs = &lifecycleArgs{agentHome, targetUID, targetGID, requirePrivilegeDrop}
+				return hooks.NewLifecycleManager(), stubEnforceTokenOwnerChecks
+			}
+			t.Cleanup(func() { runNewLifecycleManager = origNewLifecycleManager })
+
+			var gotEnforceTokenOwnerChecks *bool
+			origEnforceTokenFileOwnerChecks := runEnforceTokenFileOwnerChecks
+			runEnforceTokenFileOwnerChecks = func(enabled bool) { gotEnforceTokenOwnerChecks = &enabled }
+			t.Cleanup(func() { runEnforceTokenFileOwnerChecks = origEnforceTokenFileOwnerChecks })
+
+			opts := InitRunOptions{
+				DisableTermSignalForwarding: true,
+				RequirePrivilegeDrop:        requirePrivilegeDrop,
+			}
+			_ = RunInit([]string{"sh", "-c", "true"}, opts)
+
+			if gotLifecycleArgs == nil {
+				t.Fatal("runNewLifecycleManager was never called")
+			}
+			if gotLifecycleArgs.agentHome != agentHome {
+				t.Errorf("agentHome = %q, want %q", gotLifecycleArgs.agentHome, agentHome)
+			}
+			if gotLifecycleArgs.targetUID != stubUID || gotLifecycleArgs.targetGID != stubGID {
+				t.Errorf("targetUID/GID = %d/%d, want %d/%d (runSetupHostUser's own return)", gotLifecycleArgs.targetUID, gotLifecycleArgs.targetGID, stubUID, stubGID)
+			}
+			if gotLifecycleArgs.requirePrivilegeDrop != requirePrivilegeDrop {
+				t.Errorf("requirePrivilegeDrop = %v, want %v", gotLifecycleArgs.requirePrivilegeDrop, requirePrivilegeDrop)
+			}
+
+			if gotEnforceTokenOwnerChecks == nil {
+				t.Fatal("runEnforceTokenFileOwnerChecks was never called")
+			}
+			if *gotEnforceTokenOwnerChecks != stubEnforceTokenOwnerChecks {
+				t.Errorf("EnforceTokenFileOwnerChecks(%v), want %v (runNewLifecycleManager's own second return value)", *gotEnforceTokenOwnerChecks, stubEnforceTokenOwnerChecks)
 			}
 		})
 	}

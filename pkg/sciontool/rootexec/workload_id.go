@@ -30,18 +30,23 @@ var (
 // around to 0 and drops "privilege" to root instead of the intended
 // workload identity.
 //
-// On top of that width check, ValidWorkloadID also refuses the two values
-// that are valid uint32s but never a legitimate workload identity: 0
-// (root itself — the whole point of a privilege drop is to leave it) and
+// On top of that width check, ValidWorkloadID always refuses
 // math.MaxUint32 (4294967295, i.e. 2^32-1) — often the visible result of a
 // signed-to-unsigned or -1-as-sentinel bug further upstream, not a real
-// uid/gid any real system assigns.
-func ValidWorkloadID(s string) (uint32, error) {
+// uid/gid any real system assigns — regardless of refuseZero.
+//
+// refuseZero additionally refuses 0 (root itself): a caller in a context
+// where privilege drop is required sets this, since the whole point of a
+// privilege drop is to leave uid/gid 0. A caller in a context where
+// privilege drop is optional (e.g. setupHostUser outside RequirePrivilegeDrop)
+// passes false, keeping the pre-existing behavior of accepting 0 and
+// proceeding as root.
+func ValidWorkloadID(s string, refuseZero bool) (uint32, error) {
 	v, err := strconv.ParseUint(s, 10, 32)
 	if err != nil {
 		return 0, fmt.Errorf("rootexec: %q is not a valid uid/gid: %w", s, err)
 	}
-	if v == 0 {
+	if v == 0 && refuseZero {
 		return 0, errWorkloadIDIsRoot
 	}
 	if v == math.MaxUint32 {

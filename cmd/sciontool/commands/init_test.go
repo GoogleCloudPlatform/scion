@@ -1120,15 +1120,13 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 	}
 }
 
-// TestConfigureGitCommand_PropagatesTrustBundleEnv proves the git-clone leg
-// of the egress_trust_bundle env-propagation path: init's git clone needs
-// GIT_SSL_CAINFO to reach the `git` subprocess. configureGitCommand
-// (init.go, ~line 2507) builds cmd.Env as append(os.Environ(),
-// "GIT_TERMINAL_PROMPT=0") — a full copy of the process environment, not an
-// allowlisted subset — so GIT_SSL_CAINFO (and every other CA-bundle var
-// buildActorTemplate sets on the container) reaches the actual `git`
-// subprocess whenever it is present in the parent's env, with no code
-// change needed here to carry it through.
+// TestConfigureGitCommand_PropagatesTrustBundleEnv proves configureGitCommand
+// passes GIT_SSL_CAINFO through to the `git` subprocess it configures:
+// configureGitCommand (init.go, ~line 2507) builds cmd.Env as
+// append(os.Environ(), "GIT_TERMINAL_PROMPT=0") — a full copy of the process
+// environment, not an allowlisted subset — so any CA-bundle var already set
+// in this process's own environment reaches the `git` subprocess unchanged,
+// with no code change needed here to carry it through.
 func TestConfigureGitCommand_PropagatesTrustBundleEnv(t *testing.T) {
 	t.Setenv("GIT_SSL_CAINFO", "/run/ate/trust-bundle.pem")
 
@@ -1939,10 +1937,6 @@ func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
 // here instead of ever reaching adjustScionUser at all — the same "skip
 // user setup, continue as root-eligible for DecideExecAsRoot to gate"
 // outcome an unparseable value produces.
-//
-// MUTATION: widen setupHostUser's parse back to strconv.Atoi — this test's
-// overflow/sentinel cases go red (adjustScionUser gets called with the
-// wrapped-to-root value instead of being skipped).
 func TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1984,6 +1978,47 @@ func TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs(t *testing.T) {
 				if uid != 0 || gid != 0 {
 					t.Errorf("setupHostUser = (%d, %d), want (0, 0): refused input must never reach a Credential as a wrapped uid/gid", uid, gid)
 				}
+			}
+		})
+	}
+}
+
+// TestSetupHostUser_ZeroUIDGIDModeGated proves SCION_HOST_UID/GID=0 is
+// refused under RequirePrivilegeDrop (the whole point of the mode is to
+// never regain root) and accepted outside it, proceeding as root when
+// privilege drop is optional.
+func TestSetupHostUser_ZeroUIDGIDModeGated(t *testing.T) {
+	tests := []struct {
+		name                 string
+		requirePrivilegeDrop bool
+		wantAdjustCall       bool
+	}{
+		{"enforced: zero refused", true, false},
+		{"non-enforced: zero keeps base behavior", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", "0")
+			t.Setenv("SCION_HOST_GID", "0")
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := false
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called = true
+				return uid, gid, false
+			}
+
+			setupHostUser(tt.requirePrivilegeDrop)
+
+			if called != tt.wantAdjustCall {
+				t.Errorf("adjustScionUser called = %v, want %v", called, tt.wantAdjustCall)
 			}
 		})
 	}
