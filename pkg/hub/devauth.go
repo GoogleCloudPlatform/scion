@@ -134,17 +134,16 @@ func isTrustedLocalDevUser(identity Identity) bool {
 //
 // Both of those are gated by the single ServerConfig.DevAuthToken != ""
 // condition, so that one bit is exactly what this reports:
-//   - pkg/hub/server.go builds AuthConfig.DevAuthEnabled as
-//     cfg.DevAuthToken != "" (server.go, "Build unified auth configuration"
-//     block, ~line 1723), which is what UnifiedAuthMiddleware's dev-token
-//     arms check before accepting a dev token (pkg/hub/auth.go ~line 396
-//     "if !cfg.DevAuthEnabled" and the tokenTypeUser fallback at ~line 452
-//     "if cfg.DevAuthEnabled && apiclient.ValidateDevToken(...)").
-//   - pkg/hub/server.go seeds the DevUserID row only "if cfg.DevAuthToken
-//     != ..." (server.go ~line 1650, guarding the seedDevUser call), so a
-//     server with dev-auth off never seeds it during that startup (a row
-//     seeded some other way, e.g. directly in a test, does not change this
-//     bit — see setDevLocalAuthorityEnabled).
+//   - New's "Build unified auth configuration" block sets
+//     AuthConfig.DevAuthEnabled from cfg.DevAuthToken != "", and
+//     srv.authConfig (assigned exactly once, in New) is the only AuthConfig
+//     UnifiedAuthMiddleware is ever called with. UnifiedAuthMiddleware's
+//     tokenTypeDev arm checks DevAuthEnabled before accepting a dev token,
+//     and the tokenTypeUser fallback's dev-token arm checks the same field.
+//   - New seeds the DevUserID row (seedDevUser) only when cfg.DevAuthToken
+//     != "", so a server with dev-auth off never seeds it during that
+//     startup (a row seeded some other way, e.g. directly in a test, does
+//     not change this bit — see setDevLocalAuthorityEnabled).
 //
 // A nil receiver (a zero-value or never-constructed AuthzService) reports
 // false: fail closed.
@@ -159,7 +158,10 @@ func isTrustedLocalDevUser(identity Identity) bool {
 // so B.3's fire-time authority decision can additionally confirm this
 // server currently admits dev_local at all before trusting a previously
 // stored dev_local row (a server later reconfigured with dev-auth off must
-// not honor an old dev_local row's authority).
+// not honor an old dev_local row's authority). Enforced, on both sides of
+// dev-auth on/off and through the real UnifiedAuthMiddleware wiring (not a
+// re-derivation of cfg.DevAuthToken != ""), by
+// TestAuthzService_DevLocalAuthorityEnabled.
 func (a *AuthzService) devLocalAuthorityEnabled() bool {
 	if a == nil {
 		return false

@@ -287,93 +287,165 @@ func TestResumeSchedule_ByDevUserRecordsDevLocal(t *testing.T) {
 
 // TestExecuteSchedule_RecurrenceCopiesInitiatorAttribution pins plan §3.5's
 // recurrence row: server.go's executeSchedule copies the schedule's current
-// InitiatorAttribution verbatim onto each materialized event.
+// InitiatorAttribution verbatim onto each materialized event. Table-driven
+// over uat and dev_local (ptone/scion#2342 review round 1, finding 2): the
+// dev_local case is the acceptance-criterion pin that a dev_local schedule's
+// kind and revision round-trip to its materialized event unchanged, and
+// that scheduledInitiator reads the copied row back as dev_local, never
+// legacy_unknown — a regression here (e.g. a future "normalize unknown
+// kinds" change in the entadapter read path or in scheduledInitiator) would
+// otherwise go unnoticed.
 func TestExecuteSchedule_RecurrenceCopiesInitiatorAttribution(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
-	ctx := context.Background()
-
-	sched := &store.Schedule{
-		ID:        tid("e2b-recur-sched"),
-		ProjectID: projectID,
-		Name:      "recur",
-		CronExpr:  "0 9 * * *",
-		EventType: "message",
-		Payload:   `{"agentName":"a","message":"hi"}`,
-		Status:    store.ScheduleStatusActive,
-		CreatedBy: DevUserID,
-		InitiatorAttribution: store.InitiatorAttribution{
-			InitiatorPrincipalKind:      "user",
-			InitiatorPrincipalID:        tid("e2b-recur-user"),
-			InitiatorCredentialKind:     store.InitiatorCredentialKindUAT,
-			InitiatorCredentialID:       tid("e2b-recur-token"),
-			InitiatorCredentialSnapshot: `{"name":"recur-token"}`,
-			AttributionVersion:          1,
-			AuthorizationRevision:       3,
+	cases := []struct {
+		name  string
+		attrs store.InitiatorAttribution
+	}{
+		{
+			name: "uat",
+			attrs: store.InitiatorAttribution{
+				InitiatorPrincipalKind:      "user",
+				InitiatorPrincipalID:        tid("e2b-recur-uat-user"),
+				InitiatorCredentialKind:     store.InitiatorCredentialKindUAT,
+				InitiatorCredentialID:       tid("e2b-recur-uat-token"),
+				InitiatorCredentialSnapshot: `{"name":"recur-token"}`,
+				AttributionVersion:          1,
+				AuthorizationRevision:       3,
+			},
+		},
+		{
+			name: "dev_local",
+			attrs: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "dev",
+				InitiatorPrincipalID:    DevUserID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
+				AttributionVersion:      1,
+				AuthorizationRevision:   4, // a revision other than 1, per the review's fix
+			},
 		},
 	}
-	require.NoError(t, s.CreateSchedule(ctx, sched))
 
-	srv.executeSchedule(ctx, *sched, time.Now())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduleTest(t)
+			ctx := context.Background()
 
-	result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ScheduleID: sched.ID}, store.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, result.Items, 1)
-	evt := result.Items[0]
+			sched := &store.Schedule{
+				ID:                   tid("e2b-recur-sched-" + tc.name),
+				ProjectID:            projectID,
+				Name:                 "recur-" + tc.name,
+				CronExpr:             "0 9 * * *",
+				EventType:            "message",
+				Payload:              `{"agentName":"a","message":"hi"}`,
+				Status:               store.ScheduleStatusActive,
+				CreatedBy:            DevUserID,
+				InitiatorAttribution: tc.attrs,
+			}
+			require.NoError(t, s.CreateSchedule(ctx, sched))
 
-	assert.Equal(t, sched.InitiatorPrincipalKind, evt.InitiatorPrincipalKind)
-	assert.Equal(t, sched.InitiatorPrincipalID, evt.InitiatorPrincipalID)
-	assert.Equal(t, sched.InitiatorCredentialKind, evt.InitiatorCredentialKind)
-	assert.Equal(t, sched.InitiatorCredentialID, evt.InitiatorCredentialID)
-	assert.Equal(t, sched.InitiatorCredentialSnapshot, evt.InitiatorCredentialSnapshot)
-	assert.Equal(t, sched.AttributionVersion, evt.AttributionVersion)
-	assert.Equal(t, sched.AuthorizationRevision, evt.AuthorizationRevision,
-		"the materialized event keeps the schedule's revision snapshot")
+			srv.executeSchedule(ctx, *sched, time.Now())
+
+			result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ScheduleID: sched.ID}, store.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, result.Items, 1)
+			evt := result.Items[0]
+
+			assert.Equal(t, sched.InitiatorPrincipalKind, evt.InitiatorPrincipalKind)
+			assert.Equal(t, sched.InitiatorPrincipalID, evt.InitiatorPrincipalID)
+			assert.Equal(t, sched.InitiatorCredentialKind, evt.InitiatorCredentialKind)
+			assert.Equal(t, sched.InitiatorCredentialID, evt.InitiatorCredentialID)
+			assert.Equal(t, sched.InitiatorCredentialSnapshot, evt.InitiatorCredentialSnapshot)
+			assert.Equal(t, sched.AttributionVersion, evt.AttributionVersion)
+			assert.Equal(t, sched.AuthorizationRevision, evt.AuthorizationRevision,
+				"the materialized event keeps the schedule's revision snapshot")
+
+			if tc.name == "dev_local" {
+				assert.Equal(t, store.InitiatorCredentialKindDevLocal, evt.InitiatorCredentialKind)
+				initiator := srv.scheduledInitiator(evt.InitiatorAttribution)
+				assert.False(t, initiator.LegacyUnknown, "a dev_local row must never read as legacy_unknown")
+				assert.Equal(t, store.InitiatorCredentialKindDevLocal, initiator.CredentialKind)
+			}
+		})
+	}
 }
 
 // TestSchedulerFireEvent_RestartReplayPreservesInitiatorAttribution pins plan
 // §3.5's restart-replay row: firing an overdue persisted event (the
 // wasExpired=true path loadPersistedTimers uses) is read-only with respect
 // to attribution.
+// Table-driven over uat and dev_local (ptone/scion#2342 review round 1,
+// finding 2's optional restart-replay case, made mandatory by the lead's
+// ruling): a restart-replayed dev_local row must survive unchanged, exactly
+// like every other kind.
 func TestSchedulerFireEvent_RestartReplayPreservesInitiatorAttribution(t *testing.T) {
-	srv, s, projectID := setupScheduleTest(t)
-	ctx := context.Background()
-
-	evt := store.ScheduledEvent{
-		ID:        tid("e2b-replay-evt"),
-		ProjectID: projectID,
-		EventType: "message",
-		FireAt:    time.Now().Add(-time.Hour), // overdue
-		Payload:   `{"agentName":"nonexistent","message":"hi"}`,
-		CreatedBy: DevUserID,
-		InitiatorAttribution: store.InitiatorAttribution{
-			InitiatorPrincipalKind:  "user",
-			InitiatorPrincipalID:    tid("e2b-replay-user"),
-			InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
-			InitiatorCredentialID:   tid("e2b-replay-token"),
-			AttributionVersion:      1,
-			AuthorizationRevision:   1,
+	cases := []struct {
+		name  string
+		attrs store.InitiatorAttribution
+	}{
+		{
+			name: "uat",
+			attrs: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "user",
+				InitiatorPrincipalID:    tid("e2b-replay-uat-user"),
+				InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
+				InitiatorCredentialID:   tid("e2b-replay-uat-token"),
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+		},
+		{
+			name: "dev_local",
+			attrs: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "dev",
+				InitiatorPrincipalID:    DevUserID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
 		},
 	}
-	require.NoError(t, s.CreateScheduledEvent(ctx, &evt))
 
-	// Exercise the same fireEvent(wasExpired=true) path loadPersistedTimers
-	// uses for overdue events, synchronously (loadPersistedTimers itself
-	// wraps this in `go`, which is a concurrency detail, not a behavioral
-	// one).
-	srv.scheduler.fireEvent(ctx, evt, true)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduleTest(t)
+			ctx := context.Background()
 
-	got, err := s.GetScheduledEvent(ctx, evt.ID)
-	require.NoError(t, err)
-	assert.Equal(t, evt.InitiatorPrincipalKind, got.InitiatorPrincipalKind)
-	assert.Equal(t, evt.InitiatorPrincipalID, got.InitiatorPrincipalID)
-	assert.Equal(t, evt.InitiatorCredentialKind, got.InitiatorCredentialKind)
-	assert.Equal(t, evt.InitiatorCredentialID, got.InitiatorCredentialID)
-	assert.Equal(t, evt.AttributionVersion, got.AttributionVersion)
-	// The target agent doesn't exist, so the handler errors and fireEvent's
-	// existing (pre-E.2b) behavior downgrades the wasExpired-derived
-	// "expired" status to "failed" — status handling is unchanged by E.2b;
-	// this test only asserts attribution survives the replay.
-	assert.Equal(t, store.ScheduledEventFailed, got.Status)
+			evt := store.ScheduledEvent{
+				ID:                   tid("e2b-replay-evt-" + tc.name),
+				ProjectID:            projectID,
+				EventType:            "message",
+				FireAt:               time.Now().Add(-time.Hour), // overdue
+				Payload:              `{"agentName":"nonexistent","message":"hi"}`,
+				CreatedBy:            DevUserID,
+				InitiatorAttribution: tc.attrs,
+			}
+			require.NoError(t, s.CreateScheduledEvent(ctx, &evt))
+
+			// Exercise the same fireEvent(wasExpired=true) path
+			// loadPersistedTimers uses for overdue events, synchronously
+			// (loadPersistedTimers itself wraps this in `go`, which is a
+			// concurrency detail, not a behavioral one).
+			srv.scheduler.fireEvent(ctx, evt, true)
+
+			got, err := s.GetScheduledEvent(ctx, evt.ID)
+			require.NoError(t, err)
+			assert.Equal(t, evt.InitiatorPrincipalKind, got.InitiatorPrincipalKind)
+			assert.Equal(t, evt.InitiatorPrincipalID, got.InitiatorPrincipalID)
+			assert.Equal(t, evt.InitiatorCredentialKind, got.InitiatorCredentialKind)
+			assert.Equal(t, evt.InitiatorCredentialID, got.InitiatorCredentialID)
+			assert.Equal(t, evt.AttributionVersion, got.AttributionVersion)
+			// The target agent doesn't exist, so the handler errors and
+			// fireEvent's existing (pre-E.2b) behavior downgrades the
+			// wasExpired-derived "expired" status to "failed" — status
+			// handling is unchanged by E.2b; this test only asserts
+			// attribution survives the replay.
+			assert.Equal(t, store.ScheduledEventFailed, got.Status)
+
+			if tc.name == "dev_local" {
+				assert.Equal(t, store.InitiatorCredentialKindDevLocal, got.InitiatorCredentialKind)
+				assert.False(t, srv.scheduledInitiator(got.InitiatorAttribution).LegacyUnknown)
+			}
+		})
+	}
 }
 
 // e2bFailingScheduleStore injects a store failure into CreateScheduledEvent,
@@ -1161,6 +1233,82 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		assert.Empty(t, rec.ActorCredentialType)
 		assert.Empty(t, rec.ActorCredentialID)
 	})
+
+	// The next two subtests cover ptone/scion#2342 review round 1, finding
+	// 1: a dev_local initiator's PrincipalKind is "dev"
+	// (hub.DevUser.Type()), but scheduledCreatorIdentity resolves CreatedBy
+	// generically as a "user" identity — never "dev" — so the general
+	// same-kind/same-ID rule alone could never pair a genuine dev_local
+	// self-fire. initiatorMatchesExecutor's dev_local addition closes that
+	// gap; these subtests pin both its positive and negative sides.
+
+	t.Run("dev_local initiator, same principal as the executed dev user: credential is copied and mapped to the dev kind", func(t *testing.T) {
+		// bypassAgentsServer (bypassAgentsSetup) configures cfg.DevAuthToken,
+		// so New() already seeded a User row at DevUserID (seedDevUser) —
+		// scheduledCreatorIdentity can resolve CreatedBy: DevUserID via
+		// GetUser without any extra setup here.
+		require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, DevUserID))
+
+		evt := store.ScheduledEvent{
+			ID:        tid("e2b-r4-devlocal-same-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-devlocal-same-agent"}`,
+			CreatedBy: DevUserID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "dev",
+				InitiatorPrincipalID:    DevUserID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+		}
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-devlocal-same-agent")
+		require.NoError(t, err)
+
+		rec := waitForAudit(t, agent.ID)
+		assert.Equal(t, "user", rec.ActorPrincipalKind, "scheduledCreatorIdentity resolves the seeded dev user as a generic user identity")
+		assert.Equal(t, DevUserID, rec.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindDev), rec.ActorCredentialType, "must show the dev kind, distinct from an ordinary session")
+		assert.NotEqual(t, string(CredentialKindInteractive), rec.ActorCredentialType)
+	})
+
+	t.Run("dev_local initiator whose PrincipalID is not DevUserID: credential fields left empty", func(t *testing.T) {
+		// CreatedBy is the ordinary owner (exec.ID() != DevUserID), so
+		// neither the general rule (PrincipalKind "dev" != exec.Type()
+		// "user") nor the dev_local addition (requires exec.ID()==DevUserID)
+		// can match — this is the negative mirror of the subtest above.
+		evt := store.ScheduledEvent{
+			ID:        tid("e2b-r4-devlocal-wrongid-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-devlocal-wrongid-agent"}`,
+			CreatedBy: f.owner.ID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "dev",
+				InitiatorPrincipalID:    DevUserID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+		}
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-devlocal-wrongid-agent")
+		require.NoError(t, err)
+
+		rec := waitForAudit(t, agent.ID)
+		assert.Equal(t, "user", rec.ActorPrincipalKind)
+		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID, "the actor is still the creator/execution identity")
+		assert.Empty(t, rec.ActorCredentialType, "a dev_local initiator whose PrincipalID isn't DevUserID must not pair")
+		assert.Empty(t, rec.ActorCredentialID)
+	})
 }
 
 // newScopedUATInitiatorContext builds a live-request context carrying a
@@ -1281,6 +1429,10 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 	t.Run("dev-auth on: flag true, and a real dev-token request is trusted", func(t *testing.T) {
 		srv, _ := testServer(t) // testServer enables dev auth (testDevToken).
 		require.True(t, srv.authzService.devLocalAuthorityEnabled())
+		// Pin the mirror to the value UnifiedAuthMiddleware actually uses
+		// (srv.authConfig.DevAuthEnabled), not to a re-derivation of
+		// cfg.DevAuthToken != "" (ptone/scion#2342 review round 1, finding 3).
+		assert.Equal(t, srv.authConfig.DevAuthEnabled, srv.authzService.devLocalAuthorityEnabled())
 
 		var gotIdentity Identity
 		handler := UnifiedAuthMiddleware(srv.authConfig)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1295,7 +1447,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 		require.True(t, isTrustedLocalDevUser(gotIdentity), "a real dev-token request must authenticate as the trusted *DevUser")
 	})
 
-	t.Run("dev-auth off: flag false even though the seeded DevUserID row exists", func(t *testing.T) {
+	t.Run("dev-auth off: flag false, and the real wiring cannot produce a trusted dev identity, even though the seeded DevUserID row exists", func(t *testing.T) {
 		s, err := newTestStore(":memory:")
 		if err != nil {
 			if strings.Contains(err.Error(), "sqlite driver not registered") {
@@ -1323,6 +1475,32 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 		})
 
 		assert.False(t, srv.authzService.devLocalAuthorityEnabled())
+		// Same mirror pin as the "on" subtest — the invariant is checked
+		// against the value the middleware actually uses on both sides.
+		assert.Equal(t, srv.authConfig.DevAuthEnabled, srv.authzService.devLocalAuthorityEnabled())
+
+		// The other half of binding addition (c)'s invariant
+		// (isTrustedLocalDevUser(id) ⇒ devLocalAuthorityEnabled()) is that
+		// this server's own request pipeline can never produce the trusted
+		// identity in the first place when the flag is false — not merely
+		// that the flag reads false in isolation (ptone/scion#2342 review
+		// round 1, finding 3). A dev-token-shaped bearer token, sent through
+		// the real UnifiedAuthMiddleware with dev-auth off, must be
+		// rejected before any handler could see a trusted dev identity.
+		var gotIdentity Identity
+		handlerCalled := false
+		handler := UnifiedAuthMiddleware(srv.authConfig)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			gotIdentity = GetIdentityFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.True(t, !handlerCalled || !isTrustedLocalDevUser(gotIdentity),
+			"with dev-auth off, the inner handler must either never run, or never see a trusted dev identity")
 	})
 }
 

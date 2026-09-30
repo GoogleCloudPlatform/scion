@@ -4147,12 +4147,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// actor is.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
-		// when the initiator is the same principal as the creator: after an
-		// update or resume by a different user, the initiator is not the
-		// creator, and ApplyActor exists specifically to prevent naming
-		// principal A with principal B's credential. When it does match, the
-		// value is mapped back to hub.CredentialKind's vocabulary
-		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// when the initiator is the same principal as the creator/executor
+		// identity (initiatorMatchesExecutor, scheduled_initiator.go): after
+		// an update or resume by a different user, the initiator is not the
+		// creator, and this check exists specifically to prevent naming
+		// principal A with principal B's credential. dev_local additionally
+		// matches when both sides resolve to the well-known DevUserID —
+		// initiatorMatchesExecutor's doc comment has the exact condition and
+		// why it's needed (scheduledCreatorIdentity never reconstructs the
+		// dev user's Type() as "dev"). When it does match, the value is
+		// mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive/dev), since actor_credential_type is a
 		// column every other writer fills from that domain, not
 		// InitiatorAttribution's smaller one.
 		scheduledDispatchAudit := &store.MutationAuditRecord{
@@ -4164,8 +4169,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			CanDelegateResult:  "allow",
 		}
 		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
-		if !initiator.LegacyUnknown &&
-			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+		if initiatorMatchesExecutor(initiator, creatorIdentity) {
 			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
 				scheduledDispatchAudit.ActorCredentialType = hubKind
 				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID

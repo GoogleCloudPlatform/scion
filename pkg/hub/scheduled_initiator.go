@@ -279,3 +279,49 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 		CredentialSnapshot: attr.InitiatorCredentialSnapshot,
 	}
 }
+
+// initiatorMatchesExecutor reports whether a non-legacy initiator is the
+// same principal as exec — the identity that will actually execute/authorize
+// this fire (e.g. server.go's scheduled-dispatch success audit, via
+// scheduledCreatorIdentity). Callers use this to decide whether it is safe
+// to copy the initiator's credential onto a record that names exec as the
+// actor: after an update or resume by a different principal, the initiator
+// is not exec, and naming principal A with principal B's credential would
+// be wrong.
+//
+// The general rule is same-kind/same-ID: initiator.PrincipalKind ==
+// exec.Type() && initiator.PrincipalID == exec.ID(). dev_local
+// (ptone/scion#2342 review round 1, finding 1) is the one narrow addition,
+// checked ONLY in addition to the general rule, never instead of it, and
+// only for this exact kind:
+//
+//	initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
+//		initiator.PrincipalID == DevUserID &&
+//		exec.ID() == DevUserID &&
+//		exec.Type() == "user"
+//
+// This addition exists because a dev_local row's InitiatorPrincipalKind is
+// hub.DevUser.Type() ("dev"), but exec — reconstructed by
+// scheduledCreatorIdentity (server.go) from CreatedBy, and by B.3's
+// fire-time resolution (b3-design §3.6.2) — is always a generic
+// NewAuthenticatedUser with Type()=="user", never "dev". Without this
+// addition the general rule could never match a genuine dev_local self-fire,
+// and the scheduled-dispatch success audit would never show the dev kind
+// for one (leaving it audited the same as a legacy or different-principal
+// row, contrary to "keep audit and log attribution visibly distinct from
+// ordinary browser/API session credentials"). No other kind is loosened:
+// every kind other than dev_local is decided by the general rule alone.
+//
+// A legacy_unknown initiator, or a nil exec, never matches.
+func initiatorMatchesExecutor(initiator ScheduledInitiator, exec Identity) bool {
+	if initiator.LegacyUnknown || exec == nil {
+		return false
+	}
+	if initiator.PrincipalKind == exec.Type() && initiator.PrincipalID == exec.ID() {
+		return true
+	}
+	return initiator.CredentialKind == store.InitiatorCredentialKindDevLocal &&
+		initiator.PrincipalID == DevUserID &&
+		exec.ID() == DevUserID &&
+		exec.Type() == "user"
+}
