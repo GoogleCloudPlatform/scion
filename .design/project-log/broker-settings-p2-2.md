@@ -249,9 +249,11 @@ Disposition of the remaining, non-blocking findings:
   reason for a correct conclusion — it said `"unlimited"` is unreachable here because `brokerCapacity`
   "returns before counting", but skipping the count has nothing to do with reachability (this view
   ignores `Count` entirely). Reworded to the actual reason: `"unlimited"` needs a nil `limitDef` or a
-  nil `quotaService` in `effectiveBrokerLimit`, and neither can occur in `getUsageByLimit`/
-  `getUsageSummary` (`def` is always this request's non-nil limit definition, and `s.quotaService` is
-  always constructed in `NewServer`, `server.go`).
+  nil `quotaService` in `effectiveBrokerLimit`, and neither can occur in `getUsageByLimit` (`def` is
+  always this request's non-nil limit definition, and `s.quotaService` is always constructed in
+  `NewServer`, `server.go`). *(Note: this bullet originally cited `getUsageByLimit`/`getUsageSummary`;
+  round 4's F2 caught that only `getUsageByLimit` builds `usageReservationView`, so the citation is
+  corrected here to match the code as it stands after round 4.)*
 - **F4 (FYI, cheap fix applied):** `BrokerAgentLimit`'s doc comment listed "unlimited" and "not a broker
   row" as its nil cases but not "resolution failed" (`BrokerCapacity{}` on an outright error). Added.
 - **F3 (FYI):** the brokers-list table cell now renders at `font-weight: 500` (via the unscoped
@@ -294,6 +296,19 @@ Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-setti
 
 Re-verified: `go build ./pkg/hub/...` and `go vet ./pkg/hub/...`. `gh api ... --jq '.updated_at,.body'`
 piped through the EM's exact grep, pasted into the report back to the EM.
+
+## Review round 5: APPROVE
+
+Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-5.md`. Two
+comment-only nits, both fixed:
+
+- **F1:** `brokers.ts`'s `renderAgentCapacity` JSDoc still said `'-'` for the absent case; the code
+  renders an em dash `"—"`. Corrected the doc to match.
+- **F2:** the round-2 section's F2 bullet above still cited `getUsageByLimit`/`getUsageSummary` for the
+  `BrokerAgentLimitSource` comment fix, but round 4 had since corrected the actual code comment to cite
+  `getUsageByLimit` alone. Fixed the bullet to match and noted why.
+
+Last review round (6 of 6, including the initial submission). Re-verified: `cd web && npx tsc --noEmit`.
 
 ## Note on the upstream-main rebase step
 
