@@ -438,19 +438,22 @@ def _toml_edit_preserves(
 
 
 def _warn_if_stale_top_level_model_survives(
-    ctx: scion_harness.ProvisionContext, content: str, model: str | None
+    ctx: scion_harness.ProvisionContext, content: str, model: str | None, reason: str
 ) -> None:
     """Logs an observability warning when SCION_MODEL was empty (no model
     for this script to write) but `content` — whichever variant is about to
     be committed to disk — still has a top-level `model` key left over from
     a prior provision or a hand-edited file.
 
-    This can happen when a header-shaped line inside an earlier top-level
-    multi-line string hides the real table header that would otherwise let
-    _strip_toml_top_level_key find and remove a later, genuinely top-level
-    `model` line (ptone/scion#2365 review round 5, N3). It's purely
-    observational, logging only, with no change to what gets written:
-    rejecting the edit wouldn't help, since every fallback path keeps
+    `reason` names why, for *this specific call site*, the stale key wasn't
+    removed — the three callers in _reconcile_codex_toml reach this for
+    different causes (a header-shaped line hiding the real strip target on
+    the main path; the whole model/effort edit being rejected on the two
+    fallback paths — see each call site) and a single generic explanation
+    would mislead on at least two of the three (ptone/scion#2365 review
+    round 6, N2).
+    It's purely observational, logging only, with no change to what gets
+    written: rejecting the edit wouldn't help, since every path here keeps
     whatever `content` already has for keys it doesn't own, and this stale
     key is exactly such an unowned survivor. Without SCION_MODEL there's no
     `--model` argv either, so codex will actually run on this stale value —
@@ -466,10 +469,8 @@ def _warn_if_stale_top_level_model_survives(
     if stale:
         ctx.info(
             f"config.toml still sets top-level model={stale!r} with no "
-            "SCION_MODEL to replace it (a header-shaped line earlier in "
-            "the file may be hiding it from this script's line-oriented "
-            "strip); codex will use it, since no --model argv is passed "
-            "either."
+            f"SCION_MODEL to replace it ({reason}); codex will use it, "
+            "since no --model argv is passed either."
         )
 
 
@@ -511,7 +512,14 @@ def _reconcile_codex_toml(
     content = _with_reconciled_otel(content)
 
     if _toml_edit_preserves(original, content, model, reasoning_effort):
-        _warn_if_stale_top_level_model_survives(ctx, content, model)
+        _warn_if_stale_top_level_model_survives(
+            ctx,
+            content,
+            model,
+            "a header-shaped line earlier in the file may be hiding the "
+            "real table header from this script's line-oriented strip, so "
+            "it never found this key",
+        )
         scion_harness.atomic_write_text(config_path, content)
         return
 
@@ -538,7 +546,14 @@ def _reconcile_codex_toml(
             "editor doesn't fully understand, e.g. a multi-line string "
             "containing a header-shaped or key-shaped line."
         )
-        _warn_if_stale_top_level_model_survives(ctx, otel_only_content, model)
+        _warn_if_stale_top_level_model_survives(
+            ctx,
+            otel_only_content,
+            model,
+            "the model/model_reasoning_effort edit above was rejected, so "
+            "this script never attempted to strip this key from the "
+            "original file",
+        )
         scion_harness.atomic_write_text(config_path, otel_only_content)
         return
 
@@ -548,7 +563,14 @@ def _reconcile_codex_toml(
         "untouched rather than risk corrupting or silently altering "
         "existing settings."
     )
-    _warn_if_stale_top_level_model_survives(ctx, original, model)
+    _warn_if_stale_top_level_model_survives(
+        ctx,
+        original,
+        model,
+        "both the model/model_reasoning_effort edit and the telemetry-only "
+        "fallback above were rejected, so config.toml was left completely "
+        "untouched and this key was never stripped",
+    )
 
 
 # --- MCP server emission ---------------------------------------------------

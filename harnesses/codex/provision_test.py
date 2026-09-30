@@ -828,15 +828,15 @@ class CodexProvisionTest(unittest.TestCase):
         )
         self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
 
-    def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives(self) -> None:
-        # Regression test for ptone/scion#2365 review round 5 (N3): a
-        # header-shaped line inside an earlier top-level multi-line string
-        # can hide the real table header that would otherwise let
-        # _strip_toml_top_level_key find and remove a later, genuinely
-        # top-level `model` line. With SCION_MODEL empty (model=None),
-        # nothing replaces that stale value, so codex runs on it with no
-        # --model argv either — this is observability only (a warning),
-        # not a behavior change: the file content is unaffected.
+    def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives_full_edit_path(self) -> None:
+        # Regression test for ptone/scion#2365 review round 5 (N3), full
+        # edit path: a header-shaped line inside an earlier top-level
+        # multi-line string can hide the real table header that would
+        # otherwise let _strip_toml_top_level_key find and remove a later,
+        # genuinely top-level `model` line. With SCION_MODEL empty
+        # (model=None), nothing replaces that stale value, so codex runs on
+        # it with no --model argv either — this is observability only (a
+        # warning), not a behavior change: the file content is unaffected.
         original = (
             'developer_instructions = """\n'
             "[foo]\n"
@@ -851,31 +851,90 @@ class CodexProvisionTest(unittest.TestCase):
 
         self.assertEqual(data.get("model"), "gpt-5.5", "stale model is expected to survive; this is observability only")
         self.assertTrue(
-            any("stale" in w.lower() or "still sets top-level model" in w for w in warnings),
-            f"expected a stale-model warning to be logged, got: {warnings}",
+            any("still sets top-level model" in w and "line-oriented strip" in w for w in warnings),
+            f"expected a stale-model warning naming the header-hiding cause, got: {warnings}",
+        )
+
+    def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives_otel_only_fallback_path(self) -> None:
+        # Regression test for ptone/scion#2365 review round 6 (N1): the
+        # stale-model warning has three call sites in _reconcile_codex_toml
+        # (full edit, otel-only fallback, fully-untouched), but only the
+        # full-edit path had a test — removing the call on either fallback
+        # path left all existing tests green. Here, the full edit is
+        # rejected (model_reasoning_effort would splice into the string),
+        # so the otel-only fallback runs and keeps the stale top-level
+        # `model` from the original file untouched.
+        original = (
+            'model = "gpt-5.5"\n'
+            'developer_instructions = """\n'
+            'model_reasoning_effort = "x"\n'
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+
+        after, warnings = self._reconcile_and_capture(original, model=None, reasoning_effort="x")
+        data = tomllib.loads(after)
+
+        self.assertEqual(data.get("model"), "gpt-5.5", "stale model is expected to survive; this is observability only")
+        self.assertTrue(
+            any("still sets top-level model" in w and "rejected" in w for w in warnings),
+            f"expected a stale-model warning naming the rejected-edit cause, got: {warnings}",
+        )
+
+    def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives_fully_untouched_path(self) -> None:
+        # Regression test for ptone/scion#2365 review round 6 (N1): the
+        # third call site, reached when even the otel-only fallback is
+        # rejected (here, a NaN value makes tomllib equality always false,
+        # so every comparison fails and config.toml is left completely
+        # untouched) but a stale top-level `model` is still present in the
+        # unmodified original.
+        original = 'x = nan\nmodel = "old"\n'
+
+        after, warnings = self._reconcile_and_capture(original, model=None)
+
+        self.assertEqual(after, original, "file must be left completely untouched")
+        self.assertTrue(
+            any("still sets top-level model" in w and "completely untouched" in w for w in warnings),
+            f"expected a stale-model warning naming the fully-untouched cause, got: {warnings}",
         )
 
     def test_warn_if_stale_top_level_model_survives_is_silent_when_model_provided(self) -> None:
         warnings: list[str] = []
         ctx = _test_ctx()
         ctx.info = warnings.append  # type: ignore[method-assign]
-        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', "gpt-5.5")
+        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', "gpt-5.5", "some reason")
         self.assertEqual(warnings, [])
 
     def test_warn_if_stale_top_level_model_survives_is_silent_when_no_model_key(self) -> None:
         warnings: list[str] = []
         ctx = _test_ctx()
         ctx.info = warnings.append  # type: ignore[method-assign]
-        provision._warn_if_stale_top_level_model_survives(ctx, "other_key = 1\n", None)
+        provision._warn_if_stale_top_level_model_survives(ctx, "other_key = 1\n", None, "some reason")
         self.assertEqual(warnings, [])
 
     def test_warn_if_stale_top_level_model_survives_warns_on_stale_model(self) -> None:
         warnings: list[str] = []
         ctx = _test_ctx()
         ctx.info = warnings.append  # type: ignore[method-assign]
-        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', None)
+        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', None, "some reason")
         self.assertEqual(len(warnings), 1)
         self.assertIn("gpt-5.5", warnings[0])
+
+    def test_warn_if_stale_top_level_model_survives_includes_the_given_reason(self) -> None:
+        # Regression test for ptone/scion#2365 review round 6 (N2): the
+        # warning must include the caller-supplied reason, since a single
+        # generic hint misled on two of the three call sites (see the three
+        # end-to-end tests below, one per call site, each asserting its own
+        # distinct reason text).
+        warnings: list[str] = []
+        ctx = _test_ctx()
+        ctx.info = warnings.append  # type: ignore[method-assign]
+        provision._warn_if_stale_top_level_model_survives(
+            ctx, 'model = "gpt-5.5"\n', None, "a distinctive marker reason"
+        )
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("a distinctive marker reason", warnings[0])
 
     def test_toml_edit_preserves_accepts_valid_content_with_matching_model_and_effort(self) -> None:
         self.assertTrue(
