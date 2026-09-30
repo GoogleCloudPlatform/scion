@@ -1,6 +1,6 @@
 # broker-settings not_enforced wiring (ptone/scion#2061 P2, ptone/scion#2177)
 
-Branch `scion/broker-settings-not-enforced`, branched from upstream `GoogleCloudPlatform/scion`
+PR: ptone/scion#2330 (draft), branch `scion/broker-settings-not-enforced`, branched from upstream `GoogleCloudPlatform/scion`
 main (NOT stacked on the now-merged `scion/broker-settings-p2-1`). Base at branch time:
 `f671d1a8`, which includes both prerequisite PRs merged upstream:
 `GoogleCloudPlatform/scion#2115` (P1b, the `Server.brokerQuotasEnforced()` enforcement switch) and
@@ -143,7 +143,8 @@ All in `pkg/hub/broker_settings_handlers_test.go` unless noted:
 
 ## Deliverables
 
-- Fork PR (draft) against `ptone/scion` `main` from `scion/broker-settings-not-enforced`.
+- Fork PR ptone/scion#2330 (draft) against `ptone/scion` `main` from
+  `scion/broker-settings-not-enforced`.
 - This log entry.
 - `/scion-volumes/scratchpad/projects/broker-settings/notes/` — no additional notes file was
   required by this brief beyond this log entry and the PR body.
