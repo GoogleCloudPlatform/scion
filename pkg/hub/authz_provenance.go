@@ -251,6 +251,14 @@ type DecisionProvenance struct {
 
 	// DenyReasons summarizes why a deny decision was reached.
 	DenyReasons []string `json:"denyReasons,omitempty"`
+
+	// Relationships lists every relationship candidate evaluated for the
+	// request, accepted or rejected. Only populated when Explain=true.
+	Relationships []RelationshipCandidateResult `json:"relationships,omitempty"`
+
+	// Actor and Purpose echo AuthzRequest.Actor/Purpose. Audit-only.
+	Actor   *DecisionActor `json:"actor,omitempty"`
+	Purpose string         `json:"purpose,omitempty"`
 }
 
 // KernelProvenance is the full provenance record for a single Evaluate call.

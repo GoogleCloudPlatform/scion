@@ -18,8 +18,10 @@ package permissions
 // owner/ancestor/progeny/etc. relationship do." B.1's runtime
 // relationship-grant evaluator and A.1's MintEligibilityDescriptor both
 // reference the same rows here, so there is never a second, drifting
-// action allowlist for the same rule. One row per (Relationship,
-// ResourceType) pair; ResourceType is always explicit, never a wildcard.
+// action allowlist for the same rule. At most two rows per (Relationship,
+// PrincipalKind, ResourceType), and only with disjoint PermissionIDs and
+// differing MintEligible (enforced by TestRelationshipPolicy_Consistency in
+// pkg/hub); ResourceType is always explicit, never a wildcard.
 type RelationshipPolicy struct {
 	// Relationship is the canonical rule name: "owner", "ancestor",
 	// "progeny", "hub_member_sa_assign", "creator_user_skill" — matching
@@ -63,6 +65,144 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   ResourceAgent,
 		PermissionIDs:  []string{"agent.attach", "agent.port_access"},
 		MintEligible:   true,
+	},
+	// Rows below are appended by ptone/scion#2119 (B.1). Each row is pinned
+	// by relationshipCharacterizedAllowlist in
+	// pkg/hub/authz_relationship_characterization_test.go and checked by
+	// TestRelationshipPolicy_MatchesCharacterization.
+	{
+		// owner/user/agent: the remaining agent permissions (not mint-eligible).
+		// agent.manage is a reviewed unregistered ID (relationshipPolicyReviewedExceptions).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs: []string{
+			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
+			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
+			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+		},
+	},
+	{
+		// owner/user/project (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceProject,
+		PermissionIDs: []string{
+			"project.create", "project.read", "project.update", "project.delete",
+			"project.manage", "project.register", "project.set_messaging_policy",
+			"project.clone", "project.list", "project.secret_read",
+		},
+	},
+	{
+		// owner/user/template (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceTemplate,
+		PermissionIDs:  []string{"template.create", "template.read", "template.update", "template.delete", "template.list"},
+	},
+	{
+		// owner/user/harness_config (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceHarnessConfig,
+		PermissionIDs: []string{
+			"harness_config.create", "harness_config.read", "harness_config.update",
+			"harness_config.delete", "harness_config.list",
+		},
+	},
+	{
+		// owner/user/group (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceGroup,
+		PermissionIDs: []string{
+			"group.create", "group.read", "group.update", "group.delete", "group.list",
+			"group.addMember", "group.removeMember",
+		},
+	},
+	{
+		// owner/user/broker (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceBroker,
+		PermissionIDs: []string{
+			"broker.create", "broker.read", "broker.update", "broker.delete", "broker.list", "broker.dispatch",
+		},
+	},
+	{
+		// owner/user/gcp_service_account (TestRelationshipCharacterization_Owner).
+		// The owner rule does not produce an assign candidate for a hub-scoped
+		// account; hub_member_sa_assign covers that shape.
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceGCPServiceAccount,
+		PermissionIDs: []string{
+			"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",
+			"gcp_service_account.list", "gcp_service_account.verify", "gcp_service_account.mint",
+			"gcp_service_account.assign",
+		},
+	},
+	{
+		// owner/user/skill (TestRelationshipCharacterization_Owner).
+		Relationship:   "owner",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceSkill,
+		PermissionIDs: []string{
+			"skill.create", "skill.create_global", "skill.read", "skill.update", "skill.delete",
+			"skill.list", "skill.register",
+		},
+	},
+	{
+		// ancestor/user/agent: the remaining agent permissions (not mint-eligible)
+		// (TestRelationshipCharacterization_UserAncestor).
+		Relationship:   "ancestor",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs: []string{
+			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
+			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
+			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+		},
+	},
+	{
+		// ancestor/agent/agent (TestRelationshipCharacterization_AgentAncestor).
+		// Agent JWT scopes restrict this further at evaluation time.
+		Relationship:   "ancestor",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs: []string{
+			"agent.create", "agent.delete", "agent.attach", "agent.lifecycle",
+			"agent.set_message_mode", "agent.status_update", "agent.log_append",
+			"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
+		},
+	},
+	{
+		// progeny/agent/secret (TestRelationshipCharacterization_Progeny). The
+		// Decide resource type is "secret"; the permission is registered on
+		// project (reviewed cross-type cell).
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"project.secret_read"},
+		ReadOnly:       true,
+	},
+	{
+		// hub_member_sa_assign/user/gcp_service_account
+		// (TestRelationshipCharacterization_HubMemberSAAssign).
+		Relationship:   "hub_member_sa_assign",
+		PrincipalKinds: []string{"user"},
+		ResourceType:   ResourceGCPServiceAccount,
+		PermissionIDs:  []string{"gcp_service_account.assign"},
+	},
+	{
+		// creator_user_skill/agent/skill (TestRelationshipCharacterization_CreatorUserSkill).
+		Relationship:   "creator_user_skill",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   ResourceSkill,
+		PermissionIDs:  []string{"skill.read"},
+		ReadOnly:       true,
 	},
 }
 
