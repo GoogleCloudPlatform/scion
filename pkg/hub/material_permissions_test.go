@@ -330,17 +330,16 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 }
 
 // TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation pins
-// that holding a *.deliver permission through a role is not the whole
-// story: super-admin holds every registry permission, including
-// secret.deliver, through allPermissionIDs. The positive control shows the
-// same super-admin, built from a real identity, admitted for an ordinary
-// permission (project.update), so the principal itself is not the reason a
-// deliver decision would deny. The delivery-only assertion is skipped: the
-// internal hub_delivery credential kind and its restriction (denying
-// *.deliver for every other credential kind, including this one) are a
-// separate change tracked at ptone/scion#2228, not yet on this branch. Until
-// that restriction lands, ordinary role evaluation can still reach these
-// rows; no endpoint in this change consumes them.
+// the deliver rule: *.deliver is admitted only for the internal
+// hub-delivery credential (ptone/scion#2228), never for an agent JWT or any
+// other credential kind, and a role holding *.deliver never substitutes for
+// the association, progeny or skill-default grant required for the
+// selected item. Super-admin holds every registry permission, including
+// secret.deliver, through allPermissionIDs, and is denied secret.deliver on
+// an interactive credential by the delivery credential gate. The positive
+// control shows the same super-admin, built from a real identity, admitted
+// for an ordinary permission (project.update), so the principal itself is
+// not the reason for the deny.
 func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -366,8 +365,6 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testin
 		t.Fatalf("positive control: expected super-admin allowed for project.update with a real identity, got allowed=%v reason=%q", dControl.Allowed, dControl.Reason)
 	}
 
-	t.Skip("secret.deliver enforcement depends on the hub_delivery credential restriction, ptone/scion#2228 (not yet on this branch); un-skip and assert deny once that restriction lands")
-
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  admin,
 		Credential: credential,
@@ -376,7 +373,10 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testin
 		Permission: "secret.deliver",
 	})
 	if d.Allowed {
-		t.Fatalf("expected deny: super-admin holds secret.deliver through a role, but delivery needs a grant this base does not yet provide (reason=%q)", d.Reason)
+		t.Fatalf("expected deny: a role holding secret.deliver does not admit deliver without the hub-delivery credential (reason=%q)", d.Reason)
+	}
+	if d.Reason != deliveryGateReason {
+		t.Fatalf("expected the delivery credential gate to deny, got reason=%q", d.Reason)
 	}
 }
 
