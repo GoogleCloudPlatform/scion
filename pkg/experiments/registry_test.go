@@ -164,12 +164,9 @@ func TestReviewOverdue(t *testing.T) {
 	}
 }
 
-// TestReviewOverdue_LocationIndependent asserts that ReviewOverdue answers
-// the same way for the same instant regardless of now's Location: the day
-// boundary is UTC midnight, not a wall-clock calendar boundary in now's own
-// zone, so every hub replica (whatever its host's TZ setting) and every
-// caller agree. time.FixedZone is used instead of a real IANA zone so the
-// test does not depend on tzdata being installed.
+// TestReviewOverdue_LocationIndependent asserts that ReviewOverdue gives the
+// same answer for the same instant regardless of now's Location. Uses
+// time.FixedZone instead of a real IANA zone so it has no tzdata dependency.
 func TestReviewOverdue_LocationIndependent(t *testing.T) {
 	e := valid("web.reviewed", LayerWeb)
 	e.ReviewBy = "2026-06-15"

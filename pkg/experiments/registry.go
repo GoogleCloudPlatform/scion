@@ -104,14 +104,10 @@ func (e Experiment) HasLayer(l Layer) bool {
 // unparsable value (only reachable by bypassing that validation) is treated
 // as not overdue rather than panicking.
 //
-// The day boundary is UTC midnight, deliberately independent of now's
-// location: time.Parse (no location argument) parses ReviewBy as UTC
-// midnight, and comparing time.Time values compares the absolute instant,
-// not wall-clock fields in some zone. This is not a wall-clock computation
-// in now's zone — ReviewBy is a zone-less calendar date evaluated once, the
-// same way, for every caller, so every hub replica (whatever its host's TZ
-// setting) and every caller (whatever timezone its local clock reports)
-// agree on the same instant for the same ReviewBy.
+// The day boundary is UTC midnight regardless of now's Location: time.Parse
+// yields ReviewBy at 00:00 UTC and the comparison is between instants, so
+// the result depends only on the instant and hub replicas with different
+// TZ settings agree.
 func (e Experiment) ReviewOverdue(now time.Time) bool {
 	t, err := time.Parse(reviewByLayout, e.ReviewBy)
 	if err != nil {
