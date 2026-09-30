@@ -178,9 +178,13 @@ and why, which would read oddly to an upstream reviewer with no access to this p
 history. Removed all such narration from `broker_settings_handlers_test.go` and
 `broker-detail.ts`, keeping the underlying explanation (why a separate broker is needed for the
 entitlement/zero cases; why the `not_enforced` label avoids parentheses) reworded on its own terms.
-Also declined, per the EM: re-checking a second precedence step on the switch-back-on leg — the
-switch-off section already exercises every step, and the on-leg only needs to prove the switch
-itself restores the real source, which the existing single check already does.
+Also declined, per the EM: widening the switch-back-on leg to re-check the other three brokers
+(entitlement, hub_default, zero) in addition to the broker-override one it already checks — the
+switch-off section already exercises every precedence outcome, and the on-leg only needs to prove
+the switch itself restores the real source, which the existing single check already does.
+
+**Round 3** (`reviews/broker-settings-rev-not-enforced-3.md`, reviewed head `7a66cca9`): APPROVE,
+comment-only delta.
 
 ## Deliverables
 
