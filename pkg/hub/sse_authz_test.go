@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -650,6 +651,9 @@ func mockSuperAdminStore(userID string) *mockAuthzStore {
 //
 // Optional fields allow tests to inject role bindings and role definitions
 // so the CO1 kernel can resolve permissions without a real database.
+// projectMemberships is served the way the store serves it: as a view over
+// project-scoped bindings to the seeded project roles, which the mock also
+// returns from the role-binding and role-definition lookups.
 type mockAuthzStore struct {
 	store.Store // embed to satisfy interface
 
@@ -694,14 +698,90 @@ func (m *mockAuthzStore) GetProjectMembership(_ context.Context, projectID, user
 	return nil, store.ErrNotFound
 }
 
-func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
-	return nil, nil
+// mockProjectRoleDefinitionID is the role definition ID the mock uses for a
+// seeded project role name.
+func mockProjectRoleDefinitionID(roleName string) string {
+	return "mock-rd-" + roleName
+}
+
+// mockProjectRoleDefinitions are the seeded project-scoped roles
+// (seed.go), keyed by ID. Project memberships are views over bindings to
+// these roles, so the mock serves them alongside roleDefinitions.
+func mockProjectRoleDefinitions() map[string]*store.RoleDefinition {
+	defs := map[string]*store.RoleDefinition{}
+	for name, perms := range map[string][]string{
+		store.ProjectRoleOwner:  projectOwnerPermissionIDs(),
+		store.ProjectRoleAdmin:  projectAdminPermissionIDs(),
+		store.ProjectRoleMember: projectMemberCuratedPermissionIDs(),
+	} {
+		id := mockProjectRoleDefinitionID(name)
+		defs[id] = &store.RoleDefinition{ID: id, Name: name, ScopeType: store.RoleScopeProject, Permissions: perms, System: true}
+	}
+	return defs
+}
+
+// membershipBindings returns the project-scoped role bindings the
+// projectMemberships view is derived from, in a stable order.
+func (m *mockAuthzStore) membershipBindings() []*store.RoleBinding {
+	keys := make([]string, 0, len(m.projectMemberships))
+	for key := range m.projectMemberships {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]*store.RoleBinding, 0, len(keys))
+	for _, key := range keys {
+		pm := m.projectMemberships[key]
+		id := pm.RoleBindingID
+		if id == "" {
+			id = "mock-rb-" + key
+		}
+		out = append(out, &store.RoleBinding{
+			ID:               id,
+			RoleDefinitionID: mockProjectRoleDefinitionID(pm.Role),
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      pm.UserID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          pm.ProjectID,
+		})
+	}
+	return out
+}
+
+func (m *mockAuthzStore) roleDefinition(id string) (*store.RoleDefinition, bool) {
+	if rd, ok := m.roleDefinitions[id]; ok {
+		return rd, true
+	}
+	if len(m.projectMemberships) > 0 {
+		if rd, ok := mockProjectRoleDefinitions()[id]; ok {
+			return rd, true
+		}
+	}
+	return nil, false
+}
+
+func (m *mockAuthzStore) ListRoleBindingsForPrincipal(_ context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	var out []*store.RoleBinding
+	for _, rb := range m.membershipBindings() {
+		if rb.PrincipalType == principalType && rb.PrincipalID == principalID {
+			out = append(out, rb)
+		}
+	}
+	return out, nil
 }
 
 func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, id string) (*store.RoleDefinition, error) {
-	if m.roleDefinitions != nil {
-		if rd, ok := m.roleDefinitions[id]; ok {
-			return rd, nil
+	if rd, ok := m.roleDefinition(id); ok {
+		return rd, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockAuthzStore) GetRoleDefinitionByName(_ context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	for _, defs := range []map[string]*store.RoleDefinition{m.roleDefinitions, mockProjectRoleDefinitions()} {
+		for _, rd := range defs {
+			if rd.Name == name && rd.ScopeType == scopeType {
+				return rd, nil
+			}
 		}
 	}
 	return nil, store.ErrNotFound
@@ -710,17 +790,26 @@ func (m *mockAuthzStore) GetRoleDefinition(_ context.Context, id string) (*store
 func (m *mockAuthzStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
 	result := make(map[string]*store.RoleDefinition, len(ids))
 	for _, id := range ids {
-		if m.roleDefinitions != nil {
-			if rd, ok := m.roleDefinitions[id]; ok {
-				result[id] = rd
-			}
+		if rd, ok := m.roleDefinition(id); ok {
+			result[id] = rd
 		}
 	}
 	return result, nil
 }
 
-func (m *mockAuthzStore) ListRoleBindingsForPrincipals(_ context.Context, _ []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
-	return m.roleBindings, nil
+// ListRoleBindingsForPrincipals returns the injected roleBindings plus the
+// membership bindings of the requested principals.
+func (m *mockAuthzStore) ListRoleBindingsForPrincipals(_ context.Context, principals []store.PrincipalRef, _ []string, _ []string) ([]*store.RoleBinding, error) {
+	out := append([]*store.RoleBinding(nil), m.roleBindings...)
+	for _, rb := range m.membershipBindings() {
+		for _, p := range principals {
+			if rb.PrincipalType == p.Type && rb.PrincipalID == p.ID {
+				out = append(out, rb)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func (m *mockAuthzStore) ListAccessConstraints(_ context.Context, _, _ int) ([]*store.AccessConstraint, error) {

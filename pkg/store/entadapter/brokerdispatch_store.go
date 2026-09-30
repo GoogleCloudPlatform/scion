@@ -64,6 +64,21 @@ func entBrokerDispatchToStore(e *ent.BrokerDispatch) store.BrokerDispatch {
 	if e.DeadlineAt != nil {
 		d.DeadlineAt = e.DeadlineAt
 	}
+	if e.InitiatorPrincipalKind != nil {
+		d.InitiatorPrincipalKind = *e.InitiatorPrincipalKind
+	}
+	if e.InitiatorPrincipalID != nil {
+		d.InitiatorPrincipalID = *e.InitiatorPrincipalID
+	}
+	if e.InitiatorCredentialKind != nil {
+		d.InitiatorCredentialKind = *e.InitiatorCredentialKind
+	}
+	if e.InitiatorCredentialID != nil {
+		d.InitiatorCredentialID = *e.InitiatorCredentialID
+	}
+	if e.CorrelationID != nil {
+		d.CorrelationID = *e.CorrelationID
+	}
 	return d
 }
 
@@ -114,6 +129,21 @@ func (s *BrokerDispatchStore) InsertBrokerDispatch(ctx context.Context, d *store
 	}
 	if d.DeadlineAt != nil {
 		create.SetDeadlineAt(*d.DeadlineAt)
+	}
+	if d.InitiatorPrincipalKind != "" {
+		create.SetInitiatorPrincipalKind(d.InitiatorPrincipalKind)
+	}
+	if d.InitiatorPrincipalID != "" {
+		create.SetInitiatorPrincipalID(d.InitiatorPrincipalID)
+	}
+	if d.InitiatorCredentialKind != "" {
+		create.SetInitiatorCredentialKind(d.InitiatorCredentialKind)
+	}
+	if d.InitiatorCredentialID != "" {
+		create.SetInitiatorCredentialID(d.InitiatorCredentialID)
+	}
+	if d.CorrelationID != "" {
+		create.SetCorrelationID(d.CorrelationID)
 	}
 
 	created, err := create.Save(ctx)

@@ -204,6 +204,76 @@ func (_c *BrokerDispatchCreate) SetNillableDeadlineAt(v *time.Time) *BrokerDispa
 	return _c
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_c *BrokerDispatchCreate) SetInitiatorPrincipalKind(v string) *BrokerDispatchCreate {
+	_c.mutation.SetInitiatorPrincipalKind(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_c *BrokerDispatchCreate) SetNillableInitiatorPrincipalKind(v *string) *BrokerDispatchCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_c *BrokerDispatchCreate) SetInitiatorPrincipalID(v string) *BrokerDispatchCreate {
+	_c.mutation.SetInitiatorPrincipalID(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_c *BrokerDispatchCreate) SetNillableInitiatorPrincipalID(v *string) *BrokerDispatchCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalID(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_c *BrokerDispatchCreate) SetInitiatorCredentialKind(v string) *BrokerDispatchCreate {
+	_c.mutation.SetInitiatorCredentialKind(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_c *BrokerDispatchCreate) SetNillableInitiatorCredentialKind(v *string) *BrokerDispatchCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_c *BrokerDispatchCreate) SetInitiatorCredentialID(v string) *BrokerDispatchCreate {
+	_c.mutation.SetInitiatorCredentialID(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_c *BrokerDispatchCreate) SetNillableInitiatorCredentialID(v *string) *BrokerDispatchCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialID(*v)
+	}
+	return _c
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (_c *BrokerDispatchCreate) SetCorrelationID(v string) *BrokerDispatchCreate {
+	_c.mutation.SetCorrelationID(v)
+	return _c
+}
+
+// SetNillableCorrelationID sets the "correlation_id" field if the given value is not nil.
+func (_c *BrokerDispatchCreate) SetNillableCorrelationID(v *string) *BrokerDispatchCreate {
+	if v != nil {
+		_c.SetCorrelationID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *BrokerDispatchCreate) SetID(v uuid.UUID) *BrokerDispatchCreate {
 	_c.mutation.SetID(v)
@@ -391,6 +461,26 @@ func (_c *BrokerDispatchCreate) createSpec() (*BrokerDispatch, *sqlgraph.CreateS
 	if value, ok := _c.mutation.DeadlineAt(); ok {
 		_spec.SetField(brokerdispatch.FieldDeadlineAt, field.TypeTime, value)
 		_node.DeadlineAt = &value
+	}
+	if value, ok := _c.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalKind, field.TypeString, value)
+		_node.InitiatorPrincipalKind = &value
+	}
+	if value, ok := _c.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorPrincipalID, field.TypeString, value)
+		_node.InitiatorPrincipalID = &value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialKind, field.TypeString, value)
+		_node.InitiatorCredentialKind = &value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(brokerdispatch.FieldInitiatorCredentialID, field.TypeString, value)
+		_node.InitiatorCredentialID = &value
+	}
+	if value, ok := _c.mutation.CorrelationID(); ok {
+		_spec.SetField(brokerdispatch.FieldCorrelationID, field.TypeString, value)
+		_node.CorrelationID = &value
 	}
 	return _node, _spec
 }
@@ -651,6 +741,96 @@ func (u *BrokerDispatchUpsert) UpdateDeadlineAt() *BrokerDispatchUpsert {
 // ClearDeadlineAt clears the value of the "deadline_at" field.
 func (u *BrokerDispatchUpsert) ClearDeadlineAt() *BrokerDispatchUpsert {
 	u.SetNull(brokerdispatch.FieldDeadlineAt)
+	return u
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsert) SetInitiatorPrincipalKind(v string) *BrokerDispatchUpsert {
+	u.Set(brokerdispatch.FieldInitiatorPrincipalKind, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsert) UpdateInitiatorPrincipalKind() *BrokerDispatchUpsert {
+	u.SetExcluded(brokerdispatch.FieldInitiatorPrincipalKind)
+	return u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsert) ClearInitiatorPrincipalKind() *BrokerDispatchUpsert {
+	u.SetNull(brokerdispatch.FieldInitiatorPrincipalKind)
+	return u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsert) SetInitiatorPrincipalID(v string) *BrokerDispatchUpsert {
+	u.Set(brokerdispatch.FieldInitiatorPrincipalID, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsert) UpdateInitiatorPrincipalID() *BrokerDispatchUpsert {
+	u.SetExcluded(brokerdispatch.FieldInitiatorPrincipalID)
+	return u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsert) ClearInitiatorPrincipalID() *BrokerDispatchUpsert {
+	u.SetNull(brokerdispatch.FieldInitiatorPrincipalID)
+	return u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsert) SetInitiatorCredentialKind(v string) *BrokerDispatchUpsert {
+	u.Set(brokerdispatch.FieldInitiatorCredentialKind, v)
+	return u
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsert) UpdateInitiatorCredentialKind() *BrokerDispatchUpsert {
+	u.SetExcluded(brokerdispatch.FieldInitiatorCredentialKind)
+	return u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsert) ClearInitiatorCredentialKind() *BrokerDispatchUpsert {
+	u.SetNull(brokerdispatch.FieldInitiatorCredentialKind)
+	return u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsert) SetInitiatorCredentialID(v string) *BrokerDispatchUpsert {
+	u.Set(brokerdispatch.FieldInitiatorCredentialID, v)
+	return u
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsert) UpdateInitiatorCredentialID() *BrokerDispatchUpsert {
+	u.SetExcluded(brokerdispatch.FieldInitiatorCredentialID)
+	return u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsert) ClearInitiatorCredentialID() *BrokerDispatchUpsert {
+	u.SetNull(brokerdispatch.FieldInitiatorCredentialID)
+	return u
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (u *BrokerDispatchUpsert) SetCorrelationID(v string) *BrokerDispatchUpsert {
+	u.Set(brokerdispatch.FieldCorrelationID, v)
+	return u
+}
+
+// UpdateCorrelationID sets the "correlation_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsert) UpdateCorrelationID() *BrokerDispatchUpsert {
+	u.SetExcluded(brokerdispatch.FieldCorrelationID)
+	return u
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (u *BrokerDispatchUpsert) ClearCorrelationID() *BrokerDispatchUpsert {
+	u.SetNull(brokerdispatch.FieldCorrelationID)
 	return u
 }
 
@@ -947,6 +1127,111 @@ func (u *BrokerDispatchUpsertOne) UpdateDeadlineAt() *BrokerDispatchUpsertOne {
 func (u *BrokerDispatchUpsertOne) ClearDeadlineAt() *BrokerDispatchUpsertOne {
 	return u.Update(func(s *BrokerDispatchUpsert) {
 		s.ClearDeadlineAt()
+	})
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsertOne) SetInitiatorPrincipalKind(v string) *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertOne) UpdateInitiatorPrincipalKind() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsertOne) ClearInitiatorPrincipalKind() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsertOne) SetInitiatorPrincipalID(v string) *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertOne) UpdateInitiatorPrincipalID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsertOne) ClearInitiatorPrincipalID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsertOne) SetInitiatorCredentialKind(v string) *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertOne) UpdateInitiatorCredentialKind() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsertOne) ClearInitiatorCredentialKind() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsertOne) SetInitiatorCredentialID(v string) *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertOne) UpdateInitiatorCredentialID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsertOne) ClearInitiatorCredentialID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorCredentialID()
+	})
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (u *BrokerDispatchUpsertOne) SetCorrelationID(v string) *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetCorrelationID(v)
+	})
+}
+
+// UpdateCorrelationID sets the "correlation_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertOne) UpdateCorrelationID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateCorrelationID()
+	})
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (u *BrokerDispatchUpsertOne) ClearCorrelationID() *BrokerDispatchUpsertOne {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearCorrelationID()
 	})
 }
 
@@ -1410,6 +1695,111 @@ func (u *BrokerDispatchUpsertBulk) UpdateDeadlineAt() *BrokerDispatchUpsertBulk 
 func (u *BrokerDispatchUpsertBulk) ClearDeadlineAt() *BrokerDispatchUpsertBulk {
 	return u.Update(func(s *BrokerDispatchUpsert) {
 		s.ClearDeadlineAt()
+	})
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsertBulk) SetInitiatorPrincipalKind(v string) *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertBulk) UpdateInitiatorPrincipalKind() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *BrokerDispatchUpsertBulk) ClearInitiatorPrincipalKind() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsertBulk) SetInitiatorPrincipalID(v string) *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertBulk) UpdateInitiatorPrincipalID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *BrokerDispatchUpsertBulk) ClearInitiatorPrincipalID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsertBulk) SetInitiatorCredentialKind(v string) *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertBulk) UpdateInitiatorCredentialKind() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *BrokerDispatchUpsertBulk) ClearInitiatorCredentialKind() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsertBulk) SetInitiatorCredentialID(v string) *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertBulk) UpdateInitiatorCredentialID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *BrokerDispatchUpsertBulk) ClearInitiatorCredentialID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearInitiatorCredentialID()
+	})
+}
+
+// SetCorrelationID sets the "correlation_id" field.
+func (u *BrokerDispatchUpsertBulk) SetCorrelationID(v string) *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.SetCorrelationID(v)
+	})
+}
+
+// UpdateCorrelationID sets the "correlation_id" field to the value that was provided on create.
+func (u *BrokerDispatchUpsertBulk) UpdateCorrelationID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.UpdateCorrelationID()
+	})
+}
+
+// ClearCorrelationID clears the value of the "correlation_id" field.
+func (u *BrokerDispatchUpsertBulk) ClearCorrelationID() *BrokerDispatchUpsertBulk {
+	return u.Update(func(s *BrokerDispatchUpsert) {
+		s.ClearCorrelationID()
 	})
 }
 

@@ -24,6 +24,104 @@ type ScheduleCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_c *ScheduleCreate) SetInitiatorPrincipalKind(v string) *ScheduleCreate {
+	_c.mutation.SetInitiatorPrincipalKind(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableInitiatorPrincipalKind(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_c *ScheduleCreate) SetInitiatorPrincipalID(v string) *ScheduleCreate {
+	_c.mutation.SetInitiatorPrincipalID(v)
+	return _c
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableInitiatorPrincipalID(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetInitiatorPrincipalID(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_c *ScheduleCreate) SetInitiatorCredentialKind(v string) *ScheduleCreate {
+	_c.mutation.SetInitiatorCredentialKind(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableInitiatorCredentialKind(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialKind(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_c *ScheduleCreate) SetInitiatorCredentialID(v string) *ScheduleCreate {
+	_c.mutation.SetInitiatorCredentialID(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableInitiatorCredentialID(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialID(*v)
+	}
+	return _c
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (_c *ScheduleCreate) SetInitiatorCredentialSnapshot(v string) *ScheduleCreate {
+	_c.mutation.SetInitiatorCredentialSnapshot(v)
+	return _c
+}
+
+// SetNillableInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableInitiatorCredentialSnapshot(v *string) *ScheduleCreate {
+	if v != nil {
+		_c.SetInitiatorCredentialSnapshot(*v)
+	}
+	return _c
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (_c *ScheduleCreate) SetAttributionVersion(v int) *ScheduleCreate {
+	_c.mutation.SetAttributionVersion(v)
+	return _c
+}
+
+// SetNillableAttributionVersion sets the "attribution_version" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAttributionVersion(v *int) *ScheduleCreate {
+	if v != nil {
+		_c.SetAttributionVersion(*v)
+	}
+	return _c
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (_c *ScheduleCreate) SetAuthorizationRevision(v int) *ScheduleCreate {
+	_c.mutation.SetAuthorizationRevision(v)
+	return _c
+}
+
+// SetNillableAuthorizationRevision sets the "authorization_revision" field if the given value is not nil.
+func (_c *ScheduleCreate) SetNillableAuthorizationRevision(v *int) *ScheduleCreate {
+	if v != nil {
+		_c.SetAuthorizationRevision(*v)
+	}
+	return _c
+}
+
 // SetProjectID sets the "project_id" field.
 func (_c *ScheduleCreate) SetProjectID(v uuid.UUID) *ScheduleCreate {
 	_c.mutation.SetProjectID(v)
@@ -364,6 +462,34 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalKind, field.TypeString, value)
+		_node.InitiatorPrincipalKind = &value
+	}
+	if value, ok := _c.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(schedule.FieldInitiatorPrincipalID, field.TypeString, value)
+		_node.InitiatorPrincipalID = &value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialKind, field.TypeString, value)
+		_node.InitiatorCredentialKind = &value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialID, field.TypeString, value)
+		_node.InitiatorCredentialID = &value
+	}
+	if value, ok := _c.mutation.InitiatorCredentialSnapshot(); ok {
+		_spec.SetField(schedule.FieldInitiatorCredentialSnapshot, field.TypeString, value)
+		_node.InitiatorCredentialSnapshot = &value
+	}
+	if value, ok := _c.mutation.AttributionVersion(); ok {
+		_spec.SetField(schedule.FieldAttributionVersion, field.TypeInt, value)
+		_node.AttributionVersion = &value
+	}
+	if value, ok := _c.mutation.AuthorizationRevision(); ok {
+		_spec.SetField(schedule.FieldAuthorizationRevision, field.TypeInt, value)
+		_node.AuthorizationRevision = &value
+	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(schedule.FieldProjectID, field.TypeUUID, value)
 		_node.ProjectID = value
@@ -431,7 +557,7 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 // of the `INSERT` statement. For example:
 //
 //	client.Schedule.Create().
-//		SetProjectID(v).
+//		SetInitiatorPrincipalKind(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -440,7 +566,7 @@ func (_c *ScheduleCreate) createSpec() (*Schedule, *sqlgraph.CreateSpec) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ScheduleUpsert) {
-//			SetProjectID(v+v).
+//			SetInitiatorPrincipalKind(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ScheduleCreate) OnConflict(opts ...sql.ConflictOption) *ScheduleUpsertOne {
@@ -475,6 +601,144 @@ type (
 		*sql.UpdateSet
 	}
 )
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *ScheduleUpsert) SetInitiatorPrincipalKind(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldInitiatorPrincipalKind, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateInitiatorPrincipalKind() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldInitiatorPrincipalKind)
+	return u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *ScheduleUpsert) ClearInitiatorPrincipalKind() *ScheduleUpsert {
+	u.SetNull(schedule.FieldInitiatorPrincipalKind)
+	return u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *ScheduleUpsert) SetInitiatorPrincipalID(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldInitiatorPrincipalID, v)
+	return u
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateInitiatorPrincipalID() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldInitiatorPrincipalID)
+	return u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *ScheduleUpsert) ClearInitiatorPrincipalID() *ScheduleUpsert {
+	u.SetNull(schedule.FieldInitiatorPrincipalID)
+	return u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *ScheduleUpsert) SetInitiatorCredentialKind(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldInitiatorCredentialKind, v)
+	return u
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateInitiatorCredentialKind() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldInitiatorCredentialKind)
+	return u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *ScheduleUpsert) ClearInitiatorCredentialKind() *ScheduleUpsert {
+	u.SetNull(schedule.FieldInitiatorCredentialKind)
+	return u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *ScheduleUpsert) SetInitiatorCredentialID(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldInitiatorCredentialID, v)
+	return u
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateInitiatorCredentialID() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldInitiatorCredentialID)
+	return u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *ScheduleUpsert) ClearInitiatorCredentialID() *ScheduleUpsert {
+	u.SetNull(schedule.FieldInitiatorCredentialID)
+	return u
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsert) SetInitiatorCredentialSnapshot(v string) *ScheduleUpsert {
+	u.Set(schedule.FieldInitiatorCredentialSnapshot, v)
+	return u
+}
+
+// UpdateInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateInitiatorCredentialSnapshot() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldInitiatorCredentialSnapshot)
+	return u
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsert) ClearInitiatorCredentialSnapshot() *ScheduleUpsert {
+	u.SetNull(schedule.FieldInitiatorCredentialSnapshot)
+	return u
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (u *ScheduleUpsert) SetAttributionVersion(v int) *ScheduleUpsert {
+	u.Set(schedule.FieldAttributionVersion, v)
+	return u
+}
+
+// UpdateAttributionVersion sets the "attribution_version" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAttributionVersion() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAttributionVersion)
+	return u
+}
+
+// AddAttributionVersion adds v to the "attribution_version" field.
+func (u *ScheduleUpsert) AddAttributionVersion(v int) *ScheduleUpsert {
+	u.Add(schedule.FieldAttributionVersion, v)
+	return u
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (u *ScheduleUpsert) ClearAttributionVersion() *ScheduleUpsert {
+	u.SetNull(schedule.FieldAttributionVersion)
+	return u
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (u *ScheduleUpsert) SetAuthorizationRevision(v int) *ScheduleUpsert {
+	u.Set(schedule.FieldAuthorizationRevision, v)
+	return u
+}
+
+// UpdateAuthorizationRevision sets the "authorization_revision" field to the value that was provided on create.
+func (u *ScheduleUpsert) UpdateAuthorizationRevision() *ScheduleUpsert {
+	u.SetExcluded(schedule.FieldAuthorizationRevision)
+	return u
+}
+
+// AddAuthorizationRevision adds v to the "authorization_revision" field.
+func (u *ScheduleUpsert) AddAuthorizationRevision(v int) *ScheduleUpsert {
+	u.Add(schedule.FieldAuthorizationRevision, v)
+	return u
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (u *ScheduleUpsert) ClearAuthorizationRevision() *ScheduleUpsert {
+	u.SetNull(schedule.FieldAuthorizationRevision)
+	return u
+}
 
 // SetProjectID sets the "project_id" field.
 func (u *ScheduleUpsert) SetProjectID(v uuid.UUID) *ScheduleUpsert {
@@ -735,6 +999,167 @@ func (u *ScheduleUpsertOne) Update(set func(*ScheduleUpsert)) *ScheduleUpsertOne
 		set(&ScheduleUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *ScheduleUpsertOne) SetInitiatorPrincipalKind(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateInitiatorPrincipalKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *ScheduleUpsertOne) ClearInitiatorPrincipalKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *ScheduleUpsertOne) SetInitiatorPrincipalID(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateInitiatorPrincipalID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *ScheduleUpsertOne) ClearInitiatorPrincipalID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *ScheduleUpsertOne) SetInitiatorCredentialKind(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateInitiatorCredentialKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *ScheduleUpsertOne) ClearInitiatorCredentialKind() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *ScheduleUpsertOne) SetInitiatorCredentialID(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateInitiatorCredentialID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *ScheduleUpsertOne) ClearInitiatorCredentialID() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialID()
+	})
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsertOne) SetInitiatorCredentialSnapshot(v string) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialSnapshot(v)
+	})
+}
+
+// UpdateInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateInitiatorCredentialSnapshot() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialSnapshot()
+	})
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsertOne) ClearInitiatorCredentialSnapshot() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialSnapshot()
+	})
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (u *ScheduleUpsertOne) SetAttributionVersion(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAttributionVersion(v)
+	})
+}
+
+// AddAttributionVersion adds v to the "attribution_version" field.
+func (u *ScheduleUpsertOne) AddAttributionVersion(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAttributionVersion(v)
+	})
+}
+
+// UpdateAttributionVersion sets the "attribution_version" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAttributionVersion() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAttributionVersion()
+	})
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (u *ScheduleUpsertOne) ClearAttributionVersion() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAttributionVersion()
+	})
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (u *ScheduleUpsertOne) SetAuthorizationRevision(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorizationRevision(v)
+	})
+}
+
+// AddAuthorizationRevision adds v to the "authorization_revision" field.
+func (u *ScheduleUpsertOne) AddAuthorizationRevision(v int) *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAuthorizationRevision(v)
+	})
+}
+
+// UpdateAuthorizationRevision sets the "authorization_revision" field to the value that was provided on create.
+func (u *ScheduleUpsertOne) UpdateAuthorizationRevision() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorizationRevision()
+	})
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (u *ScheduleUpsertOne) ClearAuthorizationRevision() *ScheduleUpsertOne {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorizationRevision()
+	})
 }
 
 // SetProjectID sets the "project_id" field.
@@ -1118,7 +1543,7 @@ func (_c *ScheduleCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ScheduleUpsert) {
-//			SetProjectID(v+v).
+//			SetInitiatorPrincipalKind(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ScheduleCreateBulk) OnConflict(opts ...sql.ConflictOption) *ScheduleUpsertBulk {
@@ -1198,6 +1623,167 @@ func (u *ScheduleUpsertBulk) Update(set func(*ScheduleUpsert)) *ScheduleUpsertBu
 		set(&ScheduleUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (u *ScheduleUpsertBulk) SetInitiatorPrincipalKind(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorPrincipalKind(v)
+	})
+}
+
+// UpdateInitiatorPrincipalKind sets the "initiator_principal_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateInitiatorPrincipalKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorPrincipalKind()
+	})
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (u *ScheduleUpsertBulk) ClearInitiatorPrincipalKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorPrincipalKind()
+	})
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (u *ScheduleUpsertBulk) SetInitiatorPrincipalID(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorPrincipalID(v)
+	})
+}
+
+// UpdateInitiatorPrincipalID sets the "initiator_principal_id" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateInitiatorPrincipalID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorPrincipalID()
+	})
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (u *ScheduleUpsertBulk) ClearInitiatorPrincipalID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorPrincipalID()
+	})
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (u *ScheduleUpsertBulk) SetInitiatorCredentialKind(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialKind(v)
+	})
+}
+
+// UpdateInitiatorCredentialKind sets the "initiator_credential_kind" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateInitiatorCredentialKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialKind()
+	})
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (u *ScheduleUpsertBulk) ClearInitiatorCredentialKind() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialKind()
+	})
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (u *ScheduleUpsertBulk) SetInitiatorCredentialID(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialID(v)
+	})
+}
+
+// UpdateInitiatorCredentialID sets the "initiator_credential_id" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateInitiatorCredentialID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialID()
+	})
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (u *ScheduleUpsertBulk) ClearInitiatorCredentialID() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialID()
+	})
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsertBulk) SetInitiatorCredentialSnapshot(v string) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetInitiatorCredentialSnapshot(v)
+	})
+}
+
+// UpdateInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateInitiatorCredentialSnapshot() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateInitiatorCredentialSnapshot()
+	})
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (u *ScheduleUpsertBulk) ClearInitiatorCredentialSnapshot() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearInitiatorCredentialSnapshot()
+	})
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (u *ScheduleUpsertBulk) SetAttributionVersion(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAttributionVersion(v)
+	})
+}
+
+// AddAttributionVersion adds v to the "attribution_version" field.
+func (u *ScheduleUpsertBulk) AddAttributionVersion(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAttributionVersion(v)
+	})
+}
+
+// UpdateAttributionVersion sets the "attribution_version" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAttributionVersion() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAttributionVersion()
+	})
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (u *ScheduleUpsertBulk) ClearAttributionVersion() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAttributionVersion()
+	})
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (u *ScheduleUpsertBulk) SetAuthorizationRevision(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.SetAuthorizationRevision(v)
+	})
+}
+
+// AddAuthorizationRevision adds v to the "authorization_revision" field.
+func (u *ScheduleUpsertBulk) AddAuthorizationRevision(v int) *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.AddAuthorizationRevision(v)
+	})
+}
+
+// UpdateAuthorizationRevision sets the "authorization_revision" field to the value that was provided on create.
+func (u *ScheduleUpsertBulk) UpdateAuthorizationRevision() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.UpdateAuthorizationRevision()
+	})
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (u *ScheduleUpsertBulk) ClearAuthorizationRevision() *ScheduleUpsertBulk {
+	return u.Update(func(s *ScheduleUpsert) {
+		s.ClearAuthorizationRevision()
+	})
 }
 
 // SetProjectID sets the "project_id" field.

@@ -516,7 +516,11 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	}
 
 	// Check if any of the active roles grant the "agent.create" permission.
-	targetPermission := derivePermissionID("agent", ActionCreate)
+	targetPermission, err := resolveResourcePermission("agent", ActionCreate)
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: agent-create permission is not resolvable", "error", err)
+		return
+	}
 	for _, rd := range roleDefs {
 		if rd == nil {
 			continue
