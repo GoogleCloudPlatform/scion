@@ -692,7 +692,8 @@ func findRawExecViolations(path string) ([]string, error) {
 			switch sel.Sel.Name {
 			case "Run", "Output", "CombinedOutput":
 				violations = append(violations, fmt.Sprintf(
-					"%s: %s() called directly on an exec.Cmd value, bypassing pkg/sciontool/procreap",
+					"%s: %s() called directly on an exec.Cmd value instead of going through "+
+						"pkg/sciontool/procreap",
 					fset.Position(call.Pos()), sel.Sel.Name))
 			}
 			return true
