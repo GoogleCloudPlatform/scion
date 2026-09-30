@@ -85,7 +85,7 @@ Examples:
   sciontool init --grace-period=30s -- claude`,
 	DisableFlagParsing: false,
 	Run: func(cmd *cobra.Command, args []string) {
-		exitCode := RunInit(args, InitRunOptions{ForwardTermSignal: true})
+		exitCode := RunInit(args, InitRunOptions{})
 		os.Exit(exitCode)
 	},
 }
@@ -95,13 +95,14 @@ Examples:
 // These fields exist as a seam for an in-process caller that embeds RunInit
 // instead of going through the `sciontool init` CLI path.
 type InitRunOptions struct {
-	// ForwardTermSignal controls whether RunInit installs its own SIGTERM/
-	// SIGINT handler that runs pre-stop hooks and gracefully shuts down the
-	// child process. `sciontool init` (the CLI command) always sets this to
-	// true — that behaviour is unchanged. A caller that is itself PID 1 and
-	// owns SIGTERM handling for the whole process sets this to false so the
-	// two handlers don't race on the same signal.
-	ForwardTermSignal bool
+	// DisableTermSignalForwarding controls whether RunInit skips installing
+	// its own SIGTERM/SIGINT handler that runs pre-stop hooks and gracefully
+	// shuts down the child process. The zero value (false) matches
+	// `sciontool init`'s (the CLI command's) historical behaviour — signal
+	// forwarding on — without that command needing to set anything. A caller
+	// that is itself PID 1 and owns SIGTERM handling for the whole process
+	// sets this to true so the two handlers don't race on the same signal.
+	DisableTermSignalForwarding bool
 
 	// RequirePrivilegeDrop is a seam for a caller whose runtime has no
 	// legitimate "still UID 0" outcome: it is threaded through to the
@@ -120,6 +121,15 @@ type InitRunOptions struct {
 	// command) always leaves this false — that behaviour is unchanged. A
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
+}
+
+// forwardsTermSignal reports whether RunInit should install its own
+// SIGTERM/SIGINT handler, given DisableTermSignalForwarding. Kept as its own
+// tiny method (rather than inlining the negation at the one call site) so
+// the "zero-value InitRunOptions matches sciontool init's historical
+// CLI behaviour" property has a single, directly unit-testable home.
+func (opts InitRunOptions) forwardsTermSignal() bool {
+	return !opts.DisableTermSignalForwarding
 }
 
 func init() {
@@ -222,7 +232,7 @@ var runGitCloneWorkspace = gitCloneWorkspace
 // under supervision, and reports status/heartbeats to the Hub until the
 // child exits. It returns the process's intended exit code and never calls
 // os.Exit itself, so it is safe to call in-process from other entry points
-// (see InitRunOptions.ForwardTermSignal).
+// (see InitRunOptions.DisableTermSignalForwarding).
 //
 // This is the exact logic `sciontool init -- <cmd>` runs; it is exported so
 // other subcommands can reuse it instead of forking a copy.
@@ -512,7 +522,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if resolveIsSharedGitWorkspace() {
-		configureSharedWorkspaceGit(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop, rootless)
+		if err := configureSharedWorkspaceGit(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop); err != nil {
+			log.Error("Refusing shared workspace git configuration: %v", err)
+		}
 	}
 
 	// Write critical environment variables to a shell-sourceable file so that
@@ -673,7 +685,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// requestedShutdown tracks whether the process received an intentional
 	// SIGTERM/SIGINT so classifyExit can distinguish a clean stop from a crash.
 	var requestedShutdown atomic.Bool
-	if opts.ForwardTermSignal {
+	if opts.forwardsTermSignal() {
 		sigHandler := supervisor.NewSignalHandler(sup, cancel).
 			WithPreStopHook(func() error {
 				requestedShutdown.Store(true)
@@ -683,10 +695,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 		sigHandler.Start()
 		defer sigHandler.Stop()
 	} else {
-		// ForwardTermSignal=false: the caller owns SIGTERM handling for the
-		// whole process, so RunInit must not also listen for it here — doing
-		// so would shut down the child out from under the caller's own
-		// (non-forwarding) signal handling. See InitRunOptions.ForwardTermSignal.
+		// DisableTermSignalForwarding: the caller owns SIGTERM handling for
+		// the whole process, so RunInit must not also listen for it here —
+		// doing so would shut down the child out from under the caller's own
+		// signal handling. See InitRunOptions.DisableTermSignalForwarding.
 		log.Info("Termination-signal forwarding disabled for this init run; the child will not be stopped on SIGTERM/SIGINT by this code path")
 	}
 
@@ -2177,112 +2189,86 @@ func resolveIsSharedGitWorkspace() bool {
 	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
 }
 
-// gitconfigMaxBytes bounds configureSharedWorkspaceGit's read of an existing
-// $HOME/.gitconfig. A legitimate gitconfig is a handful of lines; 1 MiB is
-// generous headroom with no legitimate case anywhere near it.
-const gitconfigMaxBytes = 1 << 20
+// errSharedWorkspaceGitPrivilegeDropRequired is returned when
+// RequirePrivilegeDrop is set but uid/gid are not both usable to run git as
+// the workload, so an enforced runtime with no real workload identity to
+// drop to never runs git config as root. gitCloneWorkspace has no
+// equivalent guard of its own: it never receives RequirePrivilegeDrop at
+// all, and falls back to the "scion" system user itself whenever uid is 0.
+var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
+	"configureSharedWorkspaceGit: privilege drop required but uid/gid were not both set; refusing to run git as root")
 
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
-// (git-workspace hybrid) projects. The workspace is a pre-cloned git repo shared
-// by all agents; each agent gets its own credential helper in $HOME/.gitconfig
-// so credentials don't pollute the shared workspace.
+// (git-workspace hybrid) projects. The workspace is a pre-cloned git repo
+// shared by all agents; each agent gets its own credential helper in
+// $HOME/.gitconfig so credentials don't pollute the shared workspace.
 //
-// This runs as root, before the harness starts, against a path inside
-// agentHome — a directory the workload owns outright and can replace any
-// entry in at any time. A symlink planted at .gitconfig would make the
-// three `git config --file` calls below read from and write into an
-// arbitrary file the symlink points at (git config's own file handling
-// follows symlinks unconditionally, the same way a path-based os.Chmod
-// does); a FIFO would make the first of those calls block forever, hanging
-// RunInit.
+// When uid/gid are both usable, every `git config --file <gitconfigPath>`
+// call below runs AS the workload, via configureGitCommand's
+// SysProcAttr.Credential: git itself reads and rewrites gitconfigPath under
+// the same identity that already owns agentHome and everything in it. A
+// symlink at .gitconfig (the layout a dotfile manager such as chezmoi,
+// stow, or dotbot commonly produces, or one pointed at a file outside
+// agentHome entirely) is then exactly as safe — or unsafe — as if the
+// workload had run `git config` itself: git writes through it in place, so
+// the symlink survives, and if it targets something the workload identity
+// cannot write (e.g. a root-owned file), the write fails with an ordinary
+// permission error, leaving that target untouched. There is no longer a
+// root-vs-workload boundary for a planted symlink to cross, so no private
+// staging copy or fd-based no-follow walk is needed to make that true.
 //
-// This runs git itself — never a hand-written config parser — against a
-// private copy in a temp directory only root can reach, then installs the
-// result the same fd-based, no-follow way every other atomic write in this
-// codebase does:
+// When RequirePrivilegeDrop is set but uid/gid are not both usable, this
+// refuses outright (errSharedWorkspaceGitPrivilegeDropRequired) rather than
+// running git config as root against a directory the workload controls.
 //
-//  1. Read any existing .gitconfig with dirfd.ReadFileNoFollow: no-follow,
-//     bounded, and refuses anything but a single-link regular file. A
-//     symlink, FIFO, hardlink, oversized file, or simply no file at all are
-//     all treated identically — start from an empty private copy.
-//  2. Seed that content into a file inside a fresh os.MkdirTemp directory
-//     under a private, root-verified parent — never a blind $TMPDIR/system
-//     temp directory. See resolvePrivateGitConfigDir's own doc comment for
-//     how that parent is chosen. The three `git config --file <that private
-//     file>` calls that follow it run with GIT_CONFIG_NOSYSTEM=1,
-//     GIT_CONFIG_GLOBAL=/dev/null, HOME and TMPDIR both pointed at the temp
-//     directory, a minimal environment, cwd "/", and a timeout, all as
-//     defense in depth.
-//  3. Install the private copy via dirfd.WriteFileNoFollow: temp file
-//     created through .gitconfig's own parent dirfd, fchmod/fchown on that
-//     open fd (preserving the previous file's mode when it had one, 0644
-//     otherwise), then an fd-relative rename over .gitconfig.
+// Otherwise (rootless, where PID 1 already IS the workload's own uid with
+// no separate root identity to protect against, or an unenforced runtime
+// with no host UID configured at all) there is no workload identity
+// distinct from the one already running this code, so this keeps the
+// pre-hardening behaviour: git config runs directly against gitconfigPath
+// under this process's own identity, no Credential override.
 //
-// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop, accepted
-// for signature symmetry with the other generic hardening helpers this
-// package threads it through; it does not change resolvePrivateGitConfigDir's
-// behaviour here (see that function's own doc comment).
-func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop, rootless bool) {
+// Independently of all three cases above, gitconfigPath is stat'd (never
+// opened) before every run: a FIFO planted there would make git's own open
+// block forever with no writer, hanging RunInit, and stat — unlike open —
+// never blocks on one. This is the one piece of the historical hardening
+// this function keeps unconditionally, since a hung startup is a concrete,
+// self-contained failure mode any of the three cases above can hit, not a
+// symlink-specific privilege question the uid separation above already
+// answers.
+func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop bool) error {
 	log.Info("Configuring git credentials for shared workspace")
 
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		// A symlinked .gitconfig (the layout a dotfile manager such as
-		// chezmoi, stow, or dotbot commonly produces) is refused exactly
-		// like a hostile one, the same as a FIFO, a hardlink, or an
-		// oversized file: the private copy still starts empty and installs
-		// with ReplaceLeaf (see below), but an operator now gets a WARN
-		// naming the path and the reason.
-		log.Warn("Refusing existing %s (%v); its content was NOT merged, and the credential helper and git identity below were applied to an empty gitconfig instead. Replace it with a single-link regular file under %d bytes to have its content picked up.", gitconfigPath, err, gitconfigMaxBytes)
-	}
-	// Lstat never follows a symlink, so this can only ever report the mode
-	// of the real entry at gitconfigPath — it exists purely to preserve a
-	// legitimate existing file's permission bits across the rewrite.
-	mode := os.FileMode(0644)
-	if fi, lerr := os.Lstat(gitconfigPath); lerr == nil && fi.Mode().IsRegular() {
-		mode = fi.Mode().Perm()
+	if fi, err := os.Stat(gitconfigPath); err == nil && !fi.Mode().IsRegular() {
+		log.Warn("Refusing existing %s: not a regular file (mode %v); leaving it untouched and skipping shared-workspace git configuration.", gitconfigPath, fi.Mode())
+		return nil
 	}
 
-	tmpDir, err := resolvePrivateGitConfigDir(rootless)
-	if err != nil {
-		log.Error("Refusing private gitconfig workspace parent: %v", err)
-		return
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	privatePath := filepath.Join(tmpDir, "gitconfig")
-	if len(existing) > 0 {
-		if werr := os.WriteFile(privatePath, existing, 0600); werr != nil {
-			log.Error("Failed to seed private gitconfig: %v", werr)
-			return
-		}
+	var configureCmd func(cmd *exec.Cmd)
+	switch {
+	case uid > 0 && gid > 0:
+		configureCmd = func(cmd *exec.Cmd) { configureGitCommand(cmd, uid, gid) }
+	case requirePrivilegeDrop:
+		return errSharedWorkspaceGitPrivilegeDropRequired
+	default:
+		configureCmd = func(cmd *exec.Cmd) {}
 	}
 
-	runPrivateGitConfig := func(args ...string) bool {
+	runGitConfig := func(args ...string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		gitPath, rerr := rootexec.Resolve("git")
 		if rerr != nil {
 			log.Error("Failed to resolve a trusted git binary: %v", rerr)
-			return false
+			return
 		}
-		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", privatePath}, args...)...)
-		cmd.Dir = "/"
-		// Built entirely from scratch (rootexec.Env), not derived from this
-		// process's own environment in any way.
-		cmd.Env = rootexec.Env(
-			"HOME="+tmpDir,
-			"TMPDIR="+tmpDir,
-			"GIT_CONFIG_NOSYSTEM=1",
-			"GIT_CONFIG_GLOBAL=/dev/null",
-		)
+		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
+		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
-			return false
 		}
-		return true
 	}
 
 	// Configure credential helper using sciontool's credential-helper command,
@@ -2297,7 +2283,7 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	}
 
 	// This is idempotent and works even if provisioning already set it.
-	runPrivateGitConfig("credential.helper", credentialHelper)
+	runGitConfig("credential.helper", credentialHelper)
 
 	// Configure git identity for the agent
 	agentName := os.Getenv("SCION_AGENT_NAME")
@@ -2309,79 +2295,19 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		{"user.email", "agent@scion.dev"},
 	}
 	for _, cfg := range configs {
-		runPrivateGitConfig(cfg.key, cfg.value)
+		runGitConfig(cfg.key, cfg.value)
 	}
-
-	result, err := os.ReadFile(privatePath)
-	if err != nil {
-		log.Error("Failed to read back private gitconfig: %v", err)
-		return
-	}
-	// ReplaceLeaf, not RefuseSymlink: gitconfigPath lives inside agentHome,
-	// which the workload owns outright, so whatever currently sits at the
-	// leaf (including a symlink the read above just refused to read
-	// through) is a stale entry this install means to overwrite, not
-	// tamper to refuse — the read-side refusal already happened; this call
-	// only installs the result.
-	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid, dirfd.ReplaceLeaf); err != nil {
-		log.Error("Failed to install %s: %v", gitconfigPath, err)
-	}
+	return nil
 }
 
-// resolvePrivateGitConfigDir creates and returns the private, root-only
-// scratch directory configureSharedWorkspaceGit stages its rewritten
-// gitconfig in. Every strategy either verifies its parent directory by
-// fd-walk or is the plain historical os.MkdirTemp("") used only where there
-// is provably no root/workload boundary to cross at all — never a silent,
-// unverified fallback.
-func resolvePrivateGitConfigDir(rootless bool) (string, error) {
-	if rootless {
-		// PID 1 IS the workload's own uid here (setupHostUser's rootless
-		// case: no separate root identity exists to drop from or protect
-		// against). There is no privilege boundary this directory could
-		// ever cross, so the plain, historical ambient temp directory is
-		// exactly as safe as any other scratch file the workload already
-		// owns outright.
-		return os.MkdirTemp("", "scion-gitconfig-*")
-	}
-
-	// A real root PID 1: nothing has necessarily created hooks.PrivateRootTmpDir's
-	// parent here. Self-heal onto a hardened location:
-	// EnsureDirNoFollowRootOwned already verifies "/run" itself is
-	// root-owned and not group/other-writable before creating anything
-	// under it (it walks and checks every real ancestor, not just the final
-	// component), so this never creates "/run/scion" under an untrusted
-	// "/run". "/run" is a standard FHS directory present and root-owned on
-	// every Linux container image this repository ships, so this succeeds
-	// in the overwhelming majority of real deployments.
-	parent := filepath.Dir(hooks.PrivateRootTmpDir)
-	if pf, perr := dirfd.EnsureDirNoFollowRootOwned(parent, hooks.PrivateRootTmpDirMode); perr == nil {
-		_ = pf.Close()
-		if f, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode); err == nil {
-			_ = f.Close()
-			if dir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*"); err == nil {
-				return dir, nil
-			}
-		}
-	}
-
-	// "/run" itself is missing, not root-owned, or otherwise untrusted on
-	// this runtime — or this process could not write under it for some
-	// other reason. Fall back to the historical ambient temp directory, but
-	// only after independently verifying it cannot be used to stage a
-	// symlink swap: either it carries the sticky bit (only an entry's own
-	// owner may rename or remove it there) or it is itself root-owned and
-	// not group/other-writable. Never fall back silently into an unverified
-	// location — if neither location checks out, refuse outright rather
-	// than fail open.
-	base := os.TempDir()
-	if !dirfd.AmbientTempDirTrusted(base) {
-		return "", fmt.Errorf("neither %s nor the ambient temp directory %s are a verified root-owned (or sticky) location",
-			hooks.PrivateRootTmpDir, base)
-	}
-	return os.MkdirTemp("", "scion-gitconfig-*")
-}
-
+// configureGitCommand points cmd's environment and (when this process is
+// root and uid/gid name someone else) its Credential at the workload
+// identity. It has no opinion on RequirePrivilegeDrop: a caller that needs
+// to refuse outright when uid/gid<=0 must do so itself before calling this
+// (see configureSharedWorkspaceGit's own guard) — this helper only ever
+// sets Credential when it can, it never enforces that one was required.
+// gitCloneWorkspace, this function's other caller, has no such guard: it
+// never receives RequirePrivilegeDrop at all.
 func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if uid <= 0 {

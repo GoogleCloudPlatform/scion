@@ -49,10 +49,10 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:1612": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
 	"cmd/sciontool/commands/init.go:1617": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:1664": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:1673": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1622": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1669": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:1678": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
@@ -64,18 +64,18 @@ var execSiteAllowlist = map[string]string{
 	// which case this runs as root. Either way the call is not otherwise
 	// reachable by a workload-influenceable PATH, which is what this guard
 	// itself checks for.
-	"cmd/sciontool/commands/init.go:1826": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1844": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1859": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1915": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1929": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1940": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1839": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1863": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1878": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1934": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1948": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:1959": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:1978": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1986": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:1990": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2000": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2425": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:1997": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2005": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2009": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2019": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2358": "runs as the workload uid via Credential whenever uid>0",
 
 	// The harness-provision subcommand's own subprocess: inherits the
 	// credentials of the pre-start hook that invoked it (root when init
@@ -86,7 +86,7 @@ var execSiteAllowlist = map[string]string{
 	// hooks/lifecycle.go's executeScript: path is an absolute path built by
 	// the caller, not a bare name — PATH is never consulted for it, so
 	// there is nothing for this guard to resolve through rootexec.
-	"pkg/sciontool/hooks/lifecycle.go:209": "path is an absolute path built by the caller, not a bare name",
+	"pkg/sciontool/hooks/lifecycle.go:211": "path is an absolute path built by the caller, not a bare name",
 
 	// supervisor.Run: args[0] is the operator/harness-selected entrypoint.
 	// Run() sets a Credential before Start() whenever UID/GID are supplied —
@@ -94,12 +94,12 @@ var execSiteAllowlist = map[string]string{
 	// describes as the preferred route: the bare-name lookup happens in the
 	// (root) parent using its inherited PATH, and the resulting process
 	// runs as the workload's own uid whenever that happens.
-	"pkg/sciontool/supervisor/supervisor.go:115": "runs as the workload uid via Credential whenever UID/GID>0",
+	"pkg/sciontool/supervisor/supervisor.go:123": "runs as the workload uid via Credential whenever UID/GID>0",
 
 	// services.Manager.start: svc.spec.Command[0] comes from a workload-
 	// supplied services.yaml — the identical Go-level drop-before-exec
 	// model as supervisor.Run.
-	"pkg/sciontool/services/manager.go:372": "runs as the workload uid via Credential whenever UID/GID>0",
+	"pkg/sciontool/services/manager.go:373": "runs as the workload uid via Credential whenever UID/GID>0",
 }
 
 // aliasKind records what kind of exec constructor a package-level var
@@ -348,14 +348,19 @@ func isProvenSafe(arg ast.Expr, funcLikes []funcLike, callPos token.Pos) bool {
 	}
 }
 
-// literalIsPathLike reports whether a BasicLit STRING contains a "/" —
-// i.e. it is a path, not a bare name that would be searched for on PATH.
+// literalIsPathLike reports whether a BasicLit STRING is an absolute path.
+// A relative path containing a "/" (e.g. "bin/git" or "./git") is NOT
+// path-like by this definition: os/exec still resolves it relative to the
+// process's current working directory rather than searching PATH, and a
+// workload that controls the cwd a root-context command runs in can plant
+// a binary at that relative path exactly as it could plant one on PATH —
+// only a leading "/" rules that out.
 func literalIsPathLike(lit *ast.BasicLit) bool {
 	if lit.Kind != token.STRING {
 		return false
 	}
 	v := strings.Trim(lit.Value, "`\"")
-	return strings.ContainsRune(v, '/')
+	return filepath.IsAbs(v)
 }
 
 // isRootexecResolveCall reports whether call is exactly "rootexec.Resolve(...)".
@@ -418,5 +423,94 @@ func findRepoRoot(t *testing.T) string {
 			t.Fatal("could not find repository root (go.mod) walking up from " + thisFile)
 		}
 		dir = parent
+	}
+}
+
+// TestLiteralIsPathLike_BareAndRelativeNamesAreNotPathLike is a synthetic
+// negative control proving this guard actually has teeth: a bare command
+// name ("sh") and a relative one ("bin/sh", "./sh") are never treated as
+// path-like, so a real exec.Command("sh") call site with no allowlist entry
+// would be flagged as a violation by the sweep above, not silently waved
+// through because its literal happens to contain a slash somewhere. Only a
+// leading "/" is proven safe.
+func TestLiteralIsPathLike_BareAndRelativeNamesAreNotPathLike(t *testing.T) {
+	tests := []struct {
+		name string
+		lit  string
+		want bool
+	}{
+		{"bare name", `"sh"`, false},
+		{"relative with slash", `"bin/sh"`, false},
+		{"dot-relative", `"./sh"`, false},
+		{"absolute path", `"/bin/sh"`, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lit := &ast.BasicLit{Kind: token.STRING, Value: tc.lit}
+			if got := literalIsPathLike(lit); got != tc.want {
+				t.Errorf("literalIsPathLike(%s) = %v, want %v", tc.lit, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGuardPipeline_BareOrRelativeCommandIsFlagged is a synthetic negative
+// test: it runs the exact classify-then-prove-safe pipeline
+// TestNoRootContextExecUsesABareUnresolvedCommandName applies to every real
+// guarded-directory call site against hand-built exec.Command(...) calls,
+// without planting them in a real guarded file (which would trip the live
+// guard for real). It covers both a bare name ("sh") and a relative name
+// containing a slash ("bin/sh"): the latter is what distinguishes
+// filepath.IsAbs from the older strings.ContainsRune(v, '/') check this
+// package used — ContainsRune treats "bin/sh" as path-like purely because
+// it contains a slash, wrongly proving it safe, even though os/exec still
+// resolves a relative name against the process's current working
+// directory rather than treating it as a fixed location, exactly the
+// PATH-like redirection risk this guard exists to catch. filepath.IsAbs
+// correctly keeps flagging it.
+func TestGuardPipeline_BareOrRelativeCommandIsFlagged(t *testing.T) {
+	for _, name := range []string{"sh", "bin/sh", "./sh"} {
+		t.Run(name, func(t *testing.T) {
+			src := `package synthetic
+
+import "os/exec"
+
+func run() {
+	exec.Command("` + name + `")
+}
+`
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			aliases := map[string]aliasKind{}
+			collectExecAliases(f, aliases)
+			funcLikes := collectFuncLikes(f)
+
+			var found bool
+			ast.Inspect(f, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				argIndex, isExecCall := classifyExecCall(call, aliases)
+				if !isExecCall {
+					return true
+				}
+				found = true
+				if len(call.Args) <= argIndex {
+					t.Fatalf("exec.Command call has no command-name argument")
+				}
+				arg := call.Args[argIndex]
+				if isProvenSafe(arg, funcLikes, call.Pos()) {
+					t.Errorf("isProvenSafe(%v) = true, want false: %q must be flagged, not proven safe", arg, name)
+				}
+				return true
+			})
+			if !found {
+				t.Fatal("test bug: synthetic source has no exec.Command call for the pipeline to classify")
+			}
+		})
 	}
 }

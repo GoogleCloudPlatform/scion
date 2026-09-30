@@ -7,13 +7,15 @@ package commands
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,8 +23,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -2459,11 +2459,11 @@ func gitConfigGet(t *testing.T, path, key string) string {
 }
 
 // TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit is the required
-// regression test for the private-directory git invocation: with a planted
-// "git" placed first on $PATH, the real, trusted git must still run —
-// rootexec.Resolve's fixed search list, not $PATH, decides which binary
-// this function execs — so the planted one never runs, and the gitconfig
-// content this function is supposed to produce still appears.
+// regression test for the git invocation: with a planted "git" placed first
+// on $PATH, the real, trusted git must still run — rootexec.Resolve's fixed
+// search list, not $PATH, decides which binary this function execs — so the
+// planted one never runs, and the gitconfig content this function is
+// supposed to produce still appears.
 func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	realPath := os.Getenv("PATH")
 	dir := t.TempDir()
@@ -2476,7 +2476,9 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	t.Setenv("PATH", dir)
 
 	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit: %v", err)
+	}
 
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("configureSharedWorkspaceGit executed a planted git from $PATH")
@@ -2495,32 +2497,39 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 var startProcreapReaperOnce sync.Once
 
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
-// regression test for the 79efae4b0 reconciliation: runPrivateGitConfig's
-// git invocation (PR1's symlink-safe, rootexec-resolved gitconfig rewrite)
-// must go through procreap's managed exec API, not a raw
-// cmd.CombinedOutput(), because sciontool init's real PID-1 reaper
-// (procreap.StartReaper) is active for the whole lifetime of every one of
-// these calls in production. A raw CombinedOutput() call here is exactly
-// the shape of bug TestManagedService_StartSurvivesReaperRace
+// regression test, updated for the 40589a69 redesign, for the property
+// first established by the 79efae4b0 reconciliation: configureSharedWorkspaceGit's
+// internal runGitConfig closure must invoke git through procreap's managed
+// exec API, not a raw cmd.CombinedOutput(), because sciontool init's real
+// PID-1 reaper (procreap.StartReaper) is active for the whole lifetime of
+// every one of these calls in production. A raw CombinedOutput() call here
+// is exactly the shape of bug TestManagedService_StartSurvivesReaperRace
 // (pkg/sciontool/services) guards against for the services manager: the
 // reaper's generic wait4(-1, ...) can steal the git child's exit status
 // from cmd.Wait() before CombinedOutput() gets to it, surfacing as an
-// ECHILD-shaped "wait: no child processes" error that makes
-// runPrivateGitConfig give up and skip writing that config key.
+// ECHILD-shaped "wait: no child processes" error that makes runGitConfig
+// silently drop that config key (it only logs, it has no error to return).
 //
 // A real, live procreap reaper must run for this to be a faithful
 // reproduction — a fake or absent reaper can't race anything (same
 // requirement TestManagedService_StartSurvivesReaperRace documents).
 //
 // Positive control: this test is not vacuously green. Reverting
-// runPrivateGitConfig's call back to a raw cmd.CombinedOutput() (undoing
-// this reconciliation's one-line fix) makes this test fail under `go test
-// -race -count=5 -run TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
+// runGitConfig's call back to a raw cmd.CombinedOutput() makes this test
+// fail under `go test -race -count=5 -run
+// TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
-// it passes reliably. See preflight/pr1-rebase-conflicts.md's 79efae4b0
+// it passes reliably. See preflight/pr1-rebase-conflicts.md's 40589a69
 // entry for the before/after run log this was verified against.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
 	startProcreapReaperOnce.Do(procreap.StartReaper)
+
+	// Prime pkg/sciontool/log's lazy initialization synchronously before
+	// fanning out, matching production order: RunInit logs several lines
+	// before ever reaching configureSharedWorkspaceGit, so log.Init() has
+	// already run by the time this function's own log.Info call executes.
+	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
+	log.Init()
 
 	const iterations = 50
 	// Pre-create every agentHome serially: t.TempDir() and t.Fatal are not
@@ -2532,175 +2541,46 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 	}
 
 	var wg sync.WaitGroup
-	gotEmails := make([]string, iterations)
+	gotContents := make([]string, iterations)
 	for i := 0; i < iterations; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			configureSharedWorkspaceGit(agentHomes[i], 0, 0, true, false)
+			if err := configureSharedWorkspaceGit(agentHomes[i], 0, 0, false); err != nil {
+				return
+			}
 			gitconfigPath := filepath.Join(agentHomes[i], ".gitconfig")
-			gotEmails[i] = gitConfigGet(t, gitconfigPath, "user.email")
+			// Read the written file directly rather than shelling out to
+			// `git config --get` (gitConfigGet's usual helper): gitConfigGet
+			// is itself a raw, unmanaged exec.Command(...).Output() call, and
+			// spawning one of those from 50 goroutines while the real
+			// procreap reaper this test just started is live would just move
+			// the exact ECHILD race this test exists to catch into the
+			// verification step instead of the code under test — a false
+			// failure that has nothing to do with runGitConfig's own
+			// managed-exec behavior. A plain file read has no subprocess to
+			// race at all.
+			content, err := os.ReadFile(gitconfigPath)
+			if err != nil {
+				return
+			}
+			gotContents[i] = string(content)
 		}(i)
 	}
 	wg.Wait()
 
-	for i, got := range gotEmails {
-		if got != "agent@scion.dev" {
-			t.Errorf("iteration %d: user.email = %q, want agent@scion.dev (a managed-exec regression would race the reaper and leave this key unset)", i, got)
+	const wantLine = "email = agent@scion.dev"
+	for i, got := range gotContents {
+		if !strings.Contains(got, wantLine) {
+			t.Errorf("iteration %d: gitconfig content = %q, want it to contain %q (a managed-exec regression would race the reaper and leave this key unset)", i, got, wantLine)
 		}
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched proves a symlink
-// planted at $HOME/.gitconfig (something the workload can always do, since
-// it owns $HOME outright) is never read through or written through.
-func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
-	agentHome := t.TempDir()
-	victim := filepath.Join(t.TempDir(), "victim")
-	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
-		t.Fatalf("write victim: %v", err)
-	}
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if err := os.Symlink(victim, gitconfigPath); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-
-	data, err := os.ReadFile(victim)
-	if err != nil {
-		t.Fatalf("read victim: %v", err)
-	}
-	if string(data) != "do-not-touch" {
-		t.Errorf("victim was modified: %q", data)
-	}
-
-	fi, err := os.Lstat(gitconfigPath)
-	if err != nil {
-		t.Fatalf("lstat gitconfig: %v", err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
-	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev", got)
-	}
-	finalContent, err := os.ReadFile(gitconfigPath)
-	if err != nil {
-		t.Fatalf("read final gitconfig: %v", err)
-	}
-	if strings.Contains(string(finalContent), "do-not-touch") {
-		t.Errorf("final gitconfig contains the victim's content, meaning the read followed the symlink: %q", finalContent)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile proves
-// a symlinked $HOME/.gitconfig — the layout a dotfile manager (chezmoi,
-// stow, dotbot, ...) commonly produces — is refused exactly like a hostile
-// one, even when the workload owns every hop of the chain. The only
-// observable change from a plain refusal is the WARN this test asserts on,
-// naming the path and the reason, ending in a regular file with the
-// credential helper set as usual.
-func TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile(t *testing.T) {
-	agentHome := t.TempDir()
-	store := filepath.Join(t.TempDir(), "dotfiles")
-	if err := os.Mkdir(store, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	real := filepath.Join(store, "gitconfig")
-	if err := os.WriteFile(real, []byte("[foo]\n\tbar = baz\n"), 0o600); err != nil {
-		t.Fatalf("write real gitconfig: %v", err)
-	}
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if err := os.Symlink(real, gitconfigPath); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-
-	output := captureStderr(t, func() {
-		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-	})
-
-	if !strings.Contains(output, "WARN") {
-		t.Errorf("expected a WARN in the output, got: %s", output)
-	}
-	if !strings.Contains(output, gitconfigPath) {
-		t.Errorf("expected the WARN to name %s, got: %s", gitconfigPath, output)
-	}
-	// The reason must be present too: a symlinked leaf is refused with the
-	// same ELOOP-derived text dirfd.ReadFileNoFollow already produces.
-	if !strings.Contains(output, syscall.ELOOP.Error()) {
-		t.Errorf("expected the WARN to name the reason (a symlink refusal), got: %s", output)
-	}
-	if strings.Contains(output, "baz") {
-		t.Errorf("expected the WARN to carry paths and reasons only, never file content, got: %s", output)
-	}
-
-	fi, err := os.Lstat(gitconfigPath)
-	if err != nil {
-		t.Fatalf("lstat gitconfig: %v", err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
-	}
-	// foo.bar must NOT survive: the link was refused, not followed, so the
-	// private copy started empty.
-	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "" {
-		t.Errorf("foo.bar = %q, want empty (the symlink must not have been followed)", got)
-	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev (the credential helper/identity must still be applied to the regular file)", got)
-	}
-	if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got == "" {
-		t.Error("credential.helper is empty; expected it to still be set on the regular file installed after the refusal")
-	}
-	realData, rerr := os.ReadFile(real)
-	if rerr != nil {
-		t.Fatalf("read real gitconfig: %v", rerr)
-	}
-	if string(realData) != "[foo]\n\tbar = baz\n" {
-		t.Errorf("the symlink target was modified: %q", realData)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
-// $HOME/.gitconfig with no writer is refused immediately rather than
-// hanging RunInit forever.
-func TestConfigureSharedWorkspaceGit_FifoDoesNotHang(t *testing.T) {
-	agentHome := t.TempDir()
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if err := syscall.Mkfifo(gitconfigPath, 0o600); err != nil {
-		t.Fatalf("mkfifo: %v", err)
-	}
-
-	output := captureStderr(t, func() {
-		done := make(chan struct{})
-		go func() {
-			configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("configureSharedWorkspaceGit blocked on a FIFO planted at .gitconfig")
-		}
-	})
-
-	if !strings.Contains(output, "WARN") {
-		t.Errorf("expected a WARN in the output, got: %s", output)
-	}
-
-	fi, err := os.Lstat(gitconfigPath)
-	if err != nil {
-		t.Fatalf("lstat gitconfig: %v", err)
-	}
-	if !fi.Mode().IsRegular() {
-		t.Errorf("gitconfigPath mode = %v, want a regular file", fi.Mode())
 	}
 }
 
 // TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys proves a
 // legitimate pre-existing .gitconfig's unrelated content survives the
-// rewrite byte-for-byte in the sections that matter.
+// rewrite: git config --file edits the file in place, so a key this
+// function never touches keeps its value.
 func TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys(t *testing.T) {
 	agentHome := t.TempDir()
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
@@ -2708,7 +2588,9 @@ func TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys(t *testing.T
 		t.Fatalf("write gitconfig: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit: %v", err)
+	}
 
 	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
 		t.Errorf("foo.bar = %q, want baz (pre-existing unrelated key lost)", got)
@@ -2725,13 +2607,17 @@ func TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun(t *testing.T) {
 	agentHome := t.TempDir()
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit (first run): %v", err)
+	}
 	first, err := os.ReadFile(gitconfigPath)
 	if err != nil {
 		t.Fatalf("read after first run: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit (second run): %v", err)
+	}
 	second, err := os.ReadFile(gitconfigPath)
 	if err != nil {
 		t.Fatalf("read after second run: %v", err)
@@ -2742,418 +2628,212 @@ func TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun(t *testing.T) {
 	}
 }
 
-// TestConfigureSharedWorkspaceGit_HardlinkedFileRefused proves a hardlink to
-// an unrelated (possibly root-owned) file planted at $HOME/.gitconfig is
-// refused rather than read.
-func TestConfigureSharedWorkspaceGit_HardlinkedFileRefused(t *testing.T) {
+// TestConfigureSharedWorkspaceGit_SymlinkPreservedAndWrittenThrough proves a
+// symlinked $HOME/.gitconfig — the layout a dotfile manager (chezmoi, stow,
+// dotbot, ...) commonly produces — survives AS a symlink: git config --file
+// resolves and rewrites its target in place, the same as any other command
+// the workload could run against its own file, instead of being refused and
+// replaced with a fresh 3-key regular file.
+func TestConfigureSharedWorkspaceGit_SymlinkPreservedAndWrittenThrough(t *testing.T) {
 	agentHome := t.TempDir()
-	original := filepath.Join(agentHome, "original")
-	if err := os.WriteFile(original, []byte("[secret]\n\ttoken = do-not-read\n"), 0o600); err != nil {
-		t.Fatalf("write original: %v", err)
+	store := filepath.Join(t.TempDir(), "dotfiles")
+	if err := os.Mkdir(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(store, "gitconfig")
+	if err := os.WriteFile(real, []byte("[foo]\n\tbar = baz\n"), 0o600); err != nil {
+		t.Fatalf("write real gitconfig: %v", err)
 	}
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if err := os.Link(original, gitconfigPath); err != nil {
-		t.Fatalf("hardlink: %v", err)
-	}
-
-	output := captureStderr(t, func() {
-		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-	})
-	if !strings.Contains(output, "WARN") {
-		t.Errorf("expected a WARN in the output, got: %s", output)
-	}
-
-	if got := gitConfigGet(t, gitconfigPath, "secret.token"); got != "" {
-		t.Errorf("secret.token = %q, want empty (hardlinked content must not have been read)", got)
-	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev", got)
-	}
-
-	originalData, err := os.ReadFile(original)
-	if err != nil {
-		t.Fatalf("read original: %v", err)
-	}
-	if !strings.Contains(string(originalData), "do-not-read") {
-		t.Errorf("original hardlinked file was modified: %q", originalData)
-	}
-
-	fi, err := os.Lstat(gitconfigPath)
-	if err != nil {
-		t.Fatalf("lstat gitconfig: %v", err)
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if ok && st.Nlink != 1 {
-		t.Errorf("gitconfigPath Nlink = %d, want 1 (should be a fresh file after install)", st.Nlink)
-	}
-}
-
-// wantGitconfigMaxBytes is this test's OWN, independently hardcoded copy of
-// the size bound init.go documents for gitconfigMaxBytes (1 MiB).
-const wantGitconfigMaxBytes = 1 << 20
-
-// gitconfigCommentOfSize returns a syntactically inert (comment-only), valid
-// git-config-file body of exactly n bytes.
-func gitconfigCommentOfSize(n int, marker string) string {
-	const prefix, suffix = "; ", "\n"
-	pad := n - len(prefix) - len(marker) - len(suffix)
-	if pad < 0 {
-		pad = 0
-	}
-	return prefix + marker + strings.Repeat("a", pad) + suffix
-}
-
-// TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty proves
-// the size bound on the pre-existing .gitconfig read is enforced against an
-// actual regular file.
-func TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty(t *testing.T) {
-	agentHome := t.TempDir()
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	const marker = "OVERSIZE-MARKER-DO-NOT-PRESERVE"
-	content := gitconfigCommentOfSize(wantGitconfigMaxBytes+1, marker)
-	if len(content) != wantGitconfigMaxBytes+1 {
-		t.Fatalf("test fixture is %d bytes, want %d", len(content), wantGitconfigMaxBytes+1)
-	}
-	if err := os.WriteFile(gitconfigPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("write oversize gitconfig: %v", err)
-	}
-
-	output := captureStderr(t, func() {
-		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-	})
-	if !strings.Contains(output, "WARN") {
-		t.Errorf("expected a WARN in the output, got: %s", output)
-	}
-	if strings.Contains(output, marker) {
-		t.Errorf("expected the WARN to carry paths and reasons only, never file content, got: %s", output)
-	}
-
-	finalContent, err := os.ReadFile(gitconfigPath)
-	if err != nil {
-		t.Fatalf("read final gitconfig: %v", err)
-	}
-	if strings.Contains(string(finalContent), marker) {
-		t.Errorf("final gitconfig contains the oversize file's marker, meaning the size cap did not refuse it: %q", finalContent)
-	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev (the rewrite should still complete from an empty seed)", got)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_AtCapRegularGitconfigIsPreserved is
-// OversizeRegularGitconfigStartsEmpty's companion: the same marker-bearing
-// content at exactly wantGitconfigMaxBytes is read and carried through.
-func TestConfigureSharedWorkspaceGit_AtCapRegularGitconfigIsPreserved(t *testing.T) {
-	agentHome := t.TempDir()
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	const marker = "AT-CAP-MARKER"
-	content := gitconfigCommentOfSize(wantGitconfigMaxBytes, marker)
-	if len(content) != wantGitconfigMaxBytes {
-		t.Fatalf("test fixture is %d bytes, want %d", len(content), wantGitconfigMaxBytes)
-	}
-	if err := os.WriteFile(gitconfigPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("write at-cap gitconfig: %v", err)
-	}
-
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-
-	finalContent, err := os.ReadFile(gitconfigPath)
-	if err != nil {
-		t.Fatalf("read final gitconfig: %v", err)
-	}
-	if !strings.Contains(string(finalContent), marker) {
-		t.Errorf("final gitconfig does not contain the at-cap file's marker; the read should have succeeded at exactly the cap")
-	}
-}
-
-// newTrustedPrivateTmpParent creates and returns a fresh, self-owned
-// directory anchored under this process's real $HOME, so
-// dirfd.EnsureDirNoFollowRootOwned can create fresh entries under it during
-// a test: EnsureDirNoFollowRootOwned's chain check walks every ancestor and
-// does not special-case a sticky bit the way AmbientTempDirTrusted's
-// leaf-only check does, so a path under the real (sticky, world-writable)
-// /tmp never passes it — only a self-owned chain like this one does.
-func newTrustedPrivateTmpParent(t *testing.T) string {
-	t.Helper()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("no usable $HOME in this environment: %v", err)
-	}
-	base := filepath.Join(home, fmt.Sprintf(".scion-test-private-tmp-%d-%d", os.Getpid(), time.Now().UnixNano()))
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		t.Skipf("cannot create a trusted fixture under $HOME in this environment: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	return base
-}
-
-// TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile
-// proves a race cannot disclose an arbitrary file: the private directory
-// configureSharedWorkspaceGit stages a rewritten gitconfig in is anchored
-// under hooks.PrivateRootTmpDir, not os.MkdirTemp("", ...) — so TMPDIR has
-// no bearing at all on where the private directory is created, and nothing
-// bearing the name "gitconfig" ever appears under a location a concurrent
-// workload-uid process can freely write to. A racer goroutine watches that
-// same directory, and if it ever saw an entry whose name mentions
-// "gitconfig" appear, it would rename it away and plant a symlink pointing
-// at an attacker-controlled directory — but nothing bearing that name ever
-// appears there for it to catch.
-func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *testing.T) {
-	agentHome := t.TempDir()
-
-	origDir := hooks.PrivateRootTmpDir
-	hooks.PrivateRootTmpDir = filepath.Join(newTrustedPrivateTmpParent(t), "scion", "tmp")
-	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
-
-	racerParent := t.TempDir()
-	t.Setenv("TMPDIR", racerParent)
-
-	victim := filepath.Join(t.TempDir(), "victim")
-	const victimContent = "ROOT-SECRET-DO-NOT-DISCLOSE\n"
-	if err := os.WriteFile(victim, []byte(victimContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	evilDir := t.TempDir()
-	if err := os.Symlink(victim, filepath.Join(evilDir, "gitconfig")); err != nil {
-		t.Fatal(err)
-	}
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			entries, err := os.ReadDir(racerParent)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				name := e.Name()
-				if !strings.Contains(name, "gitconfig") {
-					continue
-				}
-				p := filepath.Join(racerParent, name)
-				away := p + ".raced-away"
-				if os.Rename(p, away) != nil {
-					continue
-				}
-				_ = os.Symlink(evilDir, p)
-			}
-		}
-	}()
-
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-
-	close(stop)
-	wg.Wait()
-
-	entries, err := os.ReadDir(racerParent)
-	if err != nil {
-		t.Fatalf("read racer dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("TMPDIR-watched directory %s is not empty after configureSharedWorkspaceGit: %v — the private directory must never be derived from TMPDIR/os.TempDir()", racerParent, entries)
-	}
-
-	victimAfter, err := os.ReadFile(victim)
-	if err != nil {
-		t.Fatalf("read victim: %v", err)
-	}
-	if string(victimAfter) != victimContent {
-		t.Errorf("victim file was modified: %q, want unchanged %q", victimAfter, victimContent)
-	}
-
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	finalContent, err := os.ReadFile(gitconfigPath)
-	if err != nil {
-		t.Fatalf("read final gitconfig: %v", err)
-	}
-	if strings.Contains(string(finalContent), "ROOT-SECRET") {
-		t.Fatalf("final gitconfig discloses the victim's content: %q", finalContent)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed proves
-// dirfd.EnsureDirNoFollowRootOwned's chain check is what actually runs, not
-// a check that always happens to pass: pointing hooks.PrivateRootTmpDir directly
-// at a directory that already EXISTS but is group/other-writable must
-// refuse that leaf. With the ambient fallback ALSO made untrusted (so this
-// test isolates the bad-mode leaf refusal specifically, rather than
-// incidentally passing via the checked ambient path — see
-// NonEnforcedRefusesWhenBothLocationsUntrusted for that combination from
-// the other side), configureSharedWorkspaceGit must install no gitconfig at
-// all. badDir sits under a trusted, self-owned chain (see
-// newTrustedPrivateTmpParent) so only badDir's own leaf mode is under test.
-func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) {
-	origDir := hooks.PrivateRootTmpDir
-	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
-
-	trustedParent := newTrustedPrivateTmpParent(t)
-	badDir := filepath.Join(trustedParent, "scion", "tmp")
-	if err := os.MkdirAll(filepath.Dir(badDir), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(badDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Chmod after creation, not via Mkdir's own (umask-masked) mode
-	// argument, to force the exact world-writable bits this test needs.
-	if err := os.Chmod(badDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	hooks.PrivateRootTmpDir = badDir
-
-	untrustedTmp := t.TempDir()
-	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", untrustedTmp)
-
-	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-
-	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
-		t.Error("expected no .gitconfig to be installed when the private directory chain fails closed")
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion is the
-// required regression test for the bug that would make this function
-// silently install nothing whenever hooks.PrivateRootTmpDir's parent ("/run/
-// scion") doesn't already exist and this process cannot create it (e.g.
-// non-root on the real filesystem): configureSharedWorkspaceGit must still
-// install a .gitconfig — falling back to the checked ambient temp directory
-// — instead of returning having silently done nothing.
-func TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion(t *testing.T) {
-	orig := hooks.PrivateRootTmpDir
-	hooks.PrivateRootTmpDir = "/run/scion/tmp"
-	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
-
-	if !dirfd.AmbientTempDirTrusted(os.TempDir()) {
-		t.Skip("this environment's ambient temp directory is not sticky/root-owned; the checked fallback is expected to refuse here too, by design")
-	}
-
-	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, false /* rootless */)
-
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if _, err := os.Stat(gitconfigPath); err != nil {
-		t.Fatalf("expected .gitconfig to be installed via the fallback path, got: %v", err)
-	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev", got)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly proves
-// the rootless branch (no separate root/workload identity exists to
-// protect against at all) installs a gitconfig via the plain, historical
-// ambient temp directory without ever attempting hooks.PrivateRootTmpDir.
-func TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly(t *testing.T) {
-	orig := hooks.PrivateRootTmpDir
-	hooks.PrivateRootTmpDir = filepath.Join(t.TempDir(), "nonexistent-parent", "run", "scion", "tmp")
-	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
-
-	// Make the ambient temp directory itself untrusted (world-writable, no
-	// sticky bit) for the duration of this test: if the rootless flag were
-	// somehow ignored, the non-rootless branch's own checked fallback would
-	// refuse this exact directory, so only the rootless branch's
-	// unconditional, unchecked os.MkdirTemp("") can succeed here.
-	untrustedTmp := t.TempDir()
-	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", untrustedTmp)
-
-	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, true /* rootless */)
-
-	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err != nil {
-		t.Fatalf("expected .gitconfig to be installed via the rootless ambient-tempdir path, got: %v", err)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted
-// proves resolvePrivateGitConfigDir's non-rootless branch never falls open:
-// with hooks.PrivateRootTmpDir's self-heal attempt pointed somewhere this
-// process cannot create AND the ambient temp directory itself untrusted,
-// no .gitconfig may be installed at all — there is no third, unverified
-// fallback.
-func TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted(t *testing.T) {
-	orig := hooks.PrivateRootTmpDir
-	// A path this non-root test process cannot create any part of.
-	hooks.PrivateRootTmpDir = "/run-nonexistent-for-test/scion/tmp"
-	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
-
-	untrustedTmp := t.TempDir()
-	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", untrustedTmp)
-
-	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, false /* rootless */)
-
-	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
-		t.Error("expected no .gitconfig to be installed when neither the self-healed nor the ambient location is trusted — must fail closed, never fall open")
-	}
-	entries, err := os.ReadDir(untrustedTmp)
-	if err != nil {
-		t.Fatalf("read untrusted tmp dir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected nothing created inside the untrusted ambient temp dir, got %v", entries)
-	}
-}
-
-// TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused
-// covers the case where root's own inherited HOME equals the workload's
-// home directory. It proves the ambient HOME environment variable has no
-// bearing on which file gets protected or how: a hostile .gitconfig at
-// agentHome is still refused via the no-follow read.
-func TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused(t *testing.T) {
-	agentHome := t.TempDir()
-	t.Setenv("HOME", agentHome)
-
-	victim := filepath.Join(t.TempDir(), "victim")
-	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
-		t.Fatalf("write victim: %v", err)
-	}
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if err := os.Symlink(victim, gitconfigPath); err != nil {
+	if err := os.Symlink(real, gitconfigPath); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-
-	data, err := os.ReadFile(victim)
-	if err != nil {
-		t.Fatalf("read victim: %v", err)
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit: %v", err)
 	}
-	if string(data) != "do-not-touch" {
-		t.Errorf("victim was modified: %q", data)
+
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("gitconfigPath is no longer a symlink after configureSharedWorkspaceGit; expected it to be preserved")
+	}
+	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
+		t.Errorf("foo.bar = %q, want baz (the symlink's pre-existing content must survive)", got)
+	}
+	realData, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatalf("read real gitconfig (the symlink's target): %v", err)
+	}
+	if !strings.Contains(string(realData), "agent@scion.dev") {
+		t.Errorf("the symlink's target was not written through: %q", realData)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_SymlinkedHomeAncestorWorks proves a
+// symlinked ancestor directory above agentHome — not just the .gitconfig
+// leaf itself — does not make the install fail: plain path resolution (used
+// throughout this function now that there is no component-by-component
+// no-follow walk) follows it like any other directory a legitimate
+// deployment might reach through a symlinked mount.
+func TestConfigureSharedWorkspaceGit_SymlinkedHomeAncestorWorks(t *testing.T) {
+	real := t.TempDir()
+	parent := t.TempDir()
+	linked := filepath.Join(parent, "home-link")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	agentHome := filepath.Join(linked, "agent")
+	if err := os.Mkdir(agentHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit: %v", err)
+	}
+
+	gitconfigPath := filepath.Join(real, "agent", ".gitconfig")
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev (install through a symlinked ancestor must succeed)", got)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable proves the
+// credential helper is configured with no dependency on /run/scion, or any
+// other private staging directory, existing at all: configureSharedWorkspaceGit
+// runs the git config calls directly against the real gitconfig path under
+// the workload's own identity, with no private staging copy, so a runtime
+// where /run/scion is entirely absent has no bearing here.
+func TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable(t *testing.T) {
+	if _, err := os.Stat("/run/scion"); err == nil {
+		t.Skip("/run/scion exists in this environment; this test wants to prove it is not needed, not that it is absent")
+	}
+	agentHome := t.TempDir()
+	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+		t.Fatalf("configureSharedWorkspaceGit: %v", err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got == "" {
+		t.Error("credential.helper is empty; expected it to be configured without /run/scion available")
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_AttackSymlinkToRootOwnedFileLeftByteIdentical
+// is the core safety property the uid/gid>0 branch buys: a workload that
+// symlinks its own .gitconfig at a root-owned file it does not own gains
+// nothing from it — the git process configureSharedWorkspaceGit spawns runs
+// AS the workload (SysProcAttr.Credential), so its own open(2) for writing
+// hits an ordinary permission error on the root-owned target, exactly as it
+// would if the workload had tried this itself directly, leaving that target
+// byte-identical. This is only observable when this test process is real
+// root (Credential only takes effect for a process already running as uid
+// 0), so it is skipped rather than asserted vacuously otherwise.
+func TestConfigureSharedWorkspaceGit_AttackSymlinkToRootOwnedFileLeftByteIdentical(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires real root: SysProcAttr.Credential only takes effect for a process already running as uid 0")
+	}
+	scionUser, err := user.Lookup("scion")
+	if err != nil {
+		t.Skipf("no scion user in this environment: %v", err)
+	}
+	uid, _ := strconv.Atoi(scionUser.Uid)
+	gid, _ := strconv.Atoi(scionUser.Gid)
+	if uid <= 0 || gid <= 0 {
+		t.Skip("scion user has no usable non-root uid/gid in this environment")
+	}
+
+	agentHome := t.TempDir()
+	rootOwned := filepath.Join(t.TempDir(), "root-secret")
+	const rootContent = "[secret]\n\ttoken = do-not-touch\n"
+	if err := os.WriteFile(rootOwned, []byte(rootContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.Symlink(rootOwned, gitconfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// The git invocation itself is expected to fail (permission denied
+	// against a target the workload identity cannot write) — this test's
+	// own assertion is about the root-owned file's content, not about
+	// configureSharedWorkspaceGit's own return value, since that failure is
+	// logged and swallowed the same way any other per-call git failure is.
+	_ = configureSharedWorkspaceGit(agentHome, uid, gid, true)
+
+	after, err := os.ReadFile(rootOwned)
+	if err != nil {
+		t.Fatalf("read root-owned target: %v", err)
+	}
+	if string(after) != rootContent {
+		t.Errorf("root-owned file was modified: %q, want byte-identical %q", after, rootContent)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID proves
+// RequirePrivilegeDrop with no usable uid/gid refuses outright, with the
+// sentinel, before running git at all.
+func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.T) {
+	agentHome := t.TempDir()
+	err := configureSharedWorkspaceGit(agentHome, 0, 0, true)
+	if !errors.Is(err, errSharedWorkspaceGitPrivilegeDropRequired) {
+		t.Fatalf("err = %v, want errSharedWorkspaceGitPrivilegeDropRequired", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(agentHome, ".gitconfig")); statErr == nil {
+		t.Error("expected no .gitconfig to be installed when privilege drop is required but refused")
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
+// $HOME/.gitconfig with no writer is refused immediately — via a stat, which
+// never blocks, unlike opening the FIFO for real — rather than hanging
+// RunInit forever. This stat runs unconditionally, regardless of which of
+// the uid/gid cases above is taken: it guards a self-contained availability
+// failure, not a symlink-specific privilege question the uid separation
+// already answers.
+func TestConfigureSharedWorkspaceGit_FifoDoesNotHang(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := syscall.Mkfifo(gitconfigPath, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	output := captureStderr(t, func() {
+		done := make(chan struct{})
+		go func() {
+			_ = configureSharedWorkspaceGit(agentHome, 0, 0, false)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("configureSharedWorkspaceGit blocked on a FIFO planted at .gitconfig")
+		}
+	})
+
+	if !strings.Contains(output, "WARN") {
+		t.Errorf("expected a WARN in the output, got: %s", output)
 	}
 	fi, err := os.Lstat(gitconfigPath)
 	if err != nil {
 		t.Fatalf("lstat gitconfig: %v", err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
+	if fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("gitconfigPath mode = %v, want unchanged FIFO (refused and left in place, not replaced)", fi.Mode())
 	}
-	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev", got)
+}
+
+// TestInitRunOptions_ZeroValueForwardsTermSignal proves the zero-value
+// InitRunOptions{} matches sciontool init's historical CLI default (term
+// signal forwarding on) without the CLI needing to set anything, and that
+// DisableTermSignalForwarding actually flips it off for an in-process
+// caller that owns its own SIGTERM handling.
+func TestInitRunOptions_ZeroValueForwardsTermSignal(t *testing.T) {
+	if !(InitRunOptions{}).forwardsTermSignal() {
+		t.Error("zero-value InitRunOptions must forward term signals by default, matching sciontool init's historical CLI behaviour")
 	}
-	finalContent, err := os.ReadFile(gitconfigPath)
-	if err != nil {
-		t.Fatalf("read final gitconfig: %v", err)
-	}
-	if strings.Contains(string(finalContent), "do-not-touch") {
-		t.Errorf("final gitconfig contains the victim's content, meaning the read followed the symlink: %q", finalContent)
+	if (InitRunOptions{DisableTermSignalForwarding: true}).forwardsTermSignal() {
+		t.Error("DisableTermSignalForwarding: true must turn off forwarding")
 	}
 }
