@@ -256,9 +256,7 @@ func TestBackfillUATCeilings_Pagination(t *testing.T) {
 	cs := NewCompositeStore(client)
 	userID, projectID := seedProjectAndUser(t, cs)
 
-	original := uatCeilingBackfillPageSize
-	uatCeilingBackfillPageSize = 3
-	t.Cleanup(func() { uatCeilingBackfillPageSize = original })
+	cs.uatCeilingBackfillPageSize = 3
 
 	const rowCount = 7 // more than two pages at page size 3
 	ids := make([]string, 0, rowCount)
@@ -490,4 +488,34 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 			assert.False(t, after.NormalizedCeiling().Allows("agent.read"), "a versioned row with NULL ids must still deny after Migrate")
 		})
 	}
+}
+
+// TestPersistedCeilingColumnValue_NilNormalizeResultFailsClosed pins the
+// backfill's guard against a defensive scenario: permissions.
+// NormalizeLegacyUATScopes is documented to always return a non-nil slice,
+// but if that invariant were ever violated, marshalCeilingPermissionIDs(nil)
+// returns a nil *string, and dereferencing it directly would panic. The
+// guard must report ok == false instead, so the caller can skip the row
+// rather than default it to the literal "[]" — a persisted, intentionally
+// issued empty ceiling is a different, stronger claim than "not yet
+// resolved," and would stop the row from ever being reconsidered once the
+// invariant is restored.
+func TestPersistedCeilingColumnValue_NilNormalizeResultFailsClosed(t *testing.T) {
+	var value string
+	var ok bool
+	require.NotPanics(t, func() {
+		value, ok = persistedCeilingColumnValue(nil)
+	})
+	assert.False(t, ok, "a nil permission-ID list must not be treated as a persistable ceiling value")
+	assert.Empty(t, value)
+}
+
+// TestPersistedCeilingColumnValue_EmptyNonNilListPersists confirms the
+// ordinary, always-true-today case is unaffected by the guard above: a
+// non-nil empty list (a real, intentionally empty ceiling) still persists as
+// the literal "[]", distinct from the nil case.
+func TestPersistedCeilingColumnValue_EmptyNonNilListPersists(t *testing.T) {
+	value, ok := persistedCeilingColumnValue([]string{})
+	require.True(t, ok)
+	assert.Equal(t, "[]", value)
 }

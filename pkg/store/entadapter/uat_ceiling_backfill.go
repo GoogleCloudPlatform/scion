@@ -29,10 +29,12 @@ import (
 
 const uatCeilingBackfillMarkerSection = "migration_uat_ceiling_backfill_v1"
 
-// uatCeilingBackfillPageSize is a var, not a const, so a test can shrink it
-// to exercise pagination across multiple pages without creating hundreds of
-// rows.
-var uatCeilingBackfillPageSize = 500
+// defaultUATCeilingBackfillPageSize is used whenever a CompositeStore's
+// uatCeilingBackfillPageSize field is left at its zero value. The page size
+// lives on the store instance, not a package-level variable, so a test that
+// shrinks it to exercise pagination only affects its own store and cannot
+// race with any other test's migration running concurrently.
+const defaultUATCeilingBackfillPageSize = 500
 
 // BackfillUATCeilings persists a normalized permission ceiling for every
 // existing user_access_tokens row in scope: ceiling_version = 0
@@ -56,6 +58,11 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		return err
 	}
 
+	pageSize := c.uatCeilingBackfillPageSize
+	if pageSize <= 0 {
+		pageSize = defaultUATCeilingBackfillPageSize
+	}
+
 	var lastID *ent.UserAccessToken
 	var updated int
 
@@ -66,7 +73,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 				useraccesstoken.CeilingVersionEQ(int32(permissions.CeilingVersionUnspecified)),
 			).
 			Order(ent.Asc(useraccesstoken.FieldID)).
-			Limit(uatCeilingBackfillPageSize)
+			Limit(pageSize)
 		if lastID != nil {
 			q = q.Where(useraccesstoken.IDGT(lastID.ID))
 		}
@@ -87,15 +94,16 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 					scopes = nil
 				}
 			}
-			// NormalizeLegacyUATScopes always returns a non-nil slice, so the
-			// persisted value is always non-nil too: a backfilled row is
-			// never left looking "never backfilled" (NULL) again, even when
-			// it resolves to zero permissions.
 			ids := permissions.NormalizeLegacyUATScopes(scopes)
-			persisted := marshalCeilingPermissionIDs(ids)
+			value, ok := persistedCeilingColumnValue(ids)
+			if !ok {
+				slog.Error("user access token ceiling backfill: normalization returned no permission list, skipping row",
+					"token_id", row.ID)
+				continue
+			}
 			if err := c.client.UserAccessToken.UpdateOneID(row.ID).
 				SetCeilingVersion(int32(permissions.CeilingVersionUnspecified)).
-				SetCeilingPermissionIds(*persisted).
+				SetCeilingPermissionIds(value).
 				Exec(ctx); err != nil {
 				return fmt.Errorf("backfill ceiling for user access token %s: %w", row.ID, err)
 			}
@@ -103,7 +111,7 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		}
 
 		lastID = rows[len(rows)-1]
-		if len(rows) < uatCeilingBackfillPageSize {
+		if len(rows) < pageSize {
 			break
 		}
 	}
@@ -118,4 +126,26 @@ func (c *CompositeStore) BackfillUATCeilings(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// persistedCeilingColumnValue converts a computed permission-ID list into
+// the ceiling_permission_ids column value BackfillUATCeilings persists. ok
+// is false when ids is nil: permissions.NormalizeLegacyUATScopes is
+// documented to always return a non-nil slice, so the only way ids is nil
+// here is that invariant being violated by a future change. Defaulting to
+// the literal "[]" in that case would mark the row as an intentionally
+// issued, permission-less ceiling — a different, stronger claim than "not
+// yet resolved" — and would silently paper over the violation forever
+// instead of surfacing it. Returning ok == false instead lets the caller
+// skip the row (the same fail-closed choice BackfillDelegationEdges makes
+// for its own malformed input) rather than dereference a nil pointer:
+// NormalizedCeiling denies a row left NULL at load time regardless, via the
+// identical nil-safe computation on a slice field, which cannot panic the
+// way marshalCeilingPermissionIDs's pointer result could.
+func persistedCeilingColumnValue(ids []string) (value string, ok bool) {
+	persisted := marshalCeilingPermissionIDs(ids)
+	if persisted == nil {
+		return "", false
+	}
+	return *persisted, true
 }
