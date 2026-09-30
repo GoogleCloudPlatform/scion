@@ -22,7 +22,7 @@ compares them to help you pick the right one.
 | **Auth** | Cloud Run IAP proxy | Cloud Run IAP (native) | OAuth (Google/GitHub) + custom domain | Cloud Run IAP (native), per hub |
 | **DNS/TLS** | None required (Cloud Run URL) | None required (Cloud Run URL) | Required (custom domain + Let's Encrypt) | None required (Cloud Run URL, per hub) |
 | **Public IP** | No (VM has no public IP) | N/A (managed by Cloud Run) | Yes (VM has public IP via Caddy) | N/A (managed by Cloud Run); agents run in GKE Autopilot |
-| **Teardown** | `deploy.sh --delete` | `teardown.sh` | `gce-demo-provision.sh delete` | `terraform destroy`, hub roots first, then shared-infra (guarded) |
+| **Teardown** | `deploy.sh --delete` | `teardown.sh` | `gce-demo-provision.sh delete` | gated `plan -destroy` → `apply`, hub roots first, then shared-infra (see README "Destroy runbook") |
 
 ## Single-Node VM
 

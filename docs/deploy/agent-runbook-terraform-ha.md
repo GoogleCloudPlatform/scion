@@ -264,12 +264,48 @@ terraform -chdir=deploy/terraform/configurations/shared-infra output \
 `image-build/hub/Dockerfile`. The latter builds the GKE-oriented `scion-hub`
 image produced by `image-build/scripts/build-images.sh --target hub` (and
 pulled in by `--target common`/`--target all`); it runs as root and is the
-wrong hub image for this Cloud Run pattern. **Ask the user** for the
-build/push command or credentials if building `scripts/cloudrun/Dockerfile`
-isn't already scripted in this environment. Push it under a **new immutable
-tag or digest** (never `:latest`) and set `hub_image` to that reference —
-this never moves a tag anything else resolves against, so it needs no
-`:latest` ack.
+wrong hub image for this Cloud Run pattern.
+
+**Build it for `linux/amd64` explicitly.** `scripts/cloudrun/Dockerfile`
+cross-compiles the Go binary with `GOARCH=amd64` (Stage 2), but its base
+images (`node:20-slim`, `golang:1.26`, `debian:bookworm-slim`) are all
+unpinned, multi-arch images — a plain `docker build` picks whatever
+architecture the build host is. On an arm64 build host (Apple Silicon, for
+example — the same case "Why Cloud Build only" cites below for harness
+images), that produces an arm64 runtime layer wrapping an amd64-only
+binary, which Cloud Run rejects at hub apply. Use:
+```bash
+docker buildx build --platform linux/amd64 \
+  -f scripts/cloudrun/Dockerfile \
+  -t <registry>/hub:<immutable-tag> --push .
+```
+or whatever build tooling the user already has, **as long as it passes
+`linux/amd64`** — this is not a request to add a second documented build
+path. **Ask the user** for the actual build/push command or credentials if
+this isn't already scripted in this environment.
+
+**Do not run `scripts/cloudrun/deploy.sh`** to produce this image. It is
+the only scripted build of `scripts/cloudrun/Dockerfile` in this repo, but
+it has no build-only mode (its one flag is `--skip-build`): running it
+creates its own service accounts, secrets, and IAM bindings and stands up a
+**separate, non-Terraform Cloud Run hub** — it does not just build an image
+for this Terraform-managed hub. It also pushes
+`hub:${SCION_IMAGE_TAG:-latest}`, i.e. `hub:latest` by default, which is
+exactly the implicit `:latest` move this runbook forbids. Its project
+defaults to `${SCION_PROJECT:-deploy-demo-test}`, which inside a Scion
+agent container is typically set to the *Scion* project, not necessarily
+`<project>` — another reason not to treat it as "already scripted" for this
+flow.
+
+Push the hub image under a **new immutable tag or digest** (never
+`:latest`) and set `hub_image` to that reference — this never moves a tag
+anything else resolves against, so it needs no `:latest` ack. Apply the
+same kind of tag pre-check used for the harness images below to
+`<registry>/hub` before pushing:
+```bash
+gcloud artifacts docker tags list <registry>/hub \
+  --filter='tag:<immutable-tag>'
+```
 
 **Agent harness images — Cloud Build only.** This runbook documents a
 single supported build path: `--builder cloud-build`, one stage at a time,
@@ -289,21 +325,26 @@ step). `--target harnesses` only builds the harnesses themselves, and
 a time:
 
 ```bash
-image-build/scripts/build-images.sh --builder cloud-build \
-  --target core-base --registry <registry> --tag <immutable-tag>
+GCLOUD_PROJECT=<project> image-build/scripts/build-images.sh --builder cloud-build \
+  --target core-base --registry <registry> --tag <immutable-tag> \
+  2>&1 | tee /tmp/stage-core-base.log
 ```
 Wait for it to reach `SUCCESS` (see "Every submit is asynchronous" below),
 then:
 ```bash
-image-build/scripts/build-images.sh --builder cloud-build \
-  --target scion-base --registry <registry> --tag <immutable-tag>
+GCLOUD_PROJECT=<project> image-build/scripts/build-images.sh --builder cloud-build \
+  --target scion-base --registry <registry> --tag <immutable-tag> \
+  2>&1 | tee /tmp/stage-scion-base.log
 ```
 Wait for `SUCCESS`, then:
 ```bash
-image-build/scripts/build-images.sh --builder cloud-build \
-  --target harnesses --registry <registry> --tag <immutable-tag>
+GCLOUD_PROJECT=<project> image-build/scripts/build-images.sh --builder cloud-build \
+  --target harnesses --registry <registry> --tag <immutable-tag> \
+  2>&1 | tee /tmp/stage-harnesses.log
 ```
-Wait for `SUCCESS` before moving on to step 6/7. (`--target` maps to
+Wait for `SUCCESS` before moving on to step 6/7. **Set `GCLOUD_PROJECT=<project>`
+explicitly on every one of the three commands above** — see below for why.
+(`--target` maps to
 `cloudbuild-core-base.yaml`, `cloudbuild-scion-base.yaml`, and
 `cloudbuild-harnesses.yaml` respectively — image-build's README "Cloud
 Build Configs" table. `--push` and `--platform` are both ignored by
@@ -311,24 +352,78 @@ Build Configs" table. `--push` and `--platform` are both ignored by
 `--platform linux/amd64,linux/arm64` on every `docker buildx build` step,
 so neither flag has anything left to control.)
 
+**`GCLOUD_PROJECT` must be set explicitly, on every stage invocation.**
+`builder_run_target` (`image-build/scripts/builders/cloud-build.sh`)
+resolves the Cloud Build project as `$GCLOUD_PROJECT`, then `gcloud config
+get-value project`, and only parses a project out of `<registry>` when
+*both* of those are empty. None of the three commands above sets it any
+other way, so on an agent's shell the build can silently run in whatever
+project the ambient `gcloud config` names — not `<project>` — and get
+billed and executed there instead. If a command's output contains
+`Warning: Cloud Build project '<p>' differs from registry project
+'<reg>'`, **stop**: the build service account in `<p>` usually can't push
+to `<registry>`, and stage 1's `verify-registry` step will fail. This is
+why every command above is prefixed with `GCLOUD_PROJECT=<project>` — never
+drop it.
+
+**The Cloud Build service account needs push access on the shared
+registry.** Cloud Build runs as
+`<project_number>@cloudbuild.gserviceaccount.com` and needs
+`roles/artifactregistry.writer` on the target repo
+(`image-build/scripts/setup-cloud-build.sh` grants exactly this;
+`cloudbuild.googleapis.com` itself is already enabled by
+`project-services`, so nothing else is needed there). On newer projects, or
+under an org policy that disables automatic default-SA grants, this is
+often missing. Stage 1's `verify-registry` step
+(`image-build/scripts/verify-registry.sh`) fails fast in that case — that's
+safe. If it fails, **stop and ask the user** to grant push access (e.g. via
+`setup-cloud-build.sh`); do not grant it yourself.
+
 **Every submit is asynchronous.** `--builder cloud-build` always runs
 `gcloud builds submit --async` (`builders/cloud-build.sh`'s
 `builder_run_target`), so each `build-images.sh` command above returns
-"Build submitted" immediately — before the image exists. Capture the build
-ID and wait for `SUCCESS` before starting the next stage or moving on to
-step 6/7:
+"Build submitted" immediately — before the image exists. Each command is
+piped through `tee` into its own log file so the build ID can be read from
+the submit's own output.
 
+**Capture `BUILD_ID` from that output — never from `builds list
+--ongoing`.** `gcloud builds submit --async` always prints `Created
+[https://cloudbuild.googleapis.com/v1/projects/<p>/locations/<region>/builds/<ID>].`
+before returning — confirmed against the installed `gcloud`'s
+`submit_util.Build`, which calls `log.CreatedResource` unconditionally,
+including under `--async`; that status line goes to stderr, which is why
+the commands above redirect it into the log with `2>&1`. Parse the ID out
+of the log instead of guessing at it afterwards:
 ```bash
-BUILD_ID=$(gcloud builds list --project=<project> --ongoing \
-  --sort-by=~createTime --limit=1 --format='value(id)')
+BUILD_ID=$(grep -oE 'builds/[0-9a-f-]{36}' /tmp/stage-core-base.log | head -1 | cut -d/ -f2)
+[[ -n "${BUILD_ID}" ]] || { echo "No build ID found in the stage's output. STOP." >&2; exit 1; }
 ```
-Then poll in a bounded loop — the wait window should be at least the
-stage's own Cloud Build `timeout:` value (`cloudbuild-core-base.yaml`:
-10800s/3h; `cloudbuild-scion-base.yaml`: 1800s/30min;
-`cloudbuild-harnesses.yaml`: 2400s/40min) plus margin:
+(Use the matching `/tmp/stage-<target>.log` for each of the three stages.)
+Do **not** use `gcloud builds list --project=<project> --ongoing
+--sort-by=~createTime --limit=1` for this: it returns the newest in-flight
+build in the whole project, not necessarily the one you just submitted —
+another operator's build or a trigger build in the same project can be
+picked up instead, and a build that already failed fast (`verify-registry`
+fails in seconds) is no longer `--ongoing` at all, so the command silently
+names some *other* build, or none, and a foreign build reaching `SUCCESS`
+can then pass the gate for a stage that actually failed. If you want a
+`builds list` cross-check at all, filter it on this run's own tag instead
+of `--ongoing`: `--filter='substitutions._TAG="<immutable-tag>"'`.
+
+Then poll in a bounded loop whose window is **derived from that stage's own
+Cloud Build `timeout:` value** — not one fixed number shared by all three.
+Read verbatim from the YAMLs (verified against the files in this checkout):
+- `cloudbuild-core-base.yaml`: `timeout: 10800s` (3h)
+- `cloudbuild-scion-base.yaml`: `timeout: 1800s` (30min)
+- `cloudbuild-harnesses.yaml`: `timeout: 2400s` (40min)
+
+Set `MAX_WAIT` to that stage's timeout plus a margin (600s below) before
+running the loop:
 ```bash
+# core-base: MAX_WAIT=11400 ; scion-base: MAX_WAIT=2400 ; harnesses: MAX_WAIT=3000
+MAX_WAIT=<stage timeout + 600>
 STATUS=""
-for i in $(seq 1 80); do
+for i in $(seq 1 $((MAX_WAIT / 30))); do
   STATUS=$(gcloud builds describe "${BUILD_ID}" --project=<project> \
     --format='value(status)')
   case "${STATUS}" in
@@ -338,8 +433,16 @@ for i in $(seq 1 80); do
   esac
   sleep 30
 done
-[[ "${STATUS}" == "SUCCESS" ]] || { echo "Build ${BUILD_ID} did not reach SUCCESS within the wait window. STOP." >&2; exit 1; }
+[[ "${STATUS}" == "SUCCESS" ]] || { echo "Build ${BUILD_ID} did not reach SUCCESS within ${MAX_WAIT}s. STOP. Do not resubmit the stage while it may still be QUEUED or WORKING -- check with a single gcloud builds describe call first." >&2; exit 1; }
 ```
+If your shell or harness enforces a per-command time limit shorter than
+`MAX_WAIT` (up to 3h40m for `core-base`), do not run this loop as one
+foreground command that would be killed mid-wait: run it in the
+background, or poll with single `gcloud builds describe` calls spaced
+across separate tool invocations, and do not re-submit the stage while it
+may still be `QUEUED`/`WORKING` — a concurrent second submit pushes the
+same tags from a second build.
+
 On `FAILURE`, `TIMEOUT`, `CANCELLED` or `INTERNAL_ERROR` at any stage,
 **stop** — do not proceed to the next stage, and do not "fix" it by
 dropping `--tag`. The wait-for-`SUCCESS` gate after `core-base` and after
@@ -401,24 +504,30 @@ name, and the auto-added `:<short-sha>` can already exist too if another
 operator already built the same commit. Either re-points an existing tag,
 which is exactly what §10 requires an ack for. **Pre-check before asking,
 for every image in the push list above (`core-base`, `scion-base`, and each
-harness), not harnesses alone:**
+harness), not harnesses alone, checking both the immutable tag and the
+auto-added short-sha tag:**
 ```bash
 gcloud artifacts docker tags list <registry>/<image> \
-  --filter='tag:<immutable-tag>'
+  --filter='tag:<immutable-tag> OR tag:<short-sha>'
 ```
-An empty result means the tag is new; any output means this push would
-re-point it.
+An empty result means both tags are new; any output means this push would
+re-point one of them.
 
 Then **ask the user**, and make the question state explicitly whether
-`:latest` will move, e.g.: *"This pushes `core-base:<immutable-tag>`,
-`scion-base:<immutable-tag>` (each new, or re-pointed if already
-present — see the pre-check above), and `scion-<harness>:<immutable-tag>`
-(new, or re-pointed) plus `:<short-sha>` (new, or re-pointed) for [list of
-harnesses from `cloudbuild-harnesses.yaml`] to `<registry>`. It will **not**
-move any of their `:latest` tags. Do you also want `:latest` moved to this
-build?"* This applies equally to a first deployment into an empty
-registry — pushing the *initial* `:latest` establishes the tag every future
-hub on this registry inherits, so it is the same explicit ack, not
+`:latest` will move **and for which image families** (harnesses,
+`core-base`, `scion-base` — the ack must cover each one the user is being
+asked about, since harnesses are what every hub actually resolves while
+`core-base`/`scion-base` `:latest` are only the defaults other build
+configs fall back to), e.g.: *"This pushes `core-base:<immutable-tag>` plus
+`core-base:<short-sha>`, `scion-base:<immutable-tag>` plus
+`scion-base:<short-sha>` (each new, or re-pointed if already present — see
+the pre-check above), and `scion-<harness>:<immutable-tag>` plus
+`:<short-sha>` (new, or re-pointed) for [list of harnesses from
+`cloudbuild-harnesses.yaml`] to `<registry>`. It will **not** move any of
+their `:latest` tags. Do you also want `:latest` moved for any of these —
+and if so, which ones?"* This applies equally to a first deployment into an
+empty registry — pushing the *initial* `:latest` establishes the tag every
+future hub on this registry inherits, so it is the same explicit ack, not
 something to do implicitly as part of "build and push."
 
 If the user declines moving `:latest`, the consequence differs by case —
@@ -439,6 +548,29 @@ state the one that applies:
   either the user acks the initial `:latest` push now, or tell them plainly
   that no agent can start on this shared infra, and **stop before the hub
   apply** (step 7) rather than proceeding to a hub that can't run agents.
+
+**If the user acks moving `:latest`** (for either case above), the only
+sanctioned way to do it is to **re-tag the already-built immutable image**
+— never rebuild with `--tag latest`. A rebuild produces a different digest
+from the one the user just approved, re-points the `:<short-sha>` tags the
+approved build already pushed minutes earlier, and (for `harnesses`) costs
+up to another 40 minutes. After all three stages have reached `SUCCESS`
+above, for **each image the user named in the ack**:
+```bash
+gcloud artifacts docker tags add \
+  <registry>/<image>:<immutable-tag> <registry>/<image>:latest
+```
+Then verify the move landed on the digest that was actually approved, not
+one that changed underneath you between the ack and the retag:
+```bash
+gcloud artifacts docker images describe <registry>/<image>:latest \
+  --format='value(image_summary.digest)'
+gcloud artifacts docker images describe <registry>/<image>:<immutable-tag> \
+  --format='value(image_summary.digest)'
+```
+The two digests must be equal — if they aren't, stop and ask again before
+proceeding. Do this once per image the user named; no rebuild, and never
+drop `--tag` from a stage command as a way to "move" `:latest` instead.
 
 See "Image Rolls and Rollback" (§10) for how a `hub_image` roll differs
 from moving `:latest`.
