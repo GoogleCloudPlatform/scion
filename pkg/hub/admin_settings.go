@@ -654,12 +654,7 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		// Section-generic zero check (matches isZeroStruct's use elsewhere,
-		// admin_settings_db.go): checking a single named field (e.g.
-		// Enabled != nil) would silently stop deleting empty documents the
-		// moment AutoExposePortsSettings gains a second field, since a
-		// request with only the new field set would then wrongly delete the
-		// whole section. Delete only when every field is nil/zero.
+		// Section-generic zero check; see the Quotas block below.
 		if !isZeroStruct(req.AutoExposePorts) {
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
