@@ -102,7 +102,7 @@ test-hub-sqlite:
 # job to what it was scoped to test.
 #
 # The -run regex also includes the broker-settings compare-and-set and
-# row-lock tests (TestPutBrokerSettings_*, TestDeleteBrokerSettings*,
+# row-lock tests (TestPutBrokerSettings*, TestDeleteBrokerSettings*,
 # TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert
 # dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
 # tests do, so they belong in this job's Postgres coverage rather than running
@@ -140,7 +140,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings_|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
