@@ -364,6 +364,14 @@ this broker are:
   endpoint, never an agent- or template-supplied `SCION_HUB_ENDPOINT`
   override — an override still changes which endpoint the agent itself
   calls, but not which host the actor may reach.
+- An actor's own git-clone remote and telemetry endpoint are added to its
+  egress allowlist only when `egress_allow` also covers them (exact match,
+  or a wildcard one label above) — passing the public-hostname grammar is
+  not enough on its own, since a tenant-registered domain or a service like
+  nip.io/sslip.io is a well-formed public hostname that can still resolve
+  anywhere the tenant chooses. List the actual git host and telemetry
+  collector in `egress_allow` if agents need to reach them (see
+  `settings.example.yaml`).
 - The broker→router hop is plaintext HTTP, and bootstrap credentials cross
   it; NetworkPolicy and the first-bootstrap-wins nonce mitigate this, not
   transport encryption — see `README.md` for the fix options.

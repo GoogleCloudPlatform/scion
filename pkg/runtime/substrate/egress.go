@@ -298,6 +298,39 @@ func NormalizeEgressAllowEntry(raw string) (string, error) {
 	return final, nil
 }
 
+// EgressAllowCovers reports whether host (a bare, already-lowercased
+// hostname — never a URL, never carrying a leading wildcard) is covered by
+// any entry in normalizedEntries, each of which must already be the
+// canonical form NormalizeEgressAllowEntry returns (this function does not
+// re-normalize them). An entry covers host either by an exact match, or —
+// when the entry has a leading "*." — when host has exactly one more label
+// than the wildcard's own remainder and ends with it: "*.example.com"
+// covers "api.example.com" but not "example.com" itself (no label to
+// consume) or "a.b.example.com" (more than one extra label) — the same
+// single-level shape a TLS wildcard certificate matches, chosen because it
+// is the narrowest, least surprising reading of what an operator who wrote
+// "*.example.com" meant to authorize.
+func EgressAllowCovers(normalizedEntries []string, host string) bool {
+	for _, entry := range normalizedEntries {
+		if egressAllowEntryCovers(entry, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func egressAllowEntryCovers(normalizedEntry, host string) bool {
+	if normalizedEntry == host {
+		return true
+	}
+	remainder, isWildcard := strings.CutPrefix(normalizedEntry, "*.")
+	if !isWildcard {
+		return false
+	}
+	label, ok := strings.CutSuffix(host, "."+remainder)
+	return ok && label != "" && !strings.Contains(label, ".")
+}
+
 // egressAllowSuffixOK is THE public-suffix acceptance rule. Deliberately
 // isolated in its own small function — nothing else in this file depends
 // on its internals — so this specific rule can be swapped out on its own

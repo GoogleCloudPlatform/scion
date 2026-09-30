@@ -85,16 +85,38 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		seen[h] = struct{}{}
 		hosts = append(hosts, h)
 	}
-	// addTenantHost validates h (a hostname derived from tenant-controllable
-	// input) the same way an operator's own egress_allow entry is validated,
-	// before it ever reaches the actor's EgressPolicy. A host that fails
-	// validation (an IP literal, a cluster-internal suffix, a malformed or
-	// oversized name) is dropped, not added — the caller only ever wanted
-	// egress to this workload's own legitimate remotes, so refusing an
-	// invalid one fails safe rather than open. Only the bare host is
-	// logged, matching NormalizeEgressAllowEntry's own callers elsewhere:
-	// never the userinfo, query, or full URL a caller derived it from,
-	// either of which could carry a credential.
+	// operatorEgressAllow is every sc.EgressAllow entry, normalized, computed
+	// up front so addTenantHost can check coverage against it. Entries that
+	// fail to normalize are skipped here the same way the sc.EgressAllow
+	// loop below skips them: substrate.Validate(r.cfg), called at the top of
+	// Run before this is ever reached, already rejects a config with an
+	// invalid entry, so this is unreachable in practice, not a second
+	// enforcement point.
+	var operatorEgressAllow []string
+	for _, h := range sc.EgressAllow {
+		if normalized, err := substrate.NormalizeEgressAllowEntry(h); err == nil && normalized != "" {
+			operatorEgressAllow = append(operatorEgressAllow, normalized)
+		}
+	}
+
+	// addTenantHost admits h (a hostname derived from tenant-controllable
+	// input) only if it is both a well-formed public hostname (the same
+	// grammar an operator's own egress_allow entry must pass) AND covered by
+	// an operator egress_allow entry — an exact match, or a wildcard entry
+	// whose remainder it is one label under (substrate.EgressAllowCovers).
+	// Well-formedness alone is not enough: an attacker-chosen but otherwise
+	// ordinary-looking public hostname (a service like nip.io/sslip.io that
+	// resolves an embedded IP octet on request, or any domain the tenant
+	// simply registers themselves) would pass the grammar check while still
+	// letting the tenant point their own git-clone remote or telemetry
+	// endpoint at an address of their choosing — the cloud metadata address
+	// chief among them. Requiring operator coverage means only a host the
+	// operator has already agreed to allow ever gets a tenant-controlled
+	// vote toward being added; everything else is dropped, not added,
+	// naming the host and how to allow it. Only the bare host is logged,
+	// matching NormalizeEgressAllowEntry's own callers elsewhere: never the
+	// userinfo, query, or full URL a caller derived it from, either of which
+	// could carry a credential.
 	addTenantHost := func(h string) {
 		h = strings.TrimSpace(h)
 		if h == "" {
@@ -103,6 +125,11 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		normalized, err := substrate.NormalizeEgressAllowEntry(h)
 		if err != nil {
 			slog.Warn("substrate: dropping invalid tenant-derived egress host", "host", h, "error", err)
+			return
+		}
+		if !substrate.EgressAllowCovers(operatorEgressAllow, normalized) {
+			slog.Warn("substrate: dropping tenant-derived egress host not covered by egress_allow",
+				"host", normalized, "hint", "add this host (or a wildcard covering it) to runtimes.<name>.substrate.egress_allow to permit it")
 			return
 		}
 		add(normalized)
@@ -165,25 +192,12 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		add(h)
 	}
 
-	for _, h := range sc.EgressAllow {
-		// Send exactly the string ValidateEgressAllow validated, not just a
-		// trimmed one: NormalizeEgressAllowEntry validates AND returns the
-		// canonical form in one call, precisely so the two can never drift
-		// apart. If validation and the sent form were computed
-		// independently instead, they could disagree: an entry like
-		// "GitHub.COM." validates fine but would be rejected by Substrate's
-		// API if sent merely trimmed rather than fully normalized, since
-		// HostnameRule requires a lowercase name with no trailing dot.
-		//
-		// The error is ignored here, not silently: substrate.Validate(r.cfg)
-		// (called at the top of Run, before this is ever reached) already
-		// ran every sc.EgressAllow entry through this exact function, so an
-		// error here would mean Run's own guard was bypassed. Skip rather
-		// than panic or fail Run a second time for something that should be
-		// unreachable.
-		if normalized, err := substrate.NormalizeEgressAllowEntry(h); err == nil {
-			add(normalized)
-		}
+	// operatorEgressAllow already holds every sc.EgressAllow entry in the
+	// exact normalized form ValidateEgressAllow validated it in, so this
+	// sends exactly that string, not a re-normalized or merely trimmed one
+	// — see operatorEgressAllow's own doc comment for why that matters.
+	for _, h := range operatorEgressAllow {
+		add(h)
 	}
 
 	sort.Strings(hosts)

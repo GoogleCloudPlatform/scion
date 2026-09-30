@@ -529,15 +529,27 @@ hop:
 `Run` creates a per-actor `EgressPolicy` (step 5, §4) with hostname rules
 for:
 
-- the hub endpoint host;
-- the git clone host;
+- the operator-configured hub endpoint host (never a creator/template
+  override — see the trusted-hub-endpoint note in §5 or
+  `pkg/runtime/interface.go`'s `RunConfig.TrustedHubEndpoint` doc comment);
+- the git clone host, and the configured telemetry endpoint host — both
+  tenant-derived, and both added **only if an operator `egress_allow` entry
+  covers them** (exact match, or a wildcard entry one label above): a
+  well-formed public hostname is not by itself trustworthy — a service like
+  nip.io/sslip.io resolves an embedded IP octet on request, the cloud
+  metadata address included, and a tenant can otherwise simply point their
+  git remote or telemetry endpoint at any domain they register. An operator
+  who wants an actor's own git clone or telemetry endpoint to actually reach
+  the network must list that host (or a covering wildcard) in
+  `egress_allow` themselves; an uncovered host is dropped and logged, never
+  added;
 - the harness model API hosts, hardcoded: `api.anthropic.com`,
   plus Google auth and Vertex (`oauth2.googleapis.com`, `*.googleapis.com`);
   `*.googleapis.com` also happens to cover the Cloud Trace telemetry default,
-  but the actual configured telemetry endpoint is always added as its own
-  rule too — coincidence of the default is not a rule;
-- the configured telemetry endpoint host;
-- `egress_allow` entries from settings (§2).
+  but the actual configured telemetry endpoint is always subject to the
+  coverage rule above too — coincidence of the default is not a rule;
+- `egress_allow` entries from settings (§2), added directly (an
+  operator-supplied entry is its own coverage).
 
 `egress_allow` is **allowlist-first and validated** (`ValidateEgressAllow`,
 `pkg/config/substrate_egress.go`): only public FQDNs (optionally wildcarded
@@ -551,10 +563,12 @@ hostnames ending in `.svc`, `.cluster.local`, `.internal`, `.local`,
 `.localhost`, or `localhost.localdomain`; a wildcard whose remainder is
 itself a public-suffix wildcard rule (e.g. `*.run.app`); single-label
 hostnames; entries over 253 characters; and entries containing `[`, `]`, or
-`%`. This does not close DNS rebinding or a service like
-nip.io/sslip.io resolving a valid public hostname to a private address —
-only a post-resolution check by the egress proxy itself could close that,
-and none is added here.
+`%`. The same normalization and rejection rules apply to a tenant-derived
+host before its coverage is even checked, so a git-clone or telemetry host
+that fails this grammar is dropped regardless of `egress_allow`. DNS
+rebinding, or a covered hostname later resolving to a private or in-cluster
+address, is not closed by any client-side allowlist — only a post-resolution
+check by the egress proxy itself could close that, and none is added here.
 
 ### 7.1 `egress_trust_bundle`: the sdsmint MITM gateway
 

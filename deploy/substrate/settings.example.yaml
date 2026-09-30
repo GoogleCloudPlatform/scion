@@ -51,6 +51,16 @@ runtimes:
       # hostnames -- see README.md, "egress_allow entries are validated".
       # Empty means the runtime is constructed but every actor's egress
       # policy denies everything; add entries here, not per-actor.
+      #
+      # An actor's own git-clone remote and telemetry endpoint are added to
+      # its egress allowlist only when an entry here also covers them (exact
+      # match, or a wildcard one label above) -- see README.md, "An actor's
+      # own git-clone remote and telemetry endpoint". List your actual git
+      # host and telemetry collector here if agents need to reach them, e.g.:
+      #   egress_allow:
+      #     - github.com
+      #     - "*.githubusercontent.com"
+      #     - otel-collector.example.com
       egress_allow: []
       # Only needed if the cluster's egress gateway is the sdsmint (MITM)
       # variant AND actors make HTTPS/TLS requests -- see README.md,

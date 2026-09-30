@@ -48,7 +48,14 @@ func TestSubstrateEgressHostnames_TelemetryHost(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hosts := substrateEgressHostnames(RunConfig{}, tc.env, config.V1SubstrateConfig{})
+			// A tenant-derived host is only ever added when an operator
+			// egress_allow entry covers it; cover the exact host under test
+			// so this test still exercises whichever env var derives it,
+			// not the coverage gate itself (see
+			// TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage
+			// for that).
+			sc := config.V1SubstrateConfig{EgressAllow: []string{tc.want}}
+			hosts := substrateEgressHostnames(RunConfig{}, tc.env, sc)
 			if !containsHost(hosts, tc.want) {
 				t.Errorf("substrateEgressHostnames() = %v, want it to contain %q (from %s)", hosts, tc.want, tc.name)
 			}
@@ -63,7 +70,8 @@ func TestSubstrateEgressHostnames_TelemetryHostsAreIndependent(t *testing.T) {
 		"SCION_OTEL_ENDPOINT":         "cloud-otel.example.com:4317",
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "self-hosted-otel.example.com:4318",
 	}
-	hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"cloud-otel.example.com", "self-hosted-otel.example.com"}}
+	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
 	if !containsHost(hosts, "cloud-otel.example.com") {
 		t.Errorf("substrateEgressHostnames() = %v, missing SCION_OTEL_ENDPOINT host", hosts)
 	}
@@ -301,9 +309,98 @@ func TestSubstrateEgressHostnames_HubEndpointOverrideEqualToTrustedNoDup(t *test
 // addTenantHost and reaches the result, normalized.
 func TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed(t *testing.T) {
 	env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://Otel-Collector.Example.COM:4318"}
-	hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"otel-collector.example.com"}}
+	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
 	if !containsHost(hosts, "otel-collector.example.com") {
 		t.Errorf("substrateEgressHostnames() = %v, want the normalized public OTEL host present", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage proves
+// a well-formed, public tenant-derived host (one that passes
+// NormalizeEgressAllowEntry) is still dropped unless an operator
+// egress_allow entry covers it. A well-formed public hostname is not
+// automatically trustworthy — a service like nip.io/sslip.io, or simply a
+// domain the tenant registers themselves, can resolve to any address the
+// tenant chooses, the cloud metadata address included.
+func TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage(t *testing.T) {
+	env := map[string]string{"SCION_GIT_CLONE_URL": "https://uncovered.example.com/repo.git"}
+	// No egress_allow entry covers uncovered.example.com.
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"covered.example.com"}}
+	hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+	if containsHost(hosts, "uncovered.example.com") {
+		t.Errorf("substrateEgressHostnames() = %v, want uncovered.example.com dropped (no egress_allow entry covers it)", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow proves the
+// other side: a tenant-derived host IS added when an operator egress_allow
+// entry covers it, both via an exact match and via a wildcard entry one
+// label above it.
+func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
+	t.Run("exact match", func(t *testing.T) {
+		env := map[string]string{"SCION_GIT_CLONE_URL": "https://git.example.com/repo.git"}
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"git.example.com"}}
+		hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+		if !containsHost(hosts, "git.example.com") {
+			t.Errorf("substrateEgressHostnames() = %v, want git.example.com present (exact egress_allow match)", hosts)
+		}
+	})
+	t.Run("wildcard match", func(t *testing.T) {
+		env := map[string]string{"SCION_GIT_CLONE_URL": "https://git.example.com/repo.git"}
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com"}}
+		hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+		if !containsHost(hosts, "git.example.com") {
+			t.Errorf("substrateEgressHostnames() = %v, want git.example.com present (covered by the *.example.com wildcard)", hosts)
+		}
+	})
+}
+
+// TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage proves a
+// nip.io-style host (a public, well-formed hostname that resolves an
+// embedded IP octet on request — including the cloud metadata address) is
+// dropped the same as any other uncovered tenant host, and only added when
+// an operator egress_allow entry explicitly covers it.
+func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+	}{
+		{"cloud metadata address embedded in nip.io", "169.254.169.254.nip.io"},
+		{"private address embedded in nip.io", "10.0.0.1.nip.io"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"SCION_GIT_CLONE_URL": "https://" + tc.host + "/repo.git"}
+
+			t.Run("uncovered, dropped", func(t *testing.T) {
+				hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+				if containsHost(hosts, tc.host) {
+					t.Errorf("substrateEgressHostnames() = %v, want %q dropped (not covered by any egress_allow entry)", hosts, tc.host)
+				}
+			})
+			t.Run("covered, added", func(t *testing.T) {
+				sc := config.V1SubstrateConfig{EgressAllow: []string{tc.host}}
+				hosts := substrateEgressHostnames(RunConfig{}, env, sc)
+				if !containsHost(hosts, tc.host) {
+					t.Errorf("substrateEgressHostnames() = %v, want %q present (operator explicitly covered it)", hosts, tc.host)
+				}
+			})
+		})
+	}
+}
+
+// TestSubstrateEgressHostnames_HardcodedModelHostsUnaffectedByCoverage
+// proves hardcodedModelEgressHosts is unaffected by the egress_allow
+// coverage gate addTenantHost applies: these hosts are a fixed literal in
+// the binary, never tenant-derived, and are always present regardless of
+// egress_allow.
+func TestSubstrateEgressHostnames_HardcodedModelHostsUnaffectedByCoverage(t *testing.T) {
+	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+	for _, want := range hardcodedModelEgressHosts {
+		if !containsHost(hosts, want) {
+			t.Errorf("substrateEgressHostnames() = %v, want hardcoded model host %q present with no egress_allow entries at all", hosts, want)
+		}
 	}
 }
 

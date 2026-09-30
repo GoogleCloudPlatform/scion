@@ -784,3 +784,32 @@ func TestValidateEgressAllow_LocalhostForms(t *testing.T) {
 		}
 	}
 }
+
+// TestEgressAllowCovers exercises the exact-match and single-level wildcard
+// coverage rule directly, independent of substrateEgressHostnames' own
+// caller.
+func TestEgressAllowCovers(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []string
+		host    string
+		want    bool
+	}{
+		{"exact match", []string{"example.com"}, "example.com", true},
+		{"no match", []string{"example.com"}, "other.com", false},
+		{"wildcard covers one label under", []string{"*.example.com"}, "api.example.com", true},
+		{"wildcard does not cover the bare suffix itself", []string{"*.example.com"}, "example.com", false},
+		{"wildcard does not cover two labels under", []string{"*.example.com"}, "a.b.example.com", false},
+		{"wildcard does not cover an unrelated suffix", []string{"*.example.com"}, "api.example.org", false},
+		{"first of several entries matches", []string{"example.com", "other.com"}, "example.com", true},
+		{"second of several entries matches", []string{"other.com", "example.com"}, "example.com", true},
+		{"empty entry list covers nothing", nil, "example.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EgressAllowCovers(tc.entries, tc.host); got != tc.want {
+				t.Errorf("EgressAllowCovers(%v, %q) = %v, want %v", tc.entries, tc.host, got, tc.want)
+			}
+		})
+	}
+}

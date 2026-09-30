@@ -169,6 +169,19 @@ this protects against a validly-public hostname later resolving to a
 private or in-cluster address — DNS rebinding, or a service that does this
 by design.
 
+**An actor's own git-clone remote and telemetry endpoint are added to its
+egress allowlist only when `egress_allow` also covers them.** Both are
+tenant-controllable (a workload's own `SCION_GIT_CLONE_URL`, or its
+`SCION_OTEL_ENDPOINT`/`OTEL_EXPORTER_OTLP_*` telemetry endpoints), and
+passing the same public-FQDN grammar above is not enough to trust them on
+its own — a domain the tenant themselves registers, or a service like
+nip.io/sslip.io that resolves an embedded IP octet on request (the cloud
+metadata address included), is a perfectly well-formed public hostname. An
+operator who wants an actor's real git remote or telemetry collector to
+actually be reachable must list that host — or a wildcard covering it — in
+`egress_allow` themselves; an uncovered host is silently dropped (logged,
+never added) rather than granted by default.
+
 ### `egress_trust_bundle`: only needed under sdsmint
 
 Substrate's plain `atenet-egress` only enforces `egress_allow` for TLS
