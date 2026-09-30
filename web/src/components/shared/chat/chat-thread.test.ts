@@ -4935,6 +4935,53 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
     expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
   });
 
+  it("prefers the message senderProjectId over the message's own projectId for the graph link", async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, senderProjectId: 'proj-sender', projectId: 'proj-msg' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
+  });
+
+  it("prefers the roster projectId over the message's own projectId for the graph link", async () => {
+    // No senderProjectId. The rostered author's projectId ('proj-roster')
+    // must win over the message's own projectId ('proj-msg') — the roster
+    // is checked first in the chain.
+    const { el, bubbles } = await mountWithMessages(
+      [{ ...AGENT_MSG, projectId: 'proj-msg' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-roster',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    findMenuItem(el, 'Open in graph')!.click();
+
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-roster', 'agent-1'));
+  });
+
   it('hides "Open terminal" (fail closed) when canAttach is not explicitly true, but keeps "Open in graph"', async () => {
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG],
@@ -5025,10 +5072,10 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
 
     it("prefers the message's own projectId over the thread's, for a cross-project departed author (agent-to-user rows never set senderProjectId)", async () => {
       // No senderProjectId and no roster entry, but the message carries its
-      // own projectId (the author's project, as agent-to-user rows always
-      // do) which differs from the thread's project. The author's project
-      // must win — falling back to the thread's would point the graph at
-      // the wrong project.
+      // own projectId (the author's project, as agent-to-user rows do)
+      // which differs from the thread's project. The author's project must
+      // win — falling back to the thread's would point the graph at the
+      // wrong project.
       const { el, bubbles } = await mountWithMessages(
         [{ ...AGENT_MSG, projectId: 'proj-author' }],
         [OTHER_AGENT]
