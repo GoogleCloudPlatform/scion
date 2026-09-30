@@ -1053,11 +1053,11 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
-    // The first (older, stale) request resolves first, with the setting on.
-    // Applying this would be wrong on two counts: it is not the latest
+    // The first (older, stale) request resolves first, with the setting
+    // off. Applying this would be wrong on two counts: it is not the latest
     // request, and it would incorrectly clear loading while the newer
     // fetch is still in flight.
-    first.resolve(json({ agentSecretsUserScopeOnly: true }));
+    first.resolve(json({ agentSecretsUserScopeOnly: false }));
     await Promise.resolve();
     await Promise.resolve();
     await page.updateComplete;
@@ -1074,9 +1074,12 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(radio('project')?.hasAttribute('disabled')).toBe(true); // still loading
     expect(radio('user')?.hasAttribute('disabled')).toBe(true); // still loading
 
-    // The second (newer) request now resolves, with the setting off. This
-    // is the one that must actually apply.
-    second.resolve(json({ agentSecretsUserScopeOnly: false }));
+    // The second (newer) request now resolves, with the setting on. This is
+    // the one that must actually apply. Resolving it with a value that
+    // differs from the stale one (and from the default) makes "applied" and
+    // "not applied" observably distinguishable, unlike resolving both with
+    // the already-default `false`.
+    second.resolve(json({ agentSecretsUserScopeOnly: true }));
     await vi.waitFor(() => {
       const state = page as unknown as { captureAuthSettingsLoading: boolean };
       expect(state.captureAuthSettingsLoading).toBe(false);
@@ -1085,8 +1088,11 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
     expect(
       (page as unknown as { agentSecretsUserScopeOnly: boolean }).agentSecretsUserScopeOnly
-    ).toBe(false);
-    expect(radio('project')?.hasAttribute('disabled')).toBe(false);
+    ).toBe(true);
+    expect(
+      (page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope
+    ).toBe('user');
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true); // restricted
     expect(radio('user')?.hasAttribute('disabled')).toBe(false);
   });
 });
