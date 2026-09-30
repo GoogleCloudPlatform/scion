@@ -116,7 +116,7 @@ func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *mess
 // isUserMessageTopic reports whether topic addresses a user-message topic
 // (projectkeys.TopicKindUser), e.g. "scion.project.<id>.user.<userId>.messages".
 // ParseTopic returns Topic by value, so a nil check on t is neither needed
-// nor possible: err == nil already guarantees a fully-populated Topic.
+// nor possible: err == nil already guarantees a valid Topic with Kind set.
 func isUserMessageTopic(topic string) bool {
 	t, err := projectkeys.ParseTopic(topic)
 	return err == nil && t.Kind == projectkeys.TopicKindUser
