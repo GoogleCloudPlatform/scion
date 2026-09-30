@@ -36,6 +36,31 @@ func newTestBrokerSettingStore(t *testing.T) *BrokerSettingStore {
 func int64ptr(v int64) *int64 { return &v }
 
 // =============================================================================
+// Dialect detection (GoogleCloudPlatform/scion#2126 review)
+// =============================================================================
+
+// TestUsesRowLocks_ReflectsBackend pins usesRowLocks to the actual test
+// backend rather than deriving the expectation from the same
+// client.Driver().Dialect() call the implementation uses (which would let a
+// wrong comparison, e.g. against the wrong dialect constant, pass unnoticed).
+// It runs unconditionally: under the default `go test` build this is SQLite
+// (want false); under `-tags integration` with SCION_TEST_POSTGRES_URL set,
+// enttest.Active() reports the harness switched to a real Postgres backend
+// (want true). Either way the assertion is independent of usesRowLocks'
+// own logic.
+func TestUsesRowLocks_ReflectsBackend(t *testing.T) {
+	s := newTestBrokerSettingStore(t)
+
+	got := s.usesRowLocks(context.Background())
+
+	if enttest.Active() {
+		assert.True(t, got, "integration harness backend is Postgres; usesRowLocks must report true so PutBrokerSettings takes the FOR UPDATE path")
+	} else {
+		assert.False(t, got, "default test harness backend is SQLite; usesRowLocks must report false so PutBrokerSettings does not attempt FOR UPDATE")
+	}
+}
+
+// =============================================================================
 // Get (missing)
 // =============================================================================
 

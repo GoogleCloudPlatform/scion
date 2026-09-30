@@ -18,10 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
@@ -32,9 +30,7 @@ import (
 // Modeled on HubSettingStore (pkg/store/entadapter/hubsetting_store.go): a
 // single JSON document per key (here, per broker) with revision-based CAS.
 type BrokerSettingStore struct {
-	client      *ent.Client
-	dialectOnce sync.Once
-	dialectName string
+	client *ent.Client
 }
 
 // NewBrokerSettingStore creates a new Ent-backed BrokerSettingStore.
@@ -45,13 +41,24 @@ func NewBrokerSettingStore(client *ent.Client) *BrokerSettingStore {
 // usesRowLocks returns true when the underlying database supports SELECT …
 // FOR UPDATE (i.e. Postgres). SQLite uses a single-writer lock instead, so
 // ForUpdate must be skipped — it returns an error on SQLite.
-func (s *BrokerSettingStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.BrokerSetting.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+//
+// The dialect comes straight from the driver (client.Driver().Dialect()), a
+// static property fixed when the *ent.Client was constructed — never a
+// query result. This is the same no-query pattern already used elsewhere in
+// this package: CompositeStore.isPostgres (locking.go), and direct
+// client.Driver().Dialect() reads in ProjectStore, role_store.go,
+// external_store.go and skill_registry_store.go. Earlier revisions of this
+// method instead ran a throwaway Exist() query whose predicate callback
+// captured selector.Dialect() into a sync.Once-cached field — functionally
+// equivalent (ent builds that selector, and therefore invokes the
+// predicate, entirely in-process before issuing any query to the driver, so
+// the callback ran regardless of whether the subsequent round trip
+// succeeded — see GoogleCloudPlatform/scion#2126 review threads
+// discussion_r4144103907 and discussion_r4144103949 for the full trace
+// through ent's sqlgraph.QueryNodes/query.selector), but strictly more
+// complex than reading the driver directly, for no benefit.
+func (s *BrokerSettingStore) usesRowLocks(context.Context) bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // entBrokerSettingToStore converts an Ent BrokerSetting entity to the store
