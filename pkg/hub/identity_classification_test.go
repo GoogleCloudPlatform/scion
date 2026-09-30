@@ -746,6 +746,36 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 			wantCredKind:      "",
 			wantPrincipalID:   tid("audit-recognized-principal-empty-cred"),
 		},
+		{
+			// A nil identity's derived principal ID is empty; the record
+			// must carry that derived "", never the caller's supplied claim.
+			name: "nil identity with a supplied principal ID still records the derived empty ID",
+			request: AuthzRequest{
+				Principal: PrincipalContext{ID: "supplied-claim"},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "missing principal",
+			wantPrincipalKind: "",
+			wantCredKind:      "",
+			wantPrincipalID:   "",
+		},
+		{
+			// The identity is unrecognized and its own ID() is empty, so the
+			// derived principal ID is "". A supplied, non-empty Principal.ID
+			// does not change the derived classification: the record must
+			// still carry the derived "" ID, never the supplied claim.
+			name: "unrecognized identity with an empty ID and a supplied principal ID records the derived empty ID",
+			request: AuthzRequest{
+				Principal: PrincipalContext{ID: "supplied-claim", Identity: &unclassifiedMockIdentity{id: ""}},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "unrecognized principal kind",
+			wantPrincipalKind: "",
+			wantCredKind:      "",
+			wantPrincipalID:   "",
+		},
 	}
 
 	for _, tc := range cases {

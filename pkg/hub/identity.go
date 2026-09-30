@@ -302,10 +302,10 @@ func AncestryIsHubAttested(identity Identity) bool {
 // forged by an external caller, and a package-hub test fake must opt in with
 // an explicit, classified method rather than acquiring a kind by accident —
 // in particular, never by returning a Type() string that happens to match a
-// recognized one. A type
-// that does not implement this interface, and is not one of the concrete
-// types above, is classified with an empty PrincipalKind/CredentialKind,
-// which Decide's fail-closed entry check denies.
+// recognized one. A type that does not implement this interface, and is not
+// one of the concrete types above, is classified with an empty
+// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
+// denies.
 type explicitIdentityClassification interface {
 	authzClassification() (PrincipalKind, CredentialKind)
 }

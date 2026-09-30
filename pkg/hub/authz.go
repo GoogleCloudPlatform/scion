@@ -232,6 +232,15 @@ type Decision struct {
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
 
+	// principalDecorated is set by decorateDecision, the single function that
+	// derives PrincipalID from the principal Decide evaluated. It is
+	// unexported and untagged so it carries no wire representation.
+	// BuildDecisionAuditRecord reads it to tell an empty derived PrincipalID
+	// apart from a Decision decorateDecision never touched, instead of
+	// treating an empty string as "derivation ran and found nothing" in both
+	// cases.
+	principalDecorated bool
+
 	// Actor and Purpose echo AuthzRequest.Actor/Purpose on every decision.
 	// Audit-only: they never contribute to Allowed.
 	Actor   *DecisionActor `json:"actor,omitempty"`
@@ -1683,6 +1692,7 @@ func decorateDecision(decision Decision, request AuthzRequest, principal Princip
 	}
 	decision.PrincipalKind = principal.Kind
 	decision.PrincipalID = principal.ID
+	decision.principalDecorated = true
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type
 	decision.CredentialKind = string(credential.Kind)
