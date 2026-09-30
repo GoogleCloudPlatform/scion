@@ -1157,6 +1157,14 @@ When redeploying the Hub with a new image:
      --region=$REGION --project=$PROJECT_ID --quiet
    ```
 
+### 7b. Secret Name Migration
+
+Cloud SQL in this guide's topology has only a private IP, so an operator's workstation
+has no network path to the Hub database — `scion hub secret migrate-names` can't be run
+from a laptop. See the
+[Secret Name Migration runbook](/scion/hosted/ha/migrate-names-cloudrun/) for running it
+via a one-off Cloud Run job instead.
+
 ---
 
 ## Appendix A: Complete settings.yaml Reference
