@@ -21,6 +21,14 @@
 // through Decide, independent of the HTTP handlers -- see
 // handlers_gcp_identity_mint_authz_test.go for the handler-level record and
 // parity tests.
+//
+// Allow cases below run post-backfill with a system-admin delegator (via
+// seedPostBackfillAdminEdge) so the delegation ceiling passes without
+// depending on the pre-backfill temporary allow -- production state, not a
+// carve-out. The ordinary-creator case, where the delegator is not a system
+// admin and does not itself hold gcp_service_account.use, is pinned as
+// denying by TestGCPServiceAccountUse_DeniesPendingParentAuthority. Deny
+// cases hold in either state and are unaffected by the marker.
 package hub
 
 import (
@@ -39,11 +47,29 @@ func gcpUseResource(id string) Resource {
 	return Resource{Type: permissions.ResourceGCPServiceAccount, ID: id}
 }
 
+// seedPostBackfillAdminEdge marks the delegation-edge backfill migration as
+// complete and records a project-scoped delegation edge from a system-admin
+// user to agentID. checkUserHoldsPermission short-circuits on IsSystemAdmin,
+// so the delegation ceiling passes for this agent at this project scope
+// regardless of which permission is being decided -- production-like state
+// (every hub-attested agent has an edge post-backfill), without seeding the
+// permission itself into any role.
+func seedPostBackfillAdminEdge(t *testing.T, s store.Store, agentID, projectID string) {
+	t.Helper()
+	setBackfillCompleted(t, s)
+	adminID := tid("admin-for-" + agentID)
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+	createDCEdge(t, s, store.DelegationPrincipalUser, adminID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, projectID, store.ProjectRoleOwner)
+}
+
 func TestGCPServiceAccountUse_MatchingScopeAdmits(t *testing.T) {
-	authz, _ := authzTestSetup(t)
+	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	saX := tid("sa-x")
-	agent := newFullAgentIdentity(tid("agent-match"), tid("project-match"), nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+	agentID, projectID := tid("agent-match"), tid("project-match")
+	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+	seedPostBackfillAdminEdge(t, s, agentID, projectID)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
@@ -130,6 +156,23 @@ func TestGCPServiceAccountUse_EmptyResourceIDDenied(t *testing.T) {
 	if d.Allowed {
 		t.Fatalf("expected deny: empty resource ID must fail closed")
 	}
+
+	// The guard must independently deny an empty ID even when the agent's own
+	// scope is the bare prefix (GCPTokenScopeForSA("")), which is the one
+	// case where the exact HasScope compare alone would not catch a missing
+	// empty-ID check: the scope and the decided ID both being empty would
+	// otherwise line up.
+	emptyIDAgent := newFullAgentIdentity(tid("agent-emptyid-scope"), tid("project-emptyid-scope"), nil, []AgentTokenScope{GCPTokenScopeForSA("")})
+	d = authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(emptyIDAgent),
+		Credential: credentialContextForIdentity(emptyIDAgent),
+		Resource:   gcpUseResource(""),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+	if d.Allowed {
+		t.Fatalf("expected deny: empty resource ID must fail closed even when the agent's own scope is the bare prefix")
+	}
 }
 
 func TestGCPServiceAccountUse_WrongResourceTypeDenied(t *testing.T) {
@@ -180,14 +223,21 @@ func TestGCPServiceAccountUse_WrongPermissionUnaffected(t *testing.T) {
 // ParentID, never Type/ID) all admit identically when the exact scope
 // matches.
 func TestGCPServiceAccountUse_ScopeAndParentKindUnrelated(t *testing.T) {
-	authz, _ := authzTestSetup(t)
+	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	saID := tid("sa-any-scope")
-	agent := newFullAgentIdentity(tid("agent-anyscope"), tid("project-anyscope"), nil, []AgentTokenScope{GCPTokenScopeForSA(saID)})
+	agentID, projectID := tid("agent-anyscope"), tid("project-anyscope")
+	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saID)})
+	seedPostBackfillAdminEdge(t, s, agentID, projectID)
 
+	// The project-scoped case uses the agent's own project: the delegation
+	// ceiling (step 10) derives its scope from a project-typed resource's
+	// own parent, so a project-scoped SA in some OTHER project would make
+	// this a cross-project request and deny on the ceiling alone -- a fact
+	// about the ceiling, not about the per-instance match this test pins.
 	for _, sa := range []*store.GCPServiceAccount{
 		{ID: saID, Scope: store.ScopeHub, ScopeID: tid("hub")},
-		{ID: saID, Scope: store.ScopeProject, ScopeID: tid("project-any")},
+		{ID: saID, Scope: store.ScopeProject, ScopeID: projectID},
 		{ID: saID, Scope: store.ScopeUser, ScopeID: tid("user-any")},
 	} {
 		d := authz.Decide(ctx, AuthzRequest{
@@ -206,10 +256,12 @@ func TestGCPServiceAccountUse_ScopeAndParentKindUnrelated(t *testing.T) {
 // TestGCPServiceAccountUse_ExplainNamesPermission pins that an explained
 // decision over this permission names it, the same as any other permission.
 func TestGCPServiceAccountUse_ExplainNamesPermission(t *testing.T) {
-	authz, _ := authzTestSetup(t)
+	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	saX := tid("sa-explain")
-	agent := newFullAgentIdentity(tid("agent-explain"), tid("project-explain"), nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+	agentID, projectID := tid("agent-explain"), tid("project-explain")
+	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+	seedPostBackfillAdminEdge(t, s, agentID, projectID)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
@@ -283,6 +335,7 @@ func TestGCPServiceAccountUse_IndependentGrantStillRestricted(t *testing.T) {
 
 	// The agent's JWT names SA X, not SA Y.
 	agent := newFullAgentIdentity(agentID, projectID, nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+	seedPostBackfillAdminEdge(t, s, agentID, projectID)
 
 	d := authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(agent),
@@ -342,12 +395,15 @@ func TestGCPServiceAccountUse_CanDelegateUnaffected(t *testing.T) {
 	}
 }
 
-// TestGCPServiceAccountUse_ScopeCapabilityNeverAdmitsUnscoped pins G4: a
+// TestGCPServiceAccountUse_ScopeCapabilityNeverAdmitsUnscoped pins that a
 // scope-level (instance-less) capability computation -- ComputeScopeCapabilities,
 // whose Resource never carries an ID -- must never report gcp_service_account.use
-// as held, no matter what per-SA scope the agent's JWT carries. Only a
-// concrete-resource capability check (ComputeCapabilities/ComputeCapabilitiesBatch
-// against one SA's own resource) can ever show it.
+// as held, no matter what per-SA scope the agent's JWT carries. No capability
+// surface enumerates this permission at all: gcp_service_account.use has no
+// CapabilityKind, so it is absent from both permissions.ResourceActions() and
+// permissions.ScopeActions() for gcp_service_account (see
+// TestGCPServiceAccountUse_CapabilitySurfaceNeverListsUse), which is the
+// property this test and that one together rely on.
 func TestGCPServiceAccountUse_ScopeCapabilityNeverAdmitsUnscoped(t *testing.T) {
 	authz, _ := authzTestSetup(t)
 	ctx := context.Background()
@@ -364,18 +420,19 @@ func TestGCPServiceAccountUse_ScopeCapabilityNeverAdmitsUnscoped(t *testing.T) {
 
 // TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath is the Registry-walk
 // regression test: exactly one permission (gcp_service_account.use) is
-// decided by the per-instance resource match, and every other registered
-// permission's agent-scope restriction behavior is byte-identical to the
-// pre-existing static AgentScopes lookup.
+// decided by the per-instance resource match, on BOTH the restriction side
+// and the request-local grant side, and every other registered permission's
+// behavior on each side is unaffected by the per-SA scope.
 func TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath(t *testing.T) {
 	saID := tid("sa-registry-walk")
-	scopes := append(append([]AgentTokenScope{}, allRegisteredAgentScopes()...), GCPTokenScopeForSA(saID))
-	agent := newFullAgentIdentity(tid("agent-registry-walk"), tid("project-registry-walk"), nil, scopes)
+	perSAScope := GCPTokenScopeForSA(saID)
+	allScopes := append(append([]AgentTokenScope{}, allRegisteredAgentScopes()...), perSAScope)
 
-	restriction := agentScopeRestriction(agent, gcpUseResource(saID))
+	perSAOnlyAgent := newFullAgentIdentity(tid("agent-registry-walk-per-sa-only"), tid("project-registry-walk"), nil, []AgentTokenScope{perSAScope})
+	allScopesAgent := newFullAgentIdentity(tid("agent-registry-walk-all-scopes"), tid("project-registry-walk"), nil, allScopes)
 
-	scopeSet := make(map[string]bool, len(scopes))
-	for _, sc := range scopes {
+	scopeSet := make(map[string]bool, len(allScopes))
+	for _, sc := range allScopes {
 		scopeSet[string(sc)] = true
 	}
 	staticAllowed := make(map[string]bool)
@@ -388,40 +445,195 @@ func TestGCPServiceAccountUse_OnlyPermissionOnPerInstancePath(t *testing.T) {
 		}
 	}
 
-	perInstanceCount := 0
+	// 1. Walk the restriction twice: per-SA-only must deny every permission
+	// except gcp_service_account.use (kills M7 -- a second permission taking
+	// the per-instance restriction path); all-scopes must match the static
+	// AgentScopes result for every permission except gcp_service_account.use.
+	perSAOnlyAllowedCount := 0
+	var perSAOnlyAllowedID string
 	for _, p := range permissions.Registry {
-		got := restriction.Check(p.ID)
+		resource := Resource{Type: p.Resource, ID: saID}
+
+		perSAOnlyGot := agentScopeRestriction(perSAOnlyAgent, resource).Check(p.ID)
 		if p.ID == permissions.PermissionGCPServiceAccountUse {
-			perInstanceCount++
-			if !got {
-				t.Errorf("%s: expected per-instance admission for the exact matching SA, got denied", p.ID)
+			if !perSAOnlyGot {
+				t.Errorf("%s: expected per-instance admission for the exact matching SA with only the per-SA scope, got denied", p.ID)
+			}
+		} else if perSAOnlyGot {
+			t.Errorf("%s: expected deny with only the per-SA scope (no static AgentScopes match), got allowed", p.ID)
+		}
+		if perSAOnlyGot {
+			perSAOnlyAllowedCount++
+			perSAOnlyAllowedID = p.ID
+		}
+
+		allScopesGot := agentScopeRestriction(allScopesAgent, resource).Check(p.ID)
+		if p.ID == permissions.PermissionGCPServiceAccountUse {
+			if !allScopesGot {
+				t.Errorf("%s: expected per-instance admission for the exact matching SA with all scopes, got denied", p.ID)
 			}
 			continue
 		}
-		if got != staticAllowed[p.ID] {
-			t.Errorf("%s: agent-scope restriction diverged from the static AgentScopes path (got %v, want %v)", p.ID, got, staticAllowed[p.ID])
+		if allScopesGot != staticAllowed[p.ID] {
+			t.Errorf("%s: agent-scope restriction diverged from the static AgentScopes path (got %v, want %v)", p.ID, allScopesGot, staticAllowed[p.ID])
 		}
 	}
-	if perInstanceCount != 1 {
-		t.Fatalf("expected exactly one permission on the per-instance path, found %d", perInstanceCount)
+
+	// 2. Walk the grant: gcpServiceAccountUseBinding must be nil for every
+	// permission except gcp_service_account.use (kills M8 -- extra
+	// permissions granted by the synthetic role). For that one permission,
+	// the returned role must hold exactly that one permission, system-scoped.
+	grantNonNilCount := 0
+	var grantNonNilID string
+	for _, p := range permissions.Registry {
+		resource := Resource{Type: p.Resource, ID: saID}
+		cb, role := gcpServiceAccountUseBinding(allScopesAgent, p.ID, resource)
+		if p.ID == permissions.PermissionGCPServiceAccountUse {
+			if cb == nil || role == nil {
+				t.Fatalf("%s: expected a request-local grant for the exact matching SA, got nil", p.ID)
+			}
+			if role.ScopeType != ScopeTypeSystem {
+				t.Errorf("%s: grant RolePermissions.ScopeType = %v, want %v", p.ID, role.ScopeType, ScopeTypeSystem)
+			}
+			if len(role.Permissions) != 1 {
+				t.Errorf("%s: grant RolePermissions.Permissions = %v, want exactly {%s}", p.ID, role.Permissions, permissions.PermissionGCPServiceAccountUse)
+			} else if _, ok := role.Permissions[permissions.PermissionGCPServiceAccountUse]; !ok {
+				t.Errorf("%s: grant RolePermissions.Permissions = %v, want exactly {%s}", p.ID, role.Permissions, permissions.PermissionGCPServiceAccountUse)
+			}
+		} else if cb != nil || role != nil {
+			t.Errorf("%s: expected no request-local grant, got cb=%v role=%v", p.ID, cb, role)
+		}
+		if cb != nil {
+			grantNonNilCount++
+			grantNonNilID = p.ID
+		}
+	}
+
+	// 3. Exactly one permission takes the grant path and exactly one takes
+	// the per-SA-only restriction path, and it is the same permission on
+	// both sides. This replaces the tautological Registry-row count: it
+	// proves which path each permission actually took.
+	if perSAOnlyAllowedCount != 1 {
+		t.Fatalf("expected exactly one permission allowed with only the per-SA scope, found %d", perSAOnlyAllowedCount)
+	}
+	if grantNonNilCount != 1 {
+		t.Fatalf("expected exactly one permission with a non-nil request-local grant, found %d", grantNonNilCount)
+	}
+	if perSAOnlyAllowedID != grantNonNilID {
+		t.Fatalf("the per-instance restriction and the request-local grant named different permissions: %q vs %q", perSAOnlyAllowedID, grantNonNilID)
+	}
+	if perSAOnlyAllowedID != permissions.PermissionGCPServiceAccountUse {
+		t.Fatalf("expected the one per-instance permission to be %s, got %s", permissions.PermissionGCPServiceAccountUse, perSAOnlyAllowedID)
 	}
 }
 
-// TestGCPServiceAccountUse_MutationIDComparisonMatters pins that
+// TestGCPServiceAccountUse_CapabilitySurfaceNeverListsUse asserts the
+// structural property that ScopeCapabilityNeverAdmitsUnscoped actually
+// relies on: no capability surface enumerates gcp_service_account.use at
+// all, because the Registry row has no CapabilityKind. "use" is absent from
+// both ResourceActions and ScopeActions for gcp_service_account.
+func TestGCPServiceAccountUse_CapabilitySurfaceNeverListsUse(t *testing.T) {
+	for _, action := range permissions.ResourceActions()[permissions.ResourceGCPServiceAccount] {
+		if action == string(ActionUse) {
+			t.Fatalf("ResourceActions()[%s] must not list %q", permissions.ResourceGCPServiceAccount, ActionUse)
+		}
+	}
+	for _, action := range permissions.ScopeActions()[permissions.ResourceGCPServiceAccount] {
+		if action == string(ActionUse) {
+			t.Fatalf("ScopeActions()[%s] must not list %q", permissions.ResourceGCPServiceAccount, ActionUse)
+		}
+	}
+}
+
+// TestGCPServiceAccountUse_ExactIDComparison pins that
 // agentGCPServiceAccountUseScopeMatch compares the exact resource ID, not
 // merely the presence of some GCP token scope. This test fails if that
-// comparison is weakened to "the agent holds ANY project:gcp:token:* scope"
-// -- confirmed manually by editing the comparison out and observing this
-// test (and TestGCPServiceAccountUse_AnotherAccountScopeDenied) fail; see
-// the dev report for this change.
-func TestGCPServiceAccountUse_MutationIDComparisonMatters(t *testing.T) {
-	saX, saY := tid("sa-mutation-x"), tid("sa-mutation-y")
-	agent := newFullAgentIdentity(tid("agent-mutation"), tid("project-mutation"), nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
+// comparison is weakened to "the agent holds ANY project:gcp:token:* scope".
+// It also pins the helper's own permission-ID guard: the same agent and
+// exact SA resource must not match for a different permission ID, and the
+// request-local grant must not be built for one either.
+func TestGCPServiceAccountUse_ExactIDComparison(t *testing.T) {
+	saX, saY := tid("sa-exact-x"), tid("sa-exact-y")
+	agent := newFullAgentIdentity(tid("agent-exact"), tid("project-exact"), nil, []AgentTokenScope{GCPTokenScopeForSA(saX)})
 
 	if !agentGCPServiceAccountUseScopeMatch(agent, permissions.PermissionGCPServiceAccountUse, gcpUseResource(saX)) {
 		t.Fatalf("expected match for the exact SA the JWT names")
 	}
 	if agentGCPServiceAccountUseScopeMatch(agent, permissions.PermissionGCPServiceAccountUse, gcpUseResource(saY)) {
 		t.Fatalf("expected no match for a different SA ID -- the ID comparison must be exact")
+	}
+	if agentGCPServiceAccountUseScopeMatch(agent, "gcp_service_account.read", gcpUseResource(saX)) {
+		t.Fatalf("expected no match for a different permission on the same SA")
+	}
+	if cb, _ := gcpServiceAccountUseBinding(agent, "gcp_service_account.read", gcpUseResource(saX)); cb != nil {
+		t.Fatalf("expected no request-local binding for a different permission")
+	}
+}
+
+// TestGCPServiceAccountUse_UserDecisionUnchanged pins that the per-SA
+// agent-credential path added by this change is gated on isAgentPrincipal
+// and so leaves a User principal's decision over gcp_service_account.use
+// unaffected: a user with no role is denied, and a system-admin user (who
+// holds every registered permission through the super-admin role) is
+// admitted, exactly as for any other permission.
+func TestGCPServiceAccountUse_UserDecisionUnchanged(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	saX := tid("sa-user-decision")
+
+	plainUserID := tid("user-plain-decision")
+	if err := s.CreateUser(ctx, &store.User{
+		ID: plainUserID, Email: "plain-decision@test.com", DisplayName: "Plain", Role: "member", Status: store.UserStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plainUser := NewAuthenticatedUser(plainUserID, "plain-decision@test.com", "Plain", "member", "api")
+
+	d := authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(plainUser),
+		Credential: credentialContextForIdentity(plainUser),
+		Resource:   gcpUseResource(saX),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+	if d.Allowed {
+		t.Fatalf("expected deny: a user with no role must not be admitted for gcp_service_account.use")
+	}
+
+	adminID := tid("admin-decision")
+	createTestUserWithRole(t, s, adminID, "admin-decision@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(adminID, "admin-decision@test.com", "Admin", "admin", "api")
+
+	d = authz.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(admin),
+		Credential: credentialContextForIdentity(admin),
+		Resource:   gcpUseResource(saX),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+	if !d.Allowed {
+		t.Fatalf("expected admission: a system-admin user holds every registered permission, denied: %s", d.Reason)
+	}
+}
+
+// TestGCPServiceAccountUse_NoBuiltInRoleGrantsIt pins that no curated
+// built-in role seeds gcp_service_account.use into a principal's effective
+// permissions. The super-admin role is exempt by construction: it lists
+// every registered permission by design, and IsSystemAdmin/checkUserHoldsPermission
+// short-circuit on super-admin status rather than walking its permission
+// list, so including it in this walk would not add a meaningful check. No
+// other role -- hub-member, hub-viewer, project-owner, project-admin,
+// project-member, or any agent role -- grants this permission, the same way
+// project-owner grants gcp_service_account.assign but not this permission.
+func TestGCPServiceAccountUse_NoBuiltInRoleGrantsIt(t *testing.T) {
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleSuperAdmin {
+			continue
+		}
+		for _, p := range role.Permissions {
+			if p == permissions.PermissionGCPServiceAccountUse {
+				t.Errorf("built-in role %q must not grant %s", role.Name, permissions.PermissionGCPServiceAccountUse)
+			}
+		}
 	}
 }

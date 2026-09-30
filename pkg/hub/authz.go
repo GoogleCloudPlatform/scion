@@ -1211,7 +1211,7 @@ func uatScopeRestriction(scopes []string) Restriction {
 
 // agentScopeRestriction builds a kernel Restriction from agent JWT token scopes.
 // Only permissions that map to the agent's declared scopes are allowed, with
-// one reviewed exception: permissions.PermissionGCPServiceAccountUse is
+// one exception: permissions.PermissionGCPServiceAccountUse is
 // decided against the specific resource this restriction was built for
 // (agentGCPServiceAccountUseScopeMatch), never against the static AgentScopes
 // map below -- see gcpServiceAccountUseBinding's doc comment for why a static
@@ -1253,7 +1253,7 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 }
 
 // agentGCPServiceAccountUseScopeMatch reports whether agent's JWT carries the
-// exact per-instance token scope that the single reviewed
+// exact per-instance token scope that the
 // gcp_service_account.use / gcp_service_account pair requires. It is the one
 // place that pair is decided, consulted by both the request-local synthetic
 // grant (gcpServiceAccountUseBinding) and the agent-scope restriction above,

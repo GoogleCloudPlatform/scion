@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -302,12 +303,9 @@ func TestAgentGCPToken_HubScopedRequiresEnforceMode(t *testing.T) {
 	assertMintAllowed(t, f)
 }
 
-// TestAgentGCPToken_AgentLookupErrorDenied: a genuine store fault on the
-// agent lookup must deny, not 500 -- every fresh mint is a new authorization
-// event, so a lookup fault must never fall through as a pass. This
-// is the pre-existing GetAgent call ahead of resolveAgentGCPMintFacts, so the
-// denial reads "agent not found", confirming the fault is caught there and
-// not silently swallowed into a 500 further down.
+// TestAgentGCPToken_AgentLookupErrorDenied pins that an agent lookup fault
+// ahead of the record recheck denies with the existing "agent not found"
+// response, rather than falling through as a pass or a 500.
 func TestAgentGCPToken_AgentLookupErrorDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "agent-lookup-err")
 	f.Server.store = &gcpMintFailingStore{Store: f.Store, getAgentErr: errors.New("injected store fault")}
@@ -364,6 +362,47 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 	require.NoError(t, err)
 	f.Token = noScopeToken
 	assertMintDenied(t, f)
+}
+
+// TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies is the
+// production-like characterization this slice pins: with the delegation-edge
+// backfill migration complete (the marker is not deleted, unlike every other
+// test in this file) and a real owner-to-agent delegation edge recorded --
+// the shape every hub-attested agent has post-backfill -- a direct decision
+// against gcp_service_account.use through the agent's own credential still
+// denies, because the delegating owner does not itself hold
+// gcp_service_account.use. The mint endpoints are unaffected by that: they
+// no longer decide this permission, so they still succeed purely on the live
+// record recheck and the exact token-scope compare this change adds. This is
+// the rule enforced: an agent's own credential can name the exact assigned
+// service account, but that is not yet composed with proof that the
+// delegating authority currently holds authority to assign it -- a separate,
+// later change closes that gap.
+func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testing.T) {
+	f := newGCPMintFixture(t, "parent-authority-pending")
+	setBackfillCompleted(t, f.Store)
+	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
+		store.RoleScopeProject, f.ProjectID, store.ProjectRoleOwner)
+
+	// The mint endpoints succeed purely on the live record and exact
+	// token-scope checks: they do not call Decide for gcp_service_account.use.
+	assertMintAllowed(t, f)
+
+	// A direct decision against the same permission, for the same agent and
+	// service account, still denies: the delegating owner (a project owner,
+	// holding gcp_service_account.assign but not gcp_service_account.use)
+	// does not satisfy the delegation ceiling for this permission.
+	agent := newFullAgentIdentity(f.AgentID, f.ProjectID, nil, []AgentTokenScope{GCPTokenScopeForSA(f.SA.ID)})
+	d := f.Server.authzService.Decide(context.Background(), AuthzRequest{
+		Principal:  principalContextForIdentity(agent),
+		Credential: credentialContextForIdentity(agent),
+		Resource:   gcpServiceAccountResource(f.SA),
+		Action:     ActionUse,
+		Permission: permissions.PermissionGCPServiceAccountUse,
+	})
+	if d.Allowed {
+		t.Fatalf("expected deny: the delegating owner does not hold gcp_service_account.use, so the parent proof is missing, got allowed: %s", d.Reason)
+	}
 }
 
 // gcpMintFailingStore wraps a store.Store and injects an error into exactly

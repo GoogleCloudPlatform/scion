@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -1016,28 +1015,22 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// agentGCPMintFacts is the resolved GCP identity assignment and the live
-// service account row behind it, once every fact a live mint depends on has
+// agentGCPMintFacts is the live service account row behind an agent's
+// assigned GCP identity, once every SA-row fact a live mint depends on has
 // been rechecked against the store for one mint request.
 type agentGCPMintFacts struct {
 	gcpID *store.GCPIdentityConfig
 	sa    *store.GCPServiceAccount
 }
 
-// resolveAgentGCPMintFacts rechecks, for one token-mint request: the agent
-// record is current (not soft-deleted), its applied GCP identity is still in
-// assign mode, the assigned service account still loads by ID, is still
-// verified under the same email, is still reachable from the agent's
-// project, and -- for a hub-scoped account -- that saAssignCheckMode is still
-// enforce. Every fresh mint is a new authorization event, so none of these
-// facts is read once and trusted for the life of the token; each mint
-// re-derives them from the store.
-//
-// A false return covers every failure in the same path, including any store
-// lookup error, so the caller renders the one denial it already had for "no
-// GCP identity assigned" -- a refusal here discloses nothing beyond what that
-// existing denial already discloses.
-func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, agentRecord *store.Agent) (*agentGCPMintFacts, bool) {
+// resolveAgentGCPAssignment rechecks the agent-side half of a token-mint
+// request: the agent record is current (not soft-deleted) and its applied
+// GCP identity is still in assign mode. It intentionally does not touch the
+// service account row -- the caller runs the token-scope compare against the
+// returned config before paying for that lookup, so that a denial from a
+// mismatched scope never depends on, and so never reveals, the assigned
+// account's current row state.
+func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCPIdentityConfig, bool) {
 	if agentRecord == nil || !agentRecord.DeletedAt.IsZero() {
 		return nil, false
 	}
@@ -1045,8 +1038,22 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, agentRecord *stor
 		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
 		return nil, false
 	}
-	gcpID := agentRecord.AppliedConfig.GCPIdentity
+	return agentRecord.AppliedConfig.GCPIdentity, true
+}
 
+// resolveAgentGCPMintFacts rechecks, for one token-mint request and after the
+// token-scope compare has already passed: the assigned service account still
+// loads by ID, is still verified under the same email, is still reachable
+// from the agent's project, and -- for a hub-scoped account -- that
+// saAssignCheckMode is still enforce. Every fresh mint is a new authorization
+// event, so none of these facts is read once and trusted for the life of the
+// token; each mint re-derives them from the store.
+//
+// A false return covers every failure in the same path, including any store
+// lookup error, so the caller renders the one denial it already had for "no
+// GCP identity assigned" -- a refusal here discloses nothing beyond what that
+// existing denial already discloses.
+func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) (*agentGCPMintFacts, bool) {
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil || sa == nil {
 		return nil, false
@@ -1054,7 +1061,7 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, agentRecord *stor
 	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified || sa.Email != gcpID.ServiceAccountEmail {
 		return nil, false
 	}
-	if !sa.ReachableFromProject(agentRecord.ProjectID) {
+	if !sa.ReachableFromProject(agentProjectID) {
 		return nil, false
 	}
 	if sa.Scope == store.ScopeHub {
@@ -1067,32 +1074,6 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, agentRecord *stor
 	}
 
 	return &agentGCPMintFacts{gcpID: gcpID, sa: sa}, true
-}
-
-// authorizeAgentGCPServiceAccountUse decides gcp_service_account.use through
-// the requesting agent's own credential. Every fresh mint is a new
-// authorization event, so this runs on every request rather than trusting
-// the static scope compare the caller already did. On denial it writes the
-// SAME response the caller's static scope check already writes, so this adds
-// no information beyond that existing denial.
-func (s *Server) authorizeAgentGCPServiceAccountUse(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) bool {
-	agentIdent := GetAgentIdentityFromContext(r.Context())
-	if s.authzService == nil || agentIdent == nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
-		return false
-	}
-	decision := s.authzService.Decide(r.Context(), AuthzRequest{
-		Principal:  principalContextForIdentity(agentIdent),
-		Credential: credentialContextForIdentity(agentIdent),
-		Resource:   gcpServiceAccountResource(sa),
-		Action:     ActionUse,
-		Permission: permissions.PermissionGCPServiceAccountUse,
-	})
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
-		return false
-	}
-	return true
 }
 
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.
@@ -1127,14 +1108,15 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Recheck the record, verification, reachability and mode facts from the
-	// store on every mint request.
-	facts, ok := s.resolveAgentGCPMintFacts(r.Context(), agentRecord)
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
 	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-	gcpID := facts.gcpID
 
 	// Verify the agent's JWT has the correct scope
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
@@ -1143,10 +1125,10 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Recheck gcp_service_account.use through the agent's own credential.
-	// Defense in depth over the static scope compare above, not a
-	// substitute for it.
-	if !s.authorizeAgentGCPServiceAccountUse(w, r, facts.sa) {
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if _, ok := s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID); !ok {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 
@@ -1217,24 +1199,25 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Recheck the record, verification, reachability and mode facts from the
-	// store on every mint request.
-	facts, ok := s.resolveAgentGCPMintFacts(r.Context(), agentRecord)
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
 	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-	gcpID := facts.gcpID
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	if !agent.HasScope(requiredScope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
 		return
 	}
 
-	// Recheck gcp_service_account.use through the agent's own credential.
-	// Defense in depth over the static scope compare above, not a
-	// substitute for it.
-	if !s.authorizeAgentGCPServiceAccountUse(w, r, facts.sa) {
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if _, ok := s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID); !ok {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 

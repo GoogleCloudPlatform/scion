@@ -81,6 +81,9 @@ func TestMaterialPermissions_Registered(t *testing.T) {
 			t.Errorf("%s: ProjectTargetApplicability = (applies=%v, reviewed=%v), want (true, true)", id, applies, reviewed)
 		}
 	}
+	if _, ok := byID[permissions.PermissionGCPServiceAccountUse]; !ok {
+		t.Errorf("no Registry row has ID %q (permissions.PermissionGCPServiceAccountUse)", permissions.PermissionGCPServiceAccountUse)
+	}
 }
 
 // TestMaterialPermissions_AgentScopeMappingExplicit pins the explicit
