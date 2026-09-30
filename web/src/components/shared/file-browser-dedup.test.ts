@@ -66,7 +66,8 @@ function makeControlledSource(label: string) {
   return {
     source,
     listFiles,
-    resolve: (files: string[] = []) => resolveFn?.({ files: files.map(makeEntry), totalSize: 0, totalCount: files.length }),
+    resolve: (files: string[] = []) =>
+      resolveFn?.({ files: files.map(makeEntry), totalSize: 0, totalCount: files.length }),
   };
 }
 
@@ -107,8 +108,13 @@ describe('scion-file-browser — one initial listing per data source', () => {
     const el = new FileBrowserCtor();
     document.body.appendChild(el);
     await el.updateComplete;
+    await el.updateComplete;
 
-    expect((el as { loading: boolean }).loading).toBe(false);
+    // loadFiles() always increments _loadToken before doing anything else,
+    // so a token still at its initial value of 0 is direct proof no load
+    // was ever started (loading === false alone would also be true after
+    // an unrelated load already finished, so it doesn't prove this).
+    expect((el as unknown as { _loadToken: number })._loadToken).toBe(0);
   });
 
   it('loads correctly when the data source changes to a new source', async () => {
@@ -227,5 +233,103 @@ describe('scion-file-browser — one initial listing per data source', () => {
     // The stale rejection must not surface as an error over the newer, good state.
     expect((el as { error: string | null }).error).toBeNull();
     expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['ok.txt']);
+  });
+
+  it('reloads when the data source is cleared to null and reassigned to the same instance', async () => {
+    const { source, listFiles } = makeImmediateSource('a', ['foo.txt']);
+
+    const el = new FileBrowserCtor();
+    el.dataSource = source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(listFiles).toHaveBeenCalledTimes(1);
+
+    // Clear the data source, then reassign the exact same instance. Without
+    // resetting on null, _requestedSource would still equal `source` and
+    // this reassignment would be silently treated as "already requested".
+    el.dataSource = null;
+    await el.updateComplete;
+    expect((el as { files: FileEntry[] }).files).toEqual([]);
+
+    el.dataSource = source;
+    await el.updateComplete;
+    await el.updateComplete;
+
+    expect(listFiles).toHaveBeenCalledTimes(2);
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['foo.txt']);
+  });
+
+  it('invalidates an in-flight request when the data source is cleared before it resolves', async () => {
+    const slow = makeControlledSource('slow');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = slow.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    el.dataSource = null;
+    await el.updateComplete;
+
+    // The in-flight response for the cleared source must not repopulate
+    // state after the fact.
+    slow.resolve(['stale.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files).toEqual([]);
+    expect((el as { loading: boolean }).loading).toBe(false);
+  });
+
+  it('reconnects to a different data source assigned while detached (not the pre-disconnect one)', async () => {
+    const first = makeImmediateSource('a', ['foo.txt']);
+    const second = makeImmediateSource('b', ['bar.txt']);
+
+    const el = new FileBrowserCtor();
+    el.dataSource = first.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(first.listFiles).toHaveBeenCalledTimes(1);
+
+    document.body.removeChild(el);
+    el.dataSource = second.source; // changed while detached
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+
+    expect(second.listFiles).toHaveBeenCalledTimes(1);
+    expect(first.listFiles).toHaveBeenCalledTimes(1); // not reloaded
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['bar.txt']);
+  });
+
+  it('coalesces a disconnect/reconnect that happens before the initial request resolves', async () => {
+    const slow = makeControlledSource('slow');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = slow.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    // Disconnect and immediately reconnect with the same (still-loading)
+    // data source, before the in-flight request resolves.
+    document.body.removeChild(el);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+
+    // The reconnect must not have fired a second request for the same
+    // still-in-flight source.
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    slow.resolve(['foo.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['foo.txt']);
   });
 });

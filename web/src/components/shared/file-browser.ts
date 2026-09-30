@@ -578,19 +578,26 @@ export class ScionFileBrowser extends LitElement {
 
   /**
    * The data source instance an initial load has already been requested for.
-   * Reset on disconnect so reconnecting triggers exactly one fresh load, but
-   * left set across the connectedCallback → first updated() pair so that
-   * pairing does not issue a second request for the same source.
+   * Reset on disconnect (and when dataSource is cleared) so reconnecting, or
+   * a later reassignment, triggers a fresh load.
    */
   private _requestedSource: FileBrowserDataSource | null = null;
 
   /**
    * Monotonically increasing token identifying the most recently started
-   * load. Incremented on every loadFiles() call (initial or explicit
-   * refresh) so a superseded in-flight request can recognize it is stale
-   * and avoid overwriting newer results.
+   * load. Incremented whenever a load is started or invalidated, so a
+   * superseded in-flight request can recognize it is stale and avoid
+   * overwriting newer results.
    */
   private _loadToken = 0;
+
+  /**
+   * The data source a loadFiles() call is currently in flight for, if any.
+   * Lets _requestInitialLoad() coalesce into that request instead of firing
+   * a duplicate one — e.g. disconnecting and immediately reconnecting while
+   * the initial request for the same source hasn't resolved yet.
+   */
+  private _inFlightSource: FileBrowserDataSource | null = null;
 
   static override styles = css`
     :host {
@@ -843,9 +850,33 @@ export class ScionFileBrowser extends LitElement {
    * changes (e.g. switching tabs) or the component reconnects.
    */
   private _requestInitialLoad(): void {
-    if (!this.dataSource) return;
+    if (!this.dataSource) {
+      // The data source was cleared. Reset dedup state so a future
+      // reassignment reloads — including reassigning the very same
+      // instance, which _requestedSource would otherwise still remember as
+      // "already requested" — and invalidate any request still in flight
+      // for the old source so it can't land after we've moved on.
+      if (this._requestedSource !== null) {
+        this._requestedSource = null;
+        this._loadToken++;
+        this.files = [];
+        this.totalSize = 0;
+        this.totalCount = 0;
+        this.initialHasMore = false;
+        this.providerCount = 0;
+        this.loading = false;
+        this.error = null;
+      }
+      return;
+    }
     if (this._requestedSource === this.dataSource) return;
     this._requestedSource = this.dataSource;
+    if (this._inFlightSource === this.dataSource) {
+      // A load for this exact source is already in flight (e.g. we just
+      // disconnected and reconnected before it resolved) — let it finish
+      // rather than firing a duplicate request for the same data.
+      return;
+    }
     void this.loadFiles();
   }
 
@@ -854,6 +885,7 @@ export class ScionFileBrowser extends LitElement {
     if (!this.dataSource) return;
     const source = this.dataSource;
     const token = ++this._loadToken;
+    this._inFlightSource = source;
     this.loading = true;
     this.error = null;
 
@@ -876,6 +908,9 @@ export class ScionFileBrowser extends LitElement {
       console.error('Failed to load files:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load files';
     } finally {
+      if (this._inFlightSource === source) {
+        this._inFlightSource = null;
+      }
       if (token === this._loadToken) {
         this.loading = false;
       }
