@@ -112,7 +112,7 @@ jobs:
           # reason as Check Authorization Guards above: make would collapse
           # the script's exit 1 (a harness is out of sync, ptone/scion#2357)
           # and exit 2 (could not run, e.g. no PyYAML) into one code.
-          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; } || true
           set +e
           ./image-build/scripts/check-harness-coverage.sh
           rc=$?
