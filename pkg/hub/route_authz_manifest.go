@@ -188,6 +188,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/health/summary":               "admin", // Health summary
 	"/api/v1/admin/messaging":                    "admin", // Admin messaging
 	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
+	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -248,6 +249,7 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public": "authenticated", // Public settings — requires session despite name
+	"/api/v1/experiments":     "authenticated", // Resolved experiment map — any signed-in identity (#2217)
 
 	// ── GitHub App integration (method-scoped) ────────────────────────
 	"GET /api/v1/github-app":                         "authenticated", // Get GitHub App config
