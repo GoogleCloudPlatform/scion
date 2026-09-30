@@ -412,6 +412,51 @@ class MCPTomlWriteTest(unittest.TestCase):
                 self.assertNotIn("bad.name", content)
                 self.assertNotIn("also bad", content)
 
+    def test_write_mcp_toml_strips_old_section_with_trailing_comment(self) -> None:
+        # Repro case 1 from generalization-findings.md: a header with a
+        # trailing comment (e.g. hand-edited) must still be recognized, or
+        # re-writing the same table produces a duplicate
+        # ('Cannot declare... twice').
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write('[mcp_servers.foo] # added by user\ncommand = "old-cmd"\n')
+                provision._write_mcp_toml(ctx, {"foo": {"command": "new-cmd"}})
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["mcp_servers"]["foo"]["command"], "new-cmd")
+
+    def test_write_mcp_toml_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
+        # write_toml_if_preserves backstop: a header-shaped line inside a
+        # top-level multi-line string must not be silently corrupted.
+        original = (
+            'notes = """\n'
+            "[mcp_servers.fake]\n"
+            'command = "not real"\n'
+            '"""\n'
+            "[other]\n"
+            "k = 1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                provision._write_mcp_toml(ctx, {"real": {"command": "x"}})
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
+        self.assertEqual(len(warnings), 1)
+
 
 # ---------------------------------------------------------------------------
 # Config Hardening Tests
@@ -489,6 +534,60 @@ class ConfigHardeningTest(unittest.TestCase):
                 self.assertEqual(content.count("# BEGIN SCION MANAGED"), 1)
                 self.assertEqual(content.count("# END SCION MANAGED"), 1)
                 self.assertIn("auto_update = false", content)
+
+    def test_hardening_handles_template_overlay_section_with_trailing_comment(self) -> None:
+        # Regression test for the real bug reproduced in
+        # generalization-findings.md ("grok real" row): a template-home
+        # overlay's ~/.grok/config.toml can legitimately contain
+        # `[features] # <comment>` (e.g. hand-annotated or copied from
+        # another config). The old naive strip_toml_sections didn't
+        # recognize the commented header, so appending the hardening
+        # block's own `[features]` table produced invalid TOML
+        # ("Cannot declare ('features',) twice"). It must now produce a
+        # single, valid [features] table.
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write("[features] # template overlay\ntelemetry = true\n")
+                provision._harden_config(ctx)
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["features"]["telemetry"], False)
+        self.assertNotIn("BEGIN SCION MANAGED", data)
+
+    def test_hardening_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
+        # write_toml_if_preserves backstop: a header-shaped line inside a
+        # top-level multi-line string is the documented residual gap of
+        # strip_toml_sections (not a full TOML tokenizer). The edit must be
+        # rejected and the original file left on disk, not silently
+        # corrupted.
+        original = (
+            'notes = """\n'
+            "[cli]\n"
+            "looks like a header but isn't\n"
+            '"""\n'
+            "[other]\n"
+            "k = 1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                provision._harden_config(ctx)
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
+        self.assertEqual(len(warnings), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +880,97 @@ class ResolveEndpointOsEnvTest(BaseTelemetryTest):
         os.environ["SCION_GROK_BUILD_OTEL_ENDPOINT"] = "http://from-os-env:4317"
         env = {"SCION_GROK_BUILD_OTEL_ENDPOINT": "http://from-overlay:4317"}
         self.assertEqual(provision._resolve_endpoint(env), "http://from-overlay:4317")
+
+
+# ---------------------------------------------------------------------------
+# Vertex config TOML writers: validate-before-write regression tests
+# ---------------------------------------------------------------------------
+
+
+class VertexConfigTomlWriteTest(unittest.TestCase):
+    """Direct tests of _write_vertex_config / _write_vertex_model_alias's
+    TOML editing, independent of vertex-ai auth selection/env resolution
+    (covered by VertexAIAuthTest below)."""
+
+    _old_grok_home: str | None
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._old_grok_home = os.environ.pop("GROK_HOME", None)
+
+    def tearDown(self) -> None:
+        if self._old_grok_home is not None:
+            os.environ["GROK_HOME"] = self._old_grok_home
+        else:
+            os.environ.pop("GROK_HOME", None)
+        super().tearDown()
+
+    def test_write_vertex_config_strips_header_whitespace_variant(self) -> None:
+        # Repro case 4 from generalization-findings.md: `[ models ]` (legal
+        # TOML whitespace) must still be recognized by the exact-string
+        # predicate `line == "[models]"`, or the stale table survives
+        # alongside the freshly-appended one ('Cannot declare... twice').
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write('[ models ]\ndefault = "stale"\n')
+                provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(data["models"]["default"], "vertex-grok")
+
+    def test_write_vertex_config_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
+        original = (
+            'notes = """\n'
+            "[models]\n"
+            "looks like a header but isn't\n"
+            '"""\n'
+            "[other]\n"
+            "k = 1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
+        self.assertEqual(len(warnings), 1)
+
+    def test_write_vertex_model_alias_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                provision._write_vertex_config(ctx, "https://example/v1", "xai/grok-4.6")
+                with open(config_path) as f:
+                    baseline = f.read()
+                original = (
+                    baseline
+                    + '\nnotes = """\n[model."grok-4.2"]\nlooks like a header but isn\'t\n"""\n'
+                )
+                with open(config_path, "w") as f:
+                    f.write(original)
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+                provision._write_vertex_model_alias(ctx, "https://example/v1", "xai/grok-4.6", "grok-4.2")
+                with open(config_path) as f:
+                    after = f.read()
+        self.assertEqual(after, original, "file must be left untouched when the edit doesn't preserve content")
+        self.assertEqual(len(warnings), 1)
 
 
 # ---------------------------------------------------------------------------

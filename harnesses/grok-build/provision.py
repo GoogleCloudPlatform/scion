@@ -307,7 +307,10 @@ default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
         content += "\n\n"
     content += vertex_toml + "\n"
 
-    scion_harness.atomic_write_text(config_path, content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, content,
+        managed_keys={"auth_provider", "model", "models"},
+    )
 
 
 def _write_vertex_model_alias(
@@ -327,12 +330,12 @@ def _write_vertex_model_alias(
         return  # _write_vertex_config should have created it
 
     with open(config_path, "r", encoding="utf-8") as f:
-        content = f.read()
+        original = f.read()
 
     # Strip any existing block with this alias name to avoid duplicates.
     escaped_alias = scion_harness.toml_escape(alias_name)
     content = scion_harness.strip_toml_sections(
-        content,
+        original,
         lambda line: (
             line == f'[model."{escaped_alias}"]'
             or line == f"[model.{alias_name}]"
@@ -350,8 +353,10 @@ api_backend = "chat_completions"
 supports_backend_search = false'''
 
     content = content.rstrip("\n") + "\n" + alias_toml + "\n"
-    scion_harness.atomic_write_text(config_path, content)
-    ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
+    if scion_harness.write_toml_if_preserves(
+        ctx, config_path, original, content, managed_keys={"model"}
+    ):
+        ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +416,9 @@ def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]
     elif new_content:
         new_content += "\n"
 
-    scion_harness.atomic_write_text(config_path, new_content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, new_content, managed_keys={"mcp_servers"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +482,10 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
         content += "\n\n"
     content += _HARDENING_TOML + "\n"
 
-    scion_harness.atomic_write_text(config_path, content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, content,
+        managed_keys={"cli", "features", "memory", "subagents"},
+    )
 
 
 # ---------------------------------------------------------------------------
