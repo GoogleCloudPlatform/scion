@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -580,6 +581,81 @@ func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
 			err := rootCmd.Execute()
 			require.NoError(t, err)
 			assert.Contains(t, buf.String(), "Commands for interacting with a remote Scion Hub")
+		})
+	}
+}
+
+// TestFormatProviderCapacity covers the display rules for a provider's
+// broker capacity (ptone/scion#2161): "count/limit" when the broker has an
+// effective limit, just the count when it's unlimited, and a dash when the
+// hub reports no capacity for this provider.
+func TestFormatProviderCapacity(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: "12/12",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: "5",
+		},
+		{
+			name: "count known and zero, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(0), AgentLimit: nil},
+			want: "0",
+		},
+		{
+			name: "neither known: no capacity reported",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: "-",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, formatProviderCapacity(tc.p))
+		})
+	}
+}
+
+// TestProviderCapacityIndicator covers the labeled, parenthesized suffix
+// `scion hub projects info` appends after a provider's status line (e.g.
+// " (agents: 12/12)"), so the value isn't shown as a bare, unlabeled number
+// next to the status and default indicators (ptone/scion#2161).
+func TestProviderCapacityIndicator(t *testing.T) {
+	i64 := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name string
+		p    hubclient.ProjectProvider
+		want string
+	}{
+		{
+			name: "count and limit known",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12)},
+			want: " (agents: 12/12)",
+		},
+		{
+			name: "count known, unlimited",
+			p:    hubclient.ProjectProvider{AgentCount: i64(5), AgentLimit: nil},
+			want: " (agents: 5)",
+		},
+		{
+			name: "neither known: no capacity reported",
+			p:    hubclient.ProjectProvider{AgentCount: nil, AgentLimit: nil},
+			want: " (agents: -)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, providerCapacityIndicator(tc.p))
 		})
 	}
 }
