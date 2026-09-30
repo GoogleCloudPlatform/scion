@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -318,6 +319,13 @@ type ServerConfig struct {
 	// the AuditRetentionDays pattern. Zero or negative falls back to the
 	// default rather than disabling the sweep.
 	FailedMessageRetentionDays int
+
+	// Experiments is the compiled experiments registry used to resolve
+	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
+	// every reader goes through the nil-safe Server.experimentRegistry(),
+	// which falls back to experiments.Default(). Tests that need a
+	// server-layer experiment inject their own registry here (ptone/scion#2217).
+	Experiments *experiments.Registry
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -1168,6 +1176,11 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+
+	// experiments is the compiled feature-flag registry (pkg/experiments).
+	// Nil in production and in most tests; always read through the
+	// nil-safe experimentRegistry() accessor, never directly.
+	experiments *experiments.Registry
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1869,6 +1882,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("GE Google exchange service initialized",
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
+
+	srv.experiments = cfg.Experiments
 
 	srv.registerRoutes()
 

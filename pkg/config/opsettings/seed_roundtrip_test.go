@@ -15,6 +15,7 @@
 package opsettings_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -85,5 +86,36 @@ func TestSeedEquivalentRoundTrip_TelemetrySpecific(t *testing.T) {
 	}
 	if seedK.Exists("server.telemetry.enabled") {
 		t.Error("SCION_SEED_TELEMETRY_ENABLED should NOT map to server.telemetry.enabled")
+	}
+}
+
+// TestExperimentsSectionSkippedBySeeding verifies that the experiments
+// section, like messaging and maintenance, has KoanfPaths == nil and is
+// therefore invisible to seeding: ExtractSectionFromKoanf returns an empty
+// document regardless of what the bootstrap koanf contains (ptone/scion#2217).
+func TestExperimentsSectionSkippedBySeeding(t *testing.T) {
+	sec := opsettings.SectionByName("experiments")
+	if sec == nil {
+		t.Fatal("experiments section not registered")
+	}
+	if sec.KoanfPaths != nil {
+		t.Fatalf("experiments section has KoanfPaths %v, want nil (DB-only, seeding skips it)", sec.KoanfPaths)
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"web.terminal_workspace": false,
+	}, "."), nil)
+
+	raw, err := opsettings.ExtractSectionFromKoanf(k, "experiments")
+	if err != nil {
+		t.Fatalf("ExtractSectionFromKoanf: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc (seeding skipped), got %v", doc)
 	}
 }

@@ -19,6 +19,8 @@
 package opsettings
 
 import (
+	"encoding/json"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -175,4 +177,34 @@ type MessagingSettings struct {
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
 	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
+}
+
+// ExperimentsSettings stores only explicit admin overrides for the
+// pkg/experiments registry. An absent key means "use the registry default".
+// Absent row = no overrides.
+//
+// DB-only (runtime state), no settings.yaml representation: experiment names
+// contain dots, and koanf uses "." as its key delimiter, so a koanf-backed
+// map keyed by experiment name would split "web.terminal_workspace" into
+// nested keys (ptone/scion#2217).
+type ExperimentsSettings struct {
+	Overrides map[string]bool `json:"overrides,omitempty"`
+}
+
+// ParseExperimentsDoc applies exactly the Refresh/Update malformed predicate
+// (operational_settings.go): malformed = the raw bytes are not valid JSON, or
+// they do not unmarshal into ExperimentsSettings. Schema validity is
+// deliberately NOT part of this predicate — a parseable but schema-invalid
+// document (e.g. an extra top-level key) is not "malformed" in this sense,
+// even though Validate rejects it on write. Refresh and Update keep their
+// generic check through sec.New(), which is the same predicate for this
+// struct; ReadAuthoritativeExperiments calls this function directly.
+func ParseExperimentsDoc(raw json.RawMessage) (doc ExperimentsSettings, malformed bool) {
+	if !json.Valid(raw) {
+		return ExperimentsSettings{}, true
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ExperimentsSettings{}, true
+	}
+	return doc, false
 }
