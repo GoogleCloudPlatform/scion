@@ -258,6 +258,31 @@ def _strip_toml_top_level_key(content: str, key: str) -> str:
     return "\n".join(kept)
 
 
+def _insert_toml_top_level_line(content: str, line: str) -> str:
+    """Insert a top-level `key = value` line before the first table header.
+
+    TOML requires top-level keys to precede every `[table]`/`[[array-of-
+    tables]]` header; a key appended after one is parsed as belonging to
+    that table instead of being a top-level key. Appending at EOF used to
+    land `model`/`model_reasoning_effort` inside whatever table happened to
+    be last in the file (e.g. `[projects."/workspace"]`), which both had no
+    effect on codex and produced a duplicate-key TOML parse error on the
+    next provision, since `_strip_toml_top_level_key` only looks at
+    top-level lines and can't find (or remove) the misplaced copy
+    (ptone/scion#2365). Inserting here keeps the reconcile idempotent: the
+    next call's strip finds this line at top level and removes it cleanly
+    before a fresh copy is inserted in the same place.
+    """
+    lines = content.split("\n")
+    insert_at = len(lines)
+    for i, existing in enumerate(lines):
+        if existing.strip().startswith("["):
+            insert_at = i
+            break
+    lines.insert(insert_at, line)
+    return "\n".join(lines)
+
+
 def _reconcile_codex_toml(
     telemetry: dict[str, Any] | None,
     env: dict[str, str] | None,
@@ -278,11 +303,11 @@ def _reconcile_codex_toml(
 
     if model:
         model_line = f'model = "{scion_harness.toml_escape(model)}"'
-        content = content.rstrip("\n\t ") + "\n" + model_line + "\n"
+        content = _insert_toml_top_level_line(content, model_line)
 
     if reasoning_effort:
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
-        content = content.rstrip("\n\t ") + "\n" + re_line + "\n"
+        content = _insert_toml_top_level_line(content, re_line)
 
     section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
                else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
@@ -418,6 +443,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     model = os.environ.get("SCION_MODEL", "").strip()
     if model:
         ctx.info(f"model={model}")
+    else:
+        ctx.info("model=<unset>, falling back to codex's own built-in default")
 
     _reconcile_codex_toml(
         telemetry if isinstance(telemetry, dict) else None,

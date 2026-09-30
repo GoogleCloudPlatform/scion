@@ -503,6 +503,13 @@ func extractAuthMeta(hc *store.HarnessConfig, dir string) {
 // Config.ModelAliases (e.g. via the harness-config API) survives a re-sync
 // of a config.yaml that doesn't mention that field. This mirrors the
 // contract already exercised by TestSyncHarnessConfig_PreservesTypedConfig.
+//
+// One consequence: deleting model_aliases (or model) from config.yaml does
+// NOT clear the stored value — the record keeps resolving with the last
+// aliases it saw. If stale-alias drift shows up again, check whether
+// config.yaml actually still declares model_aliases before assuming this
+// stamping is broken; an intentional removal needs an explicit clear (e.g.
+// a hub-side PATCH), not just deleting the key from config.yaml.
 func extractModelConfig(hc *store.HarnessConfig, dir string) {
 	if dir == "" {
 		return

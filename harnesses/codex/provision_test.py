@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import importlib.util
 import tempfile
+import tomllib
 import unittest
 from contextlib import contextmanager
 
@@ -402,6 +403,79 @@ class CodexProvisionTest(unittest.TestCase):
                     content = f.read()
                 self.assertIn('model = "gpt-6.1-sol"', content)
                 self.assertIn('model_reasoning_effort = "high"', content)
+
+    def test_reconcile_codex_toml_writes_model_and_reasoning_effort_at_top_level_with_tables_present(self) -> None:
+        # Regression test for ptone/scion#2365 review round 1 (C1): the
+        # shipped home/.codex/config.toml has [features], [[hooks...]], and
+        # [projects."/workspace"] tables. Appending at EOF used to land
+        # `model`/`model_reasoning_effort` inside the last table instead of
+        # at the top level, where codex never reads them. Seed the real
+        # shipped fixture (not an empty file) so a regression to
+        # end-of-file appending is actually caught by tomllib parsing the
+        # wrong table.
+        real_config_path = os.path.join(os.path.dirname(__file__), "home", ".codex", "config.toml")
+        with open(real_config_path, "r", encoding="utf-8") as f:
+            real_config = f.read()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(real_config)
+
+                provision._reconcile_codex_toml(None, None, model="gpt-6.1-sol", reasoning_effort="high")
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+
+        self.assertEqual(data["model"], "gpt-6.1-sol")
+        self.assertEqual(data["model_reasoning_effort"], "high")
+        # And not misfiled into the trailing table.
+        self.assertNotIn("model", data.get("projects", {}).get("/workspace", {}))
+        self.assertNotIn("model_reasoning_effort", data.get("projects", {}).get("/workspace", {}))
+
+    def test_reconcile_codex_toml_idempotent_across_reprovision_with_tables_present(self) -> None:
+        # Regression test for ptone/scion#2365 review round 1 (C1): pre-start
+        # hooks re-run provision.py on every container start against the
+        # same persisted agent home, so a second reconcile must not produce
+        # a duplicate top-level key (which broke TOML parsing entirely).
+        real_config_path = os.path.join(os.path.dirname(__file__), "home", ".codex", "config.toml")
+        with open(real_config_path, "r", encoding="utf-8") as f:
+            real_config = f.read()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(real_config)
+
+                provision._reconcile_codex_toml(None, None, model="gpt-6.1-sol", reasoning_effort="high")
+                # Second provision (e.g. a container restart) resolves a
+                # different model; must still parse and reflect only the
+                # latest value, not a duplicate key.
+                provision._reconcile_codex_toml(None, None, model="gpt-6-astra", reasoning_effort="medium")
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+
+        self.assertEqual(data["model"], "gpt-6-astra")
+        self.assertEqual(data["model_reasoning_effort"], "medium")
+
+    def test_insert_toml_top_level_line_appends_when_no_table_header(self) -> None:
+        result = provision._insert_toml_top_level_line('other_key = "value"\n', 'model = "x"')
+        self.assertEqual(result, 'other_key = "value"\n\nmodel = "x"')
+
+    def test_insert_toml_top_level_line_lands_before_first_table_header(self) -> None:
+        content = 'other_key = "value"\n[features]\nhooks = true\n'
+        result = provision._insert_toml_top_level_line(content, 'model = "x"')
+        lines = result.split("\n")
+        model_idx = lines.index('model = "x"')
+        section_idx = lines.index("[features]")
+        self.assertLess(model_idx, section_idx)
 
     def test_strip_toml_top_level_key_section_safety(self) -> None:
         content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
