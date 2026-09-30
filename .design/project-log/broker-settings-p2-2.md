@@ -34,6 +34,11 @@ merged), started from its head `0875d543a658cd77e7a9ec92ba42436878aa0839`. Desig
   ActionRead)` filter, so a caller sees a broker's capacity exactly when they already see that
   broker row — the same rule the providers listing follows ("this change grants no new read access,
   it only adds fields to an existing, already-authorized response").
+- **`getUsageSummary` (`handleAdminUsage`, `pkg/hub/handlers_quota.go`)**: the admin usage summary's
+  `activeCount` for `max_agents_per_broker` now sums reservations across every runtime broker via the
+  same `listBrokerScopedActiveReservations` helper `getUsageByLimit` uses, instead of the
+  `store.QuotaScopeSystem` query that always returned 0 for this limit. (Added in review round 1 —
+  see "Review round 1" below.)
 - **Web**: `admin-quotas.ts`'s "Active Usage" detail panel shows each broker-scoped reservation's
   effective cap and source next to the reserved count (falls back to "unlimited" when the source is
   reported but the limit is omitted). `brokers.ts` gains an "Agents / Cap" column (table view) and a
@@ -47,25 +52,36 @@ merged), started from its head `0875d543a658cd77e7a9ec92ba42436878aa0839`. Desig
 
 ## Scoping decisions (raised here, not treated as blockers)
 
-- **`getUsageSummary` (`handleAdminUsage`) and `getMyUsage` (`handleUsageMe`) were left unchanged.**
-  The brief listed both as "as applicable" alongside `getUsageByLimit`. `getUsageSummary` reports one
-  aggregate `activeCount` per limit definition across every scope — there is no single "broker" or
-  "source" to attach at that granularity (a hub can have many brokers with different overrides under
-  the same limit), so the brief's "per-broker effective limit and its source" doesn't map onto that
-  response shape. It has the same `QuotaScopeSystem`-only counting gap as `getUsageByLimit` did (its
-  `activeCount` for `max_agents_per_broker` is always 0, for the identical reason), but fixing that is
-  an aggregate-counting bug, not a "per-broker row" concern, and the brief's own test list only
-  describes per-broker source/limit assertions that `getUsageByLimit` (individual reservation rows)
-  satisfies. Flagging it here as a real, separate gap for the EM/reviewers to route (possibly P2.3 or
-  its own fix) rather than folding an uncalled-for aggregate-counting change into this PR.
-  `getMyUsage` resolves a *user's* effective limit at system scope; `max_agents_per_broker` has no
-  per-user identity to resolve against a specific broker, so there is no broker-scoped row to enrich
-  there either.
+- **`getMyUsage` (`handleUsageMe`) was left unchanged**, after the EM asked to confirm whether it has
+  "the same zero-count bug" as `getUsageByLimit`/`getUsageSummary` did. It does show `current: 0` for
+  `max_agents_per_broker` for every user, always — but the root cause is different, not the same bug:
+  `getMyUsage` calls `CountActiveReservations(ctx, def.ID, userID, QuotaScopeSystem, "")`, filtering
+  on `subjectID = userID`. `max_agents_per_broker` reservations are always created with
+  `SubjectID = brokerID` (`broker_quota.go`), never a user ID, so no reservation can ever match this
+  query regardless of which scope is queried — summing across brokers "the same way" would not fix a
+  scope mismatch here, it would silently replace "this user's own usage" with "the whole system's
+  broker usage" attributed to one user, which misrepresents what `/usage/me` (a personal-usage
+  endpoint) means. Recommending this be left alone, or that `max_agents_per_broker` be excluded from
+  `/usage/me` entirely (it isn't a per-user quota) — the current 0 is at least not misleading in the
+  way a borrowed system-wide count would be. Left as-is pending the EM's call; said so explicitly
+  rather than applying the literal instruction where the precondition ("the same bug") didn't hold.
 - **Visibility rule for the brokers list mapped cleanly onto the providers-listing rule** (brief item
   3's "if it doesn't map cleanly, ask the EM first"): both listings already gate the entire row behind
   a read-capability/permission check before any capacity field is computed, so adding the fields
   inside that existing gate — with no new check — reproduces the providers listing's "no new read
   access" property exactly. No EM escalation was needed.
+
+## Review round 1
+
+The EM asked to fold in the `getUsageSummary` fix rather than leave it as a flagged gap (my initial
+read was that it was aggregate-only and out of the brief's "per-broker row" scope; the EM's call was
+that a summary permanently showing 0 active agents is exactly the display bug P2.2 exists to fix, scope
+question aside). Fixed by reusing `listBrokerScopedActiveReservations` for `max_agents_per_broker` in
+`getUsageSummary` too, with two new tests
+(`TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`,
+`TestGetUsageSummary_NonBrokerLimit_Unaffected`). Investigated `getMyUsage` per the EM's conditional
+ask and found a related but distinct bug (see above) — left unchanged and reported rather than assumed
+"fix it the same way" applied.
 
 ## Tests
 
@@ -88,6 +104,10 @@ merged), started from its head `0875d543a658cd77e7a9ec92ba42436878aa0839`. Desig
   doesn't see that broker's row at all, capacity fields included.
 - `TestListRuntimeBrokers_OneLimitDefinitionLookupPerListing`: a counting store wrapper asserts
   `GetLimitDefinitionByName` is called exactly once for a three-broker listing.
+- `TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`: two reservations on one broker, one on
+  another; the summary's `activeCount` for `max_agents_per_broker` must be 3, not 0.
+- `TestGetUsageSummary_NonBrokerLimit_Unaffected`: a system-scoped limit's summary count is unaffected
+  by the broker-scoped enumeration.
 
 ## Verification
 
