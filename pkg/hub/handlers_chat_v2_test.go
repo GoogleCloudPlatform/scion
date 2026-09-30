@@ -938,7 +938,8 @@ func TestChatV2_ConversationRead(t *testing.T) {
 // TestChatV2_ConversationRead_RejectsUnknownMessageID: a client that POSTs
 // an optimistic send's temporary idempotency-key ID (never persisted) as the
 // read watermark must be rejected, not silently accepted as if it were a
-// real message.
+// real message. Also covers a malformed (non-UUID) ID, which takes the same
+// store.ErrNotFound path via entadapter.parseGetID.
 func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 	srv, _, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -964,6 +965,24 @@ func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 	}
 	if rs != nil && rs.LastReadMessageID != "" {
 		t.Errorf("read state should not have been written for a rejected ID, got %+v", rs)
+	}
+
+	// A malformed (non-UUID) ID must also be rejected as 400, not 500:
+	// entadapter.parseGetID returns store.ErrNotFound for anything that
+	// doesn't parse as a UUID, which the handler treats the same as a
+	// genuinely missing message.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-reject/read",
+		map[string]string{"messageId": "not-a-uuid"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a malformed (non-UUID) message ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err = wcs.GetReadState(ctx, DevUserID, "topic-reject")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written for a malformed ID, got %+v", rs)
 	}
 }
 
