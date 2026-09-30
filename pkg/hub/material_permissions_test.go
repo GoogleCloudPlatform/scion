@@ -388,7 +388,7 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testin
 func TestAgentToken_CannotSatisfyDeliveryPermission(t *testing.T) {
 	agent := newFullAgentIdentity(tid("deliver-scope-agent"), tid("deliver-scope-project"),
 		[]string{tid("deliver-scope-user")}, allRegisteredAgentScopes())
-	restriction := agentScopeRestriction(agent)
+	restriction := agentScopeRestriction(agent, Resource{})
 	for _, id := range []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver"} {
 		if restriction.Check(id) {
 			t.Errorf("agent JWT scope restriction unexpectedly allows %q even with every registered scope present", id)

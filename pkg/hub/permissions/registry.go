@@ -79,6 +79,16 @@ const (
 	ActionDeliver = "deliver"
 	ActionUse     = "use"
 
+	// PermissionGCPServiceAccountUse is the gcp_service_account.use
+	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
+	// this one permission keys off a constant rather than a literal string.
+	// The Registry row below keeps its ID as the literal string, not this
+	// constant: pkg/hub/authzop/catalog_test.go reads registry.go as text
+	// and extracts each row's ID from the first quoted string after "{ID:",
+	// so an identifier there would parse as no ID at all. TestMaterialPermissions_Registered
+	// pins the two against each other.
+	PermissionGCPServiceAccountUse = "gcp_service_account.use"
+
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
 	UATScopeTemplateManage      = "template:manage"
@@ -301,15 +311,16 @@ var Registry = []Permission{
 	// grant required for the selected item.
 	// secret.use governs an agent's own runtime retrieval and is admitted
 	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
-	// has no AgentScopes: the GCP token scope is per service account
-	// (project:gcp:token:<sa-id>) and cannot be matched statically, so no
-	// credential satisfies it until the slice that wires the token-mint
-	// check adds that mapping.
+	// keeps AgentScopes nil: the GCP token scope names one service account
+	// instance (project:gcp:token:<sa-id>), so its agent-credential admission
+	// is decided per resource instead of from this permission's static
+	// scope list. See pkg/hub/authz.go's agent-scope restriction and its
+	// request-local synthetic grant, both keyed on PermissionGCPServiceAccountUse.
 	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
-	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
+	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.

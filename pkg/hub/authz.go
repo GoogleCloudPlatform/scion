@@ -597,6 +597,21 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 5b3: Request-local gcp_service_account.use grant
+	// (ptone/scion#2129) ────────────────────────────────────────────────
+	// See gcpServiceAccountUseBinding's doc comment. Unlike Step 5b this is
+	// not gated on agent.ProjectID() != "": the decided service account can
+	// be hub-, project- or user-scoped, and the exact per-instance scope
+	// match is what authorizes it, not the agent's own project association.
+	if isAgentPrincipal(principal.Kind) {
+		if agent, ok := principal.Identity.(AgentIdentity); ok {
+			if cb, role := gcpServiceAccountUseBinding(agent, permissionID, request.Resource); cb != nil {
+				candidates = append(candidates, *cb)
+				roleDefs[role.RoleID] = role
+			}
+		}
+	}
+
 	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
 	// #1916) ───────────────────────────────────────────────────────────
 	// The curated hub-member/hub-viewer roles carry skill/template/
@@ -628,7 +643,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// 7b. Agent JWT scope restriction.
 	if isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			restrictions = append(restrictions, agentScopeRestriction(agent))
+			restrictions = append(restrictions, agentScopeRestriction(agent, request.Resource))
 		}
 	}
 
@@ -1195,8 +1210,14 @@ func uatScopeRestriction(scopes []string) Restriction {
 }
 
 // agentScopeRestriction builds a kernel Restriction from agent JWT token scopes.
-// Only permissions that map to the agent's declared scopes are allowed.
-func agentScopeRestriction(agent AgentIdentity) Restriction {
+// Only permissions that map to the agent's declared scopes are allowed, with
+// one reviewed exception: permissions.PermissionGCPServiceAccountUse is
+// decided against the specific resource this restriction was built for
+// (agentGCPServiceAccountUseScopeMatch), never against the static AgentScopes
+// map below -- see gcpServiceAccountUseBinding's doc comment for why a static
+// list cannot express a per-instance token scope. Every other permission's
+// behavior is unchanged.
+func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 	scopes := agent.Scopes()
 	if len(scopes) == 0 {
 		// No scopes: deny everything (fail closed).
@@ -1222,10 +1243,77 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 		Kind:        "credential_scope",
 		Description: "agent JWT scope restriction",
 		Check: func(permissionID string) bool {
+			if permissionID == permissions.PermissionGCPServiceAccountUse {
+				return agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource)
+			}
 			_, ok := allowed[permissionID]
 			return ok
 		},
 	}
+}
+
+// agentGCPServiceAccountUseScopeMatch reports whether agent's JWT carries the
+// exact per-instance token scope that the single reviewed
+// gcp_service_account.use / gcp_service_account pair requires. It is the one
+// place that pair is decided, consulted by both the request-local synthetic
+// grant (gcpServiceAccountUseBinding) and the agent-scope restriction above,
+// so the two cannot drift apart.
+//
+// It denies -- never falls back to a broader test -- when permissionID is not
+// permissions.PermissionGCPServiceAccountUse, when resource.Type is not
+// permissions.ResourceGCPServiceAccount, when resource.ID is empty, or when
+// the JWT lacks the exact scope for that ID. Matching is agent.HasScope
+// (exact string equality) only: a prefix, wildcard or another account's scope
+// does not satisfy it, and the scope string itself is never re-derived --
+// GCPTokenScopeForSA (agenttoken.go) is the single source of that format.
+func agentGCPServiceAccountUseScopeMatch(agent AgentIdentity, permissionID string, resource Resource) bool {
+	if agent == nil || permissionID != permissions.PermissionGCPServiceAccountUse {
+		return false
+	}
+	if resource.Type != permissions.ResourceGCPServiceAccount || resource.ID == "" {
+		return false
+	}
+	return agent.HasScope(GCPTokenScopeForSA(resource.ID))
+}
+
+// gcpServiceAccountUseBinding returns a request-local CandidateBinding and its
+// RolePermissions when agentGCPServiceAccountUseScopeMatch holds for this
+// exact request; otherwise (nil, nil).
+//
+// The binding is scoped ScopeTypeSystem so it applies regardless of whether
+// the decided gcp_service_account row is itself hub-, project- or
+// user-scoped (scopeApplies always admits system scope) -- scope containment
+// here is not the point, the per-request resource-ID match already is.
+//
+// It is built fresh inside decide() on every call: never cached, never
+// derived from or returned by the target-agnostic agentScopesToPermissionIDs.
+// That separation matters because agentScopesToPermissionIDs also feeds
+// intersectCredentialCaveats/CanDelegate's caveat intersection, which decides
+// what an agent may delegate to something it creates -- a grant scoped to one
+// resource ID must never be read there as general, delegable
+// gcp_service_account.use authority. CanDelegate calls agentScopeRestriction
+// with a zero Resource, so agentGCPServiceAccountUseScopeMatch always denies
+// there and that caller falls through to the static (empty) AgentScopes
+// behavior, exactly as before this change.
+func gcpServiceAccountUseBinding(agent AgentIdentity, permissionID string, resource Resource) (*CandidateBinding, *RolePermissions) {
+	if !agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource) {
+		return nil, nil
+	}
+	id := "synthetic:agent-gcp-service-account-use:" + agent.ID() + ":" + resource.ID
+	role := &RolePermissions{
+		RoleID:      id,
+		RoleName:    "agent-jwt-gcp-service-account-use",
+		ScopeType:   ScopeTypeSystem,
+		Permissions: map[string]struct{}{permissions.PermissionGCPServiceAccountUse: {}},
+	}
+	cb := &CandidateBinding{
+		BindingID:        id,
+		RoleDefinitionID: id,
+		PrincipalType:    "agent",
+		PrincipalID:      agent.ID(),
+		ScopeType:        ScopeTypeSystem,
+	}
+	return cb, role
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
