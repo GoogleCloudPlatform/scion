@@ -629,7 +629,7 @@ func Spec() []TableFixture {
 		// ---- Agent identity keys ----
 		{Table: "agent_identity_keys", Rows: []row{
 			{
-				"id": "ik000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"id": "a1d00000-0000-0000-0000-000000000001", "project_id": projectID,
 				"key": "worker", "agent_id": agentID,
 			},
 		}},
@@ -637,7 +637,7 @@ func Spec() []TableFixture {
 		// ---- External identities ----
 		{Table: "external_identities", Rows: []row{
 			{ // NULL email exercises the optional/informational field
-				"id":       "xi000000-0000-0000-0000-000000000001",
+				"id":       "e1d00000-0000-0000-0000-000000000001",
 				"provider": "fixture-provider", "issuer": "https://issuer.fixture.example",
 				"subject": "fixture-subject-001", "user_id": userID,
 				"created_at": baseTime, "updated_at": baseTime,
