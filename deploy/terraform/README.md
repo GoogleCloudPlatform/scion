@@ -44,15 +44,15 @@ reads it, by naming convention, through the `shared-lookup` module (no
    `roles/iam.serviceAccountAdmin`, `roles/servicenetworking.networksAdmin`,
    `roles/storage.admin`, `roles/iap.admin`, `roles/secretmanager.admin`
    (needed for the `google_secret_manager_secret_iam_member` resources in
-   `cloudsql-database` and `hub-cloudrun` — Editor and
-   `resourcemanager.projectIamAdmin` cover project-level policy but not
-   `secretmanager.secrets.setIamPolicy` on a resource; a narrower custom
-   role granting just that permission also works). This is a role on the
-   *operator* identity applying Terraform, separate from the hub service
-   account's conditioned, hub-prefixed `secretmanager.admin` grant discussed
-   in "Troubleshooting" below — the two are not in tension. Grant all of
-   these up front — a partial role set surfaces as a plan or apply failure
-   partway through, not as a clean early error.
+   `cloudsql-database` and `hub-cloudrun` — `resourcemanager.projectIamAdmin`
+   covers only project-level policy, and Editor covers no IAM policy at all,
+   so neither reaches `secretmanager.secrets.setIamPolicy` on a resource; a
+   narrower custom role granting just that permission also works). This is
+   a role on the *operator* identity applying Terraform, separate from the
+   hub service account's conditioned, hub-prefixed `secretmanager.admin`
+   grant discussed in "Troubleshooting" below — the two are not in tension.
+   Grant all of these up front — a partial role set surfaces as a plan or
+   apply failure partway through, not as a clean early error.
 2. A GCS state bucket, versioned: `<project>-<name_prefix>-tfstate` (e.g.
    `my-project-tfha-tfstate`). Access limited to operators.
 3. ~~An IAP OAuth web client~~ — **not a prerequisite.** `iap_enabled = true`
@@ -407,10 +407,10 @@ runbook at which `terraform destroy -var deletion_protection=false` against
    Then plan and apply the destroy — never a bare `destroy` — through the
    same plan-review gate as any other apply:
    ```bash
-   terraform -chdir=configurations/hub plan -destroy \
+   terraform -chdir=deploy/terraform/configurations/hub plan -destroy \
      -var hub_name=<hub_name> -var state_prefix=<prefix>/hubs/<hub_name> \
      -var-file=<hub_name>.tfvars -out=/tmp/<hub_name>-destroy.tfplan
-   terraform -chdir=configurations/hub apply /tmp/<hub_name>-destroy.tfplan
+   terraform -chdir=deploy/terraform/configurations/hub apply /tmp/<hub_name>-destroy.tfplan
    ```
    This removes only that hub's resources; it never touches shared infra,
    because the hub root only reads shared infra via data sources.
@@ -418,10 +418,10 @@ runbook at which `terraform destroy -var deletion_protection=false` against
    `deletion_protection` off — not `plan -destroy`, since `destroy_guard`
    below is a `plan`/`apply`-time check, not a `terraform destroy`:
    ```bash
-   terraform -chdir=configurations/shared-infra plan \
+   terraform -chdir=deploy/terraform/configurations/shared-infra plan \
      -var-file=terraform.tfvars -var deletion_protection=false \
      -out=/tmp/shared-unprotect.tfplan
-   terraform -chdir=configurations/shared-infra apply /tmp/shared-unprotect.tfplan
+   terraform -chdir=deploy/terraform/configurations/shared-infra apply /tmp/shared-unprotect.tfplan
    ```
    The `terraform_data.destroy_guard` precondition makes the **plan** above
    **fail** while any hub database still exists on the shared Cloud SQL
@@ -437,9 +437,9 @@ runbook at which `terraform destroy -var deletion_protection=false` against
 4. From that branch, plan and apply the destroy — never a bare
    `destroy` — through the same plan-review gate:
    ```bash
-   terraform -chdir=configurations/shared-infra plan -destroy \
+   terraform -chdir=deploy/terraform/configurations/shared-infra plan -destroy \
      -var-file=terraform.tfvars -out=/tmp/shared-final-destroy.tfplan
-   terraform -chdir=configurations/shared-infra apply /tmp/shared-final-destroy.tfplan
+   terraform -chdir=deploy/terraform/configurations/shared-infra apply /tmp/shared-final-destroy.tfplan
    ```
 5. The operator compares a before/after `tfha*` resource inventory to
    confirm nothing outside the prefix was touched, and that nothing was

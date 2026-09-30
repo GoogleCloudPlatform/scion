@@ -271,16 +271,81 @@ tag or digest** (never `:latest`) and set `hub_image` to that reference —
 this never moves a tag anything else resolves against, so it needs no
 `:latest` ack.
 
-**Agent harness images.** Each harness image builds `FROM
-<registry>/scion-base:<tag>`, and `scion-base` in turn builds `FROM
-<registry>/core-base:<tag>` (`image-build/scripts/lib/targets.sh`'s
-`step_build_args`; `cloudbuild-harnesses.yaml`'s header and its
-`BASE_IMAGE=$_REGISTRY/scion-base:$_TAG` build-arg on every step).
-`--target harnesses` only builds the harnesses themselves — it does not
-build `scion-base` or `core-base` — so that base chain must already exist
-under the **same tag** you're about to build the harnesses with, or the
-harness build fails on its very first image because `scion-base:<tag>`
-doesn't exist.
+**Agent harness images — Cloud Build only.** This runbook documents a
+single supported build path: `--builder cloud-build`, one stage at a time,
+all three stages under the same immutable tag. Do not use `--builder
+local-docker`/`local-podman`, and do not build `--target all` or hybrid
+(local base + Cloud Build harnesses) — those paths are out of scope for
+this runbook (see "Why Cloud Build only" below).
+
+Each harness image builds `FROM <registry>/scion-base:<tag>`, and
+`scion-base` in turn builds `FROM <registry>/core-base:<tag>`
+(`cloudbuild-scion-base.yaml`'s `BASE_IMAGE=$_REGISTRY/core-base:$_TAG`
+build-arg, and `cloudbuild-harnesses.yaml`'s
+`BASE_IMAGE=$_REGISTRY/scion-base:$_TAG` build-arg with `--pull` on every
+step). `--target harnesses` only builds the harnesses themselves, and
+`--target scion-base` only builds `scion-base` — neither builds its parent
+— so the chain must be built **in order, under the same tag**, one stage at
+a time:
+
+```bash
+image-build/scripts/build-images.sh --builder cloud-build \
+  --target core-base --registry <registry> --tag <immutable-tag>
+```
+Wait for it to reach `SUCCESS` (see "Every submit is asynchronous" below),
+then:
+```bash
+image-build/scripts/build-images.sh --builder cloud-build \
+  --target scion-base --registry <registry> --tag <immutable-tag>
+```
+Wait for `SUCCESS`, then:
+```bash
+image-build/scripts/build-images.sh --builder cloud-build \
+  --target harnesses --registry <registry> --tag <immutable-tag>
+```
+Wait for `SUCCESS` before moving on to step 6/7. (`--target` maps to
+`cloudbuild-core-base.yaml`, `cloudbuild-scion-base.yaml`, and
+`cloudbuild-harnesses.yaml` respectively — image-build's README "Cloud
+Build Configs" table. `--push` and `--platform` are both ignored by
+`--builder cloud-build`: the YAMLs always push, and they hardcode
+`--platform linux/amd64,linux/arm64` on every `docker buildx build` step,
+so neither flag has anything left to control.)
+
+**Every submit is asynchronous.** `--builder cloud-build` always runs
+`gcloud builds submit --async` (`builders/cloud-build.sh`'s
+`builder_run_target`), so each `build-images.sh` command above returns
+"Build submitted" immediately — before the image exists. Capture the build
+ID and wait for `SUCCESS` before starting the next stage or moving on to
+step 6/7:
+
+```bash
+BUILD_ID=$(gcloud builds list --project=<project> --ongoing \
+  --sort-by=~createTime --limit=1 --format='value(id)')
+```
+Then poll in a bounded loop — the wait window should be at least the
+stage's own Cloud Build `timeout:` value (`cloudbuild-core-base.yaml`:
+10800s/3h; `cloudbuild-scion-base.yaml`: 1800s/30min;
+`cloudbuild-harnesses.yaml`: 2400s/40min) plus margin:
+```bash
+STATUS=""
+for i in $(seq 1 80); do
+  STATUS=$(gcloud builds describe "${BUILD_ID}" --project=<project> \
+    --format='value(status)')
+  case "${STATUS}" in
+    SUCCESS) break ;;
+    FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED)
+      echo "Build ${BUILD_ID} ended in ${STATUS}. STOP." >&2; exit 1 ;;
+  esac
+  sleep 30
+done
+[[ "${STATUS}" == "SUCCESS" ]] || { echo "Build ${BUILD_ID} did not reach SUCCESS within the wait window. STOP." >&2; exit 1; }
+```
+On `FAILURE`, `TIMEOUT`, `CANCELLED` or `INTERNAL_ERROR` at any stage,
+**stop** — do not proceed to the next stage, and do not "fix" it by
+dropping `--tag`. The wait-for-`SUCCESS` gate after `core-base` and after
+`scion-base` is also the existence check for the next stage's base image:
+if the previous stage didn't reach `SUCCESS`, its image was never pushed,
+and the next stage will fail on its first step.
 
 Both `build-images.sh --tag` and every `image-build/cloudbuild-*.yaml`'s
 `_TAG` substitution **default to `latest`.** Agent harness images are
@@ -289,98 +354,72 @@ shared infra (each `harnesses/<h>/config.yaml` pins `image:
 scion-<h>:latest`; README "Harness images"). There is no per-hub or
 per-harness image pin in this module set today (upstream settings-based
 agent image pinning exists as `ptone/scion#2156`, but this module set does
-not expose it yet). **Running the build with its defaults therefore moves
-`:latest` in the shared registry implicitly — never do this, and never
-"fix" a failed build by dropping `--tag`** to fall back to it — that's the
-same implicit move by another route. Always pass an explicit immutable tag,
-and build the base chain under that **same** tag first:
+not expose it yet). **Running any of the three commands above without
+`--tag` therefore moves `:latest` in the shared registry implicitly — never
+do this, and never "fix" a failed build by dropping `--tag`** to fall back
+to it — that's the same implicit move by another route. Always pass the
+same explicit immutable tag to all three stages.
 
-```bash
-# per-image builders (local-docker / local-podman) — three explicit
-# stages, same --tag throughout, so scion-base:<immutable-tag> (and, under
-# it, core-base:<immutable-tag>) exist before the harnesses build FROM them
-image-build/scripts/build-images.sh --target core-base --registry <registry> \
-  --tag <immutable-tag> --push
-image-build/scripts/build-images.sh --target scion-base --registry <registry> \
-  --tag <immutable-tag> --push
-image-build/scripts/build-images.sh --target harnesses --registry <registry> \
-  --tag <immutable-tag> --push
-```
+**Why Cloud Build only.** `--builder cloud-build`'s `docker buildx build`
+steps always build `linux/amd64,linux/arm64` — a multi-arch manifest,
+built server-side regardless of the operator's own machine (image-build's
+README "Builders" table: cloud-build is "always amd64+arm64
+(server-side)") — so the amd64 variant GKE Autopilot's nodes need is always
+produced. None of the commands above pass `--platform`; with
+`--builder local-docker`/`local-podman` that means the builder's *native*
+architecture, i.e. the operator's own host. An operator on an arm64 host
+(Apple Silicon, for example) running a local build would push arm64-only
+images, and every agent create would then fail on Autopilot's amd64 nodes
+with an exec-format error. Local and arm64 builds are out of scope for this
+runbook for that reason. A local-base/Cloud-Build-harnesses hybrid has the
+same failure mode (a single-arch local base under a multi-arch
+`cloudbuild-harnesses.yaml` harness build) and is likewise not documented
+here.
 
-If a single command is preferred, `--target all` builds the same chain —
-`core-base`, then `scion-base`, then every harness — under one `--tag`, for
-either builder:
-
-```bash
-image-build/scripts/build-images.sh --target all --registry <registry> \
-  --tag <immutable-tag> --push
-# or: --builder cloud-build --target all (submits cloudbuild.yaml)
-```
-
-`--target all` (either builder) also builds and pushes a
-`scion-hub:<immutable-tag>` image from `image-build/hub/Dockerfile`.
-**That image is not the Cloud Run hub image for this deployment** — this
-deployment's hub image comes from `scripts/cloudrun/Dockerfile` (see "Hub
-image" above), and nothing in this module set resolves `scion-hub`. The
-extra image is unused but harmless; there's no need to delete it, and no
-`--target` exists that builds the chain without it.
-
-The `cloud-build` builder has no per-target equivalent for staging
-`core-base` then `scion-base` alone before `--target harnesses` — use
-`--target all` there, or build `core-base`/`scion-base` with
-`--builder local-docker` first (same `--tag`) and only submit the harnesses
-to Cloud Build:
-
-```bash
-image-build/scripts/build-images.sh --target harnesses --builder cloud-build \
-  --registry <registry> --tag <immutable-tag>
-```
-
-Before running any of this, check whether `scion-base` (and, if building it
-separately, `core-base`) already exists under `<immutable-tag>` —
-`gcloud artifacts docker images describe <registry>/scion-base:<immutable-tag>`
-— or confirm it will be built in the same run. The `--dry-run` output below
-shows each step's resolved `BASE_IMAGE=` value; check that before asking
-for the ack, so a missing base surfaces before any push, not after the
-first harness fails.
-
-(If invoking Cloud Build directly instead of through `build-images.sh`, pass
-`--substitutions=_TAG=<immutable-tag>,...` — the config's own default is
-also `latest`.)
-
-**Before asking for the build ack, show the user the exact list of tags the
-command will push** — run the same command first with `--dry-run`:
-- `--builder local-docker`/`local-podman` prints the `-t <ref>` flag for
-  every tag of every image it would build.
-- `--builder cloud-build` only prints the `gcloud builds submit`
-  command and its `_TAG` substitution; the per-image tag list itself is
-  hardcoded in `cloudbuild-harnesses.yaml` (each step's `-t
-  $_REGISTRY/<image>:$_TAG` and `:$_SHORT_SHA`), so also read that file to
-  show the actual list.
+**Before asking for the build ack, show the user the exact list of images
+and tags the three stages will push.** `--builder cloud-build`'s
+`--dry-run` only prints the `gcloud builds submit` command and its
+`_TAG`/`_REGISTRY` substitutions — unlike the per-image builders, it prints
+no `BASE_IMAGE=` line and no per-image tag list, because the whole target is
+handed off to a static YAML. Read the pushed tags from that YAML instead
+(image-build's README "Cloud Build Configs" table names the file per
+target):
+- `core-base` → `cloudbuild-core-base.yaml` pushes
+  `core-base:<immutable-tag>` and `core-base:<short-sha>`.
+- `scion-base` → `cloudbuild-scion-base.yaml` pushes
+  `scion-base:<immutable-tag>` and `scion-base:<short-sha>`.
+- `harnesses` → `cloudbuild-harnesses.yaml` pushes
+  `scion-<harness>:<immutable-tag>` and `scion-<harness>:<short-sha>` for
+  each harness **it** hardcodes — currently 8, **not** the 9-image catalog
+  (it omits `scion-muse-code`; this is a pre-existing drift between the
+  static YAML and the harness catalog, out of scope for this runbook to
+  fix). Read the file itself for the current list.
 
 "Immutable" is a naming convention here, not something the tool enforces —
 `--tag <immutable-tag>` will happily overwrite an existing tag of the same
 name, and the auto-added `:<short-sha>` can already exist too if another
 operator already built the same commit. Either re-points an existing tag,
-which is exactly what §10 requires an ack for. **Pre-check before asking:**
+which is exactly what §10 requires an ack for. **Pre-check before asking,
+for every image in the push list above (`core-base`, `scion-base`, and each
+harness), not harnesses alone:**
 ```bash
-gcloud artifacts docker tags list <registry>/scion-<harness> \
+gcloud artifacts docker tags list <registry>/<image> \
   --filter='tag:<immutable-tag>'
 ```
-for each harness (or the image list from the `--dry-run` output above). An
-empty result means the tag is new; any output means this push would
+An empty result means the tag is new; any output means this push would
 re-point it.
 
 Then **ask the user**, and make the question state explicitly whether
-`:latest` will move, e.g.: *"This pushes `scion-<harness>:<immutable-tag>`
-(new, or re-pointed if already present — see the pre-check above) and
-`:<short-sha>` (new, or re-pointed if already present) for [list of
-harnesses] to `<registry>`. It will **not** move `scion-<harness>:latest`.
-Do you also want `:latest` moved to this build?"* This applies equally to a
-first deployment into an empty registry — pushing the *initial* `:latest`
-establishes the tag every future hub on this registry inherits, so it is
-the same explicit ack, not something to do implicitly as part of "build and
-push."
+`:latest` will move, e.g.: *"This pushes `core-base:<immutable-tag>`,
+`scion-base:<immutable-tag>` (each new, or re-pointed if already
+present — see the pre-check above), and `scion-<harness>:<immutable-tag>`
+(new, or re-pointed) plus `:<short-sha>` (new, or re-pointed) for [list of
+harnesses from `cloudbuild-harnesses.yaml`] to `<registry>`. It will **not**
+move any of their `:latest` tags. Do you also want `:latest` moved to this
+build?"* This applies equally to a first deployment into an empty
+registry — pushing the *initial* `:latest` establishes the tag every future
+hub on this registry inherits, so it is the same explicit ack, not
+something to do implicitly as part of "build and push."
 
 If the user declines moving `:latest`, the consequence differs by case —
 state the one that applies:
