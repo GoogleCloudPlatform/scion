@@ -792,7 +792,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 		}
 		userNotifs = notifs
 		return len(userNotifs) >= 1
-	}, 2*time.Second, 50*time.Millisecond)
+	}, 2*time.Second, 50*time.Millisecond, "user notification for %s was never stored", DevUserID)
 	require.Len(t, userNotifs, 1)
 	assert.Equal(t, "COMPLETED", userNotifs[0].Status)
 }

@@ -2655,28 +2655,23 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	initial := list[0]
+	defer close(disp.release)
 	select {
 	case <-disp.entered: // worker has written the stopping and provisioning steps
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for worker to reach DispatchAgentReprovision; it may have failed before reprovision")
 	}
-	defer close(disp.release)
 
-	// tryAdvanceReincarnation's provisioning write, and the agent row's
-	// ReincarnationUpdatedAt write in updateReincarnationStep, both finish
-	// synchronously before DispatchAgentReprovision is called, so once
-	// <-disp.entered returns above, the provisioning write has already
-	// landed. A single read is enough here; no poll is needed.
+	// Both provisioning writes (the record via tryAdvanceReincarnation, the
+	// agent row via updateReincarnationStep) finish before
+	// DispatchAgentReprovision and share one timestamp, which stays stable
+	// while the worker is held there. `initial` is not a usable baseline:
+	// the worker may already have written this step when it was read.
 	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
 		"the record's own state must track the worker's progress, not stay pending")
 
-	// The agent row's ReincarnationUpdatedAt is the provisioning step's own
-	// stamp (the worker pins the record's updated_at to the same instant),
-	// and it is stable while the worker is held in DispatchAgentReprovision.
-	// `initial` is not usable: the worker can already have written this step
-	// when it is read.
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, a.ReincarnationUpdatedAt, "the provisioning step must have set ReincarnationUpdatedAt")
