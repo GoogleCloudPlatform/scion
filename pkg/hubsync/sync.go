@@ -1393,10 +1393,8 @@ func readAgentTokenFile() string {
 // duplicates cmd/hub.go's getHubClient, which implements the identical
 // priority order independently for commands that call it directly instead
 // (`broker`, `clean`, `notifications`, `project`, `doctor`, template sync,
-// etc.) and does not report CredentialKind. That duplication predates this
-// change and was out of scope to refactor here (ptone/scion#2146 review
-// round 4's additive-only authorization) — tracked as
-// https://github.com/ptone/scion/issues/2213.
+// etc.) and does not report CredentialKind. That duplication is out of scope
+// for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	var opts []hubclient.Option
 

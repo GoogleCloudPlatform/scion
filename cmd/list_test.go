@@ -36,11 +36,7 @@ import (
 
 // captureListStdout redirects os.Stdout to a pipe for the duration of fn and
 // discards everything written to it, draining concurrently so fn can never
-// block on a full pipe buffer. Earlier versions of these tests used
-// `_, w, _ := os.Pipe()` and threw away the read end entirely — a leaked fd
-// on every call, and a hang waiting to happen the first time a command under
-// test wrote more than the pipe buffer (~64 KiB) before this helper existed
-// (ptone/scion#2146 review R3-6).
+// block on a full pipe buffer.
 func captureListStdout(fn func()) {
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -1422,7 +1418,7 @@ func TestResolveLineageRootID(t *testing.T) {
 			want:     "child-id",
 		},
 		{
-			name:     "single ancestry entry naming an AGENT (ptone/scion#2146 review R4-3): root at that agent, not self — len(ancestry) < 2 alone would have wrongly rooted at self here",
+			name:     "single ancestry entry naming an AGENT: root at that agent, not self",
 			id:       "child-of-ancestry-less-creator",
 			ancestry: []string{ancestryLessCreatorID},
 			want:     ancestryLessCreatorID,
@@ -1623,7 +1619,7 @@ func TestResolveReferenceAgent(t *testing.T) {
 // TestResolveReferenceAgent_FallsBackOn403 is the ptone/scion#2146 review
 // R1-3 regression: many agent identities are denied a single-resource GET on
 // any agent other than themselves with a plain 403 (verified against a real
-// Hub in TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// Hub in TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden,
 // pkg/hub/rs2_r1_fixes_test.go), even though the identical agent is visible
 // through the authorized list endpoint. Before this fix, resolveReferenceAgent
 // only fell through to list-based resolution on 404, so --descendants=<peer>
@@ -1647,7 +1643,7 @@ func TestResolveReferenceAgent_FallsBackOn403(t *testing.T) {
 			// peer — whether narrowed by id[] or returned in a bare page.
 			ids := r.URL.Query()["id"]
 			if len(ids) > 0 {
-				require.Equal(t, []string{peerID}, ids)
+				assert.Equal(t, []string{peerID}, ids)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: peerID, Slug: "peer-agent", Name: "peer-agent"}},
@@ -1685,7 +1681,7 @@ func TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{"agents": []hubclient.Agent{}})
 				return
 			}
-			require.Equal(t, []string{refID}, ids)
+			assert.Equal(t, []string{refID}, ids)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: refID, Slug: "ref-agent", Name: "ref-agent"}},
 			})
@@ -1720,7 +1716,7 @@ func TestResolveReferenceAgent_UUIDMismatchedIDNotFound(t *testing.T) {
 		case r.URL.Path == "/api/v1/agents/"+ref:
 			w.WriteHeader(http.StatusNotFound)
 		case r.URL.Path == "/api/v1/agents":
-			require.Equal(t, []string{ref}, r.URL.Query()["id"])
+			assert.Equal(t, []string{ref}, r.URL.Query()["id"])
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: unexpectedAgentID, Slug: "unexpected-agent"}},
 			})
@@ -1750,7 +1746,7 @@ func TestResolveReferenceAgent_UUIDDuplicateMatchErrors(t *testing.T) {
 		case r.URL.Path == "/api/v1/agents/"+ref:
 			w.WriteHeader(http.StatusNotFound)
 		case r.URL.Path == "/api/v1/agents":
-			require.Equal(t, []string{ref}, r.URL.Query()["id"])
+			assert.Equal(t, []string{ref}, r.URL.Query()["id"])
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{
 					{ID: ref, Slug: "dup-1"},
@@ -2096,7 +2092,7 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 // an agent TOKEN plus --all plus any relationship flag must fail loudly, not
 // silently print an empty list. An agent identity has no hub-wide list
 // authority at all — the real Hub proves this directly
-// (TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer,
+// (TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden,
 // pkg/hub/rs2_r1_fixes_test.go: the global endpoint returns nothing for a
 // bare agent token, even for id=<self>) — so the final --all listing could
 // never succeed for an agent-token caller regardless of how the reference
@@ -2159,17 +2155,15 @@ func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *te
 	}
 }
 
-// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked is the
-// ptone/scion#2146 review R4-6 fix itself, proven directly: the SAME
-// SCION_CLI_MODE=agent setup as
+// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked
+// proves: the SAME SCION_CLI_MODE=agent setup as
 // TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors, but
 // a HubContext whose CredentialKind is OAuth (a human authenticated via
 // `scion hub auth login`, running inside an agent container) rather than an
-// agent token. R3-2 found this was wrongly blocked by the old mode-keyed
-// guard; R4-6 fixes it by keying on the credential instead. Dev auth is
-// covered by the sibling test right below — both are real, named
-// CredentialKind values a caller might have in agent mode, not just "not an
-// agent token" in the abstract.
+// agent token, is not blocked. The guard keys on the credential, not the CLI
+// mode. Dev auth is covered by the sibling test right below — both are
+// real, named CredentialKind values a caller might have in agent mode, not
+// just "not an agent token" in the abstract.
 func TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked(t *testing.T) {
 	const refID = "88888888-9999-aaaa-bbbb-cccccccccccc"
 	var listCalled bool
@@ -2253,14 +2247,11 @@ func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *t
 }
 
 // TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked
-// is the ptone/scion#2146 review R3-5 negative-coverage gap: the --all guard
-// must NOT fire for a HubContext with no agent-token CredentialKind set
-// (this test's HubContext leaves it at its zero value,
-// hubsync.CredentialKindUnknown). It predates R4-6's re-keying of the guard
-// from CLI mode to CredentialKind, but stays useful as coverage that
-// assistant mode itself is otherwise unaffected — SCION_CLI_MODE=assistant
-// is still set here for realism, even though the guard no longer reads it.
-// Human mode is covered by TestListAgentsViaHub_AllMode_HumanCrossProjectReference;
+// covers: the --all guard must NOT fire for a HubContext with no agent-token
+// CredentialKind set (this test's HubContext leaves it at its zero value,
+// hubsync.CredentialKindUnknown). SCION_CLI_MODE=assistant is still set here
+// for realism, even though the guard no longer reads it. Human mode is
+// covered by TestListAgentsViaHub_AllMode_HumanCrossProjectReference;
 // agent mode with a non-agent-token credential is covered by
 // TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked and
 // its dev-auth sibling, immediately above.

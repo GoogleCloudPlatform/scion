@@ -2160,7 +2160,7 @@ func TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBind
 	assert.Equal(t, filterOrder1.IDs, filterDup.IDs)
 }
 
-// TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer is the
+// TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden is the
 // ptone/scion#2146 review R1-3 server-side fact that justifies
 // cmd/list.go's resolveReferenceAgent falling back to list-based resolution
 // on 403 as well as 404: an agent identity is denied a single-resource GET
@@ -2170,7 +2170,7 @@ func TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBind
 // both narrowed by id[] and in a bare page. Before the fix, --descendants=<peer>
 // / --ancestors=<peer> failed outright in agent mode for exactly the
 // audience these flags are built for.
-func TestR1_3_ListEndpointResolvesAgentIdentityCantGetOnPeer(t *testing.T) {
+func TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden(t *testing.T) {
 	f := bypassAgentsSetup(t)
 
 	getRec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)

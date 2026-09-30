@@ -480,9 +480,9 @@ type AgentFilter struct {
 	// the reference's direct parent, or the reference itself when it has no
 	// parent at all (an empty Ancestry), when its parent is a user rather
 	// than an agent, or when its only recorded parent is an agent the
-	// caller cannot list. The latter two both fall back to rooting at self,
-	// since the caller can't tell them apart, but only they (not a length-1
-	// parent the caller CAN list) mean there is no agent parent at all.
+	// caller cannot list. The latter two both root at self because the
+	// caller cannot tell them apart; a length-1 parent the caller *can* list
+	// roots at that parent.
 	//
 	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
 	// child can inherit a length-1, agent-only Ancestry from a creator

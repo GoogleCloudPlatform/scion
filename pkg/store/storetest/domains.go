@@ -646,11 +646,9 @@ func AgentDomain() Domain[store.Agent] {
 				WantCount: 1,
 			},
 			{
-				// IDs / malformed-entry path: a genuinely non-UUID entry is a
-				// distinct code path (parseUUIDList's parse-failure drop)
-				// from the user-ID case above — ptone/scion#2146 review R2-7
-				// found an earlier version of this test conflated the two by
-				// using a non-UUID string to stand in for a user ID.
+				// a genuinely non-UUID entry is a distinct code path
+				// (parseUUIDList's parse-failure drop) from the user-ID case
+				// above.
 				Name: "ByIDs_MalformedEntryDropped",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-malformed-keep")))

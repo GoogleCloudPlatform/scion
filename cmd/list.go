@@ -1246,11 +1246,11 @@ func init() {
 	// `--descendants` and `--descendants=<agent>` parse: the bare form
 	// infers the reference (calling agent in agent mode, calling user
 	// otherwise) — see resolveRelationshipReference.
-	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self)")
+	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self) (Hub mode only)")
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
+	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self) (Hub mode only)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self) (Hub mode only)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }
