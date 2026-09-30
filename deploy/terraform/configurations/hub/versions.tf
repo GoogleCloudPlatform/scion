@@ -21,5 +21,18 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    # random and time are used transitively via hub-cloudrun and
+    # cloudsql-database (both pin the same constraints in their own
+    # versions.tf); declared explicitly here too so the root's
+    # required_providers block reflects every provider the config actually
+    # needs, matching what .terraform.lock.hcl already locks.
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.12"
+    }
   }
 }
