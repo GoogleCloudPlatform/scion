@@ -12,8 +12,9 @@ import (
 )
 
 // errWorkloadIDIsRoot and errWorkloadIDIsMaxUint32 are ValidWorkloadID's two
-// refusal reasons, exported as sentinels so a caller can distinguish them
-// from an ordinary parse failure if it ever needs to.
+// refusal reasons, kept as package-level sentinels so a caller can
+// distinguish them from an ordinary parse failure (via errors.Is) if it
+// ever needs to, even though neither is itself exported.
 var (
 	errWorkloadIDIsRoot      = errors.New("rootexec: refusing uid/gid 0 (root) as a workload identity")
 	errWorkloadIDIsMaxUint32 = errors.New("rootexec: refusing uid/gid 4294967295 (2^32-1) as a workload identity")

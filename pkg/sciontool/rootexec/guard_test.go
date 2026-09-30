@@ -49,33 +49,34 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:2029": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2034": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2135": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2144": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2030": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2035": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2147": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2156": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
 	// gid) whenever uid > 0, so the process runs as the workload's own
-	// identity in that case. gitCloneWorkspace itself never receives
-	// RequirePrivilegeDrop, so uid can still be 0 here even on an enforced
-	// runtime — its own uid==0 fallback resolves the "scion" system account
-	// via user.Lookup, which is not guaranteed to exist in every image — in
-	// which case this runs as root. Either way the call is not otherwise
-	// reachable by a workload-influenceable PATH, which is what this guard
-	// itself checks for.
-	"cmd/sciontool/commands/init.go:2356": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2395": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2380": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2451": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2465": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2476": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2495": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2522": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2514": "runs as the workload uid via Credential whenever uid>0",
+	// identity in that case. Under RequirePrivilegeDrop, gitCloneWorkspace
+	// refuses uid/gid <= 0 before any git command, so these always run under
+	// the Credential. Unenforced with uid 0, its scion-user fallback
+	// resolves the image account; if that lookup fails, configureGitCommand
+	// sets no Credential and git runs with init's own credentials, as at
+	// base. Either way the call is not otherwise reachable by a
+	// workload-influenceable PATH, which is what this guard itself checks
+	// for.
+	"cmd/sciontool/commands/init.go:2387": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2426": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2411": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2482": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2496": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2507": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2545": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2557": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2553": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:2526": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2536": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2881": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
+	"cmd/sciontool/commands/init.go:2567": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2912": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
 
 	// The harness-provision subcommand's own subprocess: under
 	// RequirePrivilegeDrop, hooks.buildDroppedProvisionCmd sets Credential

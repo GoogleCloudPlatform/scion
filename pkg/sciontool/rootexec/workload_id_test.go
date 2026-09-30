@@ -22,7 +22,6 @@ func TestValidWorkloadID_RefusesUint32OverflowAndSentinels(t *testing.T) {
 	}{
 		{"ordinary workload uid", "1000", false, 1000},
 		{"2^32 overflows uint32", "4294967296", true, 0},
-		{"2^32 + 0's own uint32 truncation target", "4294967296", true, 0},
 		{"2^32-1 sentinel refused", "4294967295", true, 0},
 		{"negative refused", "-1", true, 0},
 		{"non-numeric refused", "not-a-number", true, 0},
@@ -59,21 +58,5 @@ func TestValidWorkloadID_ZeroRefusalIsModeGated(t *testing.T) {
 	}
 	if got != 0 {
 		t.Errorf("ValidWorkloadID(\"0\", false) = %d, want 0", got)
-	}
-}
-
-// TestValidWorkloadID_BothUIDAndGIDPaths proves the guard applies uniformly
-// regardless of which of the two fields (uid or gid) a caller is validating
-// — there is only one code path, but this pins that a caller validating
-// each field independently (as setupHostUser does for SCION_HOST_UID and
-// SCION_HOST_GID) gets the identical refusal for each.
-func TestValidWorkloadID_BothUIDAndGIDPaths(t *testing.T) {
-	for _, s := range []string{"4294967296", "4294967295"} {
-		if _, err := ValidWorkloadID(s, true); err == nil {
-			t.Errorf("ValidWorkloadID(%q, true) = nil error, want refusal (uid path)", s)
-		}
-		if _, err := ValidWorkloadID(s, true); err == nil {
-			t.Errorf("ValidWorkloadID(%q, true) = nil error, want refusal (gid path)", s)
-		}
 	}
 }
