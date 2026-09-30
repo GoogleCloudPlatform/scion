@@ -596,8 +596,20 @@ export class ScionFileBrowser extends LitElement {
    * Lets _requestInitialLoad() coalesce into that request instead of firing
    * a duplicate one — e.g. disconnecting and immediately reconnecting while
    * the initial request for the same source hasn't resolved yet.
+   *
+   * Keyed together with _inFlightToken (below), not on source identity
+   * alone: a source can be reassigned the same instance after being
+   * cleared to null (A -> null -> A) while the original A request is still
+   * in flight. Source identity alone would coalesce into that now-stale
+   * request, which _loadToken has already invalidated, and the browser
+   * would never load. Comparing _inFlightToken against the current
+   * _loadToken is what tells "in flight for the source we want" apart from
+   * "in flight for a source we've since moved past".
    */
   private _inFlightSource: FileBrowserDataSource | null = null;
+
+  /** The load token (see _loadToken) of the currently in-flight request, if any. */
+  private _inFlightToken: number | null = null;
 
   static override styles = css`
     :host {
@@ -855,8 +867,12 @@ export class ScionFileBrowser extends LitElement {
       // reassignment reloads — including reassigning the very same
       // instance, which _requestedSource would otherwise still remember as
       // "already requested" — and invalidate any request still in flight
-      // for the old source so it can't land after we've moved on.
-      if (this._requestedSource !== null) {
+      // (for the old source, or for any source at all, including while
+      // disconnected: disconnectedCallback() already nulls _requestedSource,
+      // so checking only that field here would silently skip this reset,
+      // and a subsequent A -> null while an A request is still in flight
+      // would let that stale request land after the source was cleared).
+      if (this._requestedSource !== null || this._inFlightSource !== null) {
         this._requestedSource = null;
         this._loadToken++;
         this.files = [];
@@ -871,10 +887,11 @@ export class ScionFileBrowser extends LitElement {
     }
     if (this._requestedSource === this.dataSource) return;
     this._requestedSource = this.dataSource;
-    if (this._inFlightSource === this.dataSource) {
-      // A load for this exact source is already in flight (e.g. we just
-      // disconnected and reconnected before it resolved) — let it finish
-      // rather than firing a duplicate request for the same data.
+    if (this._inFlightSource === this.dataSource && this._inFlightToken === this._loadToken) {
+      // A load for this exact source is already in flight *and* is still
+      // the current one (not one _loadToken has since invalidated, e.g. by
+      // an intervening clear-to-null) — let it finish rather than firing a
+      // duplicate request for the same data.
       return;
     }
     void this.loadFiles();
@@ -886,6 +903,7 @@ export class ScionFileBrowser extends LitElement {
     const source = this.dataSource;
     const token = ++this._loadToken;
     this._inFlightSource = source;
+    this._inFlightToken = token;
     this.loading = true;
     this.error = null;
 
@@ -908,8 +926,13 @@ export class ScionFileBrowser extends LitElement {
       console.error('Failed to load files:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load files';
     } finally {
-      if (this._inFlightSource === source) {
+      // Only this exact call's token owns the in-flight bookkeeping — a
+      // newer request for the same source (explicit refresh while the
+      // initial load was still in flight) may have already replaced it,
+      // and clearing here would incorrectly report nothing in flight.
+      if (this._inFlightToken === token) {
         this._inFlightSource = null;
+        this._inFlightToken = null;
       }
       if (token === this._loadToken) {
         this.loading = false;

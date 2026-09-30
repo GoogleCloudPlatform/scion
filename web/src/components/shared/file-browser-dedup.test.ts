@@ -46,14 +46,18 @@ function makeEntry(path: string): FileEntry {
   return { path, size: 10, modTime: '2026-01-01T00:00:00Z', mode: '-rw-r--r--' };
 }
 
-/** A data source whose listFiles() resolves via an externally-controlled promise. */
+/**
+ * A data source whose listFiles() resolves via an externally-controlled
+ * promise. Each call gets its own independent resolver (resolveCall(n, ...))
+ * so tests can control which of several overlapping in-flight calls
+ * resolves, and in what order — e.g. an earlier, now-stale call resolving
+ * after a later one has already started.
+ */
 function makeControlledSource(label: string) {
-  const calls: number[] = [];
-  let resolveFn: ((r: FileListResult) => void) | null = null;
+  const resolvers: Array<(r: FileListResult) => void> = [];
   const listFiles = vi.fn(() => {
-    calls.push(calls.length);
     return new Promise<FileListResult>((resolve) => {
-      resolveFn = resolve;
+      resolvers.push(resolve);
     });
   });
   const source: FileBrowserDataSource = {
@@ -66,8 +70,16 @@ function makeControlledSource(label: string) {
   return {
     source,
     listFiles,
+    /** Resolve the Nth (0-indexed) call to listFiles(). */
+    resolveCall: (n: number, files: string[] = []) =>
+      resolvers[n]?.({ files: files.map(makeEntry), totalSize: 0, totalCount: files.length }),
+    /** Resolve the most recent call to listFiles(). */
     resolve: (files: string[] = []) =>
-      resolveFn?.({ files: files.map(makeEntry), totalSize: 0, totalCount: files.length }),
+      resolvers[resolvers.length - 1]?.({
+        files: files.map(makeEntry),
+        totalSize: 0,
+        totalCount: files.length,
+      }),
   };
 }
 
@@ -331,5 +343,117 @@ describe('scion-file-browser — one initial listing per data source', () => {
     await el.updateComplete;
 
     expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['foo.txt']);
+  });
+
+  // ── Round-2 review: the null-reset (NB1) and in-flight coalescing (NB2)
+  // fixes interacted badly — coalescing keyed on source identity alone let
+  // an A -> null -> A reassignment coalesce into A's now-stale, already
+  // in-flight request, which the null-reset had invalidated via the load
+  // token. Nothing ever reloaded and the browser was stuck empty with no
+  // error and no spinner. Fixed by keying "in flight" on (source, token)
+  // together instead of source alone. ──
+
+  it('reloads when the data source is cleared to null and reassigned while the original request is still in flight', async () => {
+    const slow = makeControlledSource('a');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = slow.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    // Clear to null (invalidates the in-flight call via the load token,
+    // per the earlier "invalidates an in-flight request..." test) and
+    // immediately reassign the exact same source instance, all before the
+    // first call resolves.
+    el.dataSource = null;
+    await el.updateComplete;
+    el.dataSource = slow.source;
+    await el.updateComplete;
+    await el.updateComplete;
+
+    // Coalescing must recognize the first call is stale (superseded by the
+    // null-reset) and start a genuinely new request rather than silently
+    // treating the dead first call as "already in flight for this source".
+    expect(slow.listFiles).toHaveBeenCalledTimes(2);
+
+    // Resolve the first (stale) call — it must not resurrect the browser
+    // out of its "no request landed" state incorrectly, and specifically
+    // must not clear the bookkeeping for the second, still-current call.
+    slow.resolveCall(0, ['stale.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // Now resolve the second (current) call — this is the one that must
+    // actually populate the browser.
+    slow.resolveCall(1, ['fresh.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['fresh.txt']);
+    expect((el as { loading: boolean }).loading).toBe(false);
+  });
+
+  it('invalidates an in-flight request cleared to null while the component is disconnected', async () => {
+    const slow = makeControlledSource('a');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = slow.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    // Disconnect (this nulls _requestedSource internally) and then clear
+    // dataSource to null while still detached — a null-reset gated only on
+    // _requestedSource would see it already null and skip resetting,
+    // leaving the in-flight request's token still "current".
+    document.body.removeChild(el);
+    el.dataSource = null;
+    await el.updateComplete;
+
+    slow.resolve(['stale.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files).toEqual([]);
+    expect((el as { loading: boolean }).loading).toBe(false);
+  });
+
+  it('does not let a stale request clear the bookkeeping for a newer, still-in-flight request to the same source', async () => {
+    const slow = makeControlledSource('a');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = slow.source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(1);
+
+    // Explicit refresh starts a second, overlapping request for the same
+    // source while the first is still in flight.
+    void el.loadFiles();
+    expect(slow.listFiles).toHaveBeenCalledTimes(2);
+
+    // The first (now stale) call resolves first.
+    slow.resolveCall(0, ['stale.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    // Disconnect and reconnect — if the stale call's `finally` incorrectly
+    // cleared the in-flight bookkeeping for the still-outstanding second
+    // call, this would coalesce-fail and fire a third, unnecessary request.
+    document.body.removeChild(el);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(slow.listFiles).toHaveBeenCalledTimes(2);
+
+    slow.resolveCall(1, ['fresh.txt']);
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['fresh.txt']);
   });
 });
