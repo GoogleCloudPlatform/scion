@@ -603,13 +603,21 @@ func TestBrokerProviderSelfHeal_NoPublishWhenNothingHealed(t *testing.T) {
 	assert.Empty(t, spy.getCalls(), "self-heal must not publish when no provider row changed")
 }
 
+// captureDefaultCapturingHandler swaps in a capturingHandler as the slog
+// default and restores the previous default on test cleanup. (Named to avoid
+// colliding with the unrelated captureDefaultSlog in
+// hub_gcp_identity_default_test.go, which returns a levelCapturingHandler.)
+func captureDefaultCapturingHandler(t *testing.T) *capturingHandler {
+	t.Helper()
+	capture := &capturingHandler{}
+	restore := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+	return capture
+}
+
 // TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp covers ptone/scion#2356:
-// a successful restamp must be visible in the logs at Info level, carrying the
-// broker ID and the number of providers restamped, so operators can confirm
-// from logs alone that a rollout did not leave providers offline. It asserts
-// only identifiers and a count -- no per-provider project IDs -- since a
-// broker can have many providers and per-provider Info lines would be log
-// spam on this hot, every-tick path.
+// a successful restamp logs one Info line with brokerID, brokerName, and count.
 func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -621,10 +629,7 @@ func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
 	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: sessionID}
 	srv.controlChannel.mu.Unlock()
 
-	capture := &capturingHandler{}
-	restore := slog.Default()
-	slog.SetDefault(slog.New(capture))
-	t.Cleanup(func() { slog.SetDefault(restore) })
+	capture := captureDefaultCapturingHandler(t)
 
 	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
 
@@ -637,14 +642,12 @@ func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
 	assert.Equal(t, slog.LevelInfo, rec.Level)
 	attrs := recordAttrs(rec)
 	assert.Equal(t, broker.ID, attrs["brokerID"])
+	assert.Equal(t, broker.Name, attrs["brokerName"])
 	assert.Equal(t, int64(1), attrs["count"])
 }
 
-// TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed is the counterpart to
-// the above: a tick that heals nothing (every row already online) must not
-// emit the restamp Info line, since this handler runs on every scheduler tick
-// on every instance holding a live socket, and that no-op path is expected to
-// be the hot, common case.
+// TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed covers ptone/scion#2356:
+// a tick that heals nothing must not emit the restamp Info line.
 func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -662,10 +665,7 @@ func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.BrokerStatusOnline, provider.Status, "precondition")
 
-	capture := &capturingHandler{}
-	restore := slog.Default()
-	slog.SetDefault(slog.New(capture))
-	t.Cleanup(func() { slog.SetDefault(restore) })
+	capture := captureDefaultCapturingHandler(t)
 
 	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
 
