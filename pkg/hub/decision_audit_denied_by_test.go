@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,21 +29,58 @@ import (
 )
 
 // waitForDecisionAudit returns the single persisted decision audit record for
-// principalID with the given result. The store emitter writes asynchronously.
+// principalID with the given result. The store emitter writes asynchronously,
+// so after the first record appears the helper keeps watching and fails if a
+// second one is written.
 func waitForDecisionAudit(t *testing.T, s store.Store, principalID, result string) *store.DecisionAuditRecord {
 	t.Helper()
-	var rec *store.DecisionAuditRecord
-	require.Eventually(t, func() bool {
+	// count returns -1 on a list error so that neither wait accepts it.
+	var mu sync.Mutex
+	var last []*store.DecisionAuditRecord
+	count := func() int {
 		records, _, err := s.ListDecisionAudits(context.Background(), store.DecisionAuditFilter{
 			PrincipalID: principalID, Result: result, Limit: 10,
 		})
-		if err != nil || len(records) != 1 {
-			return false
+		if err != nil {
+			return -1
 		}
-		rec = records[0]
-		return true
-	}, 5*time.Second, 10*time.Millisecond, "expected exactly one persisted %s record for %s", result, principalID)
-	return rec
+		mu.Lock()
+		last = records
+		mu.Unlock()
+		return len(records)
+	}
+	require.Eventually(t, func() bool { return count() >= 1 }, 5*time.Second, 10*time.Millisecond,
+		"expected a persisted %s record for %s", result, principalID)
+	require.Never(t, func() bool { return count() != 1 }, 300*time.Millisecond, 20*time.Millisecond,
+		"expected exactly one persisted %s record for %s", result, principalID)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, last, 1)
+	return last[0]
+}
+
+// syncStoreDecisionAuditEmitter writes each record to the store before
+// returning and counts the records it was given.
+type syncStoreDecisionAuditEmitter struct {
+	store   store.Store
+	mu      sync.Mutex
+	records []*store.DecisionAuditRecord
+	errs    []error
+}
+
+func (e *syncStoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.records = append(e.records, record)
+	if err := e.store.CreateDecisionAudit(ctx, record); err != nil {
+		e.errs = append(e.errs, err)
+	}
+}
+
+func (e *syncStoreDecisionAuditEmitter) snapshot() ([]*store.DecisionAuditRecord, []error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]*store.DecisionAuditRecord(nil), e.records...), append([]error(nil), e.errs...)
 }
 
 // TestDecide_PersistsDeniedBy checks that Decide's single audit exit stores
@@ -116,4 +154,71 @@ func TestBuildDecisionAuditRecord_DeniedBy(t *testing.T) {
 
 	allowed := BuildDecisionAuditRecord(ctx, req, Decision{Allowed: true})
 	assert.Empty(t, allowed.DeniedBy)
+}
+
+// TestDecide_CeilingDenyEmitsOneAuditRecord pins, with a synchronous
+// emitter, that one Decide call for a delegation-ceiling deny emits exactly
+// one audit record and that the record persists denied_by
+// "delegation_ceiling". It covers the deny for a non-live delegator and the
+// deny on a ceiling store error (DenyCauseCeilingError).
+func TestDecide_CeilingDenyEmitsOneAuditRecord(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("deniedby-once-proj")
+	ownerID := tid("deniedby-once-owner")
+	orphanAgentID := tid("deniedby-once-orphan")
+	errAgentID := tid("deniedby-once-err")
+
+	createDCProject(t, s, projectID, "deniedby-once-project")
+	createDCUser(t, s, ownerID, "deniedby-once-owner@example.com", projectID, store.ProjectRoleOwner)
+
+	// Non-live chain: the delegator user does not exist.
+	createDCAgent(t, s, orphanAgentID, projectID, ownerID, AgentRoleFull)
+	createDCEdge(t, s, store.DelegationPrincipalUser, tid("deniedby-once-gone-user"),
+		store.DelegationPrincipalAgent, orphanAgentID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+
+	// Live chain whose edge lookup fails in the faulty service below.
+	createDCAgent(t, s, errAgentID, projectID, ownerID, AgentRoleFull)
+	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID,
+		store.DelegationPrincipalAgent, errAgentID,
+		store.RoleScopeProject, projectID, string(AgentRoleFull))
+
+	for _, tc := range []struct {
+		name    string
+		agentID string
+		authz   *AuthzService
+		cause   DenyCause
+	}{
+		{"non-live delegator", orphanAgentID, NewAuthzService(s, slog.Default()), DenyCauseCeilingOrphaned},
+		{"edge lookup error", errAgentID, NewAuthzService(&edgeLookupErrStore{Store: s, failID: errAgentID}, slog.Default()), DenyCauseCeilingError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emitter := &syncStoreDecisionAuditEmitter{store: s}
+			tc.authz.DecisionAuditSampleRate = 1.0
+			tc.authz.SetDecisionAuditEmitter(emitter)
+
+			agentCtx := contextWithIdentity(ctx, dcAgentIdentity(tc.agentID, projectID, AgentRoleFull))
+			req := AuthzRequestFromContext(agentCtx, Resource{Type: "project", ID: projectID}, ActionRead)
+			req.Permission = "project.read"
+			decision := tc.authz.Decide(agentCtx, req)
+			require.False(t, decision.Allowed)
+			require.Equal(t, DeniedByDelegationCeiling, decision.DeniedBy, "reason %q", decision.Reason)
+			require.Equal(t, tc.cause, decision.DenyCause, "reason %q", decision.Reason)
+
+			records, errs := emitter.snapshot()
+			require.Empty(t, errs)
+			require.Len(t, records, 1, "one Decide call emits one audit record")
+			assert.Equal(t, "delegation_ceiling", records[0].DeniedBy)
+
+			persisted, _, err := s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
+				PrincipalID: tc.agentID, Result: "deny", Limit: 10,
+			})
+			require.NoError(t, err)
+			require.Len(t, persisted, 1)
+			assert.Equal(t, "delegation_ceiling", persisted[0].DeniedBy)
+			assert.Equal(t, decision.Reason, persisted[0].Reason)
+		})
+	}
 }
