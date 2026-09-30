@@ -182,3 +182,9 @@ func (w *peerAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (w *peerAgentIdentity) TokenID() string { return "" }
+
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from a JWT.
+func (w *peerAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
