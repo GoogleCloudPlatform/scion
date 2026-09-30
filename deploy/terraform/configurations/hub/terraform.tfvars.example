@@ -1,0 +1,39 @@
+# Copy to <hub_name>.tfvars (e.g. tfha-h1.tfvars) and fill in. See
+# deploy/terraform/README.md for the full instantiation sequence, including
+# the required -backend-config prefix and matching state_prefix.
+
+project_id    = "my-project"
+region        = "us-central1"
+zone          = "us-central1-a"
+shared_prefix = "tfha"
+
+hub_name     = "tfha-h1"
+state_prefix = "tfha/hubs/tfha-h1"
+
+hub_image = "us-central1-docker.pkg.dev/my-project/tfha-scion/hub:v1.2.3"
+
+# Optional — not a prerequisite. Leave unset (null) for the first apply;
+# the hub and IAP browser login work regardless. See the README's "IAP
+# OAuth client" section to discover the Google-managed client ID (or create
+# a custom one for cross-org sign-in) and re-apply — agent transport stays
+# disabled until this is set.
+# iap_oauth_client_id = "REPLACE_ME.apps.googleusercontent.com"
+
+# Optional — leave unset (default "") for normal applies. Set to a new
+# value (e.g. a date) here, in this tfvars file, only when rotating this
+# hub's DB password; see the README's "Rotating a hub's DB password"
+# section. Once set, keep it here permanently — never remove it or reset
+# it to "", either of which triggers another, unplanned rotation on the
+# next apply.
+# db_password_rotation = "REPLACE_ME_WITH_ROTATION_MARKER"
+
+iap_members  = []
+admin_emails = []
+
+# min_instances=1: multi-replica in-process broker safety is unconfirmed
+# for this runtime. max_instances=3 (the module default) needs a hub image
+# built from a commit containing GoogleCloudPlatform/scion#2046, which
+# fixes ptone/scion#2090 (see hub-cloudrun's max_instances description).
+# On an older hub image without that fix, set max_instances=1.
+min_instances = 1
+max_instances = 3

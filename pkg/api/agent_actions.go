@@ -48,16 +48,14 @@ const (
 	// grantable authorization permission — see agentActionPermission in
 	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
 	//
-	// Deliberately NOT added to RuntimeBrokerAgentActionMethod below: the
-	// broker side never sees this action at all yet. A live
-	// POST /api/v1/agents/{id}/keys request does reach
-	// agentActionPermission("keys") on the Hub side, through the generic
-	// authz block every action passes through before dispatch — but no case
-	// for this constant exists yet in pkg/hub's action-dispatch switches
-	// (handlers_agents_core.go, handlers_projects_core.go), so dispatch
-	// still 404s regardless. This constant exists so later tasks (1.1, 1.2,
-	// 2.1, 2.2) can reference a single frozen action name while they wire
-	// the actual route, rather than each inventing their own string.
+	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
+	// the runtime broker's own dedicated keys handler
+	// (pkg/runtimebroker/handlers.go). The Hub-side action-dispatch switches
+	// (handlers_agents_core.go, handlers_projects_core.go) do not yet have a
+	// case for this constant — that is task 2.1/2.2's job — so a live public
+	// POST /api/v1/agents/{id}/keys request still 404s at the Hub today; only
+	// the internal Hub-to-broker route this constant also names is reachable
+	// once 1.2 implements a Dispatcher/BrokerClient that calls it.
 	AgentActionKeys = "keys"
 )
 
@@ -68,7 +66,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth, AgentActionKeys:
 		return http.MethodPost, true
 	default:
 		return "", false

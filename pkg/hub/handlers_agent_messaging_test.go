@@ -2376,6 +2376,85 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
 }
 
+// alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
+// subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
+// project's user-message subscriber is saturated (ptone/scion#2311).
+type alwaysDropUserBus struct{}
+
+func (alwaysDropUserBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return eventbus.ErrSubscriberBufferFull
+}
+
+func (alwaysDropUserBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (alwaysDropUserBus) Close() error { return nil }
+
+// TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable is a
+// regression test for ptone/scion#2311: when the broker's user-message
+// publish is dropped because the recipient's subscriber buffer is full, the
+// outbound-message endpoint must report a retryable failure instead of
+// silently answering 200 while the message is lost.
+func TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "broker-drop-project",
+		Slug: "broker-drop-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human-drop@example.com",
+		DisplayName: "Human Drop",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "broker-drop-agent",
+		Slug:            "broker-drop-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: "test-broker",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Wire a broker proxy whose bus always reports a dropped delivery, so
+	// the handler takes the broker path and PublishUserMessage fails.
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(alwaysDropUserBus{}, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello into a full buffer",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code,
+		"handler response: %s", rr.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+}
+
 // TestAgentMessage_UserSenderUsesEmailNotDisplayName verifies that the Sender
 // field for a user-originated message uses "user:<email>" — never
 // "user:<display_name>". A display name like "Preston Holmes" is not routable;

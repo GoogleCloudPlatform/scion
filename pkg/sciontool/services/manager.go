@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 )
 
 const maxConsecutiveFailures = 3
@@ -295,7 +296,18 @@ func (svc *managedService) start() error {
 		}
 	}
 
-	if err := cmd.Start(); err != nil {
+	// Start and register the child's PID as a single gated step so
+	// sciontool init's SIGCHLD reaper cannot observe it as
+	// exited-and-unmanaged in the gap between Start() returning and
+	// registration (see pkg/sciontool/procreap for why).
+	var execToken *procreap.Token
+	if err := procreap.Gated(func() error {
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		execToken = procreap.RegisterManagedPID(cmd.Process.Pid)
+		return nil
+	}); err != nil {
 		return err
 	}
 
@@ -312,6 +324,7 @@ func (svc *managedService) start() error {
 	// Wait for the process in background
 	go func() {
 		err := cmd.Wait()
+		procreap.UnregisterManagedPID(cmd.Process.Pid, execToken)
 		exitCode := 0
 		if err != nil {
 			var exitErr *exec.ExitError

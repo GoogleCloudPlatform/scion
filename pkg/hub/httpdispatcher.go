@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -91,6 +92,13 @@ func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 
 func (c *HTTPRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	return c.transport.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
+}
+
+// ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
+// keys route directly over HTTP (no HMAC signing). It implements
+// agentkeys.BrokerClient.
+func (c *HTTPRuntimeBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	return c.transport.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
 }
 
 // HasPromptResponse is the response from the has-prompt action.
@@ -2734,6 +2742,79 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	}
 
 	return d.client.MessageAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, message, interrupt, structuredMsg)
+}
+
+// DispatchAgentKeys implements agentkeys.Dispatcher: it looks up the target
+// broker's endpoint (the same store lookup DispatchAgentMessage already
+// performs via getBrokerEndpoint — the only store access this method
+// performs), builds the internal agentkeys.BrokerRequest from target plus
+// this call's own operationID/executeBefore/keys arguments, and hands it to
+// the configured broker client's agentkeys.BrokerClient implementation. It
+// does not re-resolve or re-authorize target: the caller (task 2.2's
+// ExecuteAgentKeys) passes the already-resolved, already-authorized facts it
+// gathered, per .design/agent-keys-contract.md §4.4.
+//
+// If the configured client does not implement agentkeys.BrokerClient (a
+// wiring defect, not a runtime condition — every production client this task
+// ships does), or the broker endpoint lookup itself fails, this is reported
+// as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
+// any request could have reached a broker.
+func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	// Fail closed on a missing or already-past deadline before spending a
+	// network round trip on it: BrokerRequest.ExecuteBefore's doc requires a
+	// zero value to fail closed, and contract §4.3 lists "the Hub's own
+	// pre-send check found ExecuteBefore already past" as an ErrNotDispatched
+	// source. The broker enforces this independently at admission (task
+	// 1.1) — this is a cheap, redundant guard, not a substitute for that.
+	if executeBefore.IsZero() || !time.Now().Before(executeBefore) {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: execute-before deadline is zero or already past", agentkeys.ErrNotDispatched)
+	}
+	// An empty operationID would make decodeBrokerKeysResponse's success-path
+	// echo check ("OperationID == expectedOperationID") vacuous — an empty
+	// echo would satisfy an empty expectation, silently discarding the audit
+	// correlation the echo check exists to enforce. The operation ID is a
+	// mandatory body field per contract §4.1; a caller (task 2.2) always
+	// mints one before calling this method, so an empty value here is a
+	// caller bug, proven before any request could be built.
+	if operationID == "" {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: operation ID is required", agentkeys.ErrNotDispatched)
+	}
+	// An empty AgentSlug builds a path like "/api/v1/agents//keys": the
+	// broker's mux would answer with a path-clean redirect, which keysClient
+	// correctly does not follow, so this would otherwise surface as an
+	// uncertain "may have run" outcome for a request that never reached a
+	// handler. An empty AgentID, ProjectID or RuntimeBrokerID are caller bugs
+	// too — task 2.2 always passes these fields from an already-resolved
+	// *store.Agent — and are proven-empty before any request is built, the
+	// same standard as the deadline and operation-ID guards above. Checking
+	// RuntimeBrokerID here too (rather than only implicitly via the
+	// getBrokerEndpoint call below) fails fast and avoids an unnecessary
+	// store read for an already-known-invalid target. This is an
+	// input-shape check, not re-resolution or re-authorization of target, so
+	// it does not conflict with the "Dispatcher does not re-resolve" rule in
+	// contract §4.4.
+	if target.AgentSlug == "" || target.AgentID == "" || target.ProjectID == "" || target.RuntimeBrokerID == "" {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: target agent slug, agent ID, project ID and runtime broker ID are all required", agentkeys.ErrNotDispatched)
+	}
+
+	keysClient, ok := d.client.(agentkeys.BrokerClient)
+	if !ok {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: configured broker client does not support keys dispatch", agentkeys.ErrNotDispatched)
+	}
+
+	endpoint, err := d.getBrokerEndpoint(ctx, target.RuntimeBrokerID)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
+	}
+
+	req := agentkeys.BrokerRequest{
+		ProjectID:     target.ProjectID,
+		AgentID:       target.AgentID,
+		OperationID:   operationID,
+		ExecuteBefore: executeBefore.UTC(),
+		Keys:          keys,
+	}
+	return keysClient.ExecuteKeys(ctx, target.RuntimeBrokerID, endpoint, target.AgentSlug, req)
 }
 
 // DispatchAgentLogs retrieves agent.log content from the runtime broker.

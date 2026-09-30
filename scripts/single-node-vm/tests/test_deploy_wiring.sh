@@ -362,6 +362,30 @@ FATAL: run_deploy_create_to_cloud_run_deploy: 'beta run deploy' was never logged
   rm -f "$config_file" "$log_file"
 }
 
+# The systemd unit install ('compute ssh ... tee ... scion-hub.service')
+# runs in Phase 3, well before the Cloud Run deploy call this helper
+# stops at, so by the time run_deploy_create_to_cloud_run_deploy returns,
+# the unit's full rendered content -- read verbatim off disk by deploy.sh
+# via `$(cat config-templates/scion-hub.service)` -- is already in
+# gcloud_log. A daemon started with no WorkingDirectory= inherits
+# whatever cwd its supervisor happens to have (systemd defaults to "/"),
+# which is not a writable or meaningful location for the scion user's
+# on-disk operational state; the unit must pin it to that user's home
+# directory instead.
+test_deploy_create_systemd_unit_has_working_directory() {
+  fresh_gcloud_state
+  run_deploy_create_to_cloud_run_deploy "$(base_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+  # Anchored to the whole line (grep -cx), not a substring match: a
+  # substring check here would still pass with the line commented out
+  # (# WorkingDirectory=/home/scion) or with a typo'd path
+  # (WorkingDirectory=/home/scion/typo), neither of which actually sets the
+  # unit's working directory.
+  assert_eq "1" "$(printf '%s\n' "$log" | grep -cx 'WorkingDirectory=/home/scion' || true)" \
+    "the installed scion-hub.service unit must set WorkingDirectory=/home/scion, matching its User=scion, so the Hub daemon's working directory is never /"
+}
+
 # =====================================================================
 # --delete wiring
 # =====================================================================

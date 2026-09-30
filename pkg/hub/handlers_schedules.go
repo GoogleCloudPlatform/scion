@@ -406,13 +406,11 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		effectivePayload := schedule.Payload
 		if req.Payload != "" {
 			effectivePayload = req.Payload
-		}
-		// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw" key
-		// in the advanced Payload JSON. Only checked when the caller is
-		// setting/changing Payload in this request — an update that leaves
-		// Payload untouched must not retroactively fail on an existing
-		// stored value.
-		if req.Payload != "" {
+			// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw"
+			// key in the advanced Payload JSON. Only checked when the caller
+			// is setting/changing Payload in this request — an update that
+			// leaves Payload untouched must not retroactively fail on an
+			// existing stored value.
 			if err := rejectRawScheduledPayload(req.Payload); err != nil {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
 					map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})

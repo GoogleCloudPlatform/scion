@@ -78,6 +78,17 @@ web/playwright-report/
 # Downloaded files
 downloads/
 
+# Local pinned tool installs (task-owned, not committed)
+/.tools/
+
+# Terraform local state/cache (the .terraform.lock.hcl provider lock IS committed)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!**/terraform.tfvars.example
+
 # PR review artifacts
 pr-*-review*.md
 

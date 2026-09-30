@@ -53,6 +53,19 @@ func (UserAccessToken) Fields() []ent.Field {
 		field.UUID("project_id", uuid.UUID{}),
 		field.String("scopes").
 			NotEmpty(),
+		// ceiling_version and ceiling_permission_ids persist the normalized,
+		// frozen permission ceiling. ceiling_version defaults to 0
+		// (permissions.CeilingVersionUnspecified) for every row created
+		// before this column existed. ceiling_permission_ids is Nillable so
+		// "never backfilled" (NULL) is distinguishable from "backfilled to an
+		// explicit empty list" (an empty JSON array, which denies rather than
+		// meaning unrestricted) — see store.UserAccessToken.NormalizedCeiling.
+		// Newly minted (CeilingVersionV1+) tokens always set both.
+		field.Int32("ceiling_version").
+			Default(0),
+		field.String("ceiling_permission_ids").
+			Optional().
+			Nillable(),
 		field.Bool("revoked").
 			Default(false),
 		field.Time("expires_at").
@@ -65,12 +78,12 @@ func (UserAccessToken) Fields() []ent.Field {
 			Default(time.Now).
 			Immutable(),
 
-		// E.1 descriptive credential metadata. Optional/Nillable additive
-		// columns: NULL means no metadata (always true for pre-E.1 rows).
-		// Immutable() (review finding F9): ruling Q1 says these fields are
-		// immutable after issuance, and this makes the generated update
-		// builders enforce that at the store layer too, not just by
-		// convention in the service layer.
+		// Descriptive credential metadata. Optional/Nillable additive
+		// columns: NULL means no metadata (always true for rows created
+		// before these columns existed). Immutable() means these fields are
+		// immutable after issuance, and the generated update builders
+		// enforce that at the store layer too, not just by convention in
+		// the service layer.
 		field.String("purpose").
 			Optional().
 			Nillable().

@@ -235,6 +235,7 @@ var Registry = []Permission{
 	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
+	{ID: "hub.experiments.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Read and update hub-wide experiment overrides", Enforcement: []string{"pkg/hub/route_metadata.go:admin.experiments", "pkg/hub/admin_experiments.go:handleAdminExperiments"}},
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -420,23 +421,6 @@ func uatScopesForResource(resource string) []string {
 	return out
 }
 
-// LegacyUATScopeImplications maps a UAT scope to additional scopes it
-// implicitly carries for tokens minted before a permission split. Before
-// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
-// through agent.attach, and agent:manage expanded (at mint time) to include
-// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
-// so that existing CI tokens continue to work (miller79/scion#88).
-//
-// NOTE: this map is NOT honored on the Decide path today
-// (enforceUATConstraints uses exact HasScope) — only inconsistently through
-// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
-// attach does not imply lifecycle. Any future alignment must narrow
-// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
-// match CanDelegate.
-var LegacyUATScopeImplications = map[string][]string{
-	"agent:attach": {"agent:lifecycle"},
-}
-
 // BoundaryKind identifies the credential-side boundary a UAT is issued
 // under: confined to one project, or spanning the hub (including
 // cross-project use, subject to the holder's live authority on each
@@ -466,13 +450,12 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it is the replacement for useraccesstoken.go's
-// scopeToPermissionIDs, which reconstructs "resource:action" and would
-// silently collapse two permissions sharing a resource/action pair (e.g.
+// selector vocabulary: a resource:action reconstruction would silently
+// collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable. A.2 owns wiring the
-// mint/runtime call sites to this table; A.1 owns the table and its
-// build/validate logic.
+// selector once either becomes UAT-selectable. Mint resolves selectors
+// through this table, and runtime authorization and delegation enforce the
+// ceiling persisted from that resolution.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string

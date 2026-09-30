@@ -155,8 +155,9 @@ func TestCrossMemberAttach_HTTPRoutes(t *testing.T) {
 }
 
 // TestCrossMemberAttach_UATScopes verifies the UAT side of the split:
-// agent:manage no longer requires agent.attach (so project owners can mint it),
-// and tokens minted before the split that carry agent:attach keep lifecycle.
+// agent:manage does not require agent.attach (so project owners can mint
+// it), and a token that carries only agent:attach — however it was minted —
+// does not gain agent.lifecycle: no scope implies another.
 func TestCrossMemberAttach_UATScopes(t *testing.T) {
 	manage := permissions.UATManageScopes()
 	assert.Contains(t, manage, "agent:lifecycle")
@@ -164,12 +165,23 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 	assert.NotContains(t, manage, "agent:port_access")
 	assert.True(t, permissions.UATValidScopes()["agent:attach"], "agent:attach stays explicitly mintable")
 
-	legacy := uatScopeRestriction([]string{"agent:attach"})
-	assert.True(t, legacy.Check("agent.lifecycle"), "legacy agent:attach tokens keep lifecycle")
-	assert.True(t, legacy.Check("agent.attach"))
-	readOnly := uatScopeRestriction([]string{"agent:read"})
+	attachOnly := ceilingRestriction(permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes([]string{"agent:attach"}),
+	})
+	assert.False(t, attachOnly.Check("agent.lifecycle"), "attach-only tokens must not gain lifecycle")
+	assert.True(t, attachOnly.Check("agent.attach"))
+
+	readOnly := ceilingRestriction(permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes([]string{"agent:read"}),
+	})
 	assert.False(t, readOnly.Check("agent.lifecycle"))
-	lifecycleOnly := uatScopeRestriction([]string{"agent:lifecycle"})
+
+	lifecycleOnly := ceilingRestriction(permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes([]string{"agent:lifecycle"}),
+	})
 	assert.False(t, lifecycleOnly.Check("agent.attach"), "lifecycle must not imply attach")
 
 	t.Run("project owner can mint agent:manage", func(t *testing.T) {
