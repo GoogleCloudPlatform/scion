@@ -710,6 +710,13 @@ type GlobalConfig struct {
 	// project_defaults.default_scratchpad in file/SQLite mode.
 	DefaultScratchpad *bool `json:"-" yaml:"-" koanf:"-"`
 
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. Populated from
+	// settings.yaml quotas.enforce_broker_quotas in file/SQLite mode, so a
+	// file-mode admin save takes effect without a restart. nil means
+	// unset — the fail-safe default (enforced) applies.
+	EnforceBrokerQuotas *bool `json:"-" yaml:"-" koanf:"-"`
+
 	// DefaultHarnessConfig is the hub-level default harness config name.
 	// Populated from the top-level default_harness_config key in settings.yaml
 	// in file/SQLite mode.
@@ -1761,6 +1768,18 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 			if ds, ok := pdMap["default_scratchpad"]; ok {
 				if b, ok := ds.(bool); ok {
 					gc.DefaultScratchpad = &b
+				}
+			}
+		}
+	}
+
+	// Check for top-level "quotas" section — it lives outside "server" in
+	// settings.yaml and controls hub-level quota enforcement toggles.
+	if qRaw, ok := raw["quotas"]; ok && qRaw != nil {
+		if qMap, ok := qRaw.(map[string]interface{}); ok {
+			if eb, ok := qMap["enforce_broker_quotas"]; ok {
+				if b, ok := eb.(bool); ok {
+					gc.EnforceBrokerQuotas = &b
 				}
 			}
 		}

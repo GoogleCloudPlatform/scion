@@ -319,11 +319,21 @@ type VersionedSettings struct {
 
 	// ProjectDefaults controls hub-level defaults applied at project creation time.
 	ProjectDefaults *ProjectDefaultsSettings `json:"project_defaults,omitempty" yaml:"project_defaults,omitempty" koanf:"project_defaults"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *QuotaSettings `json:"quotas,omitempty" yaml:"quotas,omitempty" koanf:"quotas"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
 type AutoExposePortsSettings struct {
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+}
+
+// QuotaSettings holds the quota enforcement configuration in settings.yaml.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent.
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" yaml:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
 }
 
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.
