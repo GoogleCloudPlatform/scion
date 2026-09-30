@@ -93,10 +93,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.Env, so it can never reflect the agent-level Hub config or
 	// template env overrides applied further down, both of which a creator
 	// controls (inline req.Config.Hub, template hub.endpoint via
-	// MergeScionConfig). In broker mode this is the runtime broker's own
-	// resolved value; see the trustedHubEndpoint computation below for how
-	// it (and, outside broker mode, project settings) become the one
-	// source Substrate's egress allowlist trusts.
+	// MergeScionConfig). Outside broker mode this (falling back to project
+	// settings) is the one source Substrate's egress allowlist trusts; see
+	// the trustedHubEndpoint computation below. In BrokerMode, egress trust
+	// comes from opts.TrustedHubEndpoint instead — the runtime broker's own
+	// operator-derived resolution, set separately from opts.Env so a
+	// creator-controlled ResolvedEnv/Config.Env value can never reach it —
+	// not from this variable, which in BrokerMode still only feeds the
+	// agent's own delivered hub endpoint, never egress trust.
 	var callerHubEndpoint string
 	if opts.Env != nil {
 		callerHubEndpoint = opts.Env["SCION_HUB_ENDPOINT"]
@@ -927,18 +931,29 @@ authDone:
 
 	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
 	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
-	// broker mode, callerHubEndpoint ONLY — the runtime broker's own
-	// resolved value, captured at the top of Start before any override
-	// could touch it; if empty, no hub host is trusted at all (fail closed;
-	// see substrateEgressHostnames). Outside broker mode, callerHubEndpoint,
-	// falling back to projectSettingsHubEndpoint (an operator-controlled
-	// file). The agent-level Hub config and template env overrides — both
+	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
+	// operator-derived resolution (request HubEndpoint, hub connection
+	// endpoint, broker config HubEndpoint, or project settings; never
+	// ResolvedEnv/Config.Env, which a creator can set — see
+	// api.StartOptions.TrustedHubEndpoint's own doc comment), a field set
+	// separately from opts.Env so a creator-controlled env value can never
+	// reach it even when every operator tier is empty; if empty, no hub host
+	// is trusted at all (fail closed; see substrateEgressHostnames). Outside
+	// broker mode, callerHubEndpoint (opts.Env, captured at the top of Start
+	// before any override could touch it), falling back to
+	// projectSettingsHubEndpoint (an operator-controlled file). The
+	// agent-level Hub config and template env overrides — both
 	// creator-controlled, applied above and below — never feed this value:
 	// they can still redirect the agent's own hub calls, but must never
 	// widen what the actor's egress allowlist may reach.
-	trustedHubEndpoint := callerHubEndpoint
-	if trustedHubEndpoint == "" && !opts.BrokerMode {
-		trustedHubEndpoint = projectSettingsHubEndpoint
+	var trustedHubEndpoint string
+	if opts.BrokerMode {
+		trustedHubEndpoint = opts.TrustedHubEndpoint
+	} else {
+		trustedHubEndpoint = callerHubEndpoint
+		if trustedHubEndpoint == "" {
+			trustedHubEndpoint = projectSettingsHubEndpoint
+		}
 	}
 
 	// Explicit SCION_HUB_ENDPOINT in scion config env section takes

@@ -16,6 +16,8 @@ package runtime
 
 import (
 	"net/netip"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -300,6 +302,34 @@ func TestSubstrateEgressHostnames_HubEndpointOverrideEqualToTrustedNoDup(t *test
 	}
 	if count != 1 {
 		t.Errorf("substrateEgressHostnames() = %v, want the hub host exactly once, got %d", hosts, count)
+	}
+}
+
+// TestSubstrateEgressHostnames_EmptyTrustedHubAddsNoHubHost proves the
+// invariant the trusted-hub capture (pkg/agent/run.go) exists to protect:
+// when cfg.TrustedHubEndpoint is empty (BrokerMode with no operator-derived
+// hub endpoint at all), no hub host is added — not the empty trusted value,
+// and not the final env's own SCION_HUB_ENDPOINT/SCION_HUB_URL, however
+// tenant-influenced those may be. substrateEgressHostnames must never fall
+// back to the env host when the trusted host is empty.
+func TestSubstrateEgressHostnames_EmptyTrustedHubAddsNoHubHost(t *testing.T) {
+	cfg := RunConfig{TrustedHubEndpoint: ""}
+	env := map[string]string{
+		"SCION_HUB_ENDPOINT": "http://169.254.169.254/",
+		"SCION_HUB_URL":      "https://kubernetes.default.svc",
+	}
+	hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	for _, refused := range []string{"169.254.169.254", "kubernetes.default.svc"} {
+		if containsHost(hosts, refused) {
+			t.Errorf("substrateEgressHostnames() = %v, must not add env hub host %q when TrustedHubEndpoint is empty", hosts, refused)
+		}
+	}
+	want := append([]string{}, hardcodedModelEgressHosts...)
+	sort.Strings(want)
+	got := append([]string{}, hosts...)
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("substrateEgressHostnames() = %v, want exactly the hardcoded model hosts %v (no hub host at all)", hosts, want)
 	}
 }
 

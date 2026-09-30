@@ -463,7 +463,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		connectionHubEndpoint = s.resolveHubEndpointFromRequest(in.HTTPRequest)
 	}
 
-	hubEndpoint, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
+	hubEndpoint, hubEndpointTrusted, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
 		Op:                    in.Operation,
 		ReqHubEndpoint:        in.HubEndpoint,
 		ConnectionHubEndpoint: connectionHubEndpoint,
@@ -489,6 +489,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_HUB_ENDPOINT set", "agent_id", in.AgentID, "endpoint", hubEndpoint)
 		}
+	}
+	// trustedHubEndpoint feeds api.StartOptions.TrustedHubEndpoint below —
+	// the one hub value Substrate's egress allowlist may trust
+	// (pkg/agent/run.go, pkg/runtime/substrate_egress.go). It is the SAME
+	// value delivered into the agent's own SCION_HUB_ENDPOINT env above when
+	// hubEndpointTrusted is true, and empty (fail closed) when it is false —
+	// never a value read back out of env, which by this point may already
+	// carry a creator-controlled ResolvedEnv/Config.Env value.
+	var trustedHubEndpoint string
+	if hubEndpointTrusted {
+		trustedHubEndpoint = hubEndpoint
 	}
 
 	// Colocated bridge override: when the hub and broker are on the same
@@ -638,10 +649,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// --- Build StartOptions ---
 	opts := api.StartOptions{
-		Name:        in.Name,
-		BrokerMode:  true,
-		ProjectPath: in.ProjectPath,
-		NoAuth:      in.NoAuth,
+		Name:               in.Name,
+		BrokerMode:         true,
+		ProjectPath:        in.ProjectPath,
+		NoAuth:             in.NoAuth,
+		TrustedHubEndpoint: trustedHubEndpoint,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).

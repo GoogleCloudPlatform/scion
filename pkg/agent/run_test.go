@@ -5181,17 +5181,18 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 		}
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:        "agent-1",
-			ProjectPath: projectScionDir,
-			BrokerMode:  true,
-			NoAuth:      true,
-			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Name:               "agent-1",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
 		}
 		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
-			t.Errorf("TrustedHubEndpoint = %q, want %q (the broker-supplied opts.Env value)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint)
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the broker-supplied opts.TrustedHubEndpoint value)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint)
 		}
 	})
 
@@ -5209,11 +5210,12 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 		}
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:        "agent-2",
-			ProjectPath: projectScionDir,
-			BrokerMode:  true,
-			NoAuth:      true,
-			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Name:               "agent-2",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -5237,11 +5239,12 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 		}
 		mgr := NewManager(mockRT)
 		_, err := mgr.Start(context.Background(), api.StartOptions{
-			Name:        "agent-3",
-			ProjectPath: projectScionDir,
-			BrokerMode:  true,
-			NoAuth:      true,
-			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			Name:               "agent-3",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
 		})
 		if err != nil {
 			t.Fatalf("Start failed: %v", err)
@@ -5289,6 +5292,45 @@ func TestStartTrustedHubEndpoint(t *testing.T) {
 		}
 		if capturedConfig.TrustedHubEndpoint != "" {
 			t.Errorf("TrustedHubEndpoint = %q, want \"\" (broker mode with no caller-supplied hub endpoint must not fall back to agent-level config or project settings)", capturedConfig.TrustedHubEndpoint)
+		}
+	})
+
+	// A tenant-controllable value (ResolvedEnv/Config.Env, mirrored here by
+	// setting opts.Env directly without opts.TrustedHubEndpoint) must never
+	// feed egress trust, even though it still reaches opts.Env and is
+	// delivered to the agent as SCION_HUB_ENDPOINT: BrokerMode must read
+	// opts.TrustedHubEndpoint only, never fall back to
+	// opts.Env["SCION_HUB_ENDPOINT"].
+	t.Run("tenant env hub endpoint present but TrustedHubEndpoint empty: not trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-5", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-5",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			// A tenant-controllable value present in opts.Env, exactly as
+			// resolveHubEndpointForCreate's ResolvedEnv tier would leave it
+			// when every operator tier is empty — but TrustedHubEndpoint
+			// itself is left unset, as buildStartContext now does in that
+			// case.
+			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" — a tenant-controllable opts.Env value must never feed egress trust", capturedConfig.TrustedHubEndpoint)
 		}
 	})
 }
