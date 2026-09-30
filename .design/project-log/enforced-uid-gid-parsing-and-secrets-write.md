@@ -48,16 +48,20 @@ down is opened `O_DIRECTORY|O_NOFOLLOW`, a missing component is created with
 `mkdirat` and only that newly created component is ever chowned (by fd,
 never a path-based `os.Chown`), and a symlink or any non-directory at any
 component — the home directory itself, an intermediate directory, or the
-immediate parent — is refused before anything is touched. A directory that
-does not resolve under the agent home at all (a legitimate operator-
-configured absolute target) is created the ordinary way and is never
-chowned to the workload; containment is decided by walking the chain, not
-by a string-prefix check on the path.
+immediate parent — is refused before anything is touched. A file secret
+whose target lives directly inside the agent home (its parent directory IS
+the home directory itself, e.g. `~/.netrc`) is chown-eligible exactly like
+one nested deeper. A directory that does not resolve under the agent home
+at all (a legitimate operator-configured absolute target) is created the
+ordinary way and is never chowned to the workload; containment is decided
+by walking the chain, not by a string-prefix check on the path.
 
-On this runtime, staged secret paths under the agent home must not
-traverse a symlink at any component: init refuses the write rather than
-following one. This is intended behavior, not a defect — the alternative is
-resolving a workload-plantable link as root.
+On this runtime, a staged secret's parent directory is resolved with a
+no-follow walk from the filesystem root; any symlinked path component is
+refused, for every target — not only targets under the agent home — and
+init refuses the write rather than following one. This is intended
+behavior, not a defect — the alternative is resolving a workload-plantable
+link as root.
 
 A file-secret target may itself be a path the runtime bind-mounts into the
 container (for example gcloud's `application_default_credentials.json`).
@@ -69,7 +73,12 @@ already-open parent directory descriptor) instead of being replaced
 atomically. This trades away crash-atomicity for that one write in exchange
 for working correctly against a bind-mounted target; every other writer
 built on `dirfd.WriteFileNoFollow` keeps its existing atomic create-and-
-rename behavior.
+rename behavior. The in-place path opens the leaf once, without truncating
+it, fstats that same descriptor, and refuses — naming the link count —
+anything that isn't a single-link regular file before truncating it: a
+workload can plant a hard link to an unrelated file it does not own at the
+leaf's own name, and a hard link has no symlink for `O_NOFOLLOW` to stop
+at, so the link count is what closes that gap.
 
 ## Direct passwd/group fallback: home-directory chown
 
@@ -84,3 +93,7 @@ whatever it points at. If the home directory itself is not a plain,
 non-symlink directory, enforced mode refuses the chown pass outright before
 touching anything; unenforced mode logs and skips it, leaving the rest of
 the direct-edit fallback (the `/etc/passwd`/`/etc/group` rewrite) unaffected.
+`AT_SYMLINK_NOFOLLOW` alone does not stop a hard-linked entry, which names
+the same inode as an unrelated file the workload need not own at all: under
+enforcement, each entry is fstat'd first and skipped — logged, non-fatal —
+when it has more than one link.
