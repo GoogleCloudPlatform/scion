@@ -706,10 +706,10 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
-		switch {
-		case subID == "":
+		switch subID {
+		case "":
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
-		case subID == "bulk" || subID == "bulk-delete":
+		case "bulk", "bulk-delete":
 			MethodNotAllowed(w, http.MethodPost, http.MethodPatch, http.MethodDelete)
 		default:
 			MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
