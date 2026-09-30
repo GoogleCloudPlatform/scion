@@ -1567,8 +1567,8 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext,
 // principalContextForIdentity classifies identity into its PrincipalKind by
 // concrete type — a type assertion switch, never identity.Type(). Type() is
 // informational only (see its doc comment): any concrete type, including one
-// this package has never reviewed, is free to return "user", "agent", or any
-// other string, and must not thereby be admitted as if it were the reviewed
+// this package has not classified, is free to return "user", "agent", or any
+// other string, and must not thereby be admitted as if it were the classified
 // type that string names. Every known concrete production identity type has
 // an explicit arm. The default arm covers everything else: a nil identity,
 // an unrecognized concrete type, and a package-hub test fake that has not
@@ -1605,7 +1605,7 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 
 // credentialContextForIdentity classifies identity into its CredentialKind by
 // concrete type, for the same reason principalContextForIdentity does: a
-// caller-defined or otherwise unreviewed type's Type() string must never
+// caller-defined or otherwise unclassified type's Type() string must never
 // stand in for classification. The *ScopedUserIdentity check stays first: any
 // UAT-backed identity is CredentialKindUAT regardless of what its underlying
 // UserIdentity's concrete type is. Every other known concrete identity type

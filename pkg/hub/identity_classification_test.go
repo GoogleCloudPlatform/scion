@@ -78,7 +78,7 @@ func (m *unattestedMockAgentIdentity) OriginUserID() string {
 // recognize) and does not implement explicitIdentityClassification. It exists
 // to prove classification keys on concrete type: a caller-controlled type
 // returning a familiar-looking Type() string must not be admitted as if it
-// were the reviewed type that string names.
+// were the classified type that string names.
 type userShapedMockIdentity struct {
 	id string
 }
@@ -106,14 +106,15 @@ func (m *recognizedPrincipalEmptyCredentialMockIdentity) authzClassification() (
 // Source-scan drift guard
 // =============================================================================
 
-// identityInventoryExpectation is the reviewed inventory of every non-test
+// identityInventoryExpectation is the classified inventory of every non-test
 // pkg/hub concrete type that implements Identity, keyed by the type's
 // declared name. attested records AncestryIsHubAttested's planned outcome. A
 // new identity type added to non-test pkg/hub source without a row here — or
 // without a localAncestryProvenance() implementation matching its row —
 // fails TestIdentityClassification_EveryTypeHasExplicitOutcome/SourceScan.
-// That is the point: it forces classification to be a deliberate, reviewed
-// edit. See the AST-scan limitations noted on scanIdentitySource below.
+// That is the point: it forces classification to be a deliberate, explicitly
+// classified edit. See the AST-scan limitations noted on scanIdentitySource
+// below.
 var identityInventoryExpectation = map[string]bool{
 	"AuthenticatedUser":        true,
 	"ScopedUserIdentity":       true,
@@ -273,13 +274,13 @@ func (inv identitySourceInventory) hasClassificationEscape(typeName string) bool
 
 // TestIdentityClassification_EveryTypeHasExplicitOutcome pairs a
 // source-level drift guard (subtest SourceScan) that fails if a new non-test
-// pkg/hub Identity type appears without a reviewed row in
+// pkg/hub Identity type appears without a classified row in
 // identityInventoryExpectation or without localAncestryProvenance matching
 // that row, with a runtime table (subtest ClassifierOutcomes) that exercises
 // principalContextForIdentity, credentialContextForIdentity and
 // AncestryIsHubAttested against a constructed instance of every inventory
 // row, plus nil and two kinds of unrecognized identity: a concrete type this
-// package has never reviewed, and a type whose Type() string merely
+// package has not classified, and a type whose Type() string merely
 // resembles a recognized one without being the type that string names.
 func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 	t.Run("SourceScan", func(t *testing.T) {
@@ -295,7 +296,7 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 			wantNames = append(wantNames, name)
 		}
 		assert.ElementsMatch(t, wantNames, foundNames,
-			"a new non-test pkg/hub Identity type (or a removed one) needs a reviewed row in identityInventoryExpectation")
+			"a new non-test pkg/hub Identity type (or a removed one) needs a classified row in identityInventoryExpectation")
 
 		for name := range found {
 			assert.Falsef(t, inv.hasClassificationEscape(name),
@@ -422,12 +423,12 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantAttested:       false,
 			},
 			{
-				// A concrete type this package has never reviewed is
+				// A concrete type this package has not classified is
 				// unclassified — including principal/credential kind — even
 				// when it fully implements AgentIdentity and carries a
 				// plausible-looking ancestry chain naming a real user. Only
-				// the explicit marker (or the reviewed concrete type)
-				// classifies.
+				// the explicit marker (or an explicitly classified concrete
+				// type) classifies.
 				name:               "agent-shaped type without the ancestry or classification marker",
 				identity:           &unattestedMockAgentIdentity{id: tid("classify-unattested-agent"), projectID: tid("classify-project"), ancestry: []string{tid("classify-user")}},
 				wantPrincipalKind:  "",

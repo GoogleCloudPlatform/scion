@@ -290,18 +290,19 @@ func AncestryIsHubAttested(identity Identity) bool {
 
 // explicitIdentityClassification is an opt-in marker for identity types that
 // need a PrincipalKind/CredentialKind from principalContextForIdentity and
-// credentialContextForIdentity without being one of the reviewed concrete
-// production types those functions switch on directly (AuthenticatedUser,
-// ScopedUserIdentity, DevUser, agentIdentityWrapper, storedAgentIdentity,
-// peerAgentIdentity, explainAgentIdentity, brokerIdentityImpl,
-// FederatedUserIdentity, FederatedAgentIdentity, FederatedServiceIdentity).
-// Its only current implementers are package-hub test fakes that stand in for
-// one of those types (ptone/scion#2123). The method is unexported for the
-// same reason localAncestryProvenance is: no type outside package hub can
-// implement it, so classification can never be forged by an external caller,
-// and a package-hub test fake must opt in with a reviewed, explicit method
-// rather than acquiring a kind by accident — in particular, never by
-// returning a Type() string that happens to match a recognized one. A type
+// credentialContextForIdentity without being one of the explicitly classified
+// concrete production types those functions switch on directly
+// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
+// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
+// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
+// FederatedServiceIdentity). Its only current implementers are package-hub
+// test fakes that stand in for one of those types (ptone/scion#2123). The
+// method is unexported for the same reason localAncestryProvenance is: no
+// type outside package hub can implement it, so classification can never be
+// forged by an external caller, and a package-hub test fake must opt in with
+// an explicit, classified method rather than acquiring a kind by accident —
+// in particular, never by returning a Type() string that happens to match a
+// recognized one. A type
 // that does not implement this interface, and is not one of the concrete
 // types above, is classified with an empty PrincipalKind/CredentialKind,
 // which Decide's fail-closed entry check denies.
