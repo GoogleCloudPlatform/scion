@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
@@ -61,6 +62,19 @@ func Decode(encoded string) (*Staged, error) {
 // Write writes decoded staged secrets to the filesystem inside
 // the container. File secrets are written to their target paths with 0600
 // permissions. Variable secrets are written to <homeDir>/.scion/secrets.json.
+//
+// Every leaf this writes — a file secret's own Target, and secrets.json —
+// goes through dirfd.WriteFileNoFollow with dirfd.RefuseSymlink: a
+// workload-plantable symlink at either path (e.g. left over from a previous
+// run on a persisted home, or planted ahead of a restart) is refused
+// outright rather than written or chowned through, which this function
+// otherwise does as root. WriteFileNoFollow's own parent-directory walk
+// (OpenParentNoFollow) is symlink-safe component-by-component, independent
+// of whatever os.MkdirAll below did — a symlinked intermediate directory
+// is refused the same way a symlinked leaf is. This applies in both
+// enforced and non-enforced runs: a restart exposes the same planted
+// symlink regardless of which mode created the home directory in the first
+// place.
 func Write(homeDir string, staged *Staged) error {
 	var uid, gid int
 	if os.Getuid() == 0 {
@@ -89,11 +103,8 @@ func Write(homeDir string, staged *Staged) error {
 		if (uid > 0 || gid > 0) && strings.HasPrefix(dir, homeDir) {
 			_ = os.Chown(dir, uid, gid)
 		}
-		if err := os.WriteFile(fs.Target, data, 0600); err != nil {
+		if err := dirfd.WriteFileNoFollow(fs.Target, data, 0600, uid, gid, dirfd.RefuseSymlink); err != nil {
 			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, err)
-		}
-		if (uid > 0 || gid > 0) && strings.HasPrefix(fs.Target, homeDir) {
-			_ = os.Chown(fs.Target, uid, gid)
 		}
 	}
 
@@ -110,11 +121,8 @@ func Write(homeDir string, staged *Staged) error {
 			return fmt.Errorf("failed to marshal secrets.json: %w", err)
 		}
 		secretsPath := filepath.Join(scionDir, "secrets.json")
-		if err := os.WriteFile(secretsPath, data, 0600); err != nil {
+		if err := dirfd.WriteFileNoFollow(secretsPath, data, 0600, uid, gid, dirfd.RefuseSymlink); err != nil {
 			return fmt.Errorf("failed to write secrets.json: %w", err)
-		}
-		if uid > 0 || gid > 0 {
-			_ = os.Chown(secretsPath, uid, gid)
 		}
 	}
 

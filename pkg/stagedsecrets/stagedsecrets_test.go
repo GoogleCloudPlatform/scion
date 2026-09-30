@@ -109,6 +109,88 @@ func TestWriteNoVariables(t *testing.T) {
 	}
 }
 
+// TestWrite_RefusesSymlinkAtVariableSecretsPath proves a symlink planted at
+// <homeDir>/.scion/secrets.json (e.g. left over from a previous run on a
+// persisted home, or planted ahead of a restart) is refused rather than
+// written or chowned through: Write must return an error, and the symlink's
+// target file must be untouched.
+func TestWrite_RefusesSymlinkAtVariableSecretsPath(t *testing.T) {
+	homeDir := t.TempDir()
+	scionDir := filepath.Join(homeDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(homeDir, "victim")
+	if err := os.WriteFile(victim, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	secretsPath := filepath.Join(scionDir, "secrets.json")
+	if err := os.Symlink(victim, secretsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	staged := &Staged{VariableSecrets: map[string]string{"token": "abc123"}}
+	if err := Write(homeDir, staged); err == nil {
+		t.Fatal("Write() = nil error, want a refusal for a symlinked secrets.json")
+	}
+
+	link, err := os.Readlink(secretsPath)
+	if err != nil {
+		t.Fatalf("secrets.json is no longer a symlink after the refused write: %v", err)
+	}
+	if link != victim {
+		t.Errorf("secrets.json symlink target = %q, want %q (unchanged)", link, victim)
+	}
+	content, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(content) != "untouched" {
+		t.Errorf("victim content = %q, want %q (unchanged)", content, "untouched")
+	}
+}
+
+// TestWrite_RefusesSymlinkAtFileSecretTarget proves the same for a file
+// secret's own Target: a planted symlink there is refused rather than
+// written or chowned through, and the symlink's target file is untouched.
+func TestWrite_RefusesSymlinkAtFileSecretTarget(t *testing.T) {
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+	victim := filepath.Join(targetDir, "victim")
+	if err := os.WriteFile(victim, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "ssl", "cert.pem")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, target); err != nil {
+		t.Fatal(err)
+	}
+
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "TLS_CERT", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("cert-content"))},
+	}}
+	if err := Write(homeDir, staged); err == nil {
+		t.Fatal("Write() = nil error, want a refusal for a symlinked file-secret target")
+	}
+
+	link, err := os.Readlink(target)
+	if err != nil {
+		t.Fatalf("target is no longer a symlink after the refused write: %v", err)
+	}
+	if link != victim {
+		t.Errorf("target symlink = %q, want %q (unchanged)", link, victim)
+	}
+	content, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(content) != "untouched" {
+		t.Errorf("victim content = %q, want %q (unchanged)", content, "untouched")
+	}
+}
+
 func TestDecodeErrors(t *testing.T) {
 	for name, encoded := range map[string]string{
 		"invalid base64": "not-valid-base64!!!",
