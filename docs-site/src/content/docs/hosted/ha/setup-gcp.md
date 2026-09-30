@@ -722,6 +722,7 @@ server:
     gcp_project_id: PROJECT_ID
 
   hub:
+    hub_id: scion-hub-ha-prod           # Stable identity — see note below
     admin_emails:
       - your-admin@example.com          # Admin email addresses
     hub_name: scion-hub-ha
@@ -734,6 +735,25 @@ server:
     enabled: true
     host: 127.0.0.1
 ```
+
+:::note[Set a stable `hub_id`]
+`server.hub.hub_id` is a short, unique string (letters, digits, hyphens —
+e.g. a project or environment slug such as `scion-hub-ha-prod`) that
+identifies this Hub instance, so all Cloud Run replicas must resolve to
+the **same** value. Without an explicit `hub_id`, each instance derives
+its own ID from its hostname (or Cloud Run revision), causing replicas to
+diverge on GCS storage prefixes and secret scopes.
+
+The hub ID is permanent for the hub's lifetime: changing it changes every
+hub-scoped secret name (`scion-<sha256(hub_id)[:12]>-...`) and storage
+path, orphaning anything namespaced under the old value — see
+[IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for the naming scheme. Set it once and keep every redeploy and revision
+on the same value. If `server.hub.hub_id` is missing on an HA deployment,
+the Hub refuses to start (`hosted HA deployment requires an explicit
+server.hub.hub_id`, see `validateHostedHAPreflight` in
+`cmd/server_foreground.go`).
+:::
 
 :::caution[Critical: Distinguishing IAP Audiences]
 Configuring IAP requires two different audience formats used in separate contexts:
@@ -1201,6 +1221,7 @@ server:
     gcp_project_id: your-project
 
   hub:
+    hub_id: hub-ha-prod                # Stable identity — see Section 3c
     admin_emails:
       - admin@example.com
     hub_name: hub-ha-prod
