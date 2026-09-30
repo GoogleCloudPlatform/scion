@@ -54,28 +54,6 @@ func (_c *UserAccessTokenCreate) SetProjectID(v uuid.UUID) *UserAccessTokenCreat
 	return _c
 }
 
-// SetNillableProjectID sets the "project_id" field if the given value is not nil.
-func (_c *UserAccessTokenCreate) SetNillableProjectID(v *uuid.UUID) *UserAccessTokenCreate {
-	if v != nil {
-		_c.SetProjectID(*v)
-	}
-	return _c
-}
-
-// SetBoundaryKind sets the "boundary_kind" field.
-func (_c *UserAccessTokenCreate) SetBoundaryKind(v string) *UserAccessTokenCreate {
-	_c.mutation.SetBoundaryKind(v)
-	return _c
-}
-
-// SetNillableBoundaryKind sets the "boundary_kind" field if the given value is not nil.
-func (_c *UserAccessTokenCreate) SetNillableBoundaryKind(v *string) *UserAccessTokenCreate {
-	if v != nil {
-		_c.SetBoundaryKind(*v)
-	}
-	return _c
-}
-
 // SetScopes sets the "scopes" field.
 func (_c *UserAccessTokenCreate) SetScopes(v string) *UserAccessTokenCreate {
 	_c.mutation.SetScopes(v)
@@ -243,10 +221,6 @@ func (_c *UserAccessTokenCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *UserAccessTokenCreate) defaults() {
-	if _, ok := _c.mutation.BoundaryKind(); !ok {
-		v := useraccesstoken.DefaultBoundaryKind
-		_c.mutation.SetBoundaryKind(v)
-	}
 	if _, ok := _c.mutation.CeilingVersion(); !ok {
 		v := useraccesstoken.DefaultCeilingVersion
 		_c.mutation.SetCeilingVersion(v)
@@ -294,13 +268,8 @@ func (_c *UserAccessTokenCreate) check() error {
 			return &ValidationError{Name: "key_hash", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.key_hash": %w`, err)}
 		}
 	}
-	if _, ok := _c.mutation.BoundaryKind(); !ok {
-		return &ValidationError{Name: "boundary_kind", err: errors.New(`ent: missing required field "UserAccessToken.boundary_kind"`)}
-	}
-	if v, ok := _c.mutation.BoundaryKind(); ok {
-		if err := useraccesstoken.BoundaryKindValidator(v); err != nil {
-			return &ValidationError{Name: "boundary_kind", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.boundary_kind": %w`, err)}
-		}
+	if _, ok := _c.mutation.ProjectID(); !ok {
+		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "UserAccessToken.project_id"`)}
 	}
 	if _, ok := _c.mutation.Scopes(); !ok {
 		return &ValidationError{Name: "scopes", err: errors.New(`ent: missing required field "UserAccessToken.scopes"`)}
@@ -373,11 +342,7 @@ func (_c *UserAccessTokenCreate) createSpec() (*UserAccessToken, *sqlgraph.Creat
 	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(useraccesstoken.FieldProjectID, field.TypeUUID, value)
-		_node.ProjectID = &value
-	}
-	if value, ok := _c.mutation.BoundaryKind(); ok {
-		_spec.SetField(useraccesstoken.FieldBoundaryKind, field.TypeString, value)
-		_node.BoundaryKind = value
+		_node.ProjectID = value
 	}
 	if value, ok := _c.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
@@ -524,24 +489,6 @@ func (u *UserAccessTokenUpsert) SetProjectID(v uuid.UUID) *UserAccessTokenUpsert
 // UpdateProjectID sets the "project_id" field to the value that was provided on create.
 func (u *UserAccessTokenUpsert) UpdateProjectID() *UserAccessTokenUpsert {
 	u.SetExcluded(useraccesstoken.FieldProjectID)
-	return u
-}
-
-// ClearProjectID clears the value of the "project_id" field.
-func (u *UserAccessTokenUpsert) ClearProjectID() *UserAccessTokenUpsert {
-	u.SetNull(useraccesstoken.FieldProjectID)
-	return u
-}
-
-// SetBoundaryKind sets the "boundary_kind" field.
-func (u *UserAccessTokenUpsert) SetBoundaryKind(v string) *UserAccessTokenUpsert {
-	u.Set(useraccesstoken.FieldBoundaryKind, v)
-	return u
-}
-
-// UpdateBoundaryKind sets the "boundary_kind" field to the value that was provided on create.
-func (u *UserAccessTokenUpsert) UpdateBoundaryKind() *UserAccessTokenUpsert {
-	u.SetExcluded(useraccesstoken.FieldBoundaryKind)
 	return u
 }
 
@@ -765,27 +712,6 @@ func (u *UserAccessTokenUpsertOne) SetProjectID(v uuid.UUID) *UserAccessTokenUps
 func (u *UserAccessTokenUpsertOne) UpdateProjectID() *UserAccessTokenUpsertOne {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.UpdateProjectID()
-	})
-}
-
-// ClearProjectID clears the value of the "project_id" field.
-func (u *UserAccessTokenUpsertOne) ClearProjectID() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearProjectID()
-	})
-}
-
-// SetBoundaryKind sets the "boundary_kind" field.
-func (u *UserAccessTokenUpsertOne) SetBoundaryKind(v string) *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetBoundaryKind(v)
-	})
-}
-
-// UpdateBoundaryKind sets the "boundary_kind" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertOne) UpdateBoundaryKind() *UserAccessTokenUpsertOne {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdateBoundaryKind()
 	})
 }
 
@@ -1192,27 +1118,6 @@ func (u *UserAccessTokenUpsertBulk) SetProjectID(v uuid.UUID) *UserAccessTokenUp
 func (u *UserAccessTokenUpsertBulk) UpdateProjectID() *UserAccessTokenUpsertBulk {
 	return u.Update(func(s *UserAccessTokenUpsert) {
 		s.UpdateProjectID()
-	})
-}
-
-// ClearProjectID clears the value of the "project_id" field.
-func (u *UserAccessTokenUpsertBulk) ClearProjectID() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.ClearProjectID()
-	})
-}
-
-// SetBoundaryKind sets the "boundary_kind" field.
-func (u *UserAccessTokenUpsertBulk) SetBoundaryKind(v string) *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.SetBoundaryKind(v)
-	})
-}
-
-// UpdateBoundaryKind sets the "boundary_kind" field to the value that was provided on create.
-func (u *UserAccessTokenUpsertBulk) UpdateBoundaryKind() *UserAccessTokenUpsertBulk {
-	return u.Update(func(s *UserAccessTokenUpsert) {
-		s.UpdateBoundaryKind()
 	})
 }
 

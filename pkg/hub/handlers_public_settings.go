@@ -50,7 +50,7 @@ func (s *Server) nativeChatEnabled() bool {
 
 func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

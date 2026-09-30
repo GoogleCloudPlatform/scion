@@ -1698,6 +1698,21 @@ type UserAccessToken struct {
 	CeilingVersion       permissions.CeilingVersion `json:"-"`
 	CeilingPermissionIDs []string                   `json:"-"`
 
+	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
+	// permission ceiling. CeilingVersionUnspecified (zero value) with
+	// CeilingPermissionIDs == nil means no ceiling has been persisted for
+	// this row yet: NormalizedCeiling recomputes it from Scopes via the
+	// frozen legacy snapshot rather than trusting a zero value that could
+	// equally mean "persisted, and resolves to nothing." Once
+	// CeilingPermissionIDs is non-nil — backfilled, or set at mint for any
+	// CeilingVersionV1+ row — it is the authoritative, already-resolved
+	// value and Scopes is retained only for display/audit, never re-derived.
+	// Excluded from JSON: the HTTP token response is a separate type, and
+	// omitempty would collapse the nil-vs-empty-list distinction on a round
+	// trip.
+	CeilingVersion       permissions.CeilingVersion `json:"-"`
+	CeilingPermissionIDs []string                   `json:"-"`
+
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"` // Required for UATs

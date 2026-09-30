@@ -101,7 +101,7 @@ func (s *Server) handleSkillFiles(w http.ResponseWriter, r *http.Request, skillI
 	case http.MethodPut:
 		s.handleSkillFileWrite(w, r, skillID, filePath)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 

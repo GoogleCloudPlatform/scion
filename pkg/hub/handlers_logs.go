@@ -32,7 +32,7 @@ import (
 // It proxies the request to the agent's runtime broker to read agent.log.
 func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -89,7 +89,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/cloud-logs
 func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -170,7 +170,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 // It returns an SSE stream of log entries using the Cloud Logging Tail API.
 func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -280,7 +280,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 // entries associated with the given agent.
 func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -387,7 +387,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 // It returns an SSE stream of message log entries from the "scion-messages" log.
 func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -485,7 +485,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 // within the given project (across all agents).
 func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -557,7 +557,7 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 // It returns an SSE stream of all message log entries within the project.
 func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

@@ -188,7 +188,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -217,7 +217,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -229,7 +229,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -244,6 +244,18 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	if sectionName == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"Section name is required", nil)
+		return
+	}
+
+	// The "experiments" section has its own compare-and-set reset with a
+	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
+	// hub.experiments.update. This generic route has no compare-and-set and
+	// is gated on hub.config.update, so it must not be a second way to clear
+	// every experiment override (ptone/scion#2217). Rejected before any
+	// store call.
+	if sectionName == "experiments" {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
 
@@ -654,7 +666,8 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		if req.AutoExposePorts.Enabled != nil {
+		// Section-generic zero check; see the Quotas block below.
+		if !isZeroStruct(req.AutoExposePorts) {
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
 			delete(raw, "auto_expose_ports")

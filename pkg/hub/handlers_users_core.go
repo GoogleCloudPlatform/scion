@@ -40,7 +40,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createUser(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -114,7 +114,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource actions
 	if action == "revoke-sessions" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
@@ -129,7 +129,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteUser(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 

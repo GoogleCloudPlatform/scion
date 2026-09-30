@@ -1615,7 +1615,7 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 // intended for UI form generation and CLI validation. Static metadata — no DB access.
 func (s *Server) handleAdminServerConfigSchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

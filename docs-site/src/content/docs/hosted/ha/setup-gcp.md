@@ -19,6 +19,18 @@ agent dispatch, and **Cloud SQL** for durable state.
 | Storage | GCS | Templates, artifacts, hub data |
 | Images | Artifact Registry | Container image repository |
 
+:::tip[Terraform alternative]
+This guide walks through the manual `gcloud`/`kubectl` steps. If you'd rather
+provision this same architecture declaratively — including support for
+multiple hubs sharing one project's shared infrastructure (network, Cloud
+SQL, Filestore, GKE Autopilot, Artifact Registry) — see
+[Multi-Hub HA with Terraform](/scion/hosted/ha/terraform/) and the Terraform
+module set at
+[`deploy/terraform/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/terraform/README.md)
+in the repository. It automates most of the steps below; the two approaches
+are not meant to be mixed against the same project.
+:::
+
 ---
 
 ## 0. Prerequisites & Deployer Identity
@@ -722,6 +734,7 @@ server:
     gcp_project_id: PROJECT_ID
 
   hub:
+    hub_id: scion-hub-ha-prod           # Stable identity — see note below
     admin_emails:
       - your-admin@example.com          # Admin email addresses
     hub_name: scion-hub-ha
@@ -734,6 +747,30 @@ server:
     enabled: true
     host: 127.0.0.1
 ```
+
+:::note[Set a stable `hub_id`]
+`server.hub.hub_id` is a short string (recommended: lowercase letters,
+digits, hyphens — e.g. a project or environment slug such as
+`scion-hub-ha-prod`) that identifies this Hub instance. All Cloud Run
+replicas must resolve to the **same** value, and it should be unique
+among hubs that share a GCP project or bucket. Without an explicit
+`hub_id`, the Hub falls back to an implicit ID (a hash of the Cloud Run
+service name, or a per-host, hostname-derived value elsewhere). That
+value changes if the service is renamed or recreated under another
+name, and it differs for any process that does not run under the same
+service. The HA preflight therefore requires it to be pinned.
+
+The hub ID is permanent for the hub's lifetime: changing it changes the
+name prefix of every Secret Manager secret this hub writes
+(`scion-<sha256(hub_id)[:12]>-...`), the GCS prefix (`hubs/<hub_id>/...`)
+and hub-scoped database rows, orphaning anything namespaced under the
+old value — see
+[IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for the naming scheme. Set it once and keep every redeploy and revision
+on the same value. If `server.hub.hub_id` is missing on an HA deployment,
+the Hub refuses to start (`hosted HA deployment requires an explicit
+server.hub.hub_id`).
+:::
 
 :::caution[Critical: Distinguishing IAP Audiences]
 Configuring IAP requires two different audience formats used in separate contexts:
@@ -1145,6 +1182,25 @@ When redeploying the Hub with a new image:
      --region=$REGION --project=$PROJECT_ID --quiet
    ```
 
+### 7b. Secret Name Migration
+
+A hub deployed exactly as this guide describes is **not covered** by the Cloud Run
+job runbook in
+[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md):
+that runbook is scoped to hubs deployed with the hub-cloudrun Terraform module
+(private-IP Cloud SQL, Direct VPC egress, DSN as a separate secret env var). This
+guide's hub uses a public-IP Cloud SQL instance with no Direct VPC egress, and keeps
+its DSN inside `settings.yaml` (§3c) rather than a separate secret env var — none of
+which the runbook's discovery steps assume. No workstation ever fetches
+`scion-hub-settings` or runs `migrate-names` directly against this hub's database
+either; that path is deliberately unsupported (no human handles the DSN). There is
+currently no supported way to run `scion hub secret migrate-names` against a hub
+deployed exactly per this guide. This gap — the missing `server.hub.hub_id` this
+guide never sets, and a DSN-free migration path for this guide's hubs — is tracked in
+[ptone/scion#2395](https://github.com/ptone/scion/issues/2395). See
+[Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for what the command does in general, and `--help` for its flags.
+
 ---
 
 ## Appendix A: Complete settings.yaml Reference
@@ -1201,6 +1257,7 @@ server:
     gcp_project_id: your-project
 
   hub:
+    hub_id: hub-ha-prod                # Stable identity — see Section 3c
     admin_emails:
       - admin@example.com
     hub_name: hub-ha-prod

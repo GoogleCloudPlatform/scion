@@ -239,7 +239,7 @@ func (s *Server) handleAgentPorts(w http.ResponseWriter, r *http.Request, agentI
 		case http.MethodDelete:
 			s.clearAgentPorts(w, r, agentID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodDelete)
 		}
 		return
 	}
@@ -268,7 +268,7 @@ func (s *Server) handleAgentPorts(w http.ResponseWriter, r *http.Request, agentI
 		s.deleteAgentPort(w, r, agentID, port)
 		return
 	}
-	MethodNotAllowed(w)
+	MethodNotAllowed(w, http.MethodDelete)
 }
 
 func (s *Server) listAgentPorts(w http.ResponseWriter, r *http.Request, agentID string) {

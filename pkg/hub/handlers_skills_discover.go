@@ -88,7 +88,7 @@ const maxDiscoverBodyBytes = 64 << 10
 // and harness-config discovery, no hub object storage is required.
 func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

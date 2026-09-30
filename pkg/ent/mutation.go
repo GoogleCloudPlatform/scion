@@ -3076,6 +3076,7 @@ type AgentMutation struct {
 	task_summary             *string
 	message                  *string
 	applied_config           *string
+	harness_config           *string
 	ancestry                 *[]string
 	appendancestry           []string
 	created                  *time.Time
@@ -4686,6 +4687,55 @@ func (m *AgentMutation) ResetAppliedConfig() {
 	delete(m.clearedFields, agent.FieldAppliedConfig)
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (m *AgentMutation) SetHarnessConfig(s string) {
+	m.harness_config = &s
+}
+
+// HarnessConfig returns the value of the "harness_config" field in the mutation.
+func (m *AgentMutation) HarnessConfig() (r string, exists bool) {
+	v := m.harness_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarnessConfig returns the old "harness_config" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldHarnessConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarnessConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarnessConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarnessConfig: %w", err)
+	}
+	return oldValue.HarnessConfig, nil
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (m *AgentMutation) ClearHarnessConfig() {
+	m.harness_config = nil
+	m.clearedFields[agent.FieldHarnessConfig] = struct{}{}
+}
+
+// HarnessConfigCleared returns if the "harness_config" field was cleared in this mutation.
+func (m *AgentMutation) HarnessConfigCleared() bool {
+	_, ok := m.clearedFields[agent.FieldHarnessConfig]
+	return ok
+}
+
+// ResetHarnessConfig resets all changes to the "harness_config" field.
+func (m *AgentMutation) ResetHarnessConfig() {
+	m.harness_config = nil
+	delete(m.clearedFields, agent.FieldHarnessConfig)
+}
+
 // SetAncestry sets the "ancestry" field.
 func (m *AgentMutation) SetAncestry(s []string) {
 	m.ancestry = &s
@@ -5931,7 +5981,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 53)
+	fields := make([]string, 0, 54)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -6024,6 +6074,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.applied_config != nil {
 		fields = append(fields, agent.FieldAppliedConfig)
+	}
+	if m.harness_config != nil {
+		fields = append(fields, agent.FieldHarnessConfig)
 	}
 	if m.ancestry != nil {
 		fields = append(fields, agent.FieldAncestry)
@@ -6161,6 +6214,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case agent.FieldAppliedConfig:
 		return m.AppliedConfig()
+	case agent.FieldHarnessConfig:
+		return m.HarnessConfig()
 	case agent.FieldAncestry:
 		return m.Ancestry()
 	case agent.FieldCreated:
@@ -6276,6 +6331,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldMessage(ctx)
 	case agent.FieldAppliedConfig:
 		return m.OldAppliedConfig(ctx)
+	case agent.FieldHarnessConfig:
+		return m.OldHarnessConfig(ctx)
 	case agent.FieldAncestry:
 		return m.OldAncestry(ctx)
 	case agent.FieldCreated:
@@ -6545,6 +6602,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAppliedConfig(v)
+		return nil
+	case agent.FieldHarnessConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarnessConfig(v)
 		return nil
 	case agent.FieldAncestry:
 		v, ok := value.([]string)
@@ -6868,6 +6932,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldAppliedConfig) {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.FieldCleared(agent.FieldHarnessConfig) {
+		fields = append(fields, agent.FieldHarnessConfig)
+	}
 	if m.FieldCleared(agent.FieldAncestry) {
 		fields = append(fields, agent.FieldAncestry)
 	}
@@ -6992,6 +7059,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ClearAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ClearHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ClearAncestry()
@@ -7141,6 +7211,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ResetAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ResetHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ResetAncestry()
@@ -65390,7 +65463,6 @@ type UserAccessTokenMutation struct {
 	prefix                 *string
 	key_hash               *string
 	project_id             *uuid.UUID
-	boundary_kind          *string
 	scopes                 *string
 	ceiling_version        *int32
 	addceiling_version     *int32
@@ -65672,7 +65744,7 @@ func (m *UserAccessTokenMutation) ProjectID() (r uuid.UUID, exists bool) {
 // OldProjectID returns the old "project_id" field's value of the UserAccessToken entity.
 // If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v *uuid.UUID, err error) {
+func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
@@ -65686,58 +65758,9 @@ func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v *uuid.UUI
 	return oldValue.ProjectID, nil
 }
 
-// ClearProjectID clears the value of the "project_id" field.
-func (m *UserAccessTokenMutation) ClearProjectID() {
-	m.project_id = nil
-	m.clearedFields[useraccesstoken.FieldProjectID] = struct{}{}
-}
-
-// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
-func (m *UserAccessTokenMutation) ProjectIDCleared() bool {
-	_, ok := m.clearedFields[useraccesstoken.FieldProjectID]
-	return ok
-}
-
 // ResetProjectID resets all changes to the "project_id" field.
 func (m *UserAccessTokenMutation) ResetProjectID() {
 	m.project_id = nil
-	delete(m.clearedFields, useraccesstoken.FieldProjectID)
-}
-
-// SetBoundaryKind sets the "boundary_kind" field.
-func (m *UserAccessTokenMutation) SetBoundaryKind(s string) {
-	m.boundary_kind = &s
-}
-
-// BoundaryKind returns the value of the "boundary_kind" field in the mutation.
-func (m *UserAccessTokenMutation) BoundaryKind() (r string, exists bool) {
-	v := m.boundary_kind
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldBoundaryKind returns the old "boundary_kind" field's value of the UserAccessToken entity.
-// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UserAccessTokenMutation) OldBoundaryKind(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldBoundaryKind is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldBoundaryKind requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldBoundaryKind: %w", err)
-	}
-	return oldValue.BoundaryKind, nil
-}
-
-// ResetBoundaryKind resets all changes to the "boundary_kind" field.
-func (m *UserAccessTokenMutation) ResetBoundaryKind() {
-	m.boundary_kind = nil
 }
 
 // SetScopes sets the "scopes" field.
@@ -66183,7 +66206,7 @@ func (m *UserAccessTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserAccessTokenMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 14)
 	if m.user_id != nil {
 		fields = append(fields, useraccesstoken.FieldUserID)
 	}
@@ -66198,9 +66221,6 @@ func (m *UserAccessTokenMutation) Fields() []string {
 	}
 	if m.project_id != nil {
 		fields = append(fields, useraccesstoken.FieldProjectID)
-	}
-	if m.boundary_kind != nil {
-		fields = append(fields, useraccesstoken.FieldBoundaryKind)
 	}
 	if m.scopes != nil {
 		fields = append(fields, useraccesstoken.FieldScopes)
@@ -66247,8 +66267,6 @@ func (m *UserAccessTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.KeyHash()
 	case useraccesstoken.FieldProjectID:
 		return m.ProjectID()
-	case useraccesstoken.FieldBoundaryKind:
-		return m.BoundaryKind()
 	case useraccesstoken.FieldScopes:
 		return m.Scopes()
 	case useraccesstoken.FieldCeilingVersion:
@@ -66286,8 +66304,6 @@ func (m *UserAccessTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldKeyHash(ctx)
 	case useraccesstoken.FieldProjectID:
 		return m.OldProjectID(ctx)
-	case useraccesstoken.FieldBoundaryKind:
-		return m.OldBoundaryKind(ctx)
 	case useraccesstoken.FieldScopes:
 		return m.OldScopes(ctx)
 	case useraccesstoken.FieldCeilingVersion:
@@ -66349,13 +66365,6 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProjectID(v)
-		return nil
-	case useraccesstoken.FieldBoundaryKind:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetBoundaryKind(v)
 		return nil
 	case useraccesstoken.FieldScopes:
 		v, ok := value.(string)
@@ -66465,9 +66474,6 @@ func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *UserAccessTokenMutation) ClearedFields() []string {
 	var fields []string
-	if m.FieldCleared(useraccesstoken.FieldProjectID) {
-		fields = append(fields, useraccesstoken.FieldProjectID)
-	}
 	if m.FieldCleared(useraccesstoken.FieldCeilingPermissionIds) {
 		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
 	}
@@ -66497,9 +66503,6 @@ func (m *UserAccessTokenMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *UserAccessTokenMutation) ClearField(name string) error {
 	switch name {
-	case useraccesstoken.FieldProjectID:
-		m.ClearProjectID()
-		return nil
 	case useraccesstoken.FieldCeilingPermissionIds:
 		m.ClearCeilingPermissionIds()
 		return nil
@@ -66537,9 +66540,6 @@ func (m *UserAccessTokenMutation) ResetField(name string) error {
 		return nil
 	case useraccesstoken.FieldProjectID:
 		m.ResetProjectID()
-		return nil
-	case useraccesstoken.FieldBoundaryKind:
-		m.ResetBoundaryKind()
 		return nil
 	case useraccesstoken.FieldScopes:
 		m.ResetScopes()

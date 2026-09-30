@@ -27,9 +27,7 @@ type UserAccessToken struct {
 	// KeyHash holds the value of the "key_hash" field.
 	KeyHash string `json:"-"`
 	// ProjectID holds the value of the "project_id" field.
-	ProjectID *uuid.UUID `json:"project_id,omitempty"`
-	// BoundaryKind holds the value of the "boundary_kind" field.
-	BoundaryKind string `json:"boundary_kind,omitempty"`
+	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// Scopes holds the value of the "scopes" field.
 	Scopes string `json:"scopes,omitempty"`
 	// CeilingVersion holds the value of the "ceiling_version" field.
@@ -56,17 +54,15 @@ func (*UserAccessToken) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case useraccesstoken.FieldProjectID:
-			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case useraccesstoken.FieldRevoked:
 			values[i] = new(sql.NullBool)
 		case useraccesstoken.FieldCeilingVersion:
 			values[i] = new(sql.NullInt64)
-		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldBoundaryKind, useraccesstoken.FieldScopes, useraccesstoken.FieldCeilingPermissionIds, useraccesstoken.FieldPurpose, useraccesstoken.FieldLabels:
+		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldScopes, useraccesstoken.FieldCeilingPermissionIds, useraccesstoken.FieldPurpose, useraccesstoken.FieldLabels:
 			values[i] = new(sql.NullString)
 		case useraccesstoken.FieldExpiresAt, useraccesstoken.FieldLastUsed, useraccesstoken.FieldCreated:
 			values[i] = new(sql.NullTime)
-		case useraccesstoken.FieldID, useraccesstoken.FieldUserID:
+		case useraccesstoken.FieldID, useraccesstoken.FieldUserID, useraccesstoken.FieldProjectID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -114,17 +110,10 @@ func (_m *UserAccessToken) assignValues(columns []string, values []any) error {
 				_m.KeyHash = value.String
 			}
 		case useraccesstoken.FieldProjectID:
-			if value, ok := values[i].(*sql.NullScanner); !ok {
+			if value, ok := values[i].(*uuid.UUID); !ok {
 				return fmt.Errorf("unexpected type %T for field project_id", values[i])
-			} else if value.Valid {
-				_m.ProjectID = new(uuid.UUID)
-				*_m.ProjectID = *value.S.(*uuid.UUID)
-			}
-		case useraccesstoken.FieldBoundaryKind:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field boundary_kind", values[i])
-			} else if value.Valid {
-				_m.BoundaryKind = value.String
+			} else if value != nil {
+				_m.ProjectID = *value
 			}
 		case useraccesstoken.FieldScopes:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -232,13 +221,8 @@ func (_m *UserAccessToken) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("key_hash=<sensitive>")
 	builder.WriteString(", ")
-	if v := _m.ProjectID; v != nil {
-		builder.WriteString("project_id=")
-		builder.WriteString(fmt.Sprintf("%v", *v))
-	}
-	builder.WriteString(", ")
-	builder.WriteString("boundary_kind=")
-	builder.WriteString(_m.BoundaryKind)
+	builder.WriteString("project_id=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
 	builder.WriteString(", ")
 	builder.WriteString("scopes=")
 	builder.WriteString(_m.Scopes)

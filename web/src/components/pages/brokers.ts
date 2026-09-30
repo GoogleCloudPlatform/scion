@@ -20,7 +20,7 @@
  * Displays all runtime brokers with their status, version, and capabilities
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
@@ -108,6 +108,22 @@ export class ScionPageBrokers extends LitElement {
       .capability-tag.enabled {
         background: var(--sl-color-success-100, #dcfce7);
         color: var(--sl-color-success-700, #15803d);
+      }
+
+      /* Visible marker for a broker cap whose source is "not_enforced"
+       * (design.md Amendment A1): the value shown is a real, resolved cap
+       * that is not currently enforced. Must not be tooltip-only. */
+      .not-enforced-marker {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        margin-left: 0.375rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #a16207);
       }
 
       .broker-meta {
@@ -239,6 +255,38 @@ export class ScionPageBrokers extends LitElement {
     this.viewMode = e.detail.view;
   }
 
+  /**
+   * Renders the broker's effective agent capacity as "7 / 30" or
+   * "7 / unlimited", with the precedence source in a tooltip
+   * (ptone/scion#2061 P2.2, design.md §5.6). Renders an em dash "—" when the
+   * fields are absent — e.g. the caller lacks visibility, or capacity
+   * resolution didn't run. When agentLimitSource is "not_enforced" (design.md
+   * Amendment A1), the shown value is a real, resolved cap that is not
+   * currently enforced — a visible "not enforced" marker is appended next to
+   * it; the source tooltip alone is not enough (a caller must not have to
+   * hover to learn the cap doesn't apply).
+   */
+  private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
+    // == null: these fields are omitempty on the wire (Go omits, never sends
+    // null), but the loose check tolerates an explicit null too.
+    if (broker.agentCount == null) {
+      return html`<span class="meta-text">—</span>`;
+    }
+    const capLabel = broker.agentLimit != null ? String(broker.agentLimit) : 'unlimited';
+    // mono-cell only applies inside .resource-table-container (the table
+    // view); stat-value is unscoped, so it styles the grid card's value too.
+    // Shared between the table cell and the grid stat (review round 2, F2)
+    // so the two can't drift out of sync.
+    return html`
+      <span class="mono-cell stat-value" title="Source: ${broker.agentLimitSource || 'unknown'}"
+        >${broker.agentCount} / ${capLabel}</span
+      >
+      ${broker.agentLimitSource === 'not_enforced'
+        ? html`<span class="not-enforced-marker">not enforced</span>`
+        : nothing}
+    `;
+  }
+
   override render() {
     return html`
       <div class="header">
@@ -353,6 +401,14 @@ export class ScionPageBrokers extends LitElement {
                 </div>
               `
             : ''}
+          ${broker.agentCount != null
+            ? html`
+                <div class="stat">
+                  <span class="stat-label">Agents / Cap</span>
+                  ${this.renderAgentCapacity(broker)}
+                </div>
+              `
+            : ''}
           ${broker.createdBy
             ? html`
                 <div class="stat">
@@ -388,6 +444,7 @@ export class ScionPageBrokers extends LitElement {
               <th class="hide-mobile">Capabilities</th>
               <th>Last Heartbeat</th>
               <th class="hide-mobile">Profiles</th>
+              <th class="hide-mobile">Agents / Cap</th>
             </tr>
           </thead>
           <tbody>
@@ -444,6 +501,7 @@ export class ScionPageBrokers extends LitElement {
           <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
         </td>
         <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
+        <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>
       </tr>
     `;
   }

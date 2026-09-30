@@ -136,8 +136,10 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 	// Try by ID first (fast path — stamped during create)
 	if hcID := agent.AppliedConfig.HarnessConfigID; hcID != "" {
 		hc, err := s.store.GetHarnessConfig(ctx, hcID)
-		if err == nil && hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
-			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+		if err == nil && hc != nil {
+			if aliases := s.modelAliasesForHarnessConfig(ctx, hc); len(aliases) > 0 {
+				return config.ResolveModelAlias(model, aliases)
+			}
 		}
 	}
 
@@ -151,8 +153,10 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 		if hc == nil {
 			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
 		}
-		if hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
-			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+		if hc != nil {
+			if aliases := s.modelAliasesForHarnessConfig(ctx, hc); len(aliases) > 0 {
+				return config.ResolveModelAlias(model, aliases)
+			}
 		}
 	}
 
@@ -165,6 +169,30 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 		}
 	}
 	return model
+}
+
+// modelAliasesForHarnessConfig returns hc's model_aliases map, backfilling
+// it from the record's own stored config.yaml when the DB record predates
+// resource_store.go stamping ModelAliases onto HarnessConfigData (or was
+// otherwise never synced since). This is a read-time-only backfill — it does
+// not persist the result — so a record missing aliases self-heals on every
+// resolution rather than only on its next sync/create/update/finalize.
+func (s *Server) modelAliasesForHarnessConfig(ctx context.Context, hc *store.HarnessConfig) map[string]string {
+	if hc == nil {
+		return nil
+	}
+	if hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+		return hc.Config.ModelAliases
+	}
+	stor := s.GetStorage()
+	if stor == nil || hc.StoragePath == "" {
+		return nil
+	}
+	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath)
+	if !ok {
+		return nil
+	}
+	return entry.ModelAliases
 }
 
 func supportReason(field api.CapabilityField) string {

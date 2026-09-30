@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -214,6 +215,38 @@ func TestApplySettingsUpdates_AutoExposePortsNilRequest(t *testing.T) {
 	}
 }
 
+// Upstream review finding (GoogleCloudPlatform/scion#2115 follow-up,
+// ptone/scion#2315): deciding whether to delete the whole auto_expose_ports
+// section by checking the single named field Enabled != nil is fragile once
+// AutoExposePortsSettings gains a second field — a request that sets only
+// the new field, with Enabled omitted, would wrongly delete the section.
+// applySettingsUpdates now uses isZeroStruct (the same helper already used
+// for the quotas section) so the decision is section-generic: it looks at
+// every field, not one hardcoded name. This is directly exercised by
+// isZeroStruct's own tests (TestIsZeroStruct) for the current single-field
+// AutoExposePortsSettings; this test locks in the equivalent behavior through
+// the actual applySettingsUpdates entry point.
+func TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck(t *testing.T) {
+	// A struct with every field nil/zero must delete the section, regardless
+	// of which field(s) AutoExposePortsSettings has.
+	raw := map[string]interface{}{
+		"schema_version":    "1",
+		"auto_expose_ports": map[string]interface{}{"enabled": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{}})
+	if _, ok := raw["auto_expose_ports"]; ok {
+		t.Error("expected auto_expose_ports to be deleted when every field of AutoExposePortsSettings is nil")
+	}
+
+	// Any field being set must keep the section.
+	enabled := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{AutoExposePorts: &config.AutoExposePortsSettings{Enabled: &enabled}})
+	if _, ok := raw2["auto_expose_ports"]; !ok {
+		t.Error("expected auto_expose_ports to be kept when a field of AutoExposePortsSettings is set")
+	}
+}
+
 func TestApplySettingsUpdates_QuotasNilEnforceBrokerQuotas(t *testing.T) {
 	// When Quotas is provided but EnforceBrokerQuotas is nil, the key should
 	// be deleted to avoid persisting an empty quotas: {} block.
@@ -317,6 +350,26 @@ func TestApplySettingsUpdates_QuotasSectionGenericZeroCheck(t *testing.T) {
 	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enabled}})
 	if _, ok := raw2["quotas"]; !ok {
 		t.Error("expected quotas to be kept when a field of QuotaSettings is set")
+	}
+}
+
+// TestSingleFieldSettingsStructsGuard fails when AutoExposePortsSettings or
+// QuotaSettings gains a field, since the section zero-check tests above
+// (TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck and
+// TestApplySettingsUpdates_QuotasSectionGenericZeroCheck) only ever exercise
+// the current single field of each struct: a new field would go unverified
+// by those "any field set" cases.
+func TestSingleFieldSettingsStructsGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"config.AutoExposePortsSettings", reflect.TypeOf(config.AutoExposePortsSettings{})},
+		{"config.QuotaSettings", reflect.TypeOf(config.QuotaSettings{})},
+	} {
+		if n := tc.typ.NumField(); n != 1 {
+			t.Errorf("%s has %d fields, want 1: add a case that sets only the new field to the section zero-check tests, then update the expected field count in TestSingleFieldSettingsStructsGuard", tc.name, n)
+		}
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -249,16 +250,17 @@ func TestBackfillUATCeilings_PreservesTransactionalAudit(t *testing.T) {
 
 // TestBackfillUATCeilings_Pagination exercises more than one page of the
 // keyset-paginated backfill query, with the page size shrunk so the test
-// does not need hundreds of rows to cross a page boundary.
+// does not need hundreds of rows to cross a page boundary. This alone would
+// still pass if the per-store page-size field were ignored (7 rows fit in
+// one page at the 500 default too); TestBackfillUATCeilings_PageSizeControlsQueryCount
+// below is the test that actually distinguishes the two.
 func TestBackfillUATCeilings_Pagination(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)
 	userID, projectID := seedProjectAndUser(t, cs)
 
-	original := uatCeilingBackfillPageSize
-	uatCeilingBackfillPageSize = 3
-	t.Cleanup(func() { uatCeilingBackfillPageSize = original })
+	cs.uatCeilingBackfillPageSize = 3
 
 	const rowCount = 7 // more than two pages at page size 3
 	ids := make([]string, 0, rowCount)
@@ -274,6 +276,41 @@ func TestBackfillUATCeilings_Pagination(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"agent.read"}, loaded.CeilingPermissionIDs, "row %s must be backfilled exactly once across pagination", id)
 	}
+}
+
+// TestBackfillUATCeilings_PageSizeControlsQueryCount observes the number of
+// underlying UserAccessToken queries directly, via an Ent query interceptor,
+// rather than only checking the backfill's end result: 7 rows at a page size
+// of 3 must round-trip in exactly 3 pages (3, 3, 1). Unlike
+// TestBackfillUATCeilings_Pagination above, this fails if the per-store
+// uatCeilingBackfillPageSizeOrDefault field is ever ignored in favor of the
+// 500 default — 7 rows would then come back in a single page (1 query), not
+// 3. This test calls BackfillUATCeilings directly rather than Migrate, so
+// only its own queries are counted; HubSetting reads/writes go through a
+// different Ent client and are not observed by this interceptor.
+func TestBackfillUATCeilings_PageSizeControlsQueryCount(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	userID, projectID := seedProjectAndUser(t, cs)
+
+	cs.uatCeilingBackfillPageSize = 3
+
+	const rowCount = 7 // 3 pages at page size 3: 3, 3, 1
+	for i := 0; i < rowCount; i++ {
+		createLegacyUAT(t, cs, userID, projectID, []string{"agent:read"})
+	}
+
+	var queries int
+	client.UserAccessToken.Intercept(ent.InterceptFunc(func(next ent.Querier) ent.Querier {
+		return ent.QuerierFunc(func(ctx context.Context, q ent.Query) (ent.Value, error) {
+			queries++
+			return next.Query(ctx, q)
+		})
+	}))
+
+	require.NoError(t, cs.BackfillUATCeilings(ctx))
+	assert.Equal(t, 3, queries, "a page size of 3 over 7 rows must query in 3 pages, not fall back to the 500 default's single page")
 }
 
 // TestBackfillUATCeilings_LeavesExistingV1RowsUntouched pins the backfill's
@@ -488,6 +525,58 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 			assert.Equal(t, permissions.CeilingVersion(version), after.CeilingVersion, "the backfill must not rewrite a versioned row's version")
 			assert.Nil(t, after.CeilingPermissionIDs, "the backfill must not populate a versioned row's permission ids")
 			assert.False(t, after.NormalizedCeiling().Allows("agent.read"), "a versioned row with NULL ids must still deny after Migrate")
+		})
+	}
+}
+
+// TestPersistedCeilingColumnValue_NilNormalizeResultFailsClosed pins the
+// backfill's guard against a defensive scenario: permissions.
+// NormalizeLegacyUATScopes is documented to always return a non-nil slice,
+// but if that invariant were ever violated, marshalCeilingPermissionIDs(nil)
+// returns a nil *string, and dereferencing it directly would panic. The
+// guard must report ok == false instead, so the caller can skip the row
+// rather than default it to the literal "[]" — a persisted, intentionally
+// issued empty ceiling is a different, stronger claim than "not yet
+// resolved," and would stop the row from ever being reconsidered once the
+// invariant is restored.
+func TestPersistedCeilingColumnValue_NilNormalizeResultFailsClosed(t *testing.T) {
+	var value string
+	var ok bool
+	require.NotPanics(t, func() {
+		value, ok = persistedCeilingColumnValue(nil)
+	})
+	assert.False(t, ok, "a nil permission-ID list must not be treated as a persistable ceiling value")
+	assert.Empty(t, value)
+}
+
+// TestPersistedCeilingColumnValue_EmptyNonNilListPersists confirms the
+// ordinary, always-true-today case is unaffected by the guard above: a
+// non-nil empty list (a real, intentionally empty ceiling) still persists as
+// the literal "[]", distinct from the nil case.
+func TestPersistedCeilingColumnValue_EmptyNonNilListPersists(t *testing.T) {
+	value, ok := persistedCeilingColumnValue([]string{})
+	require.True(t, ok)
+	assert.Equal(t, "[]", value)
+}
+
+// TestCompositeStore_UATCeilingBackfillPageSizeOrDefault pins the page-size
+// resolution BackfillUATCeilings reads, directly and independent of any row
+// count: zero and negative field values fall back to the 500 default, and a
+// positive value is used as is. This does not require a real store or
+// client — the method only reads the one field.
+func TestCompositeStore_UATCeilingBackfillPageSizeOrDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field int
+		want  int
+	}{
+		{"zero uses the default", 0, defaultUATCeilingBackfillPageSize},
+		{"negative uses the default", -1, defaultUATCeilingBackfillPageSize},
+		{"positive value is used as is", 3, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := &CompositeStore{uatCeilingBackfillPageSize: tc.field}
+			assert.Equal(t, tc.want, cs.uatCeilingBackfillPageSizeOrDefault())
 		})
 	}
 }

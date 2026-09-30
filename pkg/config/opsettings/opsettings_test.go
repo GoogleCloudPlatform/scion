@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "federation"}
+		"project_defaults", "auto_expose_ports", "quotas", "federation", "experiments"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -69,6 +69,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 	dbOnlySections := map[string]bool{
 		"maintenance": true,
 		"messaging":   true,
+		"experiments": true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {

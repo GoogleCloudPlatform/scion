@@ -82,7 +82,7 @@ const spaceEmojiAnnotationKey = "scion.dev/emoji"
 // and sort prefs.
 func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -256,7 +256,7 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		case http.MethodDelete:
 			s.handleMessageDelete(w, r, key, messageID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPut, http.MethodDelete)
 		}
 		return
 	}
@@ -302,7 +302,7 @@ func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleTopicDelete(w, r, topicID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -318,7 +318,7 @@ func (s *Server) handleSpaceThreads(w http.ResponseWriter, r *http.Request, proj
 	case http.MethodPost:
 		s.handleCreateThread(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -791,7 +791,7 @@ func (s *Server) handleConversationMessages(w http.ResponseWriter, r *http.Reque
 	case http.MethodPost:
 		s.handleConversationSend(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -2616,7 +2616,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 // optionally scoped to a time range. Only valid for agent DMs.
 func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -2793,7 +2793,7 @@ type chatReadStateResponse struct {
 // watermark; GET reports the caller's watermark and, for DMs, the peer's.
 func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost, http.MethodGet)
 		return
 	}
 
@@ -3004,7 +3004,7 @@ func (s *Server) conversationRecentMessages(
 // conversation the caller cannot read cannot be marked unread either.
 func (s *Server) handleConversationMarkUnread(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3123,7 +3123,7 @@ func (s *Server) handleConversationFlag(
 	set conversationFlagSetter,
 ) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 
@@ -3183,7 +3183,7 @@ type promoteResponse struct {
 // all message history in place.
 func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3415,7 +3415,7 @@ func titleCase(slug string) string {
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
 func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3469,7 +3469,7 @@ func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, project
 // project's annotations map under the key "scion.dev/emoji".
 func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 
@@ -3548,7 +3548,7 @@ func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Me
 // handleChatDMs handles GET /api/v1/chat/dms.
 func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -3633,7 +3633,7 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 // handleSpaceMembers handles GET /api/v1/chat/spaces/{projectId}/members.
 func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -3829,7 +3829,7 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -3842,7 +3842,7 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 // and applying server-side throttling (one event per 4s per user per conversation).
 func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3939,7 +3939,7 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 // and publishing state transitions via SSE. Design §4.5.
 func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3989,7 +3989,7 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 //   - cursor: keyset pagination cursor (optional)
 func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -4711,7 +4711,7 @@ func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAttachmentUpload(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 	}
 }
 
@@ -4729,7 +4729,7 @@ func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request
 	case http.MethodGet:
 		s.handleAttachmentDownload(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

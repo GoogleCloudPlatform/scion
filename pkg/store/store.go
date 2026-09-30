@@ -427,6 +427,78 @@ type AgentFilter struct {
 	// scoped constraints that block the list permission for specific projects.
 	// An empty or nil slice means no exclusions.
 	ExcludedProjectIDs []string
+
+	// RequestedOwnerID, when non-empty, restricts results to agents whose
+	// owner_id matches this value. Unlike OwnerID (which participates in the
+	// OR-based Mine/Shared classification via MemberOrOwnerProjectIDs), this
+	// field is always combined with every other filter using AND. It exists
+	// so an explicit caller-supplied owner filter (e.g. CLI `--owner`, hub
+	// query param `ownerId`) can never be folded into the classification OR
+	// clause and widen results beyond "agents owned by exactly this
+	// principal" (ptone/scion#2146).
+	RequestedOwnerID string
+
+	// HarnessConfig, when non-empty, restricts results to agents whose
+	// resolved AppliedConfig.HarnessConfig equals this value. The Ent
+	// adapter backs this with a dedicated, plain-equality column
+	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
+	// AppliedConfig.HarnessConfig on every write, rather than parsing or
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
+	HarnessConfig string
+
+	// IDs, when non-nil, restricts results to agents whose ID is in this set.
+	// Always combined with every other filter (including AuthorizedProjectIDs)
+	// using AND — it narrows, it never substitutes for authorization. A nil
+	// value means no restriction. An empty non-nil slice means no agents
+	// match (fail closed, mirroring AuthorizedProjectIDs).
+	//
+	// This backs relationship queries such as CLI `--ancestors`, where the
+	// caller supplies a set of IDs found in another agent's Ancestry chain.
+	// Some of those IDs may name users rather than agents (Ancestry mixes
+	// both); those simply match no row here, which is how "skip entries that
+	// are users" falls out without extra bookkeeping. It is deliberately NOT
+	// implemented by fetching each ID individually — doing so would bypass
+	// whatever authorization predicate (AuthorizedProjectIDs, etc.) the
+	// caller composed this filter with, and future relationship-based
+	// visibility (ptone/scion#2128) needs a single choke point to widen.
+	IDs []string
+
+	// LineageRootID, when non-empty, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry chain contains it — i.e. the root
+	// principal plus every agent descended from it, at any depth. It is an
+	// internal OR of two sub-conditions, but that OR is itself ANDed with
+	// every other filter (including AuthorizedProjectIDs), the same
+	// composition pattern already used for MemberOrOwnerProjectIDs above:
+	// the OR only decides which rows count as "in the root's lineage", it
+	// never widens past the authorization predicate. A root the caller is
+	// not authorized to see simply yields no matches, not an error or a
+	// disclosure.
+	//
+	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
+	// messaging-permission query — it says nothing about who the reference
+	// agent may message under any message mode (scion set-message-mode),
+	// which can be a different, smaller set. The root ID this field is set
+	// to is computed client-side (see resolveLineageRootID in cmd/list.go):
+	// the reference's direct parent, or the reference itself when it has no
+	// parent at all (an empty Ancestry), when its parent is a user rather
+	// than an agent, or when its only recorded parent is an agent the
+	// caller cannot list. The latter two both root at self because the
+	// caller cannot tell them apart; a length-1 parent the caller *can* list
+	// roots at that parent.
+	//
+	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
+	// child can inherit a length-1, agent-only Ancestry from a creator
+	// whose own Ancestry was itself empty (see resolveLineageRootID's doc
+	// for exactly when this happens). Determining "is the parent a user"
+	// therefore requires resolving a length-1 Ancestry entry through the
+	// caller's authorized list (never a bare per-ID fetch) rather than a
+	// purely local length check; an Ancestry of two or more entries never
+	// needs this, since its last entry is always an agent ID by
+	// construction. The root ID handed to this field may therefore be a
+	// USER principal ID, not only an agent ID — the OR predicate treats
+	// either the same way, since IDEQ simply never matches a user ID and
+	// ancestryContains still finds that user's descendants.
+	LineageRootID string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the

@@ -790,6 +790,41 @@ export interface RuntimeBroker {
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;
+  /**
+   * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061
+   * P2.2, design.md §5.6, §5.9). Mirrors Go
+   * RuntimeBrokerWithCapabilities.AgentLimit (pkg/hub/response_types.go)
+   * exactly — hand-written since there is no Go->TS generator (design.md
+   * §6). Absent when unlimited, or when resolution didn't run or failed;
+   * never 0 (a non-positive effective limit means unlimited).
+   */
+  agentLimit?: number;
+  /**
+   * The number of active max_agents_per_broker reservations held by this
+   * broker. Absent only when resolution didn't run or failed. Unlike
+   * agentLimit, it is still present (possibly non-zero) when the broker is
+   * unlimited — agentLimit's absence there means "no cap", not "no count".
+   */
+  agentCount?: number;
+  /**
+   * The precedence step that produced agentLimit: "broker" | "entitlement" |
+   * "hub_default" | "unlimited" | "not_enforced". This names the step, not
+   * whether the result is a cap: when the effective limit is <= 0
+   * (unlimited), agentLimit is absent but agentLimitSource is still
+   * whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide — in that case resolution does not count either,
+   * and all three fields (agentLimit/agentCount/agentLimitSource) are
+   * absent together.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: agentLimit keeps whatever the precedence steps resolved
+   * (a cap, or absent when that resolves to unlimited, exactly as above),
+   * but the value is informational only — it is not currently applied.
+   * Renderers must show this visibly, not only in a tooltip.
+   */
+  agentLimitSource?: string;
 }
 
 /**

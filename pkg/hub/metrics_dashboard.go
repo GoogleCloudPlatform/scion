@@ -795,7 +795,7 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -930,7 +930,7 @@ func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Re
 // serveMetricsDashboard contains the shared metrics dashboard logic.
 func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, opts ...QueryOption) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
