@@ -89,6 +89,14 @@ const loadChatSearch = () => import('../shared/chat/chat-search.js');
 const loadChatSwitcher = () => import('../shared/chat/chat-switcher.js');
 
 /**
+ * How long a successfully-loaded palette group stays fresh across a
+ * close/reopen before it is refetched.
+ */
+const PALETTE_GROUP_CACHE_MS = 30_000;
+/** Debounce window for refreshing dirty palette groups while the palette is open. */
+const PALETTE_REFRESH_DEBOUNCE_MS = 500;
+
+/**
  * Slow fallback poll for the members sidebar.
  *
  * Agent membership and status are SSE-driven (`project.{id}.agent.>`), so this
@@ -315,13 +323,49 @@ export class ScionPageChat extends LitElement {
    * re-capture the invoker focus.
    */
   private _palettePendingOpen = false;
-  /** Per-group palette load state. Phase 1 only ever populates 'agents'. */
+  /** Per-group palette load state for Agents, Threads and People. */
   @state()
   private v2PaletteGroups: Partial<Record<PaletteGroup, GroupState>> = {
     agents: { status: 'loading', candidates: [] },
   };
   /** Agents/DM data controller for the palette: pagination, DM join, cancellation. */
   private _paletteDataController = new ChatPaletteDataController();
+  /** Epoch ms a group last finished loading successfully — the basis for the 30s per-group cache. */
+  private _paletteGroupCacheAt: Partial<Record<PaletteGroup, number>> = {};
+  /** Groups invalidated by an SSE event since their last successful load — forces a refetch even inside the 30s cache window. */
+  private _paletteGroupDirty: Partial<Record<PaletteGroup, boolean>> = {};
+  /**
+   * Bumped by {@link _markPaletteGroupsDirty} for each named group. A loader
+   * snapshots this at load start and only clears `_paletteGroupDirty` on
+   * success if the epoch is still unchanged when the load finishes. This
+   * guarantees that an invalidation arriving *during* an in-flight load is
+   * never silently lost: if the epoch changed mid-load, `dirty` and the
+   * cache timestamp are left untouched, so the debounced refresh that
+   * invalidation already scheduled still reloads the group with current
+   * data shortly after, instead of the load in flight publishing/caching a
+   * possibly-stale snapshot for a full 30s.
+   */
+  private _paletteGroupInvalidationEpoch: Partial<Record<PaletteGroup, number>> = {};
+  /**
+   * Identifies the current People load across its identity-resolution phase
+   * (`_resolveSelfUserId`'s `/auth/me` fetch, which carries no abort signal
+   * of its own and so is not covered by `_paletteDataController.cancel()`).
+   * `_loadPalettePeople` captures this counter's value at its own start and
+   * bumps it again on every new call, so a load whose identity resolution is
+   * still pending when a *later* People load starts (a reopen, a refresh, or
+   * simply calling it twice) is superseded the moment that later call begins
+   * — before either load's identity has even resolved yet.
+   * `_closePaletteAndCancelLoad` also bumps it, so a load left pending when
+   * the palette closes (and is never reopened) is superseded too. This must
+   * be keyed to which load is current, not to `v2PaletteOpen`: a reopen sets
+   * `v2PaletteOpen` back to `true`, so an open-state check alone cannot tell
+   * a stale load's identity resolution apart from a newer one, and a stale
+   * resolution completing after the reopen could overwrite a newer,
+   * already-`ready` People state.
+   */
+  private _peopleLoadSeq = 0;
+  /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
+  private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
   /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
   private _paletteInvoker: HTMLElement | null = null;
   private _paletteInvokerSelection: {
@@ -949,6 +993,7 @@ export class ScionPageChat extends LitElement {
     window.removeEventListener('popstate', this._onPopState);
     this._paletteDataController.cancel();
     this._stopPaletteVisibilityWatchdog();
+    this._stopPaletteDebouncedRefresh();
     // Without this, a disconnect landing while a first-open lazy import is
     // still in flight would leave `_palettePendingOpen` stuck true on the
     // detached page — the suspended togglePalette call would resume anyway
@@ -1659,6 +1704,9 @@ export class ScionPageChat extends LitElement {
   }
 
   private _handleAgentsUpdated(): void {
+    // Messageability/capabilities/status can change viability for the
+    // palette's Agents group, so this invalidation marks it stale.
+    this._markPaletteGroupsDirty('agents');
     // Only adopt agents belonging to the current view: the open conversation's
     // project, or every space the user can see in the base view.
     const scopeProjectId = this.v2Conversation?.projectId || '';
@@ -1743,6 +1791,7 @@ export class ScionPageChat extends LitElement {
    * re-creation (or ID reuse) isn't permanently suppressed.
    */
   private _handleAgentCreated(e: Event): void {
+    this._markPaletteGroupsDirty('agents');
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const agentId = eventData?.agentId as string | undefined;
@@ -1785,6 +1834,12 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatMessage(e: Event): void {
+    // A message can move any group's recency ranking — a DM message affects
+    // Agents/People, a thread message affects Threads — and the event detail
+    // doesn't cheaply distinguish which without parsing the full envelope
+    // this handler otherwise ignores, so mark all three stale.
+    this._markPaletteGroupsDirty('agents', 'people', 'threads');
+
     // The sender is done typing once their message arrives — clear the avatar
     // overlay immediately instead of letting the 6s expiry run out.
     const detail = (e as CustomEvent).detail as { data?: { senderId?: string } } | undefined;
@@ -1806,6 +1861,7 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatTopic(e: Event): void {
+    this._markPaletteGroupsDirty('threads');
     const eventDetail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     // Unwrap the notifyWithData envelope: { state, data: { action, topic: {...} } }
     const eventData = (eventDetail?.data ?? eventDetail) as Record<string, unknown> | undefined;
@@ -1847,6 +1903,9 @@ export class ScionPageChat extends LitElement {
    * from the switcher cache.
    */
   private handleDMPromoted(e: Event): void {
+    // A promoted DM disappears from Agents/People recency and appears as a
+    // new Threads row, so mark all three groups stale.
+    this._markPaletteGroupsDirty('agents', 'people', 'threads');
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
@@ -1888,14 +1947,35 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleThreadSelect(e: CustomEvent): void {
-    const detail = e.detail as {
-      conversationKey: string;
-      projectId: string;
-      projectSlug?: string;
-      threadName: string;
-      defaultAgent?: string;
-    };
+    this.navigateToThread(
+      e.detail as {
+        conversationKey: string;
+        projectId: string;
+        projectSlug?: string;
+        threadName: string;
+        defaultAgent?: string;
+      }
+    );
+  }
 
+  /**
+   * In-page thread navigation shared by the space rail's `thread-select`
+   * event and the palette's Threads group selection
+   * (`_handlePaletteSelect`) — the one routine both callers share, so they
+   * route identically. Prefers
+   * `detail.projectSlug` (the target's own known slug) over a locally cached
+   * one for the same project ID, then falls back to the `_projectIdToSlug`
+   * map; when neither exists, routes by project ID rather than guessing
+   * another project's slug — `_slugToProjectId`'s own keys are never
+   * consulted here as a fallback.
+   */
+  private navigateToThread(detail: {
+    conversationKey: string;
+    projectId: string;
+    projectSlug?: string;
+    threadName: string;
+    defaultAgent?: string;
+  }): void {
     // Determine the slug for the readable URL
     const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
@@ -3027,32 +3107,31 @@ export class ScionPageChat extends LitElement {
     this.v2SwitcherConversations = convs;
   }
 
+  /**
+   * Legacy flat-switcher selection (rollout flag off). A thread whose project
+   * has no known slug routes by that thread's own `projectId`
+   * (`/chat/space/{projectId}/thread/{key}`, matching `navigateToThread`'s
+   * fallback), and every path segment is encoded.
+   */
   private handleSwitcherSelect(e: CustomEvent): void {
     const detail = e.detail as { conversationKey: string };
     this.v2SwitcherOpen = false;
-    if (detail?.conversationKey) {
-      const key = detail.conversationKey;
-      if (key.startsWith('dm:')) {
-        navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
-      } else {
-        // Find the project slug for this thread via its projectId.
-        let foundSlug = '';
-        const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
-        if (conv?.projectId) {
-          foundSlug = this._projectIdToSlug.get(conv.projectId) || '';
-        }
-        if (foundSlug) {
-          navigateTo(`/chat/${foundSlug}/${key}`);
-        } else {
-          // Fall back: let the page's route handler resolve by iterating slugs.
-          const firstSlug = this._slugToProjectId.keys().next().value;
-          if (firstSlug) {
-            navigateTo(`/chat/${firstSlug}/${key}`);
-          } else {
-            navigateTo(`/chat`);
-          }
-        }
-      }
+    if (!detail?.conversationKey) return;
+    const key = detail.conversationKey;
+    if (key.startsWith('dm:')) {
+      navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
+      return;
+    }
+    const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
+    const slug = conv?.projectId ? this._projectIdToSlug.get(conv.projectId) || '' : '';
+    if (slug) {
+      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(key)}`);
+    } else if (conv?.projectId) {
+      navigateTo(
+        `/chat/space/${encodeURIComponent(conv.projectId)}/thread/${encodeURIComponent(key)}`
+      );
+    } else {
+      navigateTo('/chat');
     }
   }
 
@@ -3061,7 +3140,7 @@ export class ScionPageChat extends LitElement {
   }
 
   // =========================================================================
-  // Grouped palette (native chat quick command palette, Phase 1: Agents/DM)
+  // Grouped palette (native chat quick command palette)
   // =========================================================================
 
   /**
@@ -3104,10 +3183,91 @@ export class ScionPageChat extends LitElement {
       }
       this.v2PaletteOpen = true;
       this._startPaletteVisibilityWatchdog();
-      void this._loadPaletteAgents();
+      this._loadPaletteGroupsOnOpen();
     } finally {
       this._palettePendingOpen = false;
     }
+  }
+
+  /**
+   * On open, reuse a group's last successful snapshot when it is still
+   * inside the 30s cache window and nothing has invalidated it since. A
+   * group that has never loaded, is stale, or was marked dirty by an SSE
+   * event gets a fresh fetch instead.
+   */
+  private _loadPaletteGroupsOnOpen(): void {
+    if (!this._shouldUseCachedPaletteGroup('agents')) void this._loadPaletteAgents();
+    if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
+    if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
+  }
+
+  private _shouldUseCachedPaletteGroup(group: PaletteGroup): boolean {
+    const state = this.v2PaletteGroups[group];
+    if (!state || state.status !== 'ready') return false;
+    if (this._paletteGroupDirty[group]) return false;
+    const cachedAt = this._paletteGroupCacheAt[group];
+    if (!cachedAt) return false;
+    return Date.now() - cachedAt < PALETTE_GROUP_CACHE_MS;
+  }
+
+  /**
+   * Mark one or more palette groups stale: their cached snapshot (if any) is
+   * no longer trusted for a future open, and — if the palette is currently
+   * open — a 500ms debounced refresh reloads them shortly. Safe to call
+   * whether or not the palette is loaded/open, or whether the palette
+   * feature is even enabled for this user.
+   */
+  private _markPaletteGroupsDirty(...groups: PaletteGroup[]): void {
+    if (!this.isPaletteEnabled) return;
+    for (const group of groups) {
+      this._paletteGroupDirty[group] = true;
+      this._paletteGroupInvalidationEpoch[group] =
+        (this._paletteGroupInvalidationEpoch[group] ?? 0) + 1;
+    }
+    if (this.v2PaletteOpen) this._schedulePaletteDebouncedRefresh();
+  }
+
+  /** Snapshot the invalidation epoch for `group` at load start — pass the result to {@link _finishPaletteGroupLoad}. */
+  private _beginPaletteGroupLoad(group: PaletteGroup): number {
+    return this._paletteGroupInvalidationEpoch[group] ?? 0;
+  }
+
+  /**
+   * Mark a successful load's group fresh — but only if nothing invalidated
+   * it since {@link _beginPaletteGroupLoad} captured `epochAtStart`. If an
+   * invalidation landed mid-load, leave `dirty=true` and the cache timestamp
+   * untouched: the debounced refresh that invalidation already scheduled (or
+   * the next open, since a dirty group is never cache-eligible) will pick up
+   * the real, current data instead of the possibly-stale snapshot this load
+   * just fetched.
+   */
+  private _finishPaletteGroupLoad(group: PaletteGroup, epochAtStart: number): void {
+    if ((this._paletteGroupInvalidationEpoch[group] ?? 0) !== epochAtStart) return;
+    this._paletteGroupDirty[group] = false;
+    this._paletteGroupCacheAt[group] = Date.now();
+  }
+
+  private _schedulePaletteDebouncedRefresh(): void {
+    if (this._paletteRefreshDebounce) clearTimeout(this._paletteRefreshDebounce);
+    this._paletteRefreshDebounce = setTimeout(() => {
+      this._paletteRefreshDebounce = null;
+      this._refreshDirtyPaletteGroups();
+    }, PALETTE_REFRESH_DEBOUNCE_MS);
+  }
+
+  private _stopPaletteDebouncedRefresh(): void {
+    if (this._paletteRefreshDebounce) {
+      clearTimeout(this._paletteRefreshDebounce);
+      this._paletteRefreshDebounce = null;
+    }
+  }
+
+  /** Reload every group an SSE event invalidated while the palette is open. A group not currently dirty is left untouched. */
+  private _refreshDirtyPaletteGroups(): void {
+    if (!this.v2PaletteOpen) return;
+    if (this._paletteGroupDirty.agents) void this._loadPaletteAgents();
+    if (this._paletteGroupDirty.people) void this._loadPalettePeople();
+    if (this._paletteGroupDirty.threads) void this._loadPaletteThreads();
   }
 
   /**
@@ -3150,7 +3310,12 @@ export class ScionPageChat extends LitElement {
    */
   private _closePaletteAndCancelLoad(): void {
     this._paletteDataController.cancel();
+    // Supersede a People load still resolving identity when the palette
+    // closes — the data controller's own cancel() above doesn't cover
+    // `_resolveSelfUserId`'s unsignalled `/auth/me` fetch.
+    this._peopleLoadSeq++;
     this._stopPaletteVisibilityWatchdog();
+    this._stopPaletteDebouncedRefresh();
     this.v2PaletteOpen = false;
   }
 
@@ -3160,9 +3325,11 @@ export class ScionPageChat extends LitElement {
       ...this.v2PaletteGroups,
       agents: { status: 'loading', candidates: this.v2PaletteGroups.agents?.candidates ?? [] },
     };
+    const epochAtStart = this._beginPaletteGroupLoad('agents');
     try {
       const candidates = await this._paletteDataController.loadAgentsGroup();
       this.v2PaletteGroups = { ...this.v2PaletteGroups, agents: { status: 'ready', candidates } };
+      this._finishPaletteGroupLoad('agents', epochAtStart);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
@@ -3173,36 +3340,211 @@ export class ScionPageChat extends LitElement {
     }
   }
 
-  /** Retry a failed palette group. Phase 1 only ever has 'agents'. */
-  private _handlePaletteRetry(e: CustomEvent<{ group: PaletteGroup }>): void {
-    if (e.detail?.group === 'agents') {
-      void this._loadPaletteAgents();
+  /**
+   * Resolve the authenticated self ID for the palette's People group,
+   * fetching `/api/v1/auth/me` when `pageData.user.id` isn't known yet (the
+   * same fallback `resolveDMByPeerId` already uses for token-based auth) and
+   * caching the result onto `pageData.user`. Returns `''` if identity truly
+   * cannot be resolved right now — the caller must not publish or cache a
+   * `ready` People group in that case: a `''` self ID excludes nothing, so a
+   * real self row — and a nonsensical self-DM target — could otherwise leak
+   * into the list and get cached for 30s with no way to self-correct once
+   * identity does resolve.
+   *
+   * Does not mark People dirty itself: its only caller,
+   * {@link _loadPalettePeople}, uses the resolved ID immediately within the
+   * very same load, so a self-triggered dirty mark would only bump the
+   * group's own invalidation epoch out from under its own
+   * {@link _finishPaletteGroupLoad} check and schedule a pointless second
+   * reload 500ms later. A genuinely external resolver (one that is not
+   * itself in the middle of a People load) is responsible for marking
+   * People dirty if it wants a still-open palette to retry.
+   */
+  private async _resolveSelfUserId(): Promise<string> {
+    const known = this.pageData?.user?.id;
+    if (known) return known;
+    try {
+      const authRes = await apiFetch('/api/v1/auth/me');
+      if (authRes.ok) {
+        const authData = (await authRes.json()) as { id?: string };
+        if (authData.id && this.pageData) {
+          if (this.pageData.user) {
+            // A plain field write, not a `pageData` reassignment.
+            // `updated()` re-parses the current route whenever
+            // `changedProperties` contains `pageData` — correct for a real
+            // identity change (e.g. sign-in), but resolving identity in the
+            // background while a conversation is already open must not
+            // revert it to whatever the URL happens to parse to right now.
+            // `requestUpdate()` with no property name still schedules the
+            // render every pageData-bound binding (e.g. currentUserId)
+            // needs, without adding `pageData` to that set.
+            this.pageData.user.id = authData.id;
+            this.requestUpdate();
+          } else {
+            this.pageData = {
+              ...this.pageData,
+              user: { id: authData.id, email: '', name: '' },
+            };
+          }
+          return authData.id;
+        }
+      }
+    } catch {
+      // Identity truly unavailable right now — caller treats '' as failure.
     }
+    return '';
+  }
+
+  /**
+   * Load the People group. Requires the authenticated self ID (resolved via
+   * {@link _resolveSelfUserId}) to exclude the current user from the list and
+   * to build the deterministic sorted-user DM key on selection
+   * (`openDM`/`buildDMKey`). If identity cannot be resolved, the group is
+   * published as a retryable error — never as a self-inclusive `ready` list,
+   * and never cached.
+   */
+  private async _loadPalettePeople(): Promise<void> {
+    this.v2PaletteGroups = {
+      ...this.v2PaletteGroups,
+      people: { status: 'loading', candidates: this.v2PaletteGroups.people?.candidates ?? [] },
+    };
+    const epochAtStart = this._beginPaletteGroupLoad('people');
+    const mySeq = ++this._peopleLoadSeq;
+    const selfId = await this._resolveSelfUserId();
+    // The identity fetch above carries no abort signal of its own, so it is
+    // not cancelled by `_closePaletteAndCancelLoad`'s `cancel()` the way the
+    // group loaders' own fetches are. Guard manually with this load's own
+    // sequence token — not `v2PaletteOpen` — since closing and reopening
+    // sets `v2PaletteOpen` back to `true`, which would let a stale load's
+    // identity resolution overwrite a newer, already-`ready` People state.
+    // A newer People load (from a reopen, a refresh, or another call) or a
+    // close in the meantime bumps `_peopleLoadSeq`, superseding this one.
+    if (mySeq !== this._peopleLoadSeq) {
+      return;
+    }
+    if (!selfId) {
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        people: {
+          status: 'error',
+          candidates: [],
+          error: 'Could not resolve your identity yet.',
+        },
+      };
+      return;
+    }
+    try {
+      const candidates = await this._paletteDataController.loadPeopleGroup(selfId);
+      this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
+      this._finishPaletteGroupLoad('people', epochAtStart);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        people: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
+      };
+    }
+  }
+
+  /**
+   * Load (or, with `retryOnly`, re-fetch only the previously-failed spaces
+   * of) the Threads group. A partial failure keeps the group `'ready'` with
+   * its successful rows selectable and `incomplete: true`, rather than
+   * hiding them behind an `'error'` state.
+   */
+  private async _loadPaletteThreads(retryOnly = false): Promise<void> {
+    const previous = this.v2PaletteGroups.threads;
+    this.v2PaletteGroups = {
+      ...this.v2PaletteGroups,
+      threads: {
+        status: 'loading',
+        candidates: previous?.candidates ?? [],
+        ...(previous?.incomplete ? { incomplete: true } : {}),
+      },
+    };
+    const epochAtStart = this._beginPaletteGroupLoad('threads');
+    try {
+      const result = retryOnly
+        ? await this._paletteDataController.retryThreadsGroup()
+        : await this._paletteDataController.loadThreadsGroup();
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        threads: {
+          status: 'ready',
+          candidates: result.candidates,
+          ...(result.incomplete ? { incomplete: true } : {}),
+        },
+      };
+      this._finishPaletteGroupLoad('threads', epochAtStart);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        threads: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
+      };
+    }
+  }
+
+  /**
+   * Retry a failed (or partially failed) palette group. Threads retries only
+   * its own previously-failed spaces via
+   * {@link ChatPaletteDataController.retryThreadsGroup}.
+   */
+  private _handlePaletteRetry(e: CustomEvent<{ group: PaletteGroup }>): void {
+    const group = e.detail?.group;
+    if (group === 'agents') void this._loadPaletteAgents();
+    else if (group === 'people') void this._loadPalettePeople();
+    else if (group === 'threads') void this._loadPaletteThreads(true);
   }
 
   /**
    * A palette selection is untrusted stale UI state until checked against
    * the freshly loaded group: verify the candidate is still present before
-   * navigating. Reuses the existing `openDM` — same typed peerKind and
-   * deterministic DM key as a member-click or mention-click selection.
+   * navigating. A `dm` target reuses the existing `openDM` — same typed
+   * peerKind and deterministic DM key as a member-click or mention-click
+   * selection. A `thread` target reuses the rail's own in-page navigation
+   * path (`navigateToThread`), which already routes correctly when a
+   * project has no known slug.
    */
   private _handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
     const target = e.detail?.target;
     this._closePaletteAndCancelLoad();
-    if (!target || target.kind !== 'dm') return;
-    const stillPresent = (this.v2PaletteGroups.agents?.candidates ?? []).some(
+    if (!target) return;
+    if (target.kind === 'dm') {
+      const group = target.peerKind === 'agent' ? 'agents' : 'people';
+      const stillPresent = (this.v2PaletteGroups[group]?.candidates ?? []).some(
+        (c) =>
+          c.target.kind === 'dm' &&
+          c.target.peerKind === target.peerKind &&
+          c.target.peerId === target.peerId
+      );
+      // A rejected stale candidate falls through to the normal (invoker-
+      // restoring) dismissal path below — only an actual navigation takes
+      // the "focus the new composer" path. The flag is set only once a
+      // navigation is confirmed, so sl-after-hide never points at a composer
+      // that was never opened.
+      if (!stillPresent) return;
+      this._paletteClosedBySelection = true;
+      this.openDM(target.peerId, target.peerKind, target.displayName);
+      return;
+    }
+    const stillPresent = (this.v2PaletteGroups.threads?.candidates ?? []).some(
       (c) =>
-        c.target.kind === 'dm' &&
-        c.target.peerKind === target.peerKind &&
-        c.target.peerId === target.peerId
+        c.target.kind === 'thread' &&
+        c.target.projectId === target.projectId &&
+        c.target.threadId === target.threadId
     );
-    // A rejected stale candidate falls through to the normal (invoker-
-    // restoring) dismissal path below — only an actual navigation takes the
-    // "focus the new composer" path. Setting the flag unconditionally above
-    // would have pointed sl-after-hide at a composer that was never opened.
     if (!stillPresent) return;
     this._paletteClosedBySelection = true;
-    this.openDM(target.peerId, target.peerKind, target.displayName);
+    this.navigateToThread({
+      conversationKey: target.threadId,
+      projectId: target.projectId,
+      ...(target.projectSlug ? { projectSlug: target.projectSlug } : {}),
+      threadName: target.threadName,
+      ...(target.defaultAgent ? { defaultAgent: target.defaultAgent } : {}),
+    });
   }
 
   /**
