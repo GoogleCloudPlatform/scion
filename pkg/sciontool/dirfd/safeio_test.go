@@ -413,10 +413,10 @@ func TestWriteFileNoFollow_LeafPolicyMatrix(t *testing.T) {
 }
 
 // TestWriteFileNoFollow_TruncateInPlaceOrCreate_OverwritesSameInode proves
-// the F2(2) fix: when the leaf already exists as a regular file,
-// TruncateInPlaceOrCreate rewrites it IN PLACE — same inode, no
-// create-then-rename — which is what avoids the EBUSY a rename over a
-// bind-mounted regular file's directory entry would otherwise produce.
+// that when the leaf already exists as a regular file, TruncateInPlaceOrCreate
+// rewrites it IN PLACE — same inode, no create-then-rename — which is what
+// avoids the EBUSY a rename over a bind-mounted regular file's directory
+// entry would otherwise produce.
 func TestWriteFileNoFollow_TruncateInPlaceOrCreate_OverwritesSameInode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "leaf")

@@ -154,8 +154,9 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // the create itself) and then reopened no-follow; a component that already
 // exists as a symlink or as any non-directory is refused before anything —
 // including a chown — happens to it. Only a component this call itself
-// creates is fchowned (via AT_EMPTY_PATH on that component's own open fd,
-// never a path-based os.Chown) to uid:gid, when uid > 0; a pre-existing
+// creates is chowned (via Chown on that component's own open *os.File,
+// i.e. fchown on the fd, never a path-based os.Chown) to uid:gid, when
+// uid > 0; a pre-existing
 // component's ownership is left exactly as it was. mode is the permission
 // bits used for any component this call creates.
 //
@@ -218,7 +219,10 @@ func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid in
 		curFd = child
 
 		if created && uid > 0 {
-			if cerr := unix.Fchownat(curFd, "", uid, gid, unix.AT_EMPTY_PATH); cerr != nil {
+			// owned.Chown is fchown(fd, uid, gid) on the fd this call just
+			// created and opened — portable across platforms, unlike the
+			// Linux-only AT_EMPTY_PATH form of fchownat.
+			if cerr := owned.Chown(uid, gid); cerr != nil {
 				return true, fmt.Errorf("dirfd: chown %s: %w", name, cerr)
 			}
 		}

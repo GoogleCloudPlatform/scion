@@ -2112,9 +2112,12 @@ func directSetUID(username, newUID, newGID string, requirePrivilegeDrop bool) er
 // directSetUIDAtChownAt performs directSetUIDAt's per-entry chown via
 // Fchownat(dirFd, name, uid, gid, flags) — chowning the directory entry
 // itself relative to an already-open, already-verified no-follow directory
-// fd, never a symlink's target (AT_SYMLINK_NOFOLLOW for every entry; the
-// directory fd itself is chowned via name="" and AT_EMPTY_PATH, which is
-// inherently symlink-safe since fd already names a concrete inode).
+// fd, never a symlink's target (AT_SYMLINK_NOFOLLOW for every real entry;
+// the directory fd itself is chowned via name="." and flags=0 — an
+// ordinary, portable relative-path lookup that resolves back to the same
+// already-open directory, not the Linux-only AT_EMPTY_PATH extension,
+// which golang.org/x/sys/unix does not expose on every platform this
+// binary builds for).
 // Indirected through a package var, not called as unix.Fchownat directly, so
 // a test can record whether and how it was called instead of inferring it
 // from a filesystem timestamp: ctime's field name is platform-specific
@@ -2185,7 +2188,7 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		homeDirFile := os.NewFile(uintptr(homeFd), homeDir)
 		defer func() { _ = homeDirFile.Close() }()
 
-		if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), "", uid, gid, unix.AT_EMPTY_PATH); err != nil {
+		if err := directSetUIDAtChownAt(int(homeDirFile.Fd()), ".", uid, gid, 0); err != nil {
 			log.Debug("Failed to chown home directory %s: %v", homeDir, err)
 		}
 		names, err := homeDirFile.Readdirnames(-1)

@@ -211,9 +211,9 @@ func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
 	}
 }
 
-// TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild pins the
-// L-A gap: init.go's stagedsecrets.Write failure branch is a hard error
-// today (return 1), not a swallow-and-continue. A planted symlink at
+// TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild pins
+// init.go's stagedsecrets.Write failure branch as a hard error (return 1),
+// never a swallow-and-continue. A planted symlink at
 // <agentHome>/.scion/secrets.json (e.g. left over from a persisted home,
 // simulating a restart) makes stagedsecrets.Write refuse — this proves
 // RunInit surfaces that refusal as a non-zero exit, reports the error phase,
@@ -534,9 +534,8 @@ func TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsErr
 }
 
 // directSetUIDAtChownCall records one directSetUIDAtChownAt invocation: name
-// is the directory entry it chowned (empty string, with AT_EMPTY_PATH, means
-// the home directory fd itself — see directSetUIDAtChownAt's own doc
-// comment).
+// is the directory entry it chowned (name "." means the home directory fd
+// itself — see directSetUIDAtChownAt's own doc comment).
 type directSetUIDAtChownCall struct {
 	name  string
 	flags int
@@ -562,11 +561,11 @@ func recordDirectSetUIDAtChowns(t *testing.T) *[]directSetUIDAtChownCall {
 
 // assertHomeChowned fails the test unless calls (as recorded by
 // recordDirectSetUIDAtChowns) includes the home directory fd's own chown
-// (name == "", AT_EMPTY_PATH).
+// (name == ".").
 func assertHomeChowned(t *testing.T, calls []directSetUIDAtChownCall) {
 	t.Helper()
 	for _, c := range calls {
-		if c.name == "" && c.flags == unix.AT_EMPTY_PATH {
+		if c.name == "." {
 			return
 		}
 	}
@@ -574,7 +573,7 @@ func assertHomeChowned(t *testing.T, calls []directSetUIDAtChownCall) {
 }
 
 // TestDirectSetUIDAt_SymlinkedHomeDir_EnforcedRefusesUnenforcedSkips proves
-// the H-17 fix: when homeDir itself is a symlink (planted ahead of a
+// that when homeDir itself is a symlink (planted ahead of a
 // restart on a persisted home), directSetUIDAt never follows it — under
 // requirePrivilegeDrop it refuses outright before touching anything, and
 // otherwise it logs and simply skips the chown pass, in both cases leaving
@@ -630,8 +629,8 @@ func TestDirectSetUIDAt_SymlinkedHomeDir_EnforcedRefusesUnenforcedSkips(t *testi
 	}
 }
 
-// TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget proves the other
-// half of H-17: a symlinked ENTRY inside homeDir (homeDir itself a real
+// TestDirectSetUIDAt_SymlinkedHomeEntry_ChownsLinkNotTarget proves that a
+// symlinked ENTRY inside homeDir (homeDir itself a real
 // directory) is chowned via AT_SYMLINK_NOFOLLOW — the link itself, never
 // whatever it points at — while a normal, non-symlink entry is still
 // chowned as usual.

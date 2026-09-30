@@ -304,7 +304,7 @@ func TestWriteAs_SymlinkedIntermediateComponentRefusedBeforeChown(t *testing.T) 
 	}
 }
 
-// TestWriteAs_ChownsOnlyUnderHome proves the M-1 ruling: a file-secret
+// TestWriteAs_ChownsOnlyUnderHome proves that a file-secret
 // target UNDER homeDir is eligible to be chowned (its newly created parent
 // directory and its leaf both go through the chown path), while a target
 // OUTSIDE homeDir is written exactly as at base — created, but never chowned
