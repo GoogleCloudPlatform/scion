@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // Tests for the common relationship stage (ptone/scion#2119): every
@@ -229,7 +231,10 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
 		}), Action("notify"), "agent.notify"},
-		"creator_user_skill": {RelationshipRuleCreatorUserSkill, skillResource(&store.Skill{
+		// ptone/scion#2128: personal skills are a progeny row too now
+		// (skillProgenyAdapter), sharing RelationshipRuleProgeny with the
+		// secret case below; kept as its own case for the skill shape.
+		"progeny_skill": {RelationshipRuleProgeny, skillResource(&store.Skill{
 			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
 		}), ActionRead, "skill.read"},
 		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead},
@@ -297,8 +302,8 @@ func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 	assert.Empty(t, r.Source.OwnerID)
 }
 
-// The creator user-skill read requires an active origin user.
-func TestRelationshipRules_CreatorSkillSourceInactive(t *testing.T) {
+// The personal-skill progeny read requires an active origin user.
+func TestRelationshipRules_SkillProgenySourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
 	// The execution source is a different active member of the agent's
 	// project, so the source-activity stage is the one under test.
@@ -317,7 +322,7 @@ func TestRelationshipRules_CreatorSkillSourceInactive(t *testing.T) {
 	d = decidePerm(f.authz, agent, res, ActionRead, "skill.read", true)
 	assert.False(t, d.Allowed)
 	assert.Equal(t, "relationship grant restricted by source_inactive", d.Reason)
-	assert.Equal(t, RelationshipRejectSourceInactive, relationshipResult(t, d, RelationshipRuleCreatorUserSkill).RejectedBy)
+	assert.Equal(t, RelationshipRejectSourceInactive, relationshipResult(t, d, RelationshipRuleProgeny).RejectedBy)
 }
 
 // Explain lists relationship candidates on allow, including a kernel
@@ -350,7 +355,7 @@ func TestRelationshipRules_RuleIDsMatchPolicyNames(t *testing.T) {
 	ids := map[string]bool{}
 	for _, id := range []RelationshipRuleID{
 		RelationshipRuleOwner, RelationshipRuleAncestor, RelationshipRuleProgeny,
-		RelationshipRuleHubMemberSAAssign, RelationshipRuleCreatorUserSkill,
+		RelationshipRuleHubMemberSAAssign,
 		RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleBrokerAssociation,
 	} {
 		ids[string(id)] = true

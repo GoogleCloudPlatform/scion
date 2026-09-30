@@ -265,11 +265,12 @@ func withTestProgenyPolicyRow(t *testing.T, kind, permissionID string) {
 // ProgenyListPredicate evaluates the source-delegation clause for the bare
 // kind, so it is narrower than a point read: when the source agent's user
 // delegator holds the read permission only through a relationship to the
-// specific record (owner of the skill), the point read admits the source and
-// the list omits it. The shipped policy has no progeny row for a kind with
-// such a user relationship, so the test adds one for skill.read.
+// specific record (owner of the template), the point read admits the source
+// and the list omits it. The shipped policy has no progeny row or adapter
+// for a kind with such a user relationship, so the test adds both for
+// template.read.
 func TestProgenyListPredicate_NarrowerThanPointRead(t *testing.T) {
-	withTestProgenyPolicyRow(t, "skill", "skill.read")
+	withTestProgenyPolicyRow(t, "template", "template.read")
 	f := newGoldenFixture(t)
 	ctx := context.Background()
 
@@ -283,21 +284,21 @@ func TestProgenyListPredicate_NarrowerThanPointRead(t *testing.T) {
 	seedExecutionAgent(t, f.store, readerID, f.projectAlpha.ID, anc, []string{f.projectOwnerID})
 	reader := execAgent(readerID, f.projectAlpha.ID, anc)
 
-	src := SharingSource{Kind: "skill", ID: tid("n3-skill"), OwnerID: sourceAgent, Policy: SharingPolicyOptInRequired, OptedIn: true}
-	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "skill", perms: []string{"skill.read"}, sources: []SharingSource{src}}))
+	src := SharingSource{Kind: "template", ID: tid("n3-template"), OwnerID: sourceAgent, Policy: SharingPolicyOptInRequired, OptedIn: true}
+	require.NoError(t, f.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "template", perms: []string{"template.read"}, sources: []SharingSource{src}}))
 
-	// The source agent's delegator holds skill.read on the record it owns,
+	// The source agent's delegator holds template.read on the record it owns,
 	// and not on the bare kind.
-	record := Resource{Type: "skill", ID: src.ID, OwnerID: sourceUser}
-	holds, detail := f.authz.relationshipSourceDelegationHolds(ctx, sourceAgent, record, "skill.read")
+	record := Resource{Type: "template", ID: src.ID, OwnerID: sourceUser}
+	holds, detail := f.authz.relationshipSourceDelegationHolds(ctx, sourceAgent, record, "template.read")
 	require.True(t, holds, "record-level delegation: %s", detail)
-	holds, _ = f.authz.relationshipSourceDelegationHolds(ctx, sourceAgent, Resource{Type: "skill"}, "skill.read")
+	holds, _ = f.authz.relationshipSourceDelegationHolds(ctx, sourceAgent, Resource{Type: "template"}, "template.read")
 	require.False(t, holds, "kind-level delegation")
 
-	d := decidePerm(f.authz, reader, record, ActionRead, "skill.read", true)
+	d := decidePerm(f.authz, reader, record, ActionRead, "template.read", true)
 	r := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.True(t, r.Accepted, "point read admits the source: rejected by %q (%s)", r.RejectedBy, r.Detail)
 
-	pred := f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(reader), "skill")
+	pred := f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(reader), "template")
 	assert.False(t, pred.Matches(src), "list omits the source")
 }

@@ -265,12 +265,12 @@ func (_q *ScheduledEventQuery) Clone() *ScheduledEventQuery {
 // Example:
 //
 //	var v []struct {
-//		ProjectID uuid.UUID `json:"project_id,omitempty"`
+//		InitiatorPrincipalKind string `json:"initiator_principal_kind,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.ScheduledEvent.Query().
-//		GroupBy(scheduledevent.FieldProjectID).
+//		GroupBy(scheduledevent.FieldInitiatorPrincipalKind).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *ScheduledEventQuery) GroupBy(field string, fields ...string) *ScheduledEventGroupBy {
@@ -288,11 +288,11 @@ func (_q *ScheduledEventQuery) GroupBy(field string, fields ...string) *Schedule
 // Example:
 //
 //	var v []struct {
-//		ProjectID uuid.UUID `json:"project_id,omitempty"`
+//		InitiatorPrincipalKind string `json:"initiator_principal_kind,omitempty"`
 //	}
 //
 //	client.ScheduledEvent.Query().
-//		Select(scheduledevent.FieldProjectID).
+//		Select(scheduledevent.FieldInitiatorPrincipalKind).
 //		Scan(ctx, &v)
 func (_q *ScheduledEventQuery) Select(fields ...string) *ScheduledEventSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

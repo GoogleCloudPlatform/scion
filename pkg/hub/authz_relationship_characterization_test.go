@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // Characterization of the named relationship grants (ptone/scion#2119).
@@ -127,8 +129,10 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 	// Current hub members may assign hub-scoped service accounts.
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {"gcp_service_account.assign"},
 
-	// An agent may read its origin user's user-scoped skills.
-	{"creator_user_skill", "agent", "skill"}: {"skill.read"},
+	// An agent may read its origin user's personal (user-scoped) skills,
+	// through the same progeny relationship as opted-in secrets, keyed on
+	// the skill's owning bucket rather than a per-record creator field.
+	{"progeny", "agent", "skill"}: {"skill.read"},
 }
 
 // sameTypeRegistryPermissions returns every registry permission ID whose
@@ -391,9 +395,10 @@ func TestRelationshipCharacterization_HubMemberSAAssign(t *testing.T) {
 	}
 }
 
-// TestRelationshipCharacterization_CreatorUserSkill pins an agent's read of
-// its origin user's user-scoped skill.
-func TestRelationshipCharacterization_CreatorUserSkill(t *testing.T) {
+// TestRelationshipCharacterization_ProgenySkillRead pins an agent's read of
+// its origin user's personal (user-scoped) skill through the common progeny
+// grant (ptone/scion#2128 retired the dedicated creator-user-skill grant).
+func TestRelationshipCharacterization_ProgenySkillRead(t *testing.T) {
 	f := newGoldenFixture(t)
 	seedExecutionAgent(t, f.store, tid("relchar-skill-agent"), f.projectAlpha.ID,
 		[]string{f.projectOwnerID}, []string{f.projectOwnerID})
@@ -405,8 +410,8 @@ func TestRelationshipCharacterization_CreatorUserSkill(t *testing.T) {
 	}}
 	res := skillScopeResource(store.SkillScopeUser, f.projectOwnerID)
 	d := f.authz.CheckAccess(context.Background(), agent, res, ActionRead)
-	assert.True(t, d.Allowed, "creator user skill read: reason %q", d.Reason)
-	assert.Equal(t, "relationship grant: creator user skill", d.Reason)
+	assert.True(t, d.Allowed, "progeny skill read: reason %q", d.Reason)
+	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
 
 	other := skillScopeResource(store.SkillScopeUser, f.memberNoneID)
 	d = f.authz.CheckAccess(context.Background(), agent, other, ActionRead)

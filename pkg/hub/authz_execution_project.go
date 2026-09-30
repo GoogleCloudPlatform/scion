@@ -29,9 +29,10 @@ const RelationshipRejectExecutionProject = "execution_project"
 
 // executionProjectRule reports whether rule derives an agent's access from
 // its source user's resources and therefore requires execution-project
-// admission.
+// admission. The progeny rule covers every such read, including a personal
+// skill owned by the agent's origin user (ptone/scion#2128).
 func executionProjectRule(rule RelationshipRuleID) bool {
-	return rule == RelationshipRuleProgeny || rule == RelationshipRuleCreatorUserSkill
+	return rule == RelationshipRuleProgeny
 }
 
 // ExecutionSourceResolver identifies the single authoritative local source

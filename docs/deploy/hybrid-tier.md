@@ -12,7 +12,10 @@ at the same NFS-served directory tree on the VM.
 This tier keeps the single-node hub's SQLite store and its Docker broker
 unchanged. It adds:
 
-- an NFS export (`knfsd`) served from a plain directory on the VM's boot disk;
+- an NFS export (`knfsd`) served from the VM's boot disk: `deploy.sh` provisions
+  a dedicated, size-capped filesystem for it (`/var/lib/scion-nfs/export.img`);
+  a manually provisioned hub can instead use a plain subdirectory, with the
+  trade-offs below;
 - a second broker runtime profile, `type: kubernetes`, pointed at the GKE
   cluster;
 - one static `PersistentVolume`/`PersistentVolumeClaim` pair in the agent
@@ -73,6 +76,19 @@ broker logs a one-time warning at startup if any of them are set, and logs the
 resolved layout (`backend`, `host_base`, `subpath_root`, `pv_name`) exactly
 once per start.
 
+The NFS server is reachable only at its internal IP inside the hub's own VPC,
+so any broker configured with `shared_dir_storage: nfs` must run on that same
+VPC network (or one routed to it) to mount the share.
+
+Agents that `deploy.sh`'s hybrid tier runs on GKE reach the hub itself through
+its public IAP URL, not its internal IP; see the runbook's [Hybrid Tier
+section](agent-runbook-single-node-vm.md#hybrid-tier-optional-gke-attach-and-nfs-firewall-rules).
+
+With the hybrid tier enabled, the hub default GCP identity mode is `block`.
+Configure a project-level mode (`assign` with a dedicated service account) for
+projects that need GCP access. The hub-level `passthrough` default applies to
+hubs deployed without the hybrid tier.
+
 The hub's own shared-dir file browser (project pages in the web UI) uses this
 same setting and the same confined resolver, so `scratchpad` listings work
 whether the project is browsed via a co-located Docker broker or lives only on
@@ -110,9 +126,11 @@ rule.
 >   scion agent pods. The firewall narrows this to nodes carrying the GKE node
 >   network tag; on a network without a broad allow-internal rule, the deny
 >   rule at 950 is harmless defense in depth.
-> - For a future `deploy.sh` tier option (Phase 3), the node subnet comes from
->   the cluster's own subnetwork, and the node tag from the cluster's node
->   pool / Autopilot node tag.
+> - `deploy.sh`'s hybrid tier reads the node subnet from the cluster's own
+>   subnetwork, and the node tag GKE assigns from the cluster's own
+>   GKE-managed firewall rules. See the runbook's [Hybrid Tier
+>   section](agent-runbook-single-node-vm.md#hybrid-tier-optional-gke-attach-and-nfs-firewall-rules)
+>   for how it does this.
 
 Project isolation between agents is a **path convention** (each project's
 `subPath` under one shared PVC), not a storage boundary: any pod spec in the
@@ -194,16 +212,21 @@ Closing the residual end to end requires:
 
 1. provisioning a dedicated NFS squash uid, in the `scion` group but distinct
    from the broker's own uid, and pointing the export's `anonuid=`/`anongid=`
-   at it — infrastructure work, not broker code, tracked for the Phase 3
-   `deploy.sh` tier option (new deployments) and as a separate ops action for
-   existing deployments;
+   at it — infrastructure work, not broker code. The Phase 3 `deploy.sh`
+   tier option does this for new deployments that use it (see
+   `docs/deploy/agent-runbook-single-node-vm.md`'s Hybrid Tier section);
+   an existing deployment's export still needs this as a separate ops
+   action, and the fix-up recipe below for any directories created before
+   the switch;
 2. verifying end to end in a scratch-project validation with that dedicated
    identity in place.
 
-Until both are done, treat `ptone/scion#1794` as **open**.
+Until both are done for a given deployment, treat `ptone/scion#1794` as
+**open** for it.
 
-**Existing directories created under Phase 1** (mode `2775`, no ACL, before
-this hardening shipped) are not retroactively fixed by an automatic migration
+**Existing directories created under Phase 1** (mode `2775`, no ACL, predating
+the group-ownership and ACL enforcement this document describes) are not
+retroactively fixed by an automatic migration
 — consistent with this feature's own "no automatic migration" precedent (see
 Migration below). If you need to harden an existing tree by hand, the recipe
 below fixes it in place.
@@ -390,11 +413,13 @@ database change.
 ## Boot-disk trade-offs
 
 The NFS export (`/srv/scion-shared`) lives on the VM's **boot disk** rather
-than a separate persistent disk. The default layout is a plain subdirectory of
-`/`, which has a real gap (see the Export layout row and Security posture
-above); keeping the export on the boot disk as a loop-mounted filesystem
-instead avoids it. The trade-offs below are real either way and should inform
-how you operate this tier:
+than a separate persistent disk. `deploy.sh` already provisions it as a
+dedicated, loop-mounted filesystem (`/var/lib/scion-nfs/export.img`), not a
+plain subdirectory of `/`. A hub set up by hand instead of by `deploy.sh` can
+still use a plain subdirectory, which has a real gap (see the Export layout
+row and Security posture above); the manual recipe below converts one to a
+dedicated filesystem. The trade-offs below are real either way and should
+inform how you operate this tier:
 
 | Concern | Consequence | Mitigation |
 |---|---|---|
@@ -402,10 +427,13 @@ how you operate this tier:
 | **Snapshots** | A boot-disk snapshot captures the OS, the hub DB, and the scratchpad together. You cannot roll back the scratchpad independently, and restores are all-or-nothing. | Accept this for scratch data. To recover a single file, mount a snapshot-derived disk on another VM and copy it out. |
 | **Lifecycle** | Tearing down the VM (and its boot disk) deletes all shared-dir data with it. Recreating the VM starts with an empty scratchpad. | Know this before tearing down a VM that has scratchpad data you care about. A dedicated persistent disk for the export is the upgrade path if this becomes unacceptable, but is not built in this phase. |
 | **I/O contention** | NFS clients, container overlay I/O, and SQLite all compete for the same disk. A low-baseline-IOPS boot disk (e.g. `pd-standard`) makes this worse. | Acceptable for scratch data; prefer `pd-balanced` or better for the boot disk if this tier sees heavy shared-dir traffic. The boot disk can be grown online (grow the PD, then `growpart` + `resize2fs`). |
-| **With the default (subdirectory) layout: no mount boundary** | There's no separate mountpoint to fail to mount (a small upside), but also no size isolation between the export and everything else on `/`. | The recommended dedicated-filesystem layout below adds a mount (and the size isolation that comes with it), at the cost of a mount that can fail — see its own fail-closed step. |
-| **Export layout** | This tier's default export is a plain subdirectory of the boot disk's root filesystem, which accepts a forged file handle for any inode on that filesystem, not just the exported subtree (see Security posture above). | Export the root of a dedicated filesystem instead — a loop-file filesystem on the boot disk, or a separate disk. A subdirectory export is not recommended. |
+| **With a manually provisioned, plain-subdirectory layout: no mount boundary** | There's no separate mountpoint to fail to mount (a small upside), but also no size isolation between the export and everything else on `/`. | The dedicated-filesystem layout `deploy.sh` already uses (and the recipe below builds by hand) adds a mount (and the size isolation that comes with it), at the cost of a mount that can fail — see its own fail-closed step. |
+| **Export layout** | A manually provisioned hub's default export is a plain subdirectory of the boot disk's root filesystem, which accepts a forged file handle for any inode on that filesystem, not just the exported subtree (see Security posture above). `deploy.sh` doesn't have this gap: it already exports the root of a dedicated filesystem. | Export the root of a dedicated filesystem instead — a loop-file filesystem on the boot disk, or a separate disk. A subdirectory export is not recommended. |
 
-**Creating the export as a dedicated filesystem root.** The recommended
+**Creating the export as a dedicated filesystem root, for a hub set up by
+hand.** `deploy.sh` already does this automatically, at
+`/var/lib/scion-nfs/export.img`; the recipe below is for converting a
+manually provisioned hub's plain-subdirectory export instead. The recommended
 approach: put the export on its own filesystem (a loop-mounted image file on
 the boot disk here) rather than a subdirectory of `/`. Run once, as root:
 
@@ -623,11 +651,11 @@ running this tier:
 - **With `shared_dir_storage: nfs`, chat attachments aren't staged into
   NFS-backed shared dirs in this release.** Plan around this for projects on
   the NFS tier until a confined NFS attachment path is built.
-- **This tier's default export is a plain subdirectory of the boot disk's
-  root filesystem, not a dedicated filesystem's own root** (see Security
-  posture and Boot-disk trade-offs above for what that costs, and how to
-  export a dedicated filesystem root instead).
-
+- **A manually provisioned hub's default export is a plain subdirectory of
+  the boot disk's root filesystem, not a dedicated filesystem's own root**
+  (`deploy.sh` already exports a dedicated filesystem; see Security posture
+  and Boot-disk trade-offs above for what the plain-subdirectory layout
+  costs, and how to convert one by hand).
 **Open question, not built:** the auxiliary Kubernetes runtime's behavior when
 GKE credentials are broken or unreachable at hub startup (whether it degrades
 gracefully to Docker-only, or blocks/delays hub startup) was flagged as an
@@ -640,8 +668,9 @@ non-production environment first.
 ## References
 
 - `ptone/scion#1777` — the tracking issue for the hybrid tier work.
-- `ptone/scion#1794` — E2 hardening (dedicated squash uid), required before
-  the Phase 3 `deploy.sh` tier option ships.
+- `ptone/scion#1794` — E2 hardening (dedicated squash uid). The Phase 3
+  `deploy.sh` tier option (`docs/deploy/agent-runbook-single-node-vm.md`)
+  provisions this for new deployments; see above for existing ones.
 - `ptone/scion#1802` — shared-dir cleanup on project deletion (the NFS side
   is handled starting Phase 2; the local backend and workspace directory
   cleanup remain tracked on that issue).

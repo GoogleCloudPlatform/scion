@@ -89,7 +89,7 @@ func (s *agentGetErrStore) GetAgent(ctx context.Context, id string) (*store.Agen
 	return s.Store.GetAgent(ctx, id)
 }
 
-// A progeny read, and the creator user-skill read, require the agent's
+// A progeny read, including a personal-skill read, requires the agent's
 // authoritative source user to hold live admission to the agent's current
 // project. Point reads and the list predicate agree on every shape.
 func TestExecutionProject_ProgenyParity(t *testing.T) {
@@ -207,7 +207,7 @@ func TestExecutionProject_ProgenyParity(t *testing.T) {
 
 			skill := skillScopeResource(store.SkillScopeUser, f.projectOwnerID)
 			sd := decidePerm(authz, agent, skill, ActionRead, "skill.read", false)
-			assert.Equal(t, tc.allowed, sd.Allowed, "creator user-skill read: reason %q", sd.Reason)
+			assert.Equal(t, tc.allowed, sd.Allowed, "personal-skill progeny read: reason %q", sd.Reason)
 		})
 	}
 }
@@ -224,8 +224,8 @@ func TestExecutionProject_CatalogSkillReadUnaffected(t *testing.T) {
 	catalog := decidePerm(f.authz, agent, skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, "skill.read", false)
 	assert.True(t, catalog.Allowed, "catalog skill read: reason %q", catalog.Reason)
 	owned := decidePerm(f.authz, agent, skillScopeResource(store.SkillScopeUser, f.projectOwnerID), ActionRead, "skill.read", true)
-	assert.False(t, owned.Allowed, "creator user-skill read: reason %q", owned.Reason)
-	assert.Equal(t, RelationshipRejectExecutionProject, relationshipResult(t, owned, RelationshipRuleCreatorUserSkill).RejectedBy)
+	assert.False(t, owned.Allowed, "personal-skill progeny read: reason %q", owned.Reason)
+	assert.Equal(t, RelationshipRejectExecutionProject, relationshipResult(t, owned, RelationshipRuleProgeny).RejectedBy)
 }
 
 // extraEdgeStore adds one more delegation edge for delegateID.

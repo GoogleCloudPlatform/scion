@@ -117,12 +117,18 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cursor := query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("groups", filter)
-	if cursor != "" {
-		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
+	cursorBinding := scopedCursorBinding("groups", filter, identity)
+	// Opened (and re-sealed on the way out, below) once here for both
+	// branches below -- the admin branch's direct store query and the
+	// non-admin authorizedList scan -- so this endpoint's cursor format
+	// never depends on which branch hasAdminView selects (see
+	// listAuthorizedOrAll's doc comment for the same reasoning; groups
+	// can't use that helper directly because of the three-way
+	// admin/non-admin/unauthenticated split below).
+	cursor, err = openAndValidateListCursor(s.listCursorSealer, cursor, cursorBinding)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 	var groupItems []store.Group
 	var nextCursor string
@@ -166,6 +172,14 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Unauthenticated: return empty list (no identity to authorize against).
 		groupItems = []store.Group{}
+	}
+	if nextCursor != "" {
+		sealed, err := s.listCursorSealer.Seal(nextCursor, cursorBinding)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		nextCursor = sealed
 	}
 	groups := make([]GroupWithCapabilities, 0, len(groupItems))
 	if identity == nil {

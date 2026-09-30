@@ -1,0 +1,2917 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file has no shebang -- it is always `source`d, never executed --
+# so shellcheck needs an explicit shell directive to know its dialect.
+# shellcheck shell=bash
+
+# scripts/single-node-vm/hybrid-tier.sh — hybrid-tier (attach-only GKE
+# target) additions for deploy.sh.
+#
+# This file is meant to be `source`d by deploy.sh, never executed directly.
+# It depends on the caller already having defined `config_get`,
+# `config_prompt`, `info`, `warn`, `err`, `print_gcloud_error` and `PYTHON`
+# (deploy.sh defines all of these before sourcing this file), and on
+# `set -euo pipefail` already being in effect.
+#
+# Every function here is a plain shell function operating on explicit
+# arguments and a small set of documented globals, so the test
+# harness under tests/ can source this file on its own -- with its own stub
+# `config_get`/`info`/`warn`/`err` and a stub `gcloud` on PATH -- without
+# ever loading or running deploy.sh itself.
+#
+# The cluster itself is always an existing, attach-only target -- this
+# file never creates or deletes one.
+#
+# Array expansions throughout this file use the
+# `${arr[@]+"${arr[@]}"}` idiom instead of a bare `"${arr[@]}"` wherever
+# the array in question can legitimately be empty. Under `set -u`, an
+# empty array's bare `"${arr[@]}"` is an unbound-variable error on bash
+# older than 4.4 (macOS ships 3.2), even though it is a documented no-op
+# on 4.4+; the `+` form is the portable way to say "zero or more
+# elements" on every bash version this script might run under.
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# The dedicated NFS squash identity: a system account with no login shell
+# and no home, whose primary group is the existing "scion" group (the
+# broker's own group -- see docs/deploy/agent-runbook-single-node-vm.md).
+# Deliberately distinct from the "scion" user itself: squashing every NFS
+# client to the broker's own uid would mean any pod that can reach the
+# export can act as the broker on the shared tree, which is exactly the
+# upper-dir-symlink-plant vector the dedicated identity exists to close.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_SQUASH_USER="scion-nfs"
+# The NFS export root: the mount point of a dedicated, size-capped ext4
+# filesystem, loop-mounted from a single image file that itself lives on
+# the VM's boot disk (per the design's boot-disk provisioning choice).
+# The export root is the ROOT of that filesystem, not a subdirectory of
+# it: with no_subtree_check (required so NFSv4 file handles survive a
+# restart), a subdirectory export lets a forged file handle reach any
+# inode on the whole containing filesystem. Giving the export its own
+# filesystem means there is nothing else on that filesystem for a forged
+# handle to reach.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_EXPORT_ROOT="/srv/scion-shared"
+# The backing image file for the export filesystem above. Lives on the
+# boot disk, outside the export root itself. Created once, at whatever
+# size gke_target.shared_dir_image_size_gb (default 20) specifies; never
+# re-created or shrunk on a later run. Growing it later is a manual,
+# documented operation (grow the file, then resize2fs) -- see
+# docs/deploy/hybrid-tier.md.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_IMAGE_PATH="/var/lib/scion-nfs/export.img"
+
+# Marker types, all the exact token "scion-deployment=<hub_name>", by
+# resource kind (matches the base-resource marker convention deploy.sh
+# itself already uses for the VM, Cloud Run proxy, service account, and
+# Cloud Router):
+#   firewall rule -> description       (see hybrid_ensure_firewall_rules)
+#   static internal IP address -> description
+#                                       (see hybrid_ensure_internal_ip_new_vm /
+#                                       _existing_vm)
+#   Kubernetes namespace/PV/PVC -> label
+#                                       (see hybrid_k8s_preflight)
+#   service account -> description     (see hybrid_ensure_transport_sa)
+# This marker is purely informational for ownership checks: it is never
+# checked or corrected on resources this tier doesn't itself create or
+# adopt.
+
+# _hybrid_gcloud_not_found TEXT
+#
+# True only for gcloud's own specific "genuinely absent" signal: a
+# bounded NOT_FOUND status token, a "code=404" ResponseError, or an
+# "HTTP 404" status line -- never a bare "404" substring, which shows up
+# in plenty of text that has nothing to do with absence: a cluster
+# literally named "hub-404", a project ID like "team-404-prod" inside a
+# URL, "Timeout after 404 seconds", or a proxy's own unrelated status
+# line mentioning a request id that happens to contain "404". Some
+# permission-denied responses are deliberately worded to avoid
+# confirming a resource's existence to a caller who can't see it (for
+# example "...not found or permission denied"), and those must never be
+# treated as "gone": anything mentioning permission or forbidden is
+# excluded outright, checked first, before the not-found signal itself.
+# A suggestion response ("Did you mean ...") means gcloud found
+# something close enough to suggest, which is not the same as
+# confirming the requested name is absent, so that's excluded too.
+_hybrid_gcloud_not_found() {
+  local text="$1"
+  if echo "$text" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  if echo "$text" | grep -qiE 'did you mean'; then
+    return 1
+  fi
+  echo "$text" | grep -qE 'code=404\b|\bHTTP 404\b|(^|[^A-Za-z0-9_])NOT_FOUND($|[^A-Za-z0-9_])'
+}
+
+# _hybrid_kubectl_not_found TEXT
+#
+# True only for kubectl's own specific "genuinely absent" signal for a
+# named object: "Error from server (NotFound): <kind> "<name>" not
+# found" -- requiring the quoted kind and name, not just the bare
+# "(NotFound)" reason token. kubectl also returns "Error from server
+# (NotFound): the server could not find the requested resource" when
+# the API server itself doesn't recognize the requested endpoint (a
+# stale kubectl/server version skew, for example) -- that carries the
+# same "(NotFound)" token but says nothing about whether the object this
+# call was actually checking for exists, so it must never read as
+# absent, and the kind/name requirement above already excludes it. Same
+# permission/forbidden exclusion as _hybrid_gcloud_not_found above.
+_hybrid_kubectl_not_found() {
+  local text="$1"
+  if echo "$text" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  echo "$text" | grep -qE 'Error from server \(NotFound\): [A-Za-z.]+ "[^"]+" not found'
+}
+
+# _hybrid_registry_is_loopback REGISTRY
+#
+# True if REGISTRY's host component is one of the common loopback
+# spellings (localhost, 127.0.0.0/8, ::1, or 0.0.0.0), with or without a
+# port. Takes the part of REGISTRY before its first '/'
+# (the host[:port]), strips an IPv6 literal's brackets first (so a port
+# after "]" is never confused with the host itself), then strips a
+# ":port" suffix from whatever's left, so "localhost/...",
+# "localhost:PORT/...", "127.0.0.1/...", "127.0.0.1:PORT/...",
+# "[::1]/..." and "[::1]:PORT/..." are all refused identically, since
+# they all reach the same place on a GKE node.
+_hybrid_registry_is_loopback() {
+  local registry="$1" host
+  host="${registry%%/*}"
+  if [[ "$host" == \[*\]* ]]; then
+    host="${host#\[}"
+    host="${host%%\]*}"
+  else
+    host="${host%%:*}"
+  fi
+  case "$host" in
+    localhost|127.*|0.0.0.0|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _hybrid_validate_target_fields NAME LOCATION RESOLVED_PROJECT NAMESPACE \
+#   PVC_NAME PROJECT_ID
+#
+# The gke_target.* field-syntax and project-match validation shared by
+# both hybrid_read_config (create, below) and deploy.sh's --delete path:
+# a malformed or foreign-project cluster reference must be refused the
+# same way regardless of which path read it, rather than create-mode
+# validating strictly while delete-mode reads the same fields with none
+# of these checks. RESOLVED_PROJECT is the caller's already-defaulted
+# value (gke_target.project if set, else PROJECT_ID), not the raw config
+# value, so this only ever sees one project value, not two. Exits
+# non-zero with an actionable, field-naming message on the first problem
+# found. Never touches HYBRID_ENABLED or any GKE_* global itself -- the
+# caller is responsible for those.
+_hybrid_validate_target_fields() {
+  local name="$1" location="$2" resolved_project="$3" namespace="$4" pvc_name="$5" project_id="$6"
+
+  if [[ -z "$location" ]]; then
+    err "gke_target.location is required when gke_target.name is set."
+    exit 1
+  fi
+  if ! [[ "$name" =~ ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$ ]]; then
+    err "gke_target.name '${name}' is not a valid GKE cluster name (lowercase letters, digits and hyphens; must start with a letter and not end with a hyphen)."
+    exit 1
+  fi
+  if ! [[ "$location" =~ ^[a-z]+-[a-z]+[0-9]+(-[a-z])?$ ]]; then
+    err "gke_target.location '${location}' is not a valid GCP zone or region."
+    exit 1
+  fi
+  if ! [[ "$resolved_project" =~ ^[a-z][-a-z0-9]{4,28}[a-z0-9]$ ]]; then
+    err "gke_target.project '${resolved_project}' is not a valid GCP project ID."
+    exit 1
+  fi
+  if ! [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.namespace '${namespace}' is not a valid Kubernetes namespace name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
+  if ! [[ "$pvc_name" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.pvc_name '${pvc_name}' is not a valid Kubernetes object name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
+  if [[ "$resolved_project" != "$project_id" ]]; then
+    err "gke_target.project ('${resolved_project}') must match this hub's project ('${project_id}'). Attaching a cluster in a different project is not supported yet."
+    exit 1
+  fi
+}
+
+# hybrid_read_config PROJECT_ID HUB_NAME
+#
+# Reads gke_target.{name,location,project,namespace,pvc_name} via the
+# caller's config_get. In interactive mode (no CONFIG_FILE), offers to
+# enable the tier and prompts for all five fields via config_prompt when
+# the operator opts in, showing each derived default (empty input
+# accepts it); in config-file mode, an absent or empty gke_target.name
+# means the tier is off, full stop, with no prompt.
+#
+# Sets HYBRID_ENABLED to "true" or "false".
+# Exits non-zero with an actionable message on any invalid gke_target.*
+# or shared_dir_image_size_gb value, or a missing $PYTHON.
+hybrid_read_config() {
+  local project_id="$1" hub_name="$2"
+  local cfg_name cfg_location cfg_project cfg_namespace cfg_pvc_name cfg_image_size_gb
+  local hybrid_choice
+  local default_namespace default_pvc_name
+  default_namespace="$(hybrid_k8s_default_namespace "$hub_name")"
+  default_pvc_name="$(hybrid_k8s_default_pvc_name "$hub_name")"
+
+  cfg_name="$(config_get 'gke_target.name' '')"
+  cfg_location="$(config_get 'gke_target.location' '')"
+  cfg_project="$(config_get 'gke_target.project' '')"
+  cfg_namespace="$(config_get 'gke_target.namespace' "$default_namespace")"
+  cfg_pvc_name="$(config_get 'gke_target.pvc_name' "$default_pvc_name")"
+  cfg_image_size_gb="$(config_get 'gke_target.shared_dir_image_size_gb' '20')"
+
+  if [[ -z "$cfg_name" && -z "${CONFIG_FILE:-}" ]]; then
+    echo ""
+    config_prompt hybrid_choice "Attach an existing GKE cluster as a second runtime (hybrid tier)? [y/N]: " "n"
+    if [[ "$(echo "$hybrid_choice" | tr '[:upper:]' '[:lower:]')" == "y" ]]; then
+      config_prompt cfg_name "GKE cluster name: " ""
+      config_prompt cfg_location "GKE cluster location (zone or region): " ""
+      config_prompt cfg_project "GKE cluster project [${project_id}]: " "${project_id}"
+      config_prompt cfg_namespace "Kubernetes namespace for the shared tree [${default_namespace}]: " "${default_namespace}"
+      config_prompt cfg_pvc_name "PersistentVolumeClaim name [${default_pvc_name}]: " "${default_pvc_name}"
+    fi
+  fi
+
+  if [[ -z "$cfg_name" ]]; then
+    HYBRID_ENABLED=false
+    return 0
+  fi
+
+  GKE_NAME="$cfg_name"
+  GKE_LOCATION="$cfg_location"
+  GKE_PROJECT="${cfg_project:-$project_id}"
+  _hybrid_validate_target_fields "$cfg_name" "$cfg_location" "$GKE_PROJECT" "$cfg_namespace" "$cfg_pvc_name" "$project_id"
+
+  if ! [[ "$cfg_image_size_gb" =~ ^[1-9][0-9]*$ ]]; then
+    err "gke_target.shared_dir_image_size_gb '${cfg_image_size_gb}' must be a positive integer (gigabytes)."
+    exit 1
+  fi
+
+  if ! command -v "$PYTHON" &>/dev/null; then
+    err "Python interpreter '${PYTHON}' is required for the hybrid tier (cluster discovery and firewall-rule checks) but was not found. Set PYTHON=/path/to/python3 or disable the tier."
+    exit 1
+  fi
+
+  # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+  HYBRID_ENABLED=true
+  # shellcheck disable=SC2034 # read by hybrid_k8s_ensure_objects/_teardown_check as an override
+  GKE_NAMESPACE="$cfg_namespace"
+  # shellcheck disable=SC2034 # read by hybrid_k8s_ensure_objects/_teardown_check as an override
+  GKE_PVC_NAME="$cfg_pvc_name"
+  # shellcheck disable=SC2034 # read by deploy.sh, passed to hybrid_nfs_export_script
+  HYBRID_SHARED_DIR_IMAGE_SIZE_GB="$cfg_image_size_gb"
+}
+
+# _hybrid_cluster_ref — a "name (project: P, location: L)" string for
+# actionable messages, built from the globals hybrid_read_config sets.
+_hybrid_cluster_ref() {
+  echo "${GKE_NAME} (project: ${GKE_PROJECT}, location: ${GKE_LOCATION})"
+}
+
+# _hybrid_region_from_location LOCATION
+#
+# A GKE cluster's location is either regional (e.g. us-central1, already
+# a region) or zonal (e.g. us-central1-a, a region plus a single-letter
+# zone suffix). Subnetworks are regional resources, so a zonal location
+# needs that suffix stripped before it can be passed to
+# `gcloud compute networks subnets describe --region`.
+_hybrid_region_from_location() {
+  local location="$1"
+  if [[ "$location" =~ ^(.+)-[a-z]$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "$location"
+  fi
+}
+
+# _hybrid_validate_node_subnet_cidr CIDR
+#
+# Validates CIDR as a syntactically valid IPv4 network in canonical form
+# (no host bits set), and refuses anything broader than /8: 0.0.0.0/0
+# would list every routable address as a trusted NFS client, and nothing
+# a single GKE node subnet legitimately needs is ever wider than /8.
+# Prints nothing and returns non-zero on any problem; the caller supplies
+# the actionable error message.
+_hybrid_validate_node_subnet_cidr() {
+  local cidr="$1"
+  "$PYTHON" -c "
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=True)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if (net.version == 4 and net.prefixlen >= 8) else 1)
+" "$cidr"
+}
+
+# hybrid_discover HUB_NETWORK
+#
+# Verifies the configured GKE cluster exists and is on the hub's own
+# network, then discovers its node network tag, its node subnet's
+# primary IP range, and its pod CIDR. Every gcloud call here is
+# read-only (describe/list); nothing is created. Sets GKE_NODE_TAG,
+# GKE_NODE_SUBNET_CIDR, and GKE_POD_CIDR. Exits non-zero with an
+# actionable message, naming the cluster and (where relevant) what was
+# found, if the cluster can't be described, is on a different network
+# than the hub VM, its node subnet or pod CIDR can't be determined or
+# has an invalid or dangerously broad IP range, or no single node tag
+# can be discovered -- always before any resource is created. Every
+# failed gcloud call's message includes gcloud's own stderr rather than
+# assuming "not found": a permission or API-disabled error looks nothing
+# like a missing cluster, and reporting it as one would send an operator
+# chasing the wrong fix.
+#
+# The node subnet -- not the pod CIDR or any secondary range -- is what
+# the NFS export's client list is built from: nodes, not pods, originate
+# the NFS mount traffic that reaches the VM. The NFS firewall allow
+# rule's source is unrelated to this and continues to use the node
+# network tag discovered above, not an IP range. The pod CIDR is used
+# by the separate hub-deny firewall rule (all protocols), which
+# blocks that same pod range from reaching the hub VM directly over the
+# VPC.
+#
+# Node-tag discovery reads the node tag GKE assigns, from the cluster's
+# own GKE-managed firewall rules, the same source for Standard and
+# Autopilot clusters alike: it lists the firewall rules on the cluster's
+# network, and looks among them for the one rule matching ^gke-.+-all$,
+# direction INGRESS, whose source ranges include this cluster's own pod
+# CIDR -- pod CIDRs are unique within a VPC, so this ties the rule to
+# this specific cluster. That rule must carry exactly one target tag,
+# matching ^gke-.+-node$, and the matching <same-prefix>-vms rule must
+# exist and carry the same single target tag. Anything else -- no
+# matching rule, more than one, the wrong shape of tags, or the -vms
+# rule missing or disagreeing -- refuses to guess and fails instead,
+# listing whatever it found.
+hybrid_discover() {
+  local hub_network="$1"
+  local cluster_ref
+  cluster_ref="$(_hybrid_cluster_ref)"
+
+  local describe_json describe_err
+  describe_err="$(mktemp)"
+  if ! describe_json="$(gcloud container clusters describe "${GKE_NAME}" \
+      --project="${GKE_PROJECT}" --location="${GKE_LOCATION}" \
+      --format=json 2>"${describe_err}")"; then
+    err "Could not describe GKE cluster ${cluster_ref}:"
+    err "  $(cat "${describe_err}")"
+    rm -f "${describe_err}"
+    exit 1
+  fi
+  rm -f "${describe_err}"
+
+  local network
+  network="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('network') or '')
+")"
+  if [[ -z "$network" ]]; then
+    err "Could not determine the network for GKE cluster ${cluster_ref} from its description."
+    exit 1
+  fi
+  if [[ "$network" != "$hub_network" ]]; then
+    err "GKE cluster ${cluster_ref} is on network '${network}', but this hub uses network '${hub_network}'. Attaching a cluster on a different network is not supported."
+    exit 1
+  fi
+
+  # The NFS export's client list is the cluster's node subnet, never the
+  # pod CIDR or any secondary range: nodes are what actually originate
+  # NFS traffic, and the node subnet is the narrowest range that's still
+  # guaranteed to cover every node regardless of how pod/service ranges
+  # are laid out.
+  local subnetwork
+  subnetwork="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('subnetwork') or '')
+")"
+  if [[ -z "$subnetwork" ]]; then
+    err "Could not determine the node subnetwork for GKE cluster ${cluster_ref} from its description."
+    exit 1
+  fi
+
+  local subnet_region
+  subnet_region="$(_hybrid_region_from_location "$GKE_LOCATION")"
+
+  local subnet_err subnet_json
+  subnet_err="$(mktemp)"
+  if ! subnet_json="$(gcloud compute networks subnets describe "$subnetwork" \
+      --region="$subnet_region" --project="${GKE_PROJECT}" --format=json 2>"${subnet_err}")"; then
+    err "Could not describe node subnetwork '${subnetwork}' (region: ${subnet_region}) for GKE cluster ${cluster_ref}:"
+    err "  $(cat "${subnet_err}")"
+    rm -f "${subnet_err}"
+    exit 1
+  fi
+  rm -f "${subnet_err}"
+
+  local node_cidr
+  node_cidr="$(echo "$subnet_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('ipCidrRange') or '')
+")"
+  if [[ -z "$node_cidr" ]] || ! _hybrid_validate_node_subnet_cidr "$node_cidr"; then
+    err "GKE cluster ${cluster_ref}'s node subnetwork '${subnetwork}' has an invalid or dangerously broad primary IP range ('${node_cidr:-empty}'). Refusing to build an NFS export client list from it."
+    exit 1
+  fi
+  # shellcheck disable=SC2034 # consumed by the NFS export function
+  GKE_NODE_SUBNET_CIDR="$node_cidr"
+
+  # The pod CIDR is what the hub-deny firewall rule (all protocols,
+  # blocking pods from reaching the hub VM directly over the VPC) sources
+  # from -- unlike the NFS export, which sources from the node subnet,
+  # because kubelet (not the pod) originates NFS mount traffic, but a
+  # pod's own request would genuinely come from its pod IP. Read from two
+  # places in the same describe JSON and require them to agree:
+  # `clusterIpv4Cidr` is the cluster-wide value,
+  # `ipAllocationPolicy.clusterIpv4CidrBlock` is the allocation-policy's
+  # own record of it; a real disagreement between the two would mean
+  # this code is looking at the wrong field for this cluster's
+  # provisioning mode, which is safer to fail on than to guess.
+  local pod_cidr pod_cidr_alt
+  pod_cidr="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('clusterIpv4Cidr') or '')
+")"
+  pod_cidr_alt="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print((d.get('ipAllocationPolicy') or {}).get('clusterIpv4CidrBlock') or '')
+")"
+  if [[ -z "$pod_cidr" || -z "$pod_cidr_alt" ]]; then
+    err "Could not determine the pod CIDR for GKE cluster ${cluster_ref} from its description (clusterIpv4Cidr or ipAllocationPolicy.clusterIpv4CidrBlock is missing)."
+    exit 1
+  fi
+  if [[ "$pod_cidr" != "$pod_cidr_alt" ]]; then
+    err "GKE cluster ${cluster_ref} reports two different pod CIDRs (clusterIpv4Cidr='${pod_cidr}', ipAllocationPolicy.clusterIpv4CidrBlock='${pod_cidr_alt}'). Refusing to guess which one is right."
+    exit 1
+  fi
+  if ! _hybrid_validate_node_subnet_cidr "$pod_cidr"; then
+    err "GKE cluster ${cluster_ref}'s pod CIDR '${pod_cidr}' is invalid or dangerously broad (refusing anything broader than /8). Refusing to build the hub-deny firewall rule's source range from it."
+    exit 1
+  fi
+  # shellcheck disable=SC2034 # consumed by the hub-deny firewall rule
+  GKE_POD_CIDR="$pod_cidr"
+
+  # Autopilot does not expose node instance groups or templates as
+  # Compute resources in the project -- every instance-group describe
+  # call 404s, even for a cluster with running nodes -- so the tag is
+  # read from GKE's own auto-created firewall rules instead, which exist
+  # identically for every cluster, of either type. The cluster's pod CIDR
+  # (unique within a VPC) ties the right pair of rules to this cluster
+  # without needing to reconstruct GKE's own truncated-name/hash scheme.
+  # The list carries no --filter: it returns every rule in the project,
+  # and the Python below keeps only the rules on this network, by exact
+  # match on the network URL's last path segment.
+  local fw_list_json fw_list_err
+  fw_list_err="$(mktemp)"
+  if ! fw_list_json="$(gcloud compute firewall-rules list --project="${GKE_PROJECT}" \
+      --format=json 2>"${fw_list_err}")"; then
+    err "Could not list firewall rules in project ${GKE_PROJECT} to discover the GKE node tag for cluster ${cluster_ref} (network '${network}'):"
+    err "  $(cat "${fw_list_err}")"
+    rm -f "${fw_list_err}"
+    exit 1
+  fi
+  rm -f "${fw_list_err}"
+
+  local disc_result disc_status disc_detail
+  disc_result="$(echo "$fw_list_json" | "$PYTHON" -c "
+import json, sys, re
+
+raw = sys.stdin.read()
+rules = json.loads(raw) if raw.strip() else []
+pod_cidr = sys.argv[1]
+network = sys.argv[2]
+all_re = re.compile(r'^gke-[a-z0-9-]+-all\$')
+node_re = re.compile(r'^gke-[a-z0-9-]+-node\$')
+
+
+def describe(r):
+    ranges = ','.join(r.get('sourceRanges') or []) or 'none'
+    return '%s (direction=%s, sourceRanges=%s)' % (r.get('name') or '', r.get('direction') or '', ranges)
+
+
+# The list is unfiltered, so this is the only network check: a rule
+# counts only if its network URL ends in exactly /networks/<network>. A
+# same-named, same-pod-CIDR rule on any other network, including one
+# whose name merely starts or ends with this one, is never mistaken for
+# this cluster's own.
+on_network = [r for r in rules if (r.get('network') or '').endswith('/networks/' + network)]
+
+name_matches = [r for r in on_network if all_re.fullmatch(r.get('name') or '')]
+if not name_matches:
+    print('NONE::no firewall rule matching ^gke-[a-z0-9-]+-all\$ was found on network %s' % network)
+    sys.exit(0)
+
+candidates = [r for r in name_matches
+              if (r.get('direction') or '') == 'INGRESS'
+              and pod_cidr in (r.get('sourceRanges') or [])]
+if not candidates:
+    found = '; '.join(describe(r) for r in name_matches)
+    print('NONE::found %d rule(s) named like a GKE-managed rule, but none had direction INGRESS with source range %s: %s'
+          % (len(name_matches), pod_cidr, found))
+    sys.exit(0)
+
+if len(candidates) > 1:
+    found = ', '.join(sorted((r.get('name') or '') for r in candidates))
+    print('AMBIGUOUS::%d candidate rules matched: %s' % (len(candidates), found))
+    sys.exit(0)
+
+rule = candidates[0]
+tags = rule.get('targetTags') or []
+if len(tags) != 1:
+    print('BADTAGS::%s has %d target tag(s): %s' % (rule.get('name') or '', len(tags), ', '.join(tags) or 'none'))
+    sys.exit(0)
+
+tag = tags[0]
+if not node_re.fullmatch(tag):
+    print(\"BADTAGSHAPE::%s's target tag '%s' does not match ^gke-[a-z0-9-]+-node\$\" % (rule.get('name') or '', tag))
+    sys.exit(0)
+
+prefix = (rule.get('name') or '')[:-len('-all')]
+vms_name = prefix + '-vms'
+vms_rule = next((r for r in on_network if (r.get('name') or '') == vms_name), None)
+if vms_rule is None:
+    print('NOVMS::%s was not found' % vms_name)
+    sys.exit(0)
+
+vms_tags = vms_rule.get('targetTags') or []
+if vms_tags != [tag]:
+    print(\"VMSMISMATCH::%s's target tag(s) (%s) do not match %s's (%s)\"
+          % (vms_name, ', '.join(vms_tags) or 'none', rule.get('name') or '', tag))
+    sys.exit(0)
+
+print('OK::%s' % tag)
+" "$pod_cidr" "$network")"
+
+  disc_status="${disc_result%%::*}"
+  disc_detail="${disc_result#*::}"
+
+  if [[ "$disc_status" != "OK" ]]; then
+    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: its GKE-managed firewall rules are missing or ambiguous (${disc_detail}). This is fixed on the cluster's own firewall rules, not in this script."
+    exit 1
+  fi
+
+  GKE_NODE_TAG="$disc_detail"
+}
+
+# hybrid_nfs_fsid HUB_NAME
+#
+# A stable, deterministic NFS export fsid for this hub: a UUID5 derived
+# from the hub name, so it's the same across every re-run without needing
+# a separate value generated once and recorded somewhere. nfs-utils
+# accepts a UUID for `fsid=` (the documented way to keep file handles
+# stable and avoid ESTALE) just as readily as a small integer, and a UUID
+# needs no coordination between hubs the way hand-assigned integers would.
+hybrid_nfs_fsid() {
+  local hub_name="$1"
+  "$PYTHON" -c "
+import uuid, sys
+print(uuid.uuid5(uuid.NAMESPACE_DNS, 'scion-hub-' + sys.argv[1] + '.nfs-export'))
+" "$hub_name"
+}
+
+# hybrid_nfs_export_line EXPORT_ROOT CIDR ANONUID ANONGID FSID
+#
+# Renders one `/etc/exports.d` line for the hybrid tier's NFS export:
+# `sync` (required so both Docker and GKE writers see consistent state),
+# `no_subtree_check`, `all_squash` to the given anonuid/anongid, `sec=sys`
+# (this tier's authorization is by source IP -- see the docs, not by NFS
+# auth), `mp` (mountpoint-only: knfsd itself refuses to serve EXPORT_ROOT
+# unless it's currently a mountpoint), and the given fsid. `mp` is the
+# export-side half of the fail-closed guarantee the caller's mount check
+# provides at provisioning time -- it also covers a mount that fails on a
+# later reboot, which a one-time provisioning check can't. There is no
+# separate squash group: anongid is the "scion" group's own gid, since
+# the Phase 2 leaf ACL grants that group access, and a different anongid
+# would make GKE's writes invisible to it. Pure string rendering -- no
+# gcloud or SSH calls -- so it's directly unit-testable; the caller is
+# responsible for actually reading the anonuid/anongid off the VM and
+# writing the result to a file.
+hybrid_nfs_export_line() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5"
+  echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,mp,fsid=${fsid})"
+}
+
+# hybrid_nfs_squash_identity_script SQUASH_USER
+#
+# Renders the remote script that idempotently creates the dedicated NFS
+# squash identity (a system account, no home, no login shell, primary
+# group "scion") if it doesn't already exist, then validates it --
+# whether freshly created just now or pre-existing from an earlier run --
+# against every property the squash identity's security purpose depends
+# on: uid not 0, uid in the system range (at or below /etc/login.defs'
+# SYS_UID_MAX, defaulting to 999 when that file or key is missing, same
+# as useradd's own default), primary group exactly "scion", login shell
+# /usr/sbin/nologin, and (as before) a uid distinct from the "scion"
+# (broker) user's own -- squashing every NFS client to the broker's own
+# identity would let any pod that can reach the export act as the broker
+# on the shared tree. A pre-existing account that fails any of these was
+# not created by this script and is refused outright rather than reused,
+# since silently squashing to it could be squashing to something with
+# far more privilege than intended. Only on success does it print
+# "SQUASH_UID:SCION_GID" for the caller to capture. Pure string
+# rendering -- no gcloud or SSH calls -- so it's directly unit-testable;
+# the caller (deploy.sh) is responsible for actually running the result
+# over SSH.
+hybrid_nfs_squash_identity_script() {
+  local squash_user="$1"
+  cat <<SCRIPT
+set -euo pipefail
+id ${squash_user} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${squash_user}
+SQUASH_UID=\$(id -u ${squash_user})
+SQUASH_GROUP=\$(id -gn ${squash_user})
+SQUASH_SHELL=\$(getent passwd ${squash_user} | cut -d: -f7)
+SYS_UID_MAX=\$(awk -F'[ \\t]+' '\$1 == "SYS_UID_MAX" {print \$2}' /etc/login.defs 2>/dev/null | tail -1 || true)
+case "\$SYS_UID_MAX" in ''|*[!0-9]*) SYS_UID_MAX=999 ;; esac
+SCION_UID=\$(id -u scion)
+SCION_GID=\$(getent group scion | cut -d: -f3)
+if [ "\$SQUASH_UID" -eq 0 ]; then
+  echo "The NFS squash user (${squash_user}) must not be uid 0." >&2
+  exit 1
+fi
+if [ "\$SQUASH_UID" -gt "\$SYS_UID_MAX" ]; then
+  echo "The NFS squash user (${squash_user})'s uid (\$SQUASH_UID) must be a system uid (<= \$SYS_UID_MAX)." >&2
+  exit 1
+fi
+if [ "\$SQUASH_GROUP" != "scion" ]; then
+  echo "The NFS squash user (${squash_user})'s primary group must be scion, found '\$SQUASH_GROUP'." >&2
+  exit 1
+fi
+if [ "\$SQUASH_SHELL" != "/usr/sbin/nologin" ]; then
+  echo "The NFS squash user (${squash_user})'s login shell must be /usr/sbin/nologin, found '\$SQUASH_SHELL'." >&2
+  exit 1
+fi
+if [ "\$SQUASH_UID" = "\$SCION_UID" ]; then
+  echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
+  exit 1
+fi
+echo "\${SQUASH_UID}:\${SCION_GID}"
+SCRIPT
+}
+
+# hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME \
+#   IMAGE_PATH IMAGE_SIZE_GB
+#
+# IMAGE_PATH is a parameter (rather than reading the HYBRID_NFS_IMAGE_PATH
+# constant directly) purely so tests can point it at a throwaway temp
+# path when executing the rendered script for real -- the real caller
+# (deploy.sh) always passes $HYBRID_NFS_IMAGE_PATH.
+#
+# Renders the remote script that idempotently:
+#   - creates the backing image file (IMAGE_PATH) at IMAGE_SIZE_GB
+#      gigabytes with fallocate (which actually reserves the space,
+#      unlike a sparse truncate, and fails clearly -- removing the
+#      partial file -- if the disk can't hold it) and formats it ext4,
+#      but ONLY the first time -- an existing image file is never
+#      re-created or re-mkfs'd, since doing so would destroy whatever
+#      the export already holds;
+#   - adds an /etc/fstab entry loop-mounting that image at EXPORT_ROOT,
+#      with BOTH x-systemd.before=nfs-server.service (orders the mount
+#      before the NFS server unit) AND x-systemd.required-by=
+#      nfs-server.service (makes it an actual dependency, not just an
+#      ordering) -- before= alone only orders the units; on a failed
+#      mount it would let nfs-server start anyway and export whatever's
+#      really at EXPORT_ROOT (the boot disk's root filesystem), exactly
+#      the exposure this dedicated filesystem exists to close. Because
+#      required-by= is set, systemd-fstab-generator does not also
+#      attach this mount to local-fs.target (systemd.mount(5)), so a
+#      failed mount blocks only nfs-server, never boot; nofail is kept
+#      anyway, defensively, to keep that same "boot never blocks on
+#      this mount" property true even if required-by= is ever removed
+#      from this line. The fsck pass is 0: systemd-fstab-generator only
+#      ever schedules fsck for device paths, so a nonzero pass on this
+#      loop-mounted regular file is a no-op that just logs a boot-time
+#      warning.
+#      Then mounts it if it isn't already, and verifies (findmnt +
+#      losetup) that whatever ends up mounted at EXPORT_ROOT is
+#      actually the loop device backing IMAGE_PATH, not a stray tmpfs
+#      or bind mount left over from something else;
+#   - fails closed -- before writing or activating anything below --
+#      if EXPORT_ROOT is not actually a mountpoint after that: this is
+#      the deploy-time half of the guarantee; the exports line's own
+#      `mp` option (see hybrid_nfs_export_line) is the export-side half,
+#      and additionally covers a mount that fails on a later reboot,
+#      which this one-time check can't. A
+#      /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf
+#      drop-in adds RequiresMountsFor=EXPORT_ROOT to scion-hub.service
+#      (tier-on only; the base service install is unaffected when the
+#      tier is off), so the hub itself -- which creates shared-dir
+#      paths under EXPORT_ROOT for the co-located Docker broker -- can
+#      never start against an unmounted export and write to the boot
+#      disk's root filesystem instead, the same split this whole layout
+#      exists to prevent on the NFS side;
+#   - sets ownership/mode on the now-mounted export root (scion:scion,
+#      mode 2755 so the squash uid can't write it), installs
+#      nfs-kernel-server if it isn't already, disables NFSv2/v3/4.0 and
+#      UDP via /etc/nfs.conf.d (this tier is NFSv4.1+/TCP-only; the PV
+#      pins nfsvers=4.1) and masks rpcbind (unneeded once v2/v3
+#      are off), verifying the socket mask took,
+#      writes this hub's own file under /etc/exports.d/ (using
+#      hybrid_nfs_export_line for the rendered line, so the two stay in
+#      sync), re-exports, and enables the server under its canonical
+#      unit name (nfs-server; nfs-kernel-server is only the Debian/
+#      Ubuntu package name). A restart -- not just enable --now, which
+#      would be a no-op against an already-running unit -- only happens
+#      when it's actually needed: either this is the first time
+#      /etc/nfs.conf.d/scion-hub.conf has this exact content (apt's
+#      postinst already started the server with the stock v2/v3/UDP-
+#      enabled config before this script's write, so the very first
+#      run must restart to pick up v4.1/TCP-only), or nfs-server isn't
+#      confirmed already active, or /proc/fs/nfsd/versions shows the
+#      running kernel still has v3 or v4.0 enabled (a version the
+#      config write alone can't retroactively disable for an already-
+#      running server). Every later re-run with unchanged content, a
+#      confirmed-active server, and v3/v4.0 both confirmed off leaves
+#      it running untouched, avoiding an NFSv4 grace-period stall
+#      (during which GKE clients can't reclaim or open new state) on
+#      every redeploy. Fails closed toward restarting: an inconclusive
+#      "is it active" or "which versions are on" check is treated the
+#      same as "needs a restart".
+# Always rewrites the exports file and re-exports, which is how the
+# export picks up a changed CIDR on re-run with no separate drift
+# detection needed. Pure string rendering -- no gcloud or SSH calls --
+# so it's directly unit-testable; the caller is responsible for actually
+# running the result over SSH, after the squash identity script above
+# has already run.
+hybrid_nfs_export_script() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6" \
+    image_path="$7" image_size_gb="$8" fstab_path="${9:-/etc/fstab}"
+  local export_line image_dir
+  export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
+  image_dir="$(dirname "$image_path")"
+  local fstab_line="${image_path} ${export_root} ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0"
+  cat <<SCRIPT
+set -euo pipefail
+sudo mkdir -p ${image_dir}
+# Refuse before touching anything -- no fallocate, no mkfs, no fstab
+# write -- if EXPORT_ROOT is already in use by a layout this script
+# doesn't manage: a pre-existing mount from a different source (for
+# example a manually provisioned image at another path), or an existing
+# fstab line for EXPORT_ROOT that isn't exactly this one. Checking this
+# first means a manually created layout is refused outright instead of
+# silently getting a second image allocated and a second fstab line
+# appended alongside it, only to fail later at the mount-source check.
+if mountpoint -q ${export_root}; then
+  existing_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root} 2>/dev/null || true)"
+  existing_back="\$(losetup -n -O BACK-FILE "\$existing_src" 2>/dev/null || true)"
+  if [ "\$existing_back" != "${image_path}" ]; then
+    echo "${export_root} is already mounted (source: \${existing_src:-<unknown>}, backing file: \${existing_back:-<none>}), not from the image this script manages (${image_path}); refusing to continue on top of an existing layout it doesn't recognize." >&2
+    exit 1
+  fi
+fi
+if awk -v mp="${export_root}" -v exact="${fstab_line}" '
+  /^[[:space:]]*#/ { next }
+  \$0 == exact { next }
+  { m2 = \$2; sub(/\/\$/, "", m2); if (m2 == mp) found=1 }
+  END { exit !found }
+' ${fstab_path} 2>/dev/null; then
+  echo "${fstab_path} already has a line for ${export_root} that does not match the expected entry; refusing to continue. Expected: ${fstab_line}" >&2
+  exit 1
+fi
+if grep -qxF "${fstab_line}" ${fstab_path} 2>/dev/null; then
+  : # fstab already has exactly the expected line; nothing to add.
+else
+  echo "${fstab_line}" | sudo tee -a ${fstab_path} > /dev/null
+  sudo systemctl daemon-reload
+fi
+if [ ! -e ${image_path} ]; then
+  sudo fallocate -l ${image_size_gb}G ${image_path} || { sudo rm -f ${image_path}; echo "could not reserve ${image_size_gb}G for ${image_path} (insufficient disk space?); refusing to continue" >&2; exit 1; }
+  sudo mkfs.ext4 -F -q ${image_path}
+fi
+sudo mkdir -p ${export_root}
+if ! mountpoint -q ${export_root}; then
+  sudo mount ${export_root}
+fi
+if ! mountpoint -q ${export_root}; then
+  echo "${export_root} is not a mountpoint after attempting to mount ${image_path}; refusing to write or activate the NFS export on the boot disk's root filesystem instead." >&2
+  exit 1
+fi
+mount_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root})"
+mount_back="\$(losetup -n -O BACK-FILE "\$mount_src" 2>/dev/null || true)"
+if [ "\$mount_back" != "${image_path}" ]; then
+  echo "${export_root} is mounted, but not from the loop device backing ${image_path} (found: \${mount_back:-<none>}); refusing to write or activate the NFS export against the wrong filesystem" >&2
+  exit 1
+fi
+sudo chown scion:scion ${export_root}
+sudo chmod 2755 ${export_root}
+sudo install -d -m 0755 /etc/systemd/system/scion-hub.service.d
+cat <<HUBDROPIN | sudo tee /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf > /dev/null
+[Unit]
+RequiresMountsFor=${export_root}
+HUBDROPIN
+sudo systemctl daemon-reload
+sudo install -d -m 0755 /etc/exports.d
+if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
+fi
+sudo install -d -m 0755 /etc/nfs.conf.d
+NFS_CONF_CONTENT="\$(cat <<'NFSCONF'
+[nfsd]
+vers2=n
+vers3=n
+vers4.0=n
+udp=n
+NFSCONF
+)"
+NFS_CONF_EXISTING="\$(cat /etc/nfs.conf.d/scion-hub.conf 2>/dev/null || true)"
+NFS_CONF_NEEDS_RESTART=true
+if [ "\$NFS_CONF_EXISTING" = "\$NFS_CONF_CONTENT" ]; then
+  NFS_CONF_NEEDS_RESTART=false
+fi
+echo "\$NFS_CONF_CONTENT" | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
+sudo systemctl mask --now rpcbind.service rpcbind.socket
+[ "\$(systemctl is-enabled rpcbind.socket 2>/dev/null || true)" = masked ] || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
+echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
+sudo exportfs -ra
+sudo systemctl enable nfs-server
+# Even with an unchanged config and an already-active server, the kernel's
+# own enabled-version set is what the config drop-in actually controls --
+# an interrupted first run can write the drop-in, die before ever
+# restarting, and leave nfs-server serving whatever it started with
+# (v2/v3/v4.0 all still on). Restart unless the kernel confirms v3 and
+# v4.0 are both off; an unreadable versions file is treated the same as
+# "not confirmed", not as "fine".
+NFS_VERSIONS_OK=false
+if NFS_VERSIONS_CONTENT="\$(cat /proc/fs/nfsd/versions 2>/dev/null)"; then
+  case " \$NFS_VERSIONS_CONTENT " in
+    *" -3 "*)
+      case " \$NFS_VERSIONS_CONTENT " in
+        *" -4.0 "*) NFS_VERSIONS_OK=true ;;
+      esac
+      ;;
+  esac
+fi
+if [ "\$NFS_CONF_NEEDS_RESTART" = "true" ] || ! systemctl is-active --quiet nfs-server || [ "\$NFS_VERSIONS_OK" != "true" ]; then
+  sudo systemctl restart nfs-server
+fi
+echo 'NFS export configured.'
+SCRIPT
+}
+
+# hybrid_settings_shared_dir_storage_yaml VM_IP EXPORT_ROOT PVC_NAME
+#
+# Renders the server.shared_dir_storage block for settings.yaml (the
+# schema from pkg/config/settings_v1.go's V1SharedDirStorageConfig/
+# V1NFSConfig/V1NFSShare), indented to nest under "server:" at the same
+# level as its existing "hub:"/"storage:"/etc. keys. backend is "nfs".
+#
+# The Docker broker on this same VM computes its local mount path as
+# filepath.Join(mount_root, shares[0].id) (see
+# pkg/runtime/workspace_backend_nfs.go) -- so mount_root and id are set
+# to EXPORT_ROOT's parent directory and base name respectively, the only
+# split that makes mount_root/id resolve back to EXPORT_ROOT itself, the
+# same path the share's own "export" field (and the PV's nfs.path) name.
+# Getting this wrong doesn't fail loudly: it just gives Docker and GKE
+# two different trees on what's supposed to be the same shared directory.
+#
+# subpath_root is the fixed "projects" subdirectory every project's
+# shared-dirs live under. PVC_NAME is the PersistentVolumeClaim this
+# hub's GKE pods actually bind to -- despite the YAML field's own name,
+# "pv_name" is consumed as the pod spec's claimName (see
+# pkg/runtime/k8s_runtime.go), not the PersistentVolume's own name, so
+# the caller must pass the resolved PVC name here, not the PV name.
+# Pure string rendering -- no gcloud, kubectl, or SSH calls -- so it's
+# directly unit-testable; the caller only calls this when the tier is
+# on, and splices its output into an otherwise-unchanged settings.yaml
+# render.
+hybrid_settings_shared_dir_storage_yaml() {
+  local vm_ip="$1" export_root="$2" pvc_name="$3"
+  local mount_root share_id
+  mount_root="$(dirname "$export_root")"
+  share_id="$(basename "$export_root")"
+  cat <<YAML
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: "${mount_root}"
+      subpath_root: "projects"
+      shares:
+        - id: "${share_id}"
+          server: "${vm_ip}"
+          export: "${export_root}"
+          pv_name: "${pvc_name}"
+YAML
+}
+
+# hybrid_cloud_run_label_args SERVICE_NAME PROJECT_ID REGION HUB_NAME
+#
+# Echoes the --labels=... argument to pass to `gcloud beta run deploy`, or
+# nothing, based on whether the service already exists: the base-marker
+# convention is additive and create-only, so the label is only added
+# when this is the first create. `describe` failing only means "not
+# found by that exact call"; it is not itself a positive absence signal
+# (a permissions error looks the same from the exit code alone, and
+# real Cloud Run 404 text -- "Cannot find service [X]" -- carries none
+# of the NOT_FOUND/404 tokens gcloud's other APIs use, so text-matching
+# describe's error here would silently never fire). Absence is instead
+# confirmed the same way `_hybrid_firewall_rule_absent` does: a `list`
+# call that both succeeds and comes back empty. Any other outcome --
+# the service is listed, or the list call itself fails -- fails safe
+# toward "assume it exists" (no label), on the reasoning that a missing
+# marker is corrected by nothing, while a wrong marker on an existing,
+# unrelated service is not easily undone.
+hybrid_cloud_run_label_args() {
+  local service_name="$1" project_id="$2" region="$3" hub_name="$4"
+  if gcloud run services describe "$service_name" \
+      --project="$project_id" --region="$region" >/dev/null 2>/dev/null; then
+    return 0
+  fi
+  local list_output
+  if list_output="$(gcloud run services list --project="$project_id" --region="$region" \
+      --filter="metadata.name=${service_name}" --format="value(metadata.name)" 2>/dev/null)"; then
+    if [[ -z "$list_output" ]]; then
+      echo "--labels=scion-deployment=${hub_name}"
+    fi
+  fi
+}
+
+# _hybrid_firewall_rule_fields
+#
+# Reads the JSON body of `gcloud compute firewall-rules describe
+# --format=json` from stdin and echoes every field able to widen,
+# narrow or disable the rule, normalized for exact comparison and joined
+# by ASCII unit separator (0x1f, not tab -- see below):
+#   network  direction  action  allowed/denied (all entries)  sourceTags
+#   sourceRanges  sourceServiceAccounts  targetTags
+#   targetServiceAccounts  destinationRanges  disabled  priority
+# Every other field is ignored, including non-scoping settable fields
+# (description, logConfig) and output-only metadata (id, name, kind,
+# selfLink, creationTimestamp) -- none of them can change what the rule
+# does. network is reduced to its short name (the self-link's last path
+# segment). action is ALLOW, DENY, or MALFORMED if both allowed[] and
+# denied[] are present (GCP never returns that shape; treating it as a
+# guaranteed mismatch is simpler than picking one). Every allowed/denied
+# entry is included, each rendered "proto:port,port" (ports sorted) or
+# bare "proto", the whole set sorted and joined with ';', so a second
+# entry changes the field regardless of order. sourceTags and
+# sourceRanges are compared as separate fields, since GCP ORs them when
+# both are set. The remaining list fields are comma-joined and sorted.
+#
+# 0x1f, not tab, because bash's `read` collapses runs of IFS
+# *whitespace* -- which includes tab -- silently merging adjacent empty
+# fields and shifting every field after them, which is wrong here: "this
+# field is empty" is a meaningful, distinct result, not a fencepost to
+# skip.
+_hybrid_firewall_rule_fields() {
+  "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+network = (d.get('network') or '').rstrip('/').rsplit('/', 1)[-1]
+direction = d.get('direction') or ''
+allowed = d.get('allowed') or []
+denied = d.get('denied') or []
+if allowed and denied:
+    action = 'MALFORMED'
+    rules = allowed + denied
+elif allowed:
+    action = 'ALLOW'
+    rules = allowed
+elif denied:
+    action = 'DENY'
+    rules = denied
+else:
+    action = ''
+    rules = []
+
+def rule_sig(r):
+    proto = r.get('IPProtocol', '')
+    ports = ','.join(sorted(r.get('ports') or []))
+    return (proto + ':' + ports) if ports else proto
+
+rules_sig = ';'.join(sorted(rule_sig(r) for r in rules))
+source_tags = ','.join(sorted(d.get('sourceTags') or []))
+source_ranges = ','.join(sorted(d.get('sourceRanges') or []))
+source_sas = ','.join(sorted(d.get('sourceServiceAccounts') or []))
+target_tags = ','.join(sorted(d.get('targetTags') or []))
+target_sas = ','.join(sorted(d.get('targetServiceAccounts') or []))
+dest_ranges = ','.join(sorted(d.get('destinationRanges') or []))
+disabled = 'true' if d.get('disabled') else 'false'
+priority = str(d['priority']) if d.get('priority') is not None else ''
+sep = chr(0x1f)  # ASCII unit separator -- see the bash side for why not tab
+print(sep.join([network, direction, action, rules_sig, source_tags,
+                source_ranges, source_sas, target_tags, target_sas,
+                dest_ranges, disabled, priority]))
+"
+}
+
+# _hybrid_check_rule_drift NAME PROJECT_ID JSON NETWORK DIRECTION ACTION \
+#   RULES SOURCE_TYPE SOURCE_VALUE TARGET_TAG PRIORITY
+#
+# Compares an already-marked, pre-existing rule against every field able
+# to widen, narrow or disable it: direction, action, disabled, priority,
+# network, allowed/denied (all entries), sourceTags, sourceRanges,
+# sourceServiceAccounts, targetServiceAccounts, targetTags,
+# destinationRanges. Every other field is ignored, including
+# non-scoping settable fields (description, logConfig) and output-only
+# metadata (id, name, kind, selfLink, creationTimestamp). SOURCE_TYPE is
+# "tag" or "range"; the *other* source field is expected empty, since a
+# rule this tier creates only ever sets one of them, and GCP ORs the two
+# when both are present. Service accounts and destination ranges are
+# always expected empty, and disabled is always expected false.
+#
+# On a full match, returns 0 silently. On any mismatch, prints every
+# differing field, then the delete remediation, then an `update`
+# remediation too, but only when `update` can converge to *exactly* the
+# expected rule -- every other field already matches, and the only drift
+# left is something it can set directly (the expected source type,
+# target tags, priority). If a field would need to be cleared, or it is
+# not one of the fields this function offers an update for, only delete
+# is offered. For the nfs-deny rule, the delete remediation is the
+# two-rule, order-preserving sequence
+# (delete allow, delete deny, re-run deploy.sh) rather than a bare
+# delete, since deleting the deny alone would leave tcp:2049 reachable
+# through the allow rule with nothing to deny it. Never corrects
+# anything itself.
+_hybrid_check_rule_drift() {
+  local name="$1" project_id="$2" json="$3" exp_network="$4" exp_direction="$5" \
+    exp_action="$6" exp_rules="$7" source_type="$8" exp_source_value="$9" \
+    exp_target_tag="${10}" exp_priority="${11}"
+
+  local exp_source_tags="" exp_source_ranges=""
+  if [[ "$source_type" == "tag" ]]; then
+    exp_source_tags="$exp_source_value"
+  else
+    exp_source_ranges="$exp_source_value"
+  fi
+
+  local fields
+  fields="$(echo "$json" | _hybrid_firewall_rule_fields)"
+  local act_network act_direction act_action act_rules act_source_tags act_source_ranges \
+    act_source_sas act_target_tags act_target_sas act_dest_ranges act_disabled act_priority
+  IFS=$'\x1f' read -r act_network act_direction act_action act_rules act_source_tags \
+    act_source_ranges act_source_sas act_target_tags act_target_sas act_dest_ranges \
+    act_disabled act_priority <<< "$fields"
+
+  local -a mismatches=()
+  local update_converges=true
+
+  if [[ "$act_network" != "$exp_network" ]]; then
+    mismatches+=("network: expected '${exp_network}', found '${act_network}'")
+    update_converges=false
+  fi
+  if [[ "$act_direction" != "$exp_direction" ]]; then
+    mismatches+=("direction: expected '${exp_direction}', found '${act_direction}'")
+    update_converges=false
+  fi
+  if [[ "$act_action" != "$exp_action" ]]; then
+    mismatches+=("action: expected '${exp_action}', found '${act_action}'")
+    update_converges=false
+  fi
+  if [[ "$act_rules" != "$exp_rules" ]]; then
+    mismatches+=("ports: expected '${exp_rules}', found '${act_rules}'")
+    update_converges=false
+  fi
+  if [[ "$act_source_tags" != "$exp_source_tags" ]]; then
+    mismatches+=("source tags: expected '${exp_source_tags:-(empty)}', found '${act_source_tags:-(empty)}'")
+    [[ "$source_type" != "tag" ]] && update_converges=false
+  fi
+  if [[ "$act_source_ranges" != "$exp_source_ranges" ]]; then
+    mismatches+=("source ranges: expected '${exp_source_ranges:-(empty)}', found '${act_source_ranges:-(empty)}'")
+    [[ "$source_type" != "range" ]] && update_converges=false
+  fi
+  if [[ "$act_source_sas" != "" ]]; then
+    mismatches+=("source service accounts: expected '(empty)', found '${act_source_sas}'")
+    update_converges=false
+  fi
+  if [[ "$act_target_tags" != "$exp_target_tag" ]]; then
+    mismatches+=("target tags: expected '${exp_target_tag}', found '${act_target_tags}'")
+  fi
+  if [[ "$act_target_sas" != "" ]]; then
+    mismatches+=("target service accounts: expected '(empty)', found '${act_target_sas}'")
+    update_converges=false
+  fi
+  if [[ "$act_dest_ranges" != "" ]]; then
+    mismatches+=("destination ranges: expected '(empty)', found '${act_dest_ranges}'")
+    update_converges=false
+  fi
+  if [[ "$act_disabled" != "false" ]]; then
+    mismatches+=("disabled: expected 'false', found '${act_disabled}'")
+    update_converges=false
+  fi
+  if [[ "$act_priority" != "$exp_priority" ]]; then
+    mismatches+=("priority: expected '${exp_priority}', found '${act_priority}'")
+  fi
+
+  if [[ ${#mismatches[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  err "Firewall rule '${name}' carries this deployment's marker but its spec has drifted from what this tier expects:"
+  local m
+  for m in "${mismatches[@]}"; do
+    err "  ${m}"
+  done
+  err "Refusing to auto-correct a marked rule. To restore the expected spec:"
+  if [[ "$name" == *-nfs-deny ]]; then
+    local allow_name="${name%-nfs-deny}-nfs-allow"
+    err "  Delete both rules, in this order, then re-run deploy.sh (deleting only the deny rule would leave tcp:2049 reachable through the allow rule with nothing to deny it):"
+    err "    gcloud compute firewall-rules delete ${allow_name} --project=${project_id} --quiet"
+    err "    gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+  else
+    err "  gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+    err "  Then re-run deploy.sh to recreate it with the expected spec."
+  fi
+
+  if [[ "$update_converges" == "true" ]]; then
+    local source_flag
+    if [[ "$source_type" == "tag" ]]; then
+      source_flag="--source-tags=${exp_source_value}"
+    else
+      source_flag="--source-ranges=${exp_source_value}"
+    fi
+    err "Or update it in place:"
+    err "  gcloud compute firewall-rules update ${name} --project=${project_id} --priority=${exp_priority} ${source_flag} --target-tags=${exp_target_tag}"
+  fi
+
+  return 1
+}
+
+# _hybrid_ensure_firewall_rule NAME PROJECT_ID MARKER NETWORK DIRECTION \
+#   ACTION RULES SOURCE_TYPE SOURCE_VALUE TARGET_TAG PRIORITY
+#
+# Shared by hybrid_ensure_firewall_rules below. If a rule named NAME
+# already exists: fails outright if its description isn't exactly MARKER
+# (deploy.sh never adopts a same-named rule it does not already own);
+# otherwise verifies its full security-relevant spec against the expected
+# values via _hybrid_check_rule_drift, and fails (never auto-corrects) on
+# any mismatch. Only a rule that both carries the marker and matches the
+# expected spec is left alone. Otherwise creates it fresh, with the marker
+# and expected spec.
+_hybrid_ensure_firewall_rule() {
+  local name="$1" project_id="$2" marker="$3" network="$4" direction="$5" action="$6" \
+    rules="$7" source_type="$8" source_value="$9" target_tag="${10}" priority="${11}"
+
+  local json
+  if json="$(gcloud compute firewall-rules describe "${name}" \
+      --project="${project_id}" --format=json 2>/dev/null)"; then
+    local existing_desc
+    existing_desc="$(echo "$json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+    if [[ "$existing_desc" != "$marker" ]]; then
+      err "Firewall rule '${name}' already exists but does not carry this deployment's marker ('${marker}'). Refusing to modify it."
+      exit 1
+    fi
+    if ! _hybrid_check_rule_drift "$name" "$project_id" "$json" "$network" "$direction" \
+        "$action" "$rules" "$source_type" "$source_value" "$target_tag" "$priority"; then
+      exit 1
+    fi
+    echo "  Firewall rule already exists and matches the expected spec: ${name}"
+    return 0
+  fi
+
+  local source_flag
+  if [[ "$source_type" == "tag" ]]; then
+    source_flag="--source-tags=${source_value}"
+  else
+    source_flag="--source-ranges=${source_value}"
+  fi
+
+  gcloud compute firewall-rules create "${name}" \
+    --project="${project_id}" \
+    --description="${marker}" \
+    --network="${network}" \
+    --direction="${direction}" \
+    --action="${action}" \
+    --rules="${rules}" \
+    "${source_flag}" \
+    --target-tags="${target_tag}" \
+    --priority="${priority}" \
+    --quiet
+  echo "  Created firewall rule: ${name}"
+}
+
+# _hybrid_check_cloud_run_egress_overlap PROJECT_ID REGION SUBNET POD_CIDR
+#
+# The Cloud Run IAP proxy reaches the hub VM over direct VPC egress from
+# this same subnet (see deploy.sh's `gcloud beta run deploy`, which hardcodes
+# --network=default --subnet=default), so its own traffic to the hub's
+# tcp:8080 sources from that subnet's primary IP range -- never from a
+# pod-range address. If that range ever overlapped the discovered pod
+# CIDR, hub-deny (source = pod CIDR, all protocols) would also deny the
+# proxy's own traffic, breaking every deploy, hybrid tier or not. Reads
+# the subnet's primary range fresh and refuses to continue -- before
+# hub-deny or anything else in this function is created -- on any
+# overlap, or if the range can't be read at all: an unknown range is
+# never treated as "safe".
+_hybrid_check_cloud_run_egress_overlap() {
+  local project_id="$1" region="$2" subnet="$3" pod_cidr="$4"
+  local subnet_json subnet_err subnet_range
+  subnet_err="$(mktemp)"
+  if ! subnet_json="$(gcloud compute networks subnets describe "${subnet}" \
+      --region="${region}" --project="${project_id}" --format=json 2>"${subnet_err}")"; then
+    err "Could not describe subnet '${subnet}' (region: ${region}) to confirm the Cloud Run IAP proxy's egress range can't overlap the discovered pod CIDR before creating hub-deny:"
+    err "  $(cat "${subnet_err}")"
+    rm -f "${subnet_err}"
+    exit 1
+  fi
+  rm -f "${subnet_err}"
+  subnet_range="$(echo "$subnet_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('ipCidrRange') or '')")"
+  if [[ -z "$subnet_range" ]]; then
+    err "Subnet '${subnet}' has no primary IP range in its description; refusing to create hub-deny without confirming it can't overlap the Cloud Run IAP proxy's own egress range."
+    exit 1
+  fi
+  local overlaps
+  if ! overlaps="$("$PYTHON" -c "
+import ipaddress, sys
+a = ipaddress.ip_network(sys.argv[1], strict=False)
+b = ipaddress.ip_network(sys.argv[2], strict=False)
+print('true' if a.overlaps(b) else 'false')
+" "$subnet_range" "$pod_cidr" 2>&1)"; then
+    # A malformed range on either side must fail closed, the same as
+    # every other check here -- never silently treated as "no overlap".
+    err "Could not compare subnet '${subnet}'s primary range (${subnet_range}) against the discovered pod CIDR (${pod_cidr}):"
+    err "  ${overlaps}"
+    exit 1
+  fi
+  if [[ "$overlaps" == "true" ]]; then
+    err "The discovered pod CIDR (${pod_cidr}) overlaps subnet '${subnet}'s primary range (${subnet_range}), which the Cloud Run IAP proxy uses for its own egress to the hub. hub-deny would also deny the proxy's own traffic, breaking every deploy. Refusing to create it; this must be resolved on the network's own subnet or cluster configuration, not in this script."
+    exit 1
+  fi
+}
+
+# hybrid_ensure_firewall_rules HUB_NAME PROJECT_ID NETWORK REGION
+#
+# Creates (or verifies the marker and full spec of) the three firewall
+# rules this tier needs, all targeting scion-hub-<hub>-nfs and carrying
+# the exact description token scion-deployment=<hub>:
+#   scion-hub-<hub>-nfs-allow  INGRESS ALLOW tcp:2049 from the discovered
+#                              node tag (GKE_NODE_TAG; set by
+#                              hybrid_discover), priority 900.
+#   scion-hub-<hub>-nfs-deny   INGRESS DENY  tcp:2049 from 0.0.0.0/0,
+#                              priority 950.
+#   scion-hub-<hub>-hub-deny   INGRESS DENY  all protocols and ports from
+#                              the discovered pod CIDR (GKE_POD_CIDR; set
+#                              by hybrid_discover), priority 950 -- the
+#                              same scheme as nfs-deny, so it beats a
+#                              network's own default-allow-internal rule.
+#                              GKE agent pods reach the hub through its
+#                              public IAP URL, not a private VPC path, so
+#                              nothing inside the cluster's pod range
+#                              needs to reach the hub VM directly on any
+#                              port. NFS is unaffected: the PV mount is
+#                              made by the kubelet from the node's own
+#                              primary address, which nfs-allow (priority
+#                              900) admits by source tag, not from a pod
+#                              address. Only the cluster's default pod
+#                              range is covered; a node pool with its own
+#                              pod range, or an additional pod range added
+#                              to the cluster, is not (see the runbook).
+# _hybrid_check_cloud_run_egress_overlap runs first, before any of the
+# three rules are created, and refuses outright if the pod CIDR could
+# overlap the Cloud Run IAP proxy's own egress range. The two NFS rules
+# are created deny first, then allow, so an interrupted run can never
+# leave an allow rule in place without its paired deny (teardown deletes
+# in the opposite order: allow first, then deny, for the same reason in
+# reverse); hub-deny has no paired allow to protect, so it is created
+# alongside nfs-deny, in the same position. Sets HYBRID_ALLOW_NAME,
+# HYBRID_DENY_NAME, and HYBRID_HUB_DENY_NAME. Call only after
+# hybrid_discover has set GKE_NODE_TAG and GKE_POD_CIDR.
+hybrid_ensure_firewall_rules() {
+  local hub_name="$1" project_id="$2" network="$3" region="$4"
+  local marker="scion-deployment=${hub_name}"
+  local target_tag
+  target_tag="$(hybrid_vm_tag "${hub_name}")"
+
+  _hybrid_check_cloud_run_egress_overlap "${project_id}" "${region}" "${network}" "${GKE_POD_CIDR}"
+
+  HYBRID_ALLOW_NAME="scion-hub-${hub_name}-nfs-allow"
+  HYBRID_DENY_NAME="scion-hub-${hub_name}-nfs-deny"
+  HYBRID_HUB_DENY_NAME="scion-hub-${hub_name}-hub-deny"
+
+  _hybrid_ensure_firewall_rule "${HYBRID_DENY_NAME}" "${project_id}" "${marker}" \
+    "${network}" "INGRESS" "DENY" "tcp:2049" "range" "0.0.0.0/0" "${target_tag}" "950"
+
+  _hybrid_ensure_firewall_rule "${HYBRID_HUB_DENY_NAME}" "${project_id}" "${marker}" \
+    "${network}" "INGRESS" "DENY" "all" "range" "${GKE_POD_CIDR}" "${target_tag}" "950"
+
+  _hybrid_ensure_firewall_rule "${HYBRID_ALLOW_NAME}" "${project_id}" "${marker}" \
+    "${network}" "INGRESS" "ALLOW" "tcp:2049" "tag" "${GKE_NODE_TAG}" "${target_tag}" "900"
+}
+
+# hybrid_vm_tag HUB_NAME
+#
+# Echoes the network tag a VM needs for the firewall rules above to take
+# effect on it.
+hybrid_vm_tag() {
+  echo "scion-hub-$1-nfs"
+}
+
+# hybrid_apply_vm_tag INSTANCE_NAME ZONE PROJECT_ID HUB_NAME
+#
+# Idempotently adds the hybrid-tier network tag to an EXISTING VM. A newly
+# created VM gets the same tag at creation time instead, via --tags.
+# add-tags is a set union on GCP's side, so calling it again when the tag
+# is already present is a harmless no-op -- no separate existence check is
+# needed first.
+hybrid_apply_vm_tag() {
+  local instance="$1" zone="$2" project_id="$3" hub_name="$4"
+  gcloud compute instances add-tags "${instance}" \
+    --zone="${zone}" --project="${project_id}" \
+    --tags="$(hybrid_vm_tag "${hub_name}")" \
+    --quiet
+}
+
+# hybrid_teardown_check HUB_NAME PROJECT_ID
+#
+# Looks up all three hybrid-tier firewall rules (the two NFS rules and
+# hub-deny) with a single `firewall-rules list` call and
+# classifies each: marked -> HYBRID_TEARDOWN_DELETE; found but unmarked ->
+# HYBRID_TEARDOWN_SKIP, and
+# HYBRID_TEARDOWN_FAILED=true; not found -> ignored. A failed list call
+# also sets HYBRID_TEARDOWN_FAILED, without populating either array --
+# "unknown" must never look like "nothing to protect". $PYTHON is needed,
+# and preflighted with a clear error, only when something was actually
+# found to classify. Never deletes anything itself; the caller must
+# treat HYBRID_TEARDOWN_FAILED=true as reason to abort the entire
+# teardown (hybrid_teardown_preflight below does this).
+hybrid_teardown_check() {
+  local hub_name="$1" project_id="$2"
+  local marker="scion-deployment=${hub_name}"
+  local name_allow="scion-hub-${hub_name}-nfs-allow"
+  local name_deny="scion-hub-${hub_name}-nfs-deny"
+  local name_hub_deny="scion-hub-${hub_name}-hub-deny"
+
+  HYBRID_TEARDOWN_FAILED=false
+  HYBRID_TEARDOWN_DELETE=()
+  HYBRID_TEARDOWN_SKIP=()
+
+  local list_json list_err
+  list_err="$(mktemp)"
+  if ! list_json="$(gcloud compute firewall-rules list --project="${project_id}" \
+      --filter="name=(${name_allow} ${name_deny} ${name_hub_deny})" --format=json 2>"${list_err}")"; then
+    err "Could not list firewall rules to check hybrid-tier ownership; aborting teardown rather than assuming none exist:"
+    err "  $(cat "${list_err}")"
+    rm -f "${list_err}"
+    # shellcheck disable=SC2034 # read by callers after this call returns
+    HYBRID_TEARDOWN_FAILED=true
+    return 0
+  fi
+  rm -f "${list_err}"
+
+  # Nothing to classify, so nothing needs $PYTHON either -- this keeps
+  # the common tier-off/no-hybrid-rules case working even without a
+  # Python interpreter on PATH, since it never has anything to parse.
+  if [[ "$list_json" == "[]" ]]; then
+    return 0
+  fi
+
+  if ! command -v "$PYTHON" &>/dev/null; then
+    err "Python interpreter '${PYTHON}' is required to check hybrid-tier firewall rule ownership during teardown, but was not found."
+    # shellcheck disable=SC2034 # read by callers after this call returns
+    HYBRID_TEARDOWN_FAILED=true
+    return 0
+  fi
+
+  local name desc
+  for name in "$name_allow" "$name_hub_deny" "$name_deny"; do
+    desc="$(echo "$list_json" | "$PYTHON" -c "
+import json, sys
+name = sys.argv[1]
+for r in json.load(sys.stdin):
+    if r.get('name') == name:
+        print(r.get('description') or '')
+        break
+else:
+    print('__NOT_FOUND__')
+" "$name")"
+    if [[ "$desc" == "__NOT_FOUND__" ]]; then
+      continue
+    fi
+    if [[ "$desc" == "$marker" ]]; then
+      HYBRID_TEARDOWN_DELETE+=("${name}")
+    else
+      HYBRID_TEARDOWN_SKIP+=("${name}")
+      # shellcheck disable=SC2034 # read by callers after this call returns
+      HYBRID_TEARDOWN_FAILED=true
+    fi
+  done
+}
+
+# hybrid_teardown_preflight HUB_NAME PROJECT_ID
+#
+# The full teardown-safety check deploy.sh runs before deleting anything:
+# calls hybrid_teardown_check, prints the classification block ("  found
+# (marked): <name>" / "  SKIPPED (unmarked): <name>"), and returns
+# non-zero whenever hybrid_teardown_check sets HYBRID_TEARDOWN_FAILED.
+# Never deletes anything. deploy.sh calls this unconditionally in
+# --delete mode, even when the hybrid tier is off in the current config:
+# teardown has no other way to know whether the tier was ever turned on
+# for this hub, so it always checks for these rule names.
+hybrid_teardown_preflight() {
+  local hub_name="$1" project_id="$2"
+  hybrid_teardown_check "$hub_name" "$project_id"
+
+  local name
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    echo "  found (marked): ${name}"
+  done
+  for name in ${HYBRID_TEARDOWN_SKIP[@]+"${HYBRID_TEARDOWN_SKIP[@]}"}; do
+    echo "  SKIPPED (unmarked): ${name}"
+  done
+
+  if [[ "$HYBRID_TEARDOWN_FAILED" != "true" ]]; then
+    return 0
+  fi
+  if [[ ${#HYBRID_TEARDOWN_SKIP[@]} -gt 0 ]]; then
+    err "Refusing to tear down: the SKIPPED rule(s) above do not carry this deployment's marker, so ownership can't be confirmed. Resolve the naming collision manually, then re-run teardown."
+  fi
+  return 1
+}
+
+# _hybrid_firewall_rule_absent NAME PROJECT_ID
+#
+# Positively confirms a rule doesn't exist via a `list` call, the same
+# fail-closed pattern as the ownership check: returns 0 only when the
+# list call succeeds AND comes back empty. Any other outcome (the rule is
+# listed, or the list call itself fails) returns 1 -- "unknown" is never
+# treated as "gone".
+_hybrid_firewall_rule_absent() {
+  local name="$1" project_id="$2"
+  local list_json
+  if ! list_json="$(gcloud compute firewall-rules list --project="${project_id}" \
+      --filter="name=(${name})" --format=json 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$list_json" == "[]" ]]
+}
+
+# hybrid_teardown_delete PROJECT_ID
+#
+# Deletes the rules hybrid_teardown_check queued in HYBRID_TEARDOWN_DELETE,
+# allow before deny. Call only after confirming HYBRID_TEARDOWN_FAILED=
+# false, and only once the hub VM is confirmed gone (the caller's
+# responsibility -- see docs/deploy/agent-runbook-single-node-vm.md).
+# Stops at the first delete that isn't confirmed gone -- via `delete`
+# succeeding, or, on a `delete` failure, a positive not-found from
+# `_hybrid_firewall_rule_absent` -- and leaves every rule from that point
+# on untouched, so the deny is never deleted after the allow delete
+# failed or came back uncertain. Sets HYBRID_TEARDOWN_DELETED to the
+# rules actually gone afterward and HYBRID_TEARDOWN_DELETE_FAILED to the
+# first rule that wasn't (and, transitively, every rule still queued
+# behind it). The caller must treat a non-empty
+# HYBRID_TEARDOWN_DELETE_FAILED as a failed teardown, and must only
+# report HYBRID_TEARDOWN_DELETED as deleted. Never deletes the cluster;
+# this tier never creates or deletes a cluster in the first place.
+hybrid_teardown_delete() {
+  local project_id="$1"
+  HYBRID_TEARDOWN_DELETED=()
+  HYBRID_TEARDOWN_DELETE_FAILED=()
+  local name delete_err stopped=false
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    if [[ "$stopped" == "true" ]]; then
+      case "$name" in
+        *-hub-deny) err "Not attempted (kept so pod-range traffic to the hub VM stays denied): ${name}" ;;
+        *) err "Not attempted (kept so tcp:2049 stays denied): ${name}" ;;
+      esac
+      HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
+      continue
+    fi
+    delete_err="$(mktemp)"
+    if gcloud compute firewall-rules delete "${name}" \
+        --project="${project_id}" --quiet 2>"${delete_err}"; then
+      echo "  Deleted: ${name}"
+      HYBRID_TEARDOWN_DELETED+=("${name}")
+      rm -f "${delete_err}"
+      continue
+    fi
+    if _hybrid_firewall_rule_absent "${name}" "${project_id}"; then
+      warn "Firewall rule ${name} was already gone before this teardown deleted it."
+      HYBRID_TEARDOWN_DELETED+=("${name}")
+    else
+      err "Failed to delete firewall rule ${name}:"
+      err "  $(cat "${delete_err}")"
+      HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
+      stopped=true
+    fi
+    rm -f "${delete_err}"
+  done
+}
+
+# =====================================================================
+# Static internal IP: one reserved address for the PV's NFS server
+# field, so it doesn't depend on the VM's ephemeral IP surviving a
+# recreate. GKE agent pods reach the hub through its public IAP URL, not
+# this address. Marked with an exact description token,
+# scion-deployment=<hub>.
+# =====================================================================
+
+# hybrid_internal_ip_name HUB_NAME
+hybrid_internal_ip_name() {
+  echo "scion-hub-$1-internal-ip"
+}
+
+# _hybrid_internal_ip_get NAME PROJECT_ID REGION
+#
+# Sets HYBRID_INTERNAL_IP_STATUS (found/absent/unknown),
+# HYBRID_INTERNAL_IP_ADDR, HYBRID_INTERNAL_IP_DESC,
+# HYBRID_INTERNAL_IP_ADDRESS_TYPE, HYBRID_INTERNAL_IP_SUBNET (the bare
+# subnet name, not the full subnetwork URL), and, on unknown,
+# HYBRID_INTERNAL_IP_ERR. Returns 0 only when found. Uses a `list` call
+# rather than `describe` + error-text matching -- the same positive-
+# absence pattern as _hybrid_firewall_rule_absent: a list that succeeds
+# AND has no entry in REGION (below) is the only thing that counts as
+# "absent"; a list failure is "unknown", never treated as absent.
+#
+# The filter's region:REGION clause is a word match on the region URL,
+# so the list can also return a same-named address in another region
+# whose URL contains REGION as a word (in the project ID, say). Of the
+# listed entries, only those whose region URL ends in exactly
+# /regions/REGION are kept: none kept is "absent"; one kept is "found",
+# and every field is read from that entry; more than one kept is
+# "unknown", with an error naming the count, so no caller adopts,
+# reuses or deletes an address it cannot tell apart from another.
+_hybrid_internal_ip_get() {
+  local name="$1" project_id="$2" region="$3"
+  local err_file list_json kept_json kept_count
+  err_file="$(mktemp)"
+  HYBRID_INTERNAL_IP_ADDR=""
+  HYBRID_INTERNAL_IP_DESC=""
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE=""
+  HYBRID_INTERNAL_IP_SUBNET=""
+  HYBRID_INTERNAL_IP_ERR=""
+  if ! list_json="$(gcloud compute addresses list --project="$project_id" \
+      --filter="name=(${name}) region:${region}" --format=json 2>"${err_file}")"; then
+    HYBRID_INTERNAL_IP_STATUS="unknown"
+    HYBRID_INTERNAL_IP_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
+  fi
+  rm -f "${err_file}"
+  # An empty list is "absent" without starting Python.
+  if [[ "$list_json" == "[]" ]]; then
+    HYBRID_INTERNAL_IP_STATUS="absent"
+    return 1
+  fi
+  if ! kept_json="$(echo "$list_json" | "$PYTHON" -c "
+import json, sys
+suffix = '/regions/' + sys.argv[1]
+d = json.load(sys.stdin)
+print(json.dumps([e for e in d if (e.get('region') or '').endswith(suffix)]))
+" "$region")"; then
+    HYBRID_INTERNAL_IP_STATUS="unknown"
+    HYBRID_INTERNAL_IP_ERR="could not parse the address list for ${name}"
+    return 1
+  fi
+  if ! kept_count="$(echo "$kept_json" | "$PYTHON" -c "import json,sys; print(len(json.load(sys.stdin)))")" \
+      || [[ ! "$kept_count" =~ ^[0-9]+$ ]]; then
+    HYBRID_INTERNAL_IP_STATUS="unknown"
+    HYBRID_INTERNAL_IP_ERR="could not count the addresses named ${name} in region ${region}"
+    return 1
+  fi
+  if [[ "$kept_count" == "0" ]]; then
+    HYBRID_INTERNAL_IP_STATUS="absent"
+    return 1
+  fi
+  if [[ "$kept_count" != "1" ]]; then
+    HYBRID_INTERNAL_IP_STATUS="unknown"
+    HYBRID_INTERNAL_IP_ERR="${kept_count} addresses named ${name} are in region ${region}; expected at most one"
+    return 1
+  fi
+  HYBRID_INTERNAL_IP_STATUS="found"
+  HYBRID_INTERNAL_IP_ADDR="$(echo "$kept_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('address') or '')")"
+  HYBRID_INTERNAL_IP_DESC="$(echo "$kept_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('description') or '')")"
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE="$(echo "$kept_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('addressType') or '')")"
+  local subnetwork_url
+  subnetwork_url="$(echo "$kept_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('subnetwork') or '')")"
+  HYBRID_INTERNAL_IP_SUBNET="${subnetwork_url##*/}"
+  return 0
+}
+
+# hybrid_ensure_internal_ip_new_vm HUB_NAME PROJECT_ID REGION SUBNET
+#
+# Called before creating a brand-new VM. Reuses a marked existing
+# reservation (a rerun after a previous, partially-completed create), or
+# reserves a fresh one otherwise; refuses a same-name reservation that
+# lacks the marker. Sets HYBRID_INTERNAL_IP to the address to pass as
+# the new VM's --private-network-ip.
+hybrid_ensure_internal_ip_new_vm() {
+  local hub_name="$1" project_id="$2" region="$3" subnet="$4"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" != "$marker" ]]; then
+      err "Internal IP reservation ${name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+    echo "  Reusing existing internal IP reservation: ${name} (${HYBRID_INTERNAL_IP})"
+    return 0
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    exit 1
+  fi
+
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --description="$marker" --quiet; then
+    err "Could not reserve a new internal IP address named ${name}."
+    exit 1
+  fi
+  if ! _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    err "Reserved internal IP ${name}, but could not read it back (status: ${HYBRID_INTERNAL_IP_STATUS}${HYBRID_INTERNAL_IP_ERR:+: ${HYBRID_INTERNAL_IP_ERR}})."
+    exit 1
+  fi
+  HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+  echo "  Reserved internal IP: ${name} (${HYBRID_INTERNAL_IP})"
+}
+
+# hybrid_ensure_internal_ip_existing_vm HUB_NAME PROJECT_ID REGION SUBNET \
+#   CURRENT_IP INSTANCE_NAME ZONE
+#
+# Called when the VM already exists. Promotes CURRENT_IP to a static
+# reservation if one doesn't exist yet, then re-describes the VM to
+# confirm its IP didn't change out from under the promotion (fails
+# otherwise -- an unchanged IP is the whole point of promoting it).
+# Verifies a marked existing reservation's address still matches
+# CURRENT_IP (a changed VM IP after some other recreate is drift: fails
+# with remediation, never auto-corrected). Refuses a same-name
+# reservation that lacks the marker. Sets HYBRID_INTERNAL_IP.
+hybrid_ensure_internal_ip_existing_vm() {
+  local hub_name="$1" project_id="$2" region="$3" subnet="$4" current_ip="$5" \
+    instance_name="$6" zone="$7"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" != "$marker" ]]; then
+      err "Internal IP reservation ${name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDR" != "$current_ip" ]]; then
+      err "Internal IP reservation ${name} carries this deployment's marker but its address (${HYBRID_INTERNAL_IP_ADDR}) no longer matches the VM's current internal IP (${current_ip})."
+      err "Refusing to auto-correct. Delete the reservation, then re-run deploy.sh to promote the VM's current IP:"
+      err "  gcloud compute addresses delete ${name} --region=${region} --project=${project_id} --quiet"
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+    return 0
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    exit 1
+  fi
+
+  if ! [[ "$current_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "The VM's current internal IP ('${current_ip}') doesn't look like an IPv4 address; refusing to promote it to a static reservation. A blank or malformed value here would make 'gcloud compute addresses create --addresses=' reserve an unrelated, auto-assigned address instead."
+    exit 1
+  fi
+
+  info "Promoting the VM's current internal IP to a static reservation..."
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --addresses="$current_ip" --description="$marker" --quiet; then
+    err "Could not promote the VM's current internal IP (${current_ip}) to a static reservation named ${name}."
+    exit 1
+  fi
+  local recheck_ip
+  recheck_ip="$(gcloud compute instances describe "$instance_name" \
+    --zone="$zone" --project="$project_id" \
+    --format="get(networkInterfaces[0].networkIP)")"
+  if [[ "$recheck_ip" != "$current_ip" ]]; then
+    err "The VM's internal IP changed from ${current_ip} to ${recheck_ip} while promoting the reservation; refusing to continue with a mismatched address."
+    exit 1
+  fi
+  HYBRID_INTERNAL_IP="$current_ip"
+  echo "  Promoted internal IP reservation: ${name} (${HYBRID_INTERNAL_IP})"
+}
+
+# hybrid_internal_ip_teardown_check HUB_NAME PROJECT_ID REGION
+#
+# Classifies the internal IP reservation exactly like the firewall
+# rules: found+marked -> ready to delete; found+unmarked -> SKIPPED,
+# aborts the whole teardown before any delete; not found -> ignored; an
+# unknown check result also aborts. Sets HYBRID_INTERNAL_IP_TEARDOWN_NAME
+# and HYBRID_INTERNAL_IP_TEARDOWN_READY.
+hybrid_internal_ip_teardown_check() {
+  local hub_name="$1" project_id="$2" region="$3"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+  HYBRID_INTERNAL_IP_TEARDOWN_NAME="$name"
+  HYBRID_INTERNAL_IP_TEARDOWN_READY=false
+  HYBRID_INTERNAL_IP_TEARDOWN_FAILED=false
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" == "$marker" ]]; then
+      echo "  found (marked): ${name}"
+      HYBRID_INTERNAL_IP_TEARDOWN_READY=true
+    else
+      echo "  SKIPPED (unmarked): ${name}"
+      HYBRID_INTERNAL_IP_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    HYBRID_INTERNAL_IP_TEARDOWN_FAILED=true
+  fi
+}
+
+# hybrid_internal_ip_teardown_delete PROJECT_ID REGION VM_GONE
+#
+# Deletes the reservation hybrid_internal_ip_teardown_check found ready,
+# but only once VM_GONE is "true" (the address is still attached to the
+# VM's NIC until it's deleted, so deleting it earlier would fail anyway,
+# and a not-yet-confirmed VM is exactly the "don't delete the hybrid
+# firewall rules yet either" case). When VM_GONE isn't "true", SKIPS the
+# reservation with a reason rather than attempting the delete -- this is
+# reported distinctly from an attempted-and-failed delete (SKIPPED vs.
+# Kept), so the two are never conflated in the final summary. Sets
+# HYBRID_INTERNAL_IP_DELETED, HYBRID_INTERNAL_IP_DELETE_FAILED,
+# HYBRID_INTERNAL_IP_DELETE_SKIP_REASON (set only for the SKIPPED case)
+# and HYBRID_INTERNAL_IP_DELETE_ERR (set only for an actual delete
+# failure).
+hybrid_internal_ip_teardown_delete() {
+  local project_id="$1" region="$2" vm_gone="$3"
+  HYBRID_INTERNAL_IP_DELETED=false
+  HYBRID_INTERNAL_IP_DELETE_FAILED=false
+  HYBRID_INTERNAL_IP_DELETE_SKIP_REASON=""
+  HYBRID_INTERNAL_IP_DELETE_ERR=""
+  if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" != "true" ]]; then
+    return 0
+  fi
+  if [[ "$vm_gone" != "true" ]]; then
+    warn "Keeping internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}: the VM's deletion isn't confirmed yet."
+    HYBRID_INTERNAL_IP_DELETE_FAILED=true
+    HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="VM not confirmed gone"
+    return 0
+  fi
+  local delete_err
+  delete_err="$(mktemp)"
+  if gcloud compute addresses delete "$HYBRID_INTERNAL_IP_TEARDOWN_NAME" \
+      --region="$region" --project="$project_id" --quiet 2>"${delete_err}"; then
+    echo "  Deleted: ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
+    HYBRID_INTERNAL_IP_DELETED=true
+  else
+    HYBRID_INTERNAL_IP_DELETE_ERR="$(cat "${delete_err}")"
+    err "Failed to delete internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}:"
+    err "  ${HYBRID_INTERNAL_IP_DELETE_ERR}"
+    HYBRID_INTERNAL_IP_DELETE_FAILED=true
+  fi
+  rm -f "${delete_err}"
+}
+
+# hybrid_internal_ip_guard_verify HUB_NAME PROJECT_ID REGION INSTANCE_NAME ZONE
+#
+# The static internal IP's post-create guard: the PV's NFS server field
+# needs one stable address, so the reservation that provides it must
+# actually be confirmed in place once everything above has run.
+# Confirming "in place" means more than the resource merely existing:
+# the reservation must still carry this deployment's marker and its
+# address must equal the VM's OWN, freshly re-described
+# networkInterfaces[0].networkIP -- not $HYBRID_INTERNAL_IP, which on
+# the new-VM path was itself read from this same reservation earlier
+# and so can't catch the reservation and the VM ever having actually
+# diverged. GKE agent pods reach the hub through its public IAP URL,
+# not this address, so this guard has nothing to confirm about
+# reachability from pods; that is what hub-deny is for, checked as part
+# of the firewall rules themselves.
+# Fails loudly, naming exactly which piece is missing or wrong.
+hybrid_internal_ip_guard_verify() {
+  local hub_name="$1" project_id="$2" region="$3" instance_name="$4" zone="$5"
+  if [[ -z "${HYBRID_INTERNAL_IP:-}" ]] || ! [[ "$HYBRID_INTERNAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Internal IP guard: no valid internal IP is resolved for hub ${hub_name} (got '${HYBRID_INTERNAL_IP:-}'). The shared NFS PV would have no server address."
+    exit 1
+  fi
+
+  local vm_ip
+  vm_ip="$(gcloud compute instances describe "$instance_name" \
+    --zone="$zone" --project="$project_id" \
+    --format="get(networkInterfaces[0].networkIP)" 2>/dev/null)"
+  if [[ -z "$vm_ip" ]]; then
+    err "Internal IP guard: could not re-describe VM ${instance_name} to confirm its actual internal IP."
+    exit 1
+  fi
+  if [[ "$HYBRID_INTERNAL_IP" != "$vm_ip" ]]; then
+    err "Internal IP guard: the resolved internal IP (${HYBRID_INTERNAL_IP}) does not match VM ${instance_name}'s actual internal IP (${vm_ip}). The NFS PV would point at the wrong address."
+    exit 1
+  fi
+
+  local ip_name marker addr_json addr_marker addr_value
+  ip_name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+  if ! addr_json="$(gcloud compute addresses describe "$ip_name" --region="$region" --project="$project_id" --format=json 2>/dev/null)"; then
+    err "Internal IP guard: internal IP reservation ${ip_name} could not be confirmed after create."
+    exit 1
+  fi
+  addr_marker="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+  addr_value="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('address') or '')")"
+  if [[ "$addr_marker" != "$marker" ]]; then
+    err "Internal IP guard: internal IP reservation ${ip_name} no longer carries this deployment's marker (found: '${addr_marker}')."
+    exit 1
+  fi
+  if [[ -z "$addr_value" ]] || ! [[ "$addr_value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Internal IP guard: internal IP reservation ${ip_name}'s address ('${addr_value}') is not a valid IPv4 address."
+    exit 1
+  fi
+  if [[ "$addr_value" != "$vm_ip" ]]; then
+    err "Internal IP guard: internal IP reservation ${ip_name} is ${addr_value}, but VM ${instance_name}'s actual internal IP is ${vm_ip}. The NFS PV would point at the wrong address."
+    exit 1
+  fi
+}
+
+# =====================================================================
+# Agent transport auth: GKE agent pods reach the hub through its public
+# IAP URL (the same URL a browser uses), authenticating the transport
+# hop with a Google OIDC ID token minted by impersonating a dedicated
+# service account. This is unrelated to the static internal IP above.
+# All of this is created only when the hybrid tier is on: a
+# Docker-dispatched agent on the hub VM itself never leaves the VM to
+# reach the hub, so it never needs a transport token; only GKE-dispatched
+# pods, reaching the hub over the public internet through IAP, do.
+# =====================================================================
+
+# hybrid_transport_sa_name HUB_NAME
+#
+# The transport SA's account id: "scion-tp-<hub prefix>-<hash>", where
+# <hash> is 8 hex digits of the CRC-32 (POSIX `cksum`) of the FULL hub
+# name and <hub prefix> is at most the first 12 characters of the hub
+# name, with any trailing hyphen dropped. GCP service-account ids must be
+# 6-30 characters of [a-z0-9-], starting with a letter and ending in a
+# letter or digit; the longest possible result is 9 + 12 + 1 + 8 = 30.
+#   - The prefix is readable only; the hash is what tells hubs apart, so
+#     two hub names that share their first 12 characters still get
+#     different ids (a hash collision between two specific hub names is
+#     possible in principle but vanishingly unlikely, and would surface
+#     as the ownership-marker refusal below, never as silent sharing).
+#   - "scion-tp-" can never equal deploy.sh's own base SA id, which
+#     always starts with "scion-hub-", whatever either hub is named.
+#   - Deterministic for a given hub name, so a redeploy or teardown
+#     always finds the same account.
+# Uses `cksum` rather than Python so teardown can compute the name
+# without an interpreter.
+hybrid_transport_sa_name() {
+  local hub_name="$1" crc hash prefix
+  crc="$(printf '%s' "$hub_name" | cksum | awk '{print $1}')"
+  hash="$(printf '%08x' "$crc")"
+  prefix="${hub_name:0:12}"
+  while [[ "$prefix" == *- ]]; do
+    prefix="${prefix%-}"
+  done
+  echo "scion-tp-${prefix}-${hash}"
+}
+
+# hybrid_discover_iap_client_id PROJECT_ID
+#
+# Reads the project's IAP OAuth client ID (GET .../iap_web:iapSettings
+# via `gcloud iap settings get --resource-type=iap_web`), which is what
+# an ID token minted for a service account must carry as its audience
+# for IAP to accept it on programmatic (non-browser) access -- a
+# different value from the Cloud-Run-resource IAP_AUDIENCE used
+# elsewhere for browser access. Fails closed on an API error or an
+# empty value: an unresolved audience would otherwise only surface much
+# later, as an opaque token-minting or IAP-rejection failure on the hub
+# itself. Also refuses a value that is not in the OAuth client ID form
+# (<number>-<id>.apps.googleusercontent.com). Sets HYBRID_IAP_CLIENT_ID.
+hybrid_discover_iap_client_id() {
+  local project_id="$1"
+  local settings_json settings_err client_id
+  local client_id_re='^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$'
+  settings_err="$(mktemp)"
+  if ! settings_json="$(gcloud iap settings get --project="${project_id}" \
+      --resource-type=iap_web --format=json 2>"${settings_err}")"; then
+    err "Could not read project ${project_id}'s IAP OAuth settings to discover the client ID for agent transport auth:"
+    err "  $(cat "${settings_err}")"
+    rm -f "${settings_err}"
+    exit 1
+  fi
+  rm -f "${settings_err}"
+  client_id="$(echo "$settings_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(((d.get('accessSettings') or {}).get('oauthSettings') or {}).get('clientId') or '')
+")"
+  if [[ -z "$client_id" ]]; then
+    err "Project ${project_id}'s IAP settings have no OAuth client ID configured. IAP must already have an OAuth client (Google-managed or custom) before the hybrid tier's agent transport auth can be set up; see docs/deploy/agent-runbook-single-node-vm.md Section 7."
+    exit 1
+  fi
+  # The value is written into both settings.yaml writes as a quoted YAML
+  # string, so anything that is not an OAuth client ID shape is refused
+  # rather than written.
+  if ! [[ "$client_id" =~ $client_id_re ]]; then
+    err "Project ${project_id}'s IAP OAuth client ID '${client_id}' is not in the expected <number>-<id>.apps.googleusercontent.com form. Refusing to write it into settings.yaml."
+    exit 1
+  fi
+  HYBRID_IAP_CLIENT_ID="$client_id"
+}
+
+# hybrid_ensure_transport_sa HUB_NAME PROJECT_ID
+#
+# Creates or adopts the dedicated service account impersonated to mint
+# agent transport ID tokens. Service accounts have no labels, so the
+# ownership marker lives in the description, the same convention as
+# the hybrid-tier firewall rules and internal IP reservation. Refuses
+# to adopt a same-name SA that lacks the marker, or one that has
+# user-managed keys (or whose keys cannot be listed). Sets
+# HYBRID_TRANSPORT_SA_EMAIL.
+hybrid_ensure_transport_sa() {
+  local hub_name="$1" project_id="$2"
+  local sa_name sa_email marker desc_json existing_desc describe_err keys_err user_keys
+  sa_name="$(hybrid_transport_sa_name "$hub_name")"
+  sa_email="${sa_name}@${project_id}.iam.gserviceaccount.com"
+  marker="scion-deployment=${hub_name}"
+
+  describe_err="$(mktemp)"
+  if desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>"${describe_err}")"; then
+    rm -f "${describe_err}"
+    existing_desc="$(echo "$desc_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+    if [[ "$existing_desc" != "$marker" ]]; then
+      err "Service account ${sa_email} already exists without this deployment's marker. Refusing to adopt it for agent transport auth."
+      exit 1
+    fi
+    keys_err="$(mktemp)"
+    if ! user_keys="$(gcloud iam service-accounts keys list \
+        --iam-account="$sa_email" \
+        --project="$project_id" \
+        --managed-by=user \
+        --format='value(name)' 2>"${keys_err}")"; then
+      err "Could not list the user-managed keys of service account ${sa_email}. Refusing to adopt it for agent transport auth:"
+      err "  $(cat "${keys_err}")"
+      rm -f "${keys_err}"
+      exit 1
+    fi
+    rm -f "${keys_err}"
+    if [[ -n "$user_keys" ]]; then
+      err "Service account ${sa_email} has user-managed keys. Refusing to adopt it for agent transport auth: the hub mints its tokens by impersonation, and this account must have no user-managed keys. Delete the keys, or delete the account and re-run to create it fresh."
+      exit 1
+    fi
+    echo "  Reusing existing transport service account: ${sa_email}"
+  else
+    if ! _hybrid_gcloud_not_found "$(cat "${describe_err}")"; then
+      err "Could not confirm whether transport service account ${sa_email} already exists:"
+      err "  $(cat "${describe_err}")"
+      rm -f "${describe_err}"
+      exit 1
+    fi
+    rm -f "${describe_err}"
+    if ! gcloud iam service-accounts create "$sa_name" \
+        --project="$project_id" \
+        --display-name="Scion hub ${hub_name} agent transport" \
+        --description="$marker" --quiet; then
+      err "Could not create transport service account ${sa_email}."
+      exit 1
+    fi
+    echo "  Created transport service account: ${sa_email}"
+  fi
+  HYBRID_TRANSPORT_SA_EMAIL="$sa_email"
+}
+
+# hybrid_grant_transport_token_creator TRANSPORT_SA_EMAIL HUB_SA_EMAIL PROJECT_ID
+#
+# Grants the hub VM's own runtime service account permission to
+# impersonate the transport SA for ID-token minting only
+# (roles/iam.serviceAccountOpenIdTokenCreator) -- not the broader
+# serviceAccountTokenCreator, which also allows access-token/signBlob/
+# signJwt impersonation this never uses. pkg/hub/transport_token.go's
+# gcpTransportMinter calls the IAM Credentials API's GenerateIdToken
+# directly (transport_token.go:106), which is exactly the permission
+# this role grants -- nothing broader is needed. A binding on the
+# transport SA resource itself, not project-wide, so it can't be used
+# to impersonate anything else in the project.
+#
+# The binding passes --condition=None, so it is added whether or not the
+# service account's IAM policy already contains conditional bindings. On
+# failure, gcloud's error is printed and the run exits.
+hybrid_grant_transport_token_creator() {
+  local transport_sa_email="$1" hub_sa_email="$2" project_id="$3"
+  local bind_err
+  if ! bind_err="$(gcloud iam service-accounts add-iam-policy-binding "$transport_sa_email" \
+      --project="$project_id" \
+      --member="serviceAccount:${hub_sa_email}" \
+      --role="roles/iam.serviceAccountOpenIdTokenCreator" \
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
+    err "Could not grant ${hub_sa_email} permission to mint ID tokens for ${transport_sa_email}:"
+    print_gcloud_error "$bind_err"
+    exit 1
+  fi
+  echo "  Granted roles/iam.serviceAccountOpenIdTokenCreator on ${transport_sa_email} to ${hub_sa_email}"
+}
+
+# hybrid_grant_transport_sa_iap_access TRANSPORT_SA_EMAIL SERVICE REGION PROJECT_ID
+#
+# Grants the transport SA IAP access to the Cloud Run proxy resource --
+# the same call and role deploy.sh already uses for the human operator
+# (roles/iap.httpsResourceAccessor), just with the transport SA as the
+# member. Called only after the Cloud Run service exists and has IAP
+# enabled on it (see deploy.sh Phase 4), unlike the rest of transport
+# setup, which runs in Phase 2.
+#
+# The binding passes --condition=None, so it is added whether or not the
+# resource's IAM policy already contains conditional bindings. On
+# failure, gcloud's error is printed and the run exits.
+hybrid_grant_transport_sa_iap_access() {
+  local transport_sa_email="$1" service="$2" region="$3" project_id="$4"
+  local bind_err
+  if ! bind_err="$(gcloud iap web add-iam-policy-binding \
+      --resource-type=cloud-run --service="$service" \
+      --region="$region" --project="$project_id" \
+      --member="serviceAccount:${transport_sa_email}" \
+      --role=roles/iap.httpsResourceAccessor \
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
+    err "Could not grant transport service account ${transport_sa_email} IAP access to Cloud Run service ${service}:"
+    print_gcloud_error "$bind_err"
+    exit 1
+  fi
+  echo "  IAP access granted to: ${transport_sa_email} (agent transport)"
+}
+
+# hybrid_settings_auth_transport_yaml AUDIENCE PLATFORM_SA
+#
+# Renders the `auth.transport` block spliced into both settings.yaml
+# writes (dev mode and proxy mode), indented to nest under the existing
+# `auth:` mapping alongside `mode:`. Pure string rendering, directly
+# unit-testable.
+hybrid_settings_auth_transport_yaml() {
+  local audience="$1" platform_sa="$2"
+  cat <<YAML
+    transport:
+      mode: iap
+      oidc_audience: "${audience}"
+      platform_auth_sa: "${platform_sa}"
+YAML
+}
+
+# =====================================================================
+# Restricted user access. With the tier on, the settings.yaml writes
+# carry a non-open server.auth.user_access_mode (invite_only unless the
+# config file chooses domain_restricted), plus any configured
+# server.auth.authorized_domains. The hub's admin_emails entry
+# (ADMIN_EMAIL) is always allowed to sign in, whatever the mode, and
+# invites other users from the web UI's admin Users page or with
+# `scion hub invite`.
+# =====================================================================
+
+# _hybrid_read_user_access_config — reads the optional top-level
+# `user_access_mode` (string) and `authorized_domains` (list of strings)
+# config keys, telling "absent" apart from "present but empty" (which
+# config_get cannot). Sets HYBRID_CFG_USER_ACCESS_MODE_SET (true/false),
+# HYBRID_CFG_USER_ACCESS_MODE, HYBRID_CFG_AUTHORIZED_DOMAINS_SET
+# (true/false) and the array HYBRID_CFG_AUTHORIZED_DOMAINS. Exits on a
+# value of the wrong type. With no config file, both are absent.
+_hybrid_read_user_access_config() {
+  local parsed line
+  HYBRID_CFG_USER_ACCESS_MODE_SET=false
+  HYBRID_CFG_USER_ACCESS_MODE=""
+  HYBRID_CFG_AUTHORIZED_DOMAINS_SET=false
+  HYBRID_CFG_AUTHORIZED_DOMAINS=()
+  if [[ -z "${CONFIG_FILE:-}" || ! -f "${CONFIG_FILE:-}" ]]; then
+    return 0
+  fi
+  if ! parsed="$("$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+if not isinstance(d, dict):
+    d = {}
+def bad(msg):
+    sys.stderr.write(msg + '\n')
+    sys.exit(2)
+def clean(v, key):
+    if not isinstance(v, str):
+        bad(key + ' must be a string')
+    if '\n' in v or '\r' in v or '\t' in v:
+        bad(key + ' must not contain tabs or line breaks')
+    return v
+if 'user_access_mode' in d:
+    print('M\t' + clean(d['user_access_mode'], 'user_access_mode'))
+if 'authorized_domains' in d:
+    v = d['authorized_domains']
+    if not isinstance(v, list):
+        bad('authorized_domains must be a list of domain names')
+    print('L\t')
+    for item in v:
+        print('D\t' + clean(item, 'authorized_domains entries'))
+" "$CONFIG_FILE" 2>&1)"; then
+    err "Invalid user access settings in config file ${CONFIG_FILE}: ${parsed}"
+    exit 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      "M	"*)
+        HYBRID_CFG_USER_ACCESS_MODE_SET=true
+        HYBRID_CFG_USER_ACCESS_MODE="${line#M	}"
+        ;;
+      "L	"*)
+        HYBRID_CFG_AUTHORIZED_DOMAINS_SET=true
+        ;;
+      "D	"*)
+        HYBRID_CFG_AUTHORIZED_DOMAINS+=("${line#D	}")
+        ;;
+    esac
+  done <<< "$parsed"
+}
+
+# hybrid_user_access_config_present — true if the config file sets
+# either user access key, whatever its value. deploy.sh uses this to
+# warn, with the tier off, that they are not applied; the values are not
+# validated then, so a wrongly typed value never stops a tier-off deploy.
+hybrid_user_access_config_present() {
+  if [[ -z "${CONFIG_FILE:-}" || ! -f "${CONFIG_FILE:-}" ]]; then
+    return 1
+  fi
+  "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+sys.exit(0 if isinstance(d, dict) and ('user_access_mode' in d or 'authorized_domains' in d) else 1)
+" "$CONFIG_FILE" 2>/dev/null
+}
+
+# _hybrid_is_service_account_domain DOMAIN — true if DOMAIN (lowercase)
+# names, or as a "*.suffix" wildcard would match, a Google service
+# account email domain (anything ending in gserviceaccount.com). The
+# hub matches "*.suffix" entries by plain suffix, so "*.com" counts too.
+_hybrid_is_service_account_domain() {
+  local domain="$1" suffix
+  if [[ "$domain" == *gserviceaccount.com ]]; then
+    return 0
+  fi
+  if [[ "$domain" == "*."* ]]; then
+    suffix="${domain#\*}"
+    if [[ "sa.gserviceaccount.com" == *"$suffix" ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# hybrid_resolve_user_access ADMIN_EMAIL
+#
+# Validates the user access settings the tier writes, before anything is
+# created. Refuses:
+#   - an empty ADMIN_EMAIL (nobody could sign in to invite anyone);
+#   - an ADMIN_EMAIL with inner whitespace or a comma;
+#   - an ADMIN_EMAIL that is a service account (ends in
+#     gserviceaccount.com);
+#   - a configured user_access_mode other than invite_only or
+#     domain_restricted (including "open" and the empty string);
+#   - domain_restricted with no authorized_domains;
+#   - an authorized_domains entry that is not a domain name or
+#     "*.domain" wildcard, or that names or covers a service account
+#     domain.
+# Sets HYBRID_USER_ACCESS_MODE, the array HYBRID_AUTHORIZED_DOMAINS
+# (lowercased) and HYBRID_USER_ACCESS_YAML, the block spliced into both
+# settings.yaml writes.
+hybrid_resolve_user_access() {
+  local admin_email="$1" admin_lower mode domain lower
+  local label_re='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+  local domain_re="^${label_re}(\\.${label_re})+\$"
+  local wildcard_re="^\\*\\.${label_re}(\\.${label_re})*\$"
+  _hybrid_read_user_access_config
+
+  # Trimmed and lowercased before the checks below, which matches the
+  # hub's email normalisation.
+  admin_lower="$(printf '%s' "$admin_email" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$admin_lower" ]]; then
+    err "The hybrid tier configures restricted user access (invite-only by default), which needs admin_email set to the account that signs in first and invites other users."
+    exit 1
+  fi
+  if [[ "$admin_lower" == *[[:space:],]* ]]; then
+    err "admin_email '${admin_email}' must be a single email address, with no spaces or commas."
+    exit 1
+  fi
+  if [[ "$admin_lower" == *gserviceaccount.com ]]; then
+    err "admin_email '${admin_email}' is a service account. With the hybrid tier on, admin_email must be a user account that can sign in to the web UI."
+    exit 1
+  fi
+
+  mode="invite_only"
+  if [[ "$HYBRID_CFG_USER_ACCESS_MODE_SET" == "true" ]]; then
+    mode="$HYBRID_CFG_USER_ACCESS_MODE"
+    case "$mode" in
+      invite_only|domain_restricted) ;;
+      *)
+        err "user_access_mode '${mode}' is not supported with the hybrid tier, which configures restricted user access: use invite_only (the default when unset) or domain_restricted."
+        exit 1
+        ;;
+    esac
+  fi
+
+  HYBRID_AUTHORIZED_DOMAINS=()
+  for domain in ${HYBRID_CFG_AUTHORIZED_DOMAINS[@]+"${HYBRID_CFG_AUTHORIZED_DOMAINS[@]}"}; do
+    lower="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
+    if ! [[ "$lower" =~ $domain_re || "$lower" =~ $wildcard_re ]]; then
+      err "authorized_domains entry '${domain}' is not a domain name (example.com) or a wildcard (*.example.com)."
+      exit 1
+    fi
+    if _hybrid_is_service_account_domain "$lower"; then
+      err "authorized_domains entry '${domain}' is not allowed with the hybrid tier: it matches service account email addresses (gserviceaccount.com)."
+      exit 1
+    fi
+    HYBRID_AUTHORIZED_DOMAINS+=("$lower")
+  done
+
+  if [[ "$mode" == "domain_restricted" && ${#HYBRID_AUTHORIZED_DOMAINS[@]} -eq 0 ]]; then
+    err "user_access_mode domain_restricted needs at least one authorized_domains entry."
+    exit 1
+  fi
+
+  HYBRID_USER_ACCESS_MODE="$mode"
+  HYBRID_USER_ACCESS_YAML="$(hybrid_settings_user_access_yaml "$mode" ${HYBRID_AUTHORIZED_DOMAINS[@]+"${HYBRID_AUTHORIZED_DOMAINS[@]}"})"
+}
+
+# hybrid_settings_user_access_yaml MODE [DOMAIN...]
+#
+# Renders user_access_mode (and authorized_domains, when any are given)
+# indented to nest under the settings.yaml `auth:` mapping. Pure string
+# rendering, directly unit-testable.
+hybrid_settings_user_access_yaml() {
+  local mode="$1" domain
+  shift
+  printf '    user_access_mode: "%s"\n' "$mode"
+  if [[ $# -gt 0 ]]; then
+    printf '    authorized_domains:\n'
+    for domain in "$@"; do
+      printf '      - "%s"\n' "$domain"
+    done
+  fi
+}
+
+# hybrid_teardown_transport_sa HUB_NAME PROJECT_ID SERVICE REGION SERVICE_GONE
+#
+# Removes the transport SA and its Cloud Run IAP accessor binding --
+# marked only, refusing to touch an unmarked same-name SA. Only a
+# positive not-found from `describe` reads as "nothing to do"; any
+# other describe error leaves the SA's state unknown, which is recorded
+# as a failure, never as gone.
+#
+# The IAP binding lives on the Cloud Run service's IAM policy, so when
+# SERVICE_GONE is "true" (the caller confirmed the service deleted or not
+# found) it went with the service and there is nothing to remove.
+# Otherwise it is removed before the SA; a binding that is already absent
+# counts as removed, but any other removal failure keeps the SA too, so a
+# re-run can retry both. The removal passes --condition=None, so it
+# removes the accessor binding that has no condition.
+#
+# Sets, for the caller's summary and exit status:
+#   HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL   the SA email checked
+#   HYBRID_TRANSPORT_SA_DELETED          true once the SA is deleted
+#   HYBRID_TRANSPORT_SA_NOT_FOUND        true if there was no SA to delete
+#   HYBRID_TRANSPORT_SA_DELETE_FAILED    true if the SA was kept on error,
+#                                        was unmarked, or its state is
+#                                        unknown
+#   HYBRID_TRANSPORT_SA_KEPT_REASON      why, when DELETE_FAILED is true
+#   HYBRID_TRANSPORT_SA_BINDING_STATE    removed | absent | failed |
+#                                        not-attempted
+# A failure here does not skip anything else in the caller's teardown
+# sequence; the caller decides how to treat it.
+hybrid_teardown_transport_sa() {
+  local hub_name="$1" project_id="$2" service="$3" region="$4" service_gone="${5:-false}"
+  local sa_name sa_email marker desc_json existing_desc describe_err delete_err binding_err
+  sa_name="$(hybrid_transport_sa_name "$hub_name")"
+  sa_email="${sa_name}@${project_id}.iam.gserviceaccount.com"
+  marker="scion-deployment=${hub_name}"
+  HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL="$sa_email"
+  HYBRID_TRANSPORT_SA_DELETED=false
+  HYBRID_TRANSPORT_SA_NOT_FOUND=false
+  HYBRID_TRANSPORT_SA_DELETE_FAILED=false
+  HYBRID_TRANSPORT_SA_KEPT_REASON=""
+  HYBRID_TRANSPORT_SA_BINDING_STATE="not-attempted"
+
+  describe_err="$(mktemp)"
+  if ! desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>"${describe_err}")"; then
+    if _hybrid_gcloud_not_found "$(cat "${describe_err}")"; then
+      echo "  Transport service account ${sa_email} not found; nothing to delete."
+      HYBRID_TRANSPORT_SA_NOT_FOUND=true
+    else
+      err "Could not confirm whether transport service account ${sa_email} exists; keeping it:"
+      err "  $(cat "${describe_err}")"
+      HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+      HYBRID_TRANSPORT_SA_KEPT_REASON="state unknown: describe failed"
+    fi
+    rm -f "${describe_err}"
+    return 0
+  fi
+  rm -f "${describe_err}"
+  existing_desc="$(echo "$desc_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+  if [[ "$existing_desc" != "$marker" ]]; then
+    warn "Transport service account ${sa_email} does not carry this deployment's marker; leaving it untouched."
+    HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+    HYBRID_TRANSPORT_SA_KEPT_REASON="no ownership marker"
+    return 0
+  fi
+
+  if [[ "$service_gone" == "true" ]]; then
+    HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
+  else
+    binding_err="$(mktemp)"
+    if gcloud iap web remove-iam-policy-binding \
+        --resource-type=cloud-run --service="$service" \
+        --region="$region" --project="$project_id" \
+        --member="serviceAccount:${sa_email}" \
+        --role=roles/iap.httpsResourceAccessor \
+        --condition=None \
+        --quiet >/dev/null 2>"${binding_err}"; then
+      HYBRID_TRANSPORT_SA_BINDING_STATE="removed"
+    elif _hybrid_gcloud_not_found "$(cat "${binding_err}")" \
+        || grep -qi 'policy binding with the specified .* not found' "${binding_err}"; then
+      HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
+    else
+      err "Could not remove transport service account ${sa_email}'s IAP access on Cloud Run service ${service}; keeping the service account so a re-run can retry both:"
+      err "  $(cat "${binding_err}")"
+      HYBRID_TRANSPORT_SA_BINDING_STATE="failed"
+      HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+      HYBRID_TRANSPORT_SA_KEPT_REASON="IAP access binding removal failed"
+      rm -f "${binding_err}"
+      return 0
+    fi
+    rm -f "${binding_err}"
+  fi
+
+  delete_err="$(mktemp)"
+  if gcloud iam service-accounts delete "$sa_email" \
+      --project="$project_id" --quiet 2>"${delete_err}"; then
+    echo "  Deleted: ${sa_email}"
+    HYBRID_TRANSPORT_SA_DELETED=true
+  elif _hybrid_gcloud_not_found "$(cat "${delete_err}")"; then
+    echo "  Transport service account ${sa_email} not found or already deleted."
+    HYBRID_TRANSPORT_SA_NOT_FOUND=true
+  else
+    err "Failed to delete transport service account ${sa_email}:"
+    err "  $(cat "${delete_err}")"
+    HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+    HYBRID_TRANSPORT_SA_KEPT_REASON="delete failed"
+  fi
+  rm -f "${delete_err}"
+}
+
+# =====================================================================
+# Kubernetes objects: the PV/namespace/PVC the hybrid tier's shared
+# tree is mounted through, and their teardown. Every kubectl call below
+# requires HYBRID_KUBECONFIG to already be set by
+# hybrid_k8s_setup_kubeconfig -- a task-private temporary file, never
+# the operator's default ~/.kube/config.
+# =====================================================================
+
+# hybrid_k8s_pv_name HUB_NAME — the cluster-scoped PV's name.
+hybrid_k8s_pv_name() {
+  echo "scion-hub-$1-shared"
+}
+
+# hybrid_k8s_default_namespace HUB_NAME — used when gke_target.namespace
+# isn't set.
+hybrid_k8s_default_namespace() {
+  echo "scion-hub-$1"
+}
+
+# hybrid_k8s_default_pvc_name HUB_NAME — used when gke_target.pvc_name
+# isn't set.
+hybrid_k8s_default_pvc_name() {
+  echo "scion-hub-$1-shared"
+}
+
+# hybrid_k8s_setup_kubeconfig
+#
+# Preflights that kubectl AND the gke-gcloud-auth-plugin are both present
+# (only ever called when the tier is on) -- GKE's own credential plugin,
+# required by `gcloud container clusters get-credentials` since kubectl
+# client-go dropped built-in GCP auth; kubectl alone being present is not
+# enough, and its absence otherwise surfaces as a confusing runtime
+# authentication failure rather than a clear preflight message -- then
+# runs get-credentials into a fresh, task-private temporary file and
+# sets HYBRID_KUBECONFIG to its path. The caller (deploy.sh) is
+# responsible for removing that file on exit; every subsequent kubectl
+# call in this file sets KUBECONFIG="$HYBRID_KUBECONFIG" explicitly
+# rather than relying on an ambient default.
+hybrid_k8s_setup_kubeconfig() {
+  if ! command -v kubectl &>/dev/null; then
+    err "kubectl is required for the hybrid tier's Kubernetes objects but was not found."
+    exit 1
+  fi
+  if ! command -v gke-gcloud-auth-plugin &>/dev/null; then
+    err "gke-gcloud-auth-plugin is required for the hybrid tier's Kubernetes objects but was not found. See docs/deploy/agent-runbook-single-node-vm.md for how to install it."
+    exit 1
+  fi
+  HYBRID_KUBECONFIG="$(mktemp)"
+  local cred_err
+  cred_err="$(mktemp)"
+  if ! KUBECONFIG="$HYBRID_KUBECONFIG" gcloud container clusters get-credentials "${GKE_NAME}" \
+      --location="${GKE_LOCATION}" --project="${GKE_PROJECT}" --quiet 2>"${cred_err}"; then
+    err "Could not get credentials for GKE cluster $(_hybrid_cluster_ref):"
+    err "  $(cat "${cred_err}")"
+    rm -f "${cred_err}"
+    exit 1
+  fi
+  rm -f "${cred_err}"
+}
+
+# hybrid_k8s_pv_manifest PV_NAME HUB_NAME VM_IP EXPORT_ROOT NAMESPACE PVC_NAME
+#
+# Renders the cluster-scoped PV: NFS server/path point at the hub VM's
+# export, Retain reclaim policy (the export's data outlives any single
+# claim), storageClassName "" (a static PV, never dynamically
+# provisioned), and a claimRef pinned to the namespace/PVC below so no
+# other claim in the cluster can bind it first. Mount options follow the
+# design's own rationale: nfsvers=4.1 (single port, in-protocol
+# locking), hard (avoids silent corruption), proto=tcp, and the
+# attribute-cache/lookup-cache tuning that bounds cross-runtime
+# staleness. Pure string rendering -- no gcloud, kubectl, or SSH calls.
+hybrid_k8s_pv_manifest() {
+  local pv_name="$1" hub_name="$2" vm_ip="$3" export_root="$4" namespace="$5" pvc_name="$6"
+  cat <<YAML
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${pv_name}
+  labels:
+    scion-deployment: ${hub_name}
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+    - hard
+    - proto=tcp
+    - timeo=600
+    - retrans=2
+    - actimeo=3
+    - lookupcache=positive
+  nfs:
+    server: ${vm_ip}
+    path: ${export_root}
+  claimRef:
+    namespace: ${namespace}
+    name: ${pvc_name}
+YAML
+}
+
+# hybrid_k8s_namespace_manifest NAMESPACE HUB_NAME
+hybrid_k8s_namespace_manifest() {
+  local namespace="$1" hub_name="$2"
+  cat <<YAML
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${namespace}
+  labels:
+    scion-deployment: ${hub_name}
+YAML
+}
+
+# hybrid_k8s_pvc_manifest PVC_NAME NAMESPACE HUB_NAME PV_NAME
+hybrid_k8s_pvc_manifest() {
+  local pvc_name="$1" namespace="$2" hub_name="$3" pv_name="$4"
+  cat <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+  namespace: ${namespace}
+  labels:
+    scion-deployment: ${hub_name}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: ${pv_name}
+  resources:
+    requests:
+      storage: 100Gi
+YAML
+}
+
+# _hybrid_k8s_label JSON — the value of metadata.labels["scion-deployment"]
+# on the given kubectl JSON object, or empty if unset.
+_hybrid_k8s_label() {
+  echo "$1" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('metadata', {}).get('labels', {}).get('scion-deployment') or '')
+"
+}
+
+# _hybrid_k8s_get KIND NAME [EXTRA ARGS...]
+#
+# Runs `kubectl get KIND NAME [EXTRA ARGS] -o json`. On success, sets
+# K8S_GET_JSON to the object and returns 0. On a genuine "not found"
+# (matched by the server's own error text), sets K8S_GET_STATUS=absent
+# and returns 1. On any other failure -- a connectivity or permissions
+# problem, for instance -- sets K8S_GET_STATUS=unknown and K8S_GET_ERR
+# to the error text, and also returns 1: the caller must distinguish
+# "absent" from "unknown" itself, since only "absent" is safe to create
+# over, matching the "unknown is never treated as gone" rule used
+# throughout this file's other teardown checks.
+_hybrid_k8s_get() {
+  local kind="$1" name="$2"
+  shift 2
+  local extra_args=("$@")
+  local err_file
+  err_file="$(mktemp)"
+  K8S_GET_STATUS=""
+  K8S_GET_ERR=""
+  if K8S_GET_JSON="$(KUBECONFIG="$HYBRID_KUBECONFIG" kubectl get "$kind" "$name" \
+      ${extra_args[@]+"${extra_args[@]}"} -o json 2>"${err_file}")"; then
+    K8S_GET_STATUS="found"
+    rm -f "${err_file}"
+    return 0
+  fi
+  K8S_GET_JSON=""
+  if _hybrid_kubectl_not_found "$(cat "${err_file}")"; then
+    K8S_GET_STATUS="absent"
+  else
+    K8S_GET_STATUS="unknown"
+    K8S_GET_ERR="$(cat "${err_file}")"
+  fi
+  rm -f "${err_file}"
+  return 1
+}
+
+# hybrid_k8s_preflight HUB_NAME
+#
+# Everything about the hybrid tier's Kubernetes objects that does NOT
+# depend on the hub VM's IP address, meant to be called right after
+# hybrid_discover -- before the VM, the NFS server/export, or any other
+# Phase 2 resource is created, alongside the firewall-rule checks:
+# kubectl and the gke-gcloud-auth-plugin are present, credentials can be
+# fetched into a task-private kubeconfig (hybrid_k8s_setup_kubeconfig,
+# which sets HYBRID_KUBECONFIG), and a PRE-EXISTING PV or PVC with the
+# target name carries this deployment's marker label and matches every
+# identity field that doesn't depend on the VM's IP (path, claimRef,
+# reclaim policy for the PV; the bound volume name for the PVC) --
+# refusing before anything else is created if not, rather than only
+# after the VM, NFS export, and firewall rules already exist. Only once
+# both of those checks pass does it create the namespace if it's
+# missing: namespace creation doesn't depend on the VM's IP either, so
+# there's no reason to defer it to Phase 4, but it must come after the
+# PV/PVC checks so a refusal never leaves a freshly created namespace
+# behind it. An existing, unmarked namespace is used as-is: never
+# labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed.
+#
+# Deliberately does not check or create the PV's "server" field (the VM
+# IP) or create an absent PV/PVC -- those depend on the VM's IP and stay
+# in hybrid_k8s_ensure_objects (Phase 4, below), which re-validates
+# everything this function already checked plus the IP-dependent parts,
+# so calling this first is what makes that later, fuller check almost
+# always a no-op confirmation rather than the first opportunity to
+# refuse.
+hybrid_k8s_preflight() {
+  local hub_name="$1"
+  local namespace pvc_name pv_name
+
+  hybrid_k8s_setup_kubeconfig
+
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  pv_name="$(hybrid_k8s_pv_name "$hub_name")"
+
+  if _hybrid_k8s_get pv "$pv_name"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume ${pv_name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_path act_claim_ns act_claim_name act_reclaim
+    act_path="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('path') or '')")"
+    act_claim_ns="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('namespace') or '')")"
+    act_claim_name="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('name') or '')")"
+    act_reclaim="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('persistentVolumeReclaimPolicy') or '')")"
+    local -a mismatches=()
+    [[ "$act_path" != "$HYBRID_NFS_EXPORT_ROOT" ]] && mismatches+=("path: expected '${HYBRID_NFS_EXPORT_ROOT}', found '${act_path}'")
+    [[ "$act_claim_ns" != "$namespace" ]] && mismatches+=("claimRef.namespace: expected '${namespace}', found '${act_claim_ns}'")
+    [[ "$act_claim_name" != "$pvc_name" ]] && mismatches+=("claimRef.name: expected '${pvc_name}', found '${act_claim_name}'")
+    [[ "$act_reclaim" != "Retain" ]] && mismatches+=("persistentVolumeReclaimPolicy: expected 'Retain', found '${act_reclaim}'")
+    if [[ ${#mismatches[@]} -gt 0 ]]; then
+      err "Persistent volume ${pv_name} carries this deployment's marker but its spec has drifted from what this tier expects:"
+      local m
+      for m in "${mismatches[@]}"; do
+        err "  ${m}"
+      done
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume ${pv_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get pvc "$pvc_name" -n "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume claim ${pvc_name} in namespace ${namespace} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_volume
+    act_volume="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('volumeName') or '')")"
+    if [[ "$act_volume" != "$pv_name" ]]; then
+      err "Persistent volume claim ${pvc_name} carries this deployment's marker but is bound to '${act_volume}', not the expected '${pv_name}'."
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume claim ${pvc_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get namespace "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      warn "Namespace ${namespace} already exists without this deployment's marker; using it as-is, not labeling or adopting it."
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created namespace: ${namespace}"
+  fi
+}
+
+# hybrid_k8s_ensure_objects HUB_NAME VM_IP
+#
+# Ensures the namespace, PV, and PVC exist with the expected identity,
+# creating whichever are missing. Refuses to proceed if an existing PV
+# or PVC with the target name lacks this deployment's marker label
+# (the same marker refusal hybrid_k8s_preflight above already checked
+# for the non-IP-dependent fields; this repeats it because it's also
+# reachable on its own from tests), or if a
+# marked one has drifted from its expected identity (a changed VM IP
+# after a VM recreate is the expected way for the PV to drift -- see the
+# printed remediation; never auto-corrected, matching the firewall
+# rules' own policy). An existing, unmarked namespace is used as-is:
+# never labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed. Requires HYBRID_KUBECONFIG to already be set.
+hybrid_k8s_ensure_objects() {
+  local hub_name="$1" vm_ip="$2"
+  local namespace pvc_name pv_name
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  pv_name="$(hybrid_k8s_pv_name "$hub_name")"
+
+  if _hybrid_k8s_get namespace "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      warn "Namespace ${namespace} already exists without this deployment's marker; using it as-is, not labeling or adopting it."
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created namespace: ${namespace}"
+  fi
+
+  if _hybrid_k8s_get pv "$pv_name"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume ${pv_name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_server act_path act_claim_ns act_claim_name act_reclaim
+    act_server="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('server') or '')")"
+    act_path="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('path') or '')")"
+    act_claim_ns="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('namespace') or '')")"
+    act_claim_name="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('name') or '')")"
+    act_reclaim="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('persistentVolumeReclaimPolicy') or '')")"
+    local -a mismatches=()
+    [[ "$act_server" != "$vm_ip" ]] && mismatches+=("server: expected '${vm_ip}', found '${act_server}'")
+    [[ "$act_path" != "$HYBRID_NFS_EXPORT_ROOT" ]] && mismatches+=("path: expected '${HYBRID_NFS_EXPORT_ROOT}', found '${act_path}'")
+    [[ "$act_claim_ns" != "$namespace" ]] && mismatches+=("claimRef.namespace: expected '${namespace}', found '${act_claim_ns}'")
+    [[ "$act_claim_name" != "$pvc_name" ]] && mismatches+=("claimRef.name: expected '${pvc_name}', found '${act_claim_name}'")
+    [[ "$act_reclaim" != "Retain" ]] && mismatches+=("persistentVolumeReclaimPolicy: expected 'Retain', found '${act_reclaim}'")
+    if [[ ${#mismatches[@]} -gt 0 ]]; then
+      err "Persistent volume ${pv_name} carries this deployment's marker but its spec has drifted from what this tier expects:"
+      local m
+      for m in "${mismatches[@]}"; do
+        err "  ${m}"
+      done
+      err "Refusing to auto-correct. A changed VM IP after a VM recreate is the expected way for this to happen: delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume ${pv_name}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_pv_manifest "$pv_name" "$hub_name" "$vm_ip" "$HYBRID_NFS_EXPORT_ROOT" "$namespace" "$pvc_name" \
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created persistent volume: ${pv_name}"
+  fi
+
+  if _hybrid_k8s_get pvc "$pvc_name" -n "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume claim ${pvc_name} in namespace ${namespace} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_volume
+    act_volume="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('volumeName') or '')")"
+    if [[ "$act_volume" != "$pv_name" ]]; then
+      err "Persistent volume claim ${pvc_name} carries this deployment's marker but is bound to '${act_volume}', not the expected '${pv_name}'."
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume claim ${pvc_name}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_pvc_manifest "$pvc_name" "$namespace" "$hub_name" "$pv_name" \
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created persistent volume claim: ${pvc_name} (namespace: ${namespace})"
+  fi
+}
+
+# _hybrid_k8s_pods_using_pvc PVC_NAME NAMESPACE
+#
+# Sets K8S_PODS_USING_PVC to a newline-separated list of every pod in
+# NAMESPACE that mounts PVC_NAME via a persistentVolumeClaim volume
+# (empty means none) and returns 0, or, on a list failure, sets
+# K8S_PODS_CHECK_ERR and returns 1 -- the caller must treat that the
+# same as "unknown", never as "none found". A plain function call, not
+# invoked via command substitution: the caller needs both of these
+# globals, and command substitution would run this in a subshell,
+# losing whichever one it didn't capture as stdout. Requires
+# HYBRID_KUBECONFIG to already be set.
+_hybrid_k8s_pods_using_pvc() {
+  local pvc_name="$1" namespace="$2"
+  local err_file pods_json
+  err_file="$(mktemp)"
+  K8S_PODS_CHECK_ERR=""
+  K8S_PODS_USING_PVC=""
+  if ! pods_json="$(KUBECONFIG="$HYBRID_KUBECONFIG" kubectl get pods -n "$namespace" -o json 2>"${err_file}")"; then
+    K8S_PODS_CHECK_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
+  fi
+  rm -f "${err_file}"
+  K8S_PODS_USING_PVC="$(echo "$pods_json" | "$PYTHON" -c "
+import json, sys
+pvc = sys.argv[1]
+d = json.load(sys.stdin)
+names = []
+for pod in d.get('items') or []:
+    for vol in pod.get('spec', {}).get('volumes') or []:
+        claim = vol.get('persistentVolumeClaim') or {}
+        if claim.get('claimName') == pvc:
+            names.append(pod.get('metadata', {}).get('name', '?'))
+            break
+print('\n'.join(names))
+" "$pvc_name")"
+  return 0
+}
+
+# hybrid_k8s_teardown_check HUB_NAME
+#
+# Classifies the PVC, PV, and namespace by name, in the order they'll be
+# deleted: found+marked (queued into HYBRID_K8S_TEARDOWN_DELETE) or
+# found+unmarked (SKIPPED). An unmarked PVC or PV aborts the whole
+# teardown (HYBRID_K8S_TEARDOWN_FAILED=true), the same rule as the
+# firewall rules; an unmarked namespace is only SKIPPED and does not
+# abort, since using an existing namespace without adopting it is
+# allowed on create too. Any check that itself fails (not just "not
+# found") also aborts: unknown is never treated as gone. Requires
+# HYBRID_KUBECONFIG to already be set.
+#
+# Before queuing a marked PVC for deletion, also refuses outright if any
+# pod in its namespace still mounts it: `kubectl delete pvc` blocks
+# indefinitely under its own storage-protection finalizer while a pod
+# references the claim, and the pods that would do so here are exactly
+# the GKE agent pods this tier exists to run -- deleting under a live
+# agent would hang the whole teardown rather than fail it cleanly, so
+# this catches it up front with an actionable message instead.
+hybrid_k8s_teardown_check() {
+  local hub_name="$1"
+  HYBRID_K8S_NAMESPACE="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  HYBRID_K8S_PVC_NAME="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  HYBRID_K8S_PV_NAME="$(hybrid_k8s_pv_name "$hub_name")"
+  HYBRID_K8S_TEARDOWN_DELETE=()
+  HYBRID_K8S_TEARDOWN_FAILED=false
+
+  if _hybrid_k8s_get pvc "$HYBRID_K8S_PVC_NAME" -n "$HYBRID_K8S_NAMESPACE"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
+      if ! _hybrid_k8s_pods_using_pvc "$HYBRID_K8S_PVC_NAME" "$HYBRID_K8S_NAMESPACE"; then
+        err "Could not check whether any pod in namespace ${HYBRID_K8S_NAMESPACE} still references persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}: ${K8S_PODS_CHECK_ERR}"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      elif [[ -n "$K8S_PODS_USING_PVC" ]]; then
+        err "Refusing to tear down: the following pod(s) in namespace ${HYBRID_K8S_NAMESPACE} still mount persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}. Stop those agents first, then re-run teardown:"
+        local p
+        while IFS= read -r p; do
+          [[ -n "$p" ]] && err "  pod/${p}"
+        done <<< "$K8S_PODS_USING_PVC"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      else
+        HYBRID_K8S_TEARDOWN_DELETE+=("pvc")
+      fi
+    else
+      echo "  SKIPPED (unmarked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
+      HYBRID_K8S_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistentvolumeclaim ${HYBRID_K8S_PVC_NAME}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+
+  if _hybrid_k8s_get pv "$HYBRID_K8S_PV_NAME"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): persistentvolume/${HYBRID_K8S_PV_NAME}"
+      HYBRID_K8S_TEARDOWN_DELETE+=("pv")
+    else
+      echo "  SKIPPED (unmarked): persistentvolume/${HYBRID_K8S_PV_NAME}"
+      HYBRID_K8S_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistentvolume ${HYBRID_K8S_PV_NAME}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+
+  if _hybrid_k8s_get namespace "$HYBRID_K8S_NAMESPACE"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
+      echo "  found (marked): namespace/${HYBRID_K8S_NAMESPACE}"
+      HYBRID_K8S_TEARDOWN_DELETE+=("namespace")
+    else
+      echo "  SKIPPED (unmarked, in use): namespace/${HYBRID_K8S_NAMESPACE}"
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${HYBRID_K8S_NAMESPACE}: ${K8S_GET_ERR}"
+    HYBRID_K8S_TEARDOWN_FAILED=true
+  fi
+}
+
+# hybrid_k8s_teardown_delete
+#
+# Deletes exactly what hybrid_k8s_teardown_check queued into
+# HYBRID_K8S_TEARDOWN_DELETE, in that array's order (PVC, then PV, then
+# namespace-if-marked), stopping at the first failure and recording
+# every kind from that point on in HYBRID_K8S_TEARDOWN_DELETE_FAILED --
+# the same stop-at-first-failure policy as the firewall rules' own
+# teardown delete. Every delete carries an explicit --timeout: the pod
+# preflight in hybrid_k8s_teardown_check above should already have
+# refused before this ever runs against a PVC a live pod still mounts,
+# but a bounded timeout is the backstop if a pod attaches in the window
+# between that check and this delete, or the object doesn't finish
+# terminating for some other reason -- a `delete` that hangs is treated
+# as a failure exactly like one that errors immediately.
+hybrid_k8s_teardown_delete() {
+  HYBRID_K8S_TEARDOWN_DELETED=()
+  HYBRID_K8S_TEARDOWN_DELETE_FAILED=()
+  local stopped=false kind name delete_err
+  local -a ns_args
+  for kind in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+    if [[ "$stopped" == "true" ]]; then
+      err "Not attempted (kept): ${kind}"
+      HYBRID_K8S_TEARDOWN_DELETE_FAILED+=("${kind}")
+      continue
+    fi
+    ns_args=()
+    case "$kind" in
+      pvc) name="$HYBRID_K8S_PVC_NAME"; ns_args=(-n "$HYBRID_K8S_NAMESPACE") ;;
+      pv) name="$HYBRID_K8S_PV_NAME" ;;
+      namespace) name="$HYBRID_K8S_NAMESPACE" ;;
+    esac
+    delete_err="$(mktemp)"
+    if KUBECONFIG="$HYBRID_KUBECONFIG" kubectl delete "$kind" "$name" --timeout=60s \
+        ${ns_args[@]+"${ns_args[@]}"} 2>"${delete_err}"; then
+      echo "  Deleted: ${kind}/${name}"
+      HYBRID_K8S_TEARDOWN_DELETED+=("${kind}")
+      rm -f "${delete_err}"
+      continue
+    fi
+    err "Failed to delete ${kind}/${name}:"
+    err "  $(cat "${delete_err}")"
+    HYBRID_K8S_TEARDOWN_DELETE_FAILED+=("${kind}")
+    stopped=true
+    rm -f "${delete_err}"
+  done
+}

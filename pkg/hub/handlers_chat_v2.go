@@ -1063,9 +1063,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			return // error response already written by sendAgentRouted
 		}
 		recordIdempotency(msgID)
-		if isDM {
-			s.ensureDMRegistered(ctx, key, user.ID())
-		}
+		// DM registration now happens inside sendAgentRouted, before its
+		// watermark update — see the comment there.
 		return
 	}
 
@@ -1528,6 +1527,21 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
+	// For DMs, ensure DM registry rows exist for both participants. This must
+	// precede the watermark update: touchConversationActivity is a plain
+	// UPDATE and would affect zero rows on the first message of a DM. (Moved
+	// here from the isDM branch in the caller, which ran this after
+	// sendAgentRouted had already returned — too late for the first message's
+	// watermark update below to find a row to update.)
+	if strings.HasPrefix(key, "dm:") {
+		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
+	s.touchConversationActivity(ctx, key, storeMsg.ID)
+	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -1746,14 +1760,6 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
-
-	// Update topic/DM watermark.
-	s.touchConversationActivity(ctx, key, storeMsg.ID)
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the thread as unread.  The user just sent the message, so they have
-	// implicitly read everything up to and including it.
-	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// --- W6: Human mention notifications ---
 	// Resolve @mentions that didn't match agents — they may be human members.
@@ -1983,11 +1989,6 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		}
 	}
 
-	// Publish SSE event. For the unreachable-default override, this carries
-	// the row's actual failed state so other open tabs see "Agent
-	// unreachable" too, not a false "Delivered".
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-
 	// For DMs, ensure DM registry rows exist for both participants. This must
 	// precede the watermark update: touchConversationActivity is a plain
 	// UPDATE and would affect zero rows on the first message of a DM.
@@ -1995,14 +1996,17 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
-	// Update conversation watermark.
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
 	}
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the conversation as unread.
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
+	// Publish SSE event. For the unreachable-default override, this carries
+	// the row's actual failed state so other open tabs see "Agent
+	// unreachable" too, not a false "Delivered".
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// --- W6: Chat notifications ---
 	// Shared unconditionally with the unreachable-default override (R1): a
@@ -2823,6 +2827,46 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	if body.MessageID == "" {
 		ValidationError(w, "messageId is required", nil)
 		return
+	}
+
+	existing, rsErr := wcs.GetReadState(ctx, user.ID(), key)
+	hasExisting := rsErr == nil && existing != nil && existing.LastReadMessageID != ""
+
+	// Fast path: re-marking with the already-current watermark is a no-op —
+	// skip the message lookup and the write entirely.
+	if hasExisting && existing.LastReadMessageID == body.MessageID {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Reject IDs that aren't persisted messages: clients must never set a
+	// client-local placeholder as the watermark. Existence only, not also
+	// same-conversation membership — history lists by ConversationID, and a
+	// visible row's ThreadID may differ from key.
+	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			ValidationError(w, "messageId does not refer to a known message", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
+		}
+		return
+	}
+	if targetMsg == nil {
+		ValidationError(w, "messageId does not refer to a known message", nil)
+		return
+	}
+	// Monotonic: a stale advance must never roll the watermark backward;
+	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
+	if hasExisting {
+		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil && currentMsg != nil {
+			newer := targetMsg.CreatedAt.After(currentMsg.CreatedAt) ||
+				(targetMsg.CreatedAt.Equal(currentMsg.CreatedAt) && targetMsg.ID > currentMsg.ID)
+			if !newer {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
+			}
+		}
 	}
 
 	if err := wcs.SetReadState(ctx, user.ID(), key, body.MessageID); err != nil {

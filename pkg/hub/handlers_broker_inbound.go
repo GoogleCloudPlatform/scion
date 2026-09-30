@@ -531,6 +531,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// HTTP response here would mislead the caller into retrying —
 		// which would double-deliver.
 	} else {
+		// Validated dm: key: advance the sender's v2 watermarks before
+		// publish; their web client refetches unread state on this event.
+		if strings.HasPrefix(storeMsg.ThreadID, "dm:") && senderUserID != "" {
+			s.mu.RLock()
+			dmWcs := s.webChatStore
+			s.mu.RUnlock()
+			if dmWcs != nil {
+				registerDMParticipants(r.Context(), dmWcs, storeMsg.ThreadID)
+				s.touchConversationActivity(r.Context(), storeMsg.ThreadID, storeMsg.ID)
+				s.autoAdvanceSenderReadState(r.Context(), senderUserID, storeMsg.ThreadID, storeMsg.ID)
+			}
+		}
 		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
 	}
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -225,6 +226,12 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 // and must NOT call Stop — a lookup that can't tell which container to stop
 // must not guess and stop one of them anyway. Mirrors
 // TestRestartAgent_AmbiguousMatchAbortsWithoutStart.
+//
+// The status and code are pinned exactly (500 runtime_error, not just "some
+// 5xx") because an ambiguous match is NOT ErrAgentListUnavailable: the
+// runtime answered fine, it just returned two entries. A mutation that
+// widens the list-unavailable branch to catch every lookup error (turning
+// this into a 503 runtime_unavailable) must fail this test.
 func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -246,8 +253,15 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 
-	if w.Code < 500 {
-		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected exactly 500 for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
@@ -283,6 +297,100 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	}
 }
 
+// TestStopAgent_AuxiliaryListErrorAbortsWithout202 is a knock-on-effect
+// regression test for ptone/scion#2176: before the fix, an auxiliary
+// runtime's List failure inside LookupContainerID was folded into
+// agentNotFoundError (ErrAgentNotFound), so projectScopedTarget
+// treated it as "not found in this project" and stopAgent answered 202
+// "Agent stopped (not found in project)" — a false "stopped" for what was
+// actually a transient listing failure, not via a 404 but via a 202. Now
+// that the failure surfaces as ErrAgentListUnavailable, projectScopedTarget's
+// existing "surface anything that isn't ErrAgentNotFound" check (handlers.go)
+// must reject it, and stopAgent must report 503 runtime_unavailable instead
+// of a false-success 202, and must never call Stop.
+func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: fmt.Errorf("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/stop?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (not the idempotent 202 no-op, nor a bare 500) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
+}
+
+// TestExecCommand_ListUnavailableReturns503 is a regression test for
+// ptone/scion#2165: when the container runtime itself fails to answer the
+// agent lookup (LookupContainerID wraps that in ErrAgentListUnavailable),
+// execCommand must report a retryable 503 rather than a terminal 404 — the
+// two mean very different things to a caller deciding whether to retry.
+func TestExecCommand_ListUnavailableReturns503(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+	execCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the runtime listing is unavailable, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("exec must not run when the agent lookup itself failed")
+	}
+	if strings.Contains(w.Body.String(), "docker ps failed") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
+}
+
 // TestExecCommand_NotFoundInProject verifies that exec returns 404 when the
 // slug does not resolve to any agent in the requested project (and there is no
 // legacy unlabeled container to fall back to).
@@ -311,12 +419,74 @@ func TestExecCommand_NotFoundInProject(t *testing.T) {
 	}
 }
 
+// TestExecCommand_AmbiguousMatchReturns500 is a regression test for
+// GoogleCloudPlatform/scion#2098: when LookupContainerID finds more than one
+// distinct container matching the slug (uniqueAgentEntry's ambiguous case),
+// that is a real lookup failure, not a "not found," so execCommand must
+// return a 500 runtime_error and must NOT exec — a lookup that can't tell
+// which container to target must not guess and run against one of them
+// anyway. Mirrors TestStopAgent_AmbiguousMatchAbortsWithoutStop.
+//
+// The status and code are pinned exactly (500 runtime_error, not just "some
+// 5xx") because an ambiguous match is NOT ErrAgentListUnavailable: the
+// runtime answered fine, it just returned two entries. A mutation that widens
+// the list-unavailable branch to catch every lookup error (turning this into
+// a 503 runtime_unavailable) must fail this test.
+func TestExecCommand_AmbiguousMatchReturns500(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+	execCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	body, _ := json.Marshal(map[string]any{"command": []string{"echo", "hi"}})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/exec?projectId=project-A", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected exactly 500 for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
+	}
+	if execCalled {
+		t.Error("exec must not run when the lookup found an ambiguous match")
+	}
+}
+
 // TestRestartAgent_LookupErrorAbortsWithoutStart is a regression test for
 // #1985: when resolving the project-scoped stop target during a restart
 // fails for a reason other than genuine "not found" (here, the runtime
-// listing itself errors), restartAgent must abort with a 5xx and must NOT
-// call Start — otherwise a runtime hiccup during the lookup would leave a
-// second container running alongside whatever the first lookup couldn't see.
+// listing itself errors, which LookupContainerID wraps as
+// ErrAgentListUnavailable), restartAgent must abort with the exact 503
+// runtime_unavailable response and must NOT call Start — otherwise a runtime
+// hiccup during the lookup would leave a second container running alongside
+// whatever the first lookup couldn't see. The status is pinned exactly
+// (rather than just "some 5xx") so a mutation that removes or narrows the
+// ErrAgentListUnavailable branch (falling back to a 500 runtime_error) is
+// caught.
 func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -333,14 +503,72 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
-	if w.Code < 500 {
-		t.Fatalf("expected a 5xx status when the lookup fails, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected exactly 503 when the runtime listing itself fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
 	}
 	if mgr.startCalls != 0 {
 		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
 	}
 	if mgr.stopCalls != 0 {
 		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	}
+}
+
+// TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart is the restart
+// counterpart of TestStopAgent_AuxiliaryListErrorAbortsWithout202: an
+// auxiliary runtime's List failure inside LookupContainerID must abort the
+// restart with a 503 runtime_unavailable, not proceed to Start as if the
+// agent were simply absent from this project — otherwise a runtime hiccup
+// during the stop-target lookup would leave a second container running.
+func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: fmt.Errorf("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/coordinator/restart?projectId=project-A", nil)
+	w := httptest.NewRecorder()
+	srv.handleAgentByID(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (not proceed-with-start) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
+	}
+	if defaultMgr.startCalls != 0 || auxMgr.startCalls != 0 {
+		t.Error("Start must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
+	}
+	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
 	}
 }
 
@@ -381,6 +609,12 @@ func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
 // real lookup failure, not a "not found," so restartAgent must abort with a
 // 5xx and must NOT call Start — a lookup that can't tell which container to
 // stop must not just start a second one anyway.
+//
+// The status and code are pinned exactly (500 runtime_error, not just "some
+// 5xx") because an ambiguous match is NOT ErrAgentListUnavailable: the
+// runtime answered fine, it just returned two entries. A mutation that
+// widens the list-unavailable branch to catch every lookup error (turning
+// this into a 503 runtime_unavailable) must fail this test.
 func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
@@ -401,8 +635,15 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, r)
 
-	if w.Code < 500 {
-		t.Fatalf("expected a 5xx status for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected exactly 500 for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
 	}
 	if mgr.startCalls != 0 {
 		t.Errorf("Start was called %d time(s); an ambiguous match must not start a second container", mgr.startCalls)

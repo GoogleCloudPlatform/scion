@@ -27,12 +27,13 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
-import type {
-  GroupState,
-  PaletteCandidate,
-  PaletteDismissReason,
-  PaletteGroup,
-  PaletteTarget,
+import {
+  PALETTE_GROUP_ORDER,
+  type GroupState,
+  type PaletteCandidate,
+  type PaletteDismissReason,
+  type PaletteGroup,
+  type PaletteTarget,
 } from '../../../client/chat-palette-types.js';
 import {
   rankCandidates,
@@ -61,6 +62,25 @@ export interface SwitcherSelectDetail {
   conversationKey: string;
 }
 
+/** Rows shown per group before "show more". */
+const PALETTE_GROUP_VISIBLE_LIMIT = 10;
+
+/** Display heading for each group, in the same reading order as {@link PALETTE_GROUP_ORDER}. */
+const PALETTE_GROUP_LABELS: Record<PaletteGroup, string> = {
+  agents: 'Agents',
+  threads: 'Threads',
+  people: 'People',
+  documents: 'Documents',
+};
+
+/** Singular/plural noun for the status region's match-count text (e.g. "1 matching agent" / "2 matching agents"). */
+const PALETTE_GROUP_NOUN: Record<PaletteGroup, { singular: string; plural: string }> = {
+  agents: { singular: 'agent', plural: 'agents' },
+  threads: { singular: 'thread', plural: 'threads' },
+  people: { singular: 'person', plural: 'people' },
+  documents: { singular: 'document', plural: 'documents' },
+};
+
 @customElement('scion-chat-switcher')
 export class ScionChatSwitcher extends LitElement {
   /** Full list of conversations to search through. */
@@ -79,9 +99,7 @@ export class ScionChatSwitcher extends LitElement {
   // Gated by `paletteMode`, default false. The legacy flat-list presentation
   // above (properties, styles, render path) is completely unchanged: with
   // `paletteMode` unset, chat-switcher.test.ts exercises that same code
-  // path unconditionally. Phase 1 only ever populates the 'agents' group;
-  // `threads`, `people` and `documents` are added to `groups` by later
-  // phases.
+  // path unconditionally.
   // ===========================================================================
 
   /** Selects the grouped sl-dialog presentation instead of the legacy flat overlay. */
@@ -91,7 +109,7 @@ export class ScionChatSwitcher extends LitElement {
   /** Whether the palette dialog is open. Only meaningful when `paletteMode` is true. */
   @property({ type: Boolean }) open = false;
 
-  /** Per-group load state. Phase 1 only ever sets `agents`. */
+  /** Per-group load state, keyed by {@link PaletteGroup}. */
   @property({ attribute: false })
   groups: Partial<Record<PaletteGroup, GroupState>> = {
     agents: { status: 'loading', candidates: [] },
@@ -107,6 +125,14 @@ export class ScionChatSwitcher extends LitElement {
   private composing = false;
   private domIdCounter = 0;
   private readonly domIdByCandidateId = new Map<string, string>();
+  /**
+   * Groups currently expanded past {@link PALETTE_GROUP_VISIBLE_LIMIT} rows —
+   * by explicit "show more", or automatically to keep the active option
+   * mounted after Up/Down/Tab navigation or a background refresh selects a
+   * candidate beyond the visible cap. Reset to empty on open and on every
+   * query edit, alongside `manualSelection`.
+   */
+  @state() private expandedGroups: ReadonlySet<PaletteGroup> = new Set();
 
   @query('#palette-query-input')
   private paletteInputEl?: HTMLInputElement;
@@ -143,6 +169,19 @@ export class ScionChatSwitcher extends LitElement {
         max-height: 50vh;
         overflow-y: auto;
         padding-bottom: 0.5rem;
+        /* Two-column grid in reading order (Agents, Threads, People,
+         * Documents) — the groups are rendered in that order as siblings, so
+         * a plain row-major grid places Agents/Threads on the first row and
+         * People/Documents on the second without extra markup. */
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0 0.75rem;
+      }
+
+      @media (max-width: 768px) {
+        .palette-results {
+          grid-template-columns: 1fr;
+        }
       }
 
       .palette-group-heading {
@@ -192,13 +231,15 @@ export class ScionChatSwitcher extends LitElement {
 
       .palette-empty,
       .palette-loading,
-      .palette-group-error {
+      .palette-group-error,
+      .palette-group-incomplete {
         padding: 0.5rem 1rem 0.75rem;
         color: var(--scion-text-muted, #94a3b8);
         font-size: var(--chat-fs-base);
       }
 
-      .palette-group-error sl-button {
+      .palette-group-error sl-button,
+      .palette-group-incomplete sl-button {
         margin-top: 0.25rem;
       }
 
@@ -501,13 +542,23 @@ export class ScionChatSwitcher extends LitElement {
   ): void {
     if (queryChanged) {
       this.manualSelection = false;
-      this.activeId = ranked[0]?.candidate.id ?? null;
+      this.setActiveId(ranked[0]?.candidate.id ?? null);
       return;
     }
-    if (this.manualSelection && ranked.some((r) => r.candidate.id === this.activeId)) {
-      return;
+    if (this.manualSelection && this.activeId !== null) {
+      const stillPresent = ranked.some((r) => r.candidate.id === this.activeId);
+      if (stillPresent) {
+        // A background refresh (new candidates loaded) may have moved this
+        // id past the visible cap in its group — keep it mounted *and*
+        // actually visible, not just present in the DOM: preserving a manual
+        // selection by ID is a promise about what the user sees, not only
+        // about what's technically rendered off-screen.
+        this.ensureGroupExpandedFor(this.activeId);
+        this.scrollActivePaletteOptionIntoView();
+        return;
+      }
     }
-    this.activeId = ranked[0]?.candidate.id ?? null;
+    this.setActiveId(ranked[0]?.candidate.id ?? null);
   }
 
   override willUpdate(changed: PropertyValues<ScionChatSwitcher>): void {
@@ -523,6 +574,12 @@ export class ScionChatSwitcher extends LitElement {
       this.queryText = '';
       this.manualSelection = false;
       this.committed = false;
+      this.expandedGroups = new Set();
+    }
+    if (changedKeys.has('queryText')) {
+      // A query edit resets manual navigation and any show-more expansion —
+      // the new match set starts back at each group's first 10 rows.
+      this.expandedGroups = new Set();
     }
     if (changedKeys.has('queryText') || changed.has('groups') || changed.has('open')) {
       const ranked = this.rankedPaletteCandidates;
@@ -542,18 +599,104 @@ export class ScionChatSwitcher extends LitElement {
     this.composing = false;
   }
 
+  /**
+   * Set the active candidate, expanding its group's "show more" cap first if
+   * needed so the option being activated is always actually mounted in the
+   * DOM before anything (e.g. scroll-into-view) tries to find it.
+   */
+  private setActiveId(id: string | null): void {
+    if (id) this.ensureGroupExpandedFor(id);
+    this.activeId = id;
+  }
+
+  /** Expand `candidateId`'s group past the visible cap if it isn't already fully shown. */
+  private ensureGroupExpandedFor(candidateId: string): void {
+    const ranked = this.rankedPaletteCandidates;
+    const active = ranked.find((r) => r.candidate.id === candidateId);
+    if (!active) return;
+    const group = active.candidate.group;
+    if (this.expandedGroups.has(group)) return;
+    const indexInGroup = ranked
+      .filter((r) => r.candidate.group === group)
+      .findIndex((r) => r.candidate.id === candidateId);
+    if (indexInGroup >= PALETTE_GROUP_VISIBLE_LIMIT) {
+      this.expandGroup(group);
+    }
+  }
+
+  private expandGroup(group: PaletteGroup): void {
+    if (this.expandedGroups.has(group)) return;
+    this.expandedGroups = new Set(this.expandedGroups).add(group);
+  }
+
+  /** The non-empty (has at least one ranked match) groups, in reading order. */
+  private nonEmptyPaletteGroups(ranked: Array<RankedCandidate<PaletteCandidate>>): PaletteGroup[] {
+    const present = new Set(ranked.map((r) => r.candidate.group));
+    return PALETTE_GROUP_ORDER.filter((g) => present.has(g));
+  }
+
+  /**
+   * Up/Down: move to the previous/next row *within the active candidate's
+   * group*, wrapping. If nothing is active (or the active id no longer
+   * matches any ranked candidate), choose the first/last row of the first
+   * nonempty group in reading order.
+   */
   private moveActive(delta: 1 | -1): void {
     const ranked = this.rankedPaletteCandidates;
     if (ranked.length === 0) return;
-    const currentIndex = ranked.findIndex((r) => r.candidate.id === this.activeId);
+    const active = ranked.find((r) => r.candidate.id === this.activeId);
+
+    let groupRanked: Array<RankedCandidate<PaletteCandidate>>;
+    let currentIndex: number;
+    if (active) {
+      groupRanked = ranked.filter((r) => r.candidate.group === active.candidate.group);
+      currentIndex = groupRanked.findIndex((r) => r.candidate.id === this.activeId);
+    } else {
+      const [firstGroup] = this.nonEmptyPaletteGroups(ranked);
+      groupRanked = firstGroup ? ranked.filter((r) => r.candidate.group === firstGroup) : [];
+      currentIndex = -1;
+    }
+    if (groupRanked.length === 0) return;
+
     const nextIndex =
       currentIndex === -1
         ? delta === 1
           ? 0
-          : ranked.length - 1
-        : (currentIndex + delta + ranked.length) % ranked.length;
+          : groupRanked.length - 1
+        : (currentIndex + delta + groupRanked.length) % groupRanked.length;
     this.manualSelection = true;
-    this.activeId = ranked[nextIndex].candidate.id;
+    this.setActiveId(groupRanked[nextIndex].candidate.id);
+    this.scrollActivePaletteOptionIntoView();
+  }
+
+  /**
+   * Tab/Shift+Tab: select the first (best-ranked) match of the next/previous
+   * nonempty group in reading order, wrapping — a group that has no matches
+   * right now is skipped, but "joins the next traversal" automatically once
+   * it does, since this recomputes the nonempty-group list fresh on every
+   * press rather than caching it. With no matches anywhere, the event is
+   * still consumed (via the caller's preventDefault/stopPropagation) but
+   * selection is left empty.
+   */
+  private moveActiveGroup(delta: 1 | -1): void {
+    const ranked = this.rankedPaletteCandidates;
+    const groups = this.nonEmptyPaletteGroups(ranked);
+    if (groups.length === 0) {
+      this.setActiveId(null);
+      return;
+    }
+    const active = ranked.find((r) => r.candidate.id === this.activeId);
+    const currentGroupIndex = active ? groups.indexOf(active.candidate.group) : -1;
+    const nextGroupIndex =
+      currentGroupIndex === -1
+        ? delta === 1
+          ? 0
+          : groups.length - 1
+        : (currentGroupIndex + delta + groups.length) % groups.length;
+    const nextGroup = groups[nextGroupIndex];
+    const firstInGroup = ranked.find((r) => r.candidate.group === nextGroup);
+    this.manualSelection = true;
+    this.setActiveId(firstInGroup?.candidate.id ?? null);
     this.scrollActivePaletteOptionIntoView();
   }
 
@@ -602,23 +745,17 @@ export class ScionChatSwitcher extends LitElement {
   /**
    * Keydown at the query input. Tab/Shift+Tab must both preventDefault() and
    * stopPropagation() — Shoelace's document Tab trap ignores preventDefault
-   * alone (verified in Chromium). With a single populated group in
-   * Phase 1, Tab/Shift+Tab reselects that group's first match and keeps
-   * focus in the input rather than escaping to Shoelace's trap; later phases
-   * cycle across the other populated groups here.
+   * alone — and select the first match of the next/previous *nonempty* group
+   * in reading order, wrapping and skipping empty groups, without ever
+   * escaping the modal: Tab is a group-selection key while the input has
+   * focus, not a focus-trap escape.
    */
   private handlePaletteKeydown(e: KeyboardEvent): void {
     switch (e.key) {
       case 'Tab': {
         e.preventDefault();
         e.stopPropagation();
-        const ranked = this.rankedPaletteCandidates;
-        if (ranked.length === 0) {
-          this.activeId = null;
-          return;
-        }
-        this.manualSelection = true;
-        this.activeId = ranked[0].candidate.id;
+        this.moveActiveGroup(e.shiftKey ? -1 : 1);
         return;
       }
       case 'ArrowDown':
@@ -680,11 +817,15 @@ export class ScionChatSwitcher extends LitElement {
     return html`${parts}`;
   }
 
-  private renderPaletteGroup(group: PaletteGroup, label: string): unknown {
+  private renderPaletteGroup(group: PaletteGroup): unknown {
     const state = this.groups[group];
     if (!state) return nothing;
+    const label = PALETTE_GROUP_LABELS[group];
 
     const ranked = this.rankedPaletteCandidates.filter((r) => r.candidate.group === group);
+    const expanded = this.expandedGroups.has(group);
+    const visible = expanded ? ranked : ranked.slice(0, PALETTE_GROUP_VISIBLE_LIMIT);
+    const hiddenCount = ranked.length - visible.length;
 
     return html`
       <div role="group" aria-labelledby="palette-heading-${group}">
@@ -702,10 +843,20 @@ export class ScionChatSwitcher extends LitElement {
               </div>
             `
           : nothing}
+        ${state.status === 'ready' && state.incomplete
+          ? html`
+              <div class="palette-group-incomplete">
+                Some results couldn't load.
+                <sl-button size="small" @click=${() => this.retryPaletteGroup(group)}
+                  >Retry</sl-button
+                >
+              </div>
+            `
+          : nothing}
         ${state.status !== 'loading' && state.status !== 'error' && ranked.length === 0
           ? html`<div class="palette-empty">No matches</div>`
           : nothing}
-        ${ranked.map(
+        ${visible.map(
           (r) => html`
             <div
               id=${this.domIdFor(r.candidate.id)}
@@ -714,7 +865,7 @@ export class ScionChatSwitcher extends LitElement {
               class="palette-option ${r.candidate.id === this.activeId ? 'active' : ''}"
               @click=${() => {
                 this.manualSelection = true;
-                this.activeId = r.candidate.id;
+                this.setActiveId(r.candidate.id);
                 this.commitActivePaletteCandidate();
               }}
             >
@@ -733,20 +884,58 @@ export class ScionChatSwitcher extends LitElement {
             </div>
           `
         )}
+        ${hiddenCount > 0
+          ? html`
+              <div class="palette-show-more">
+                <sl-button size="small" @click=${() => this.expandGroup(group)}
+                  >Show ${hiddenCount} more</sl-button
+                >
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
 
+  /**
+   * The status region's announced text, read through a polite live region on
+   * loading/count/active-group changes. The single-group wording below is
+   * used whenever exactly one group is present (e.g. a host that only
+   * supplies Agents). Multiple populated groups get a combined summary
+   * instead of picking one group arbitrarily.
+   */
+  private paletteStatusText(): string {
+    const presentGroups = PALETTE_GROUP_ORDER.filter((g) => this.groups[g]);
+    const matchCount = this.rankedPaletteCandidates.length;
+
+    if (presentGroups.length === 1) {
+      const group = presentGroups[0];
+      const state = this.groups[group]!;
+      const noun = PALETTE_GROUP_NOUN[group];
+      if (state.status === 'loading') return `Loading ${noun.plural}…`;
+      if (state.status === 'error') return `${PALETTE_GROUP_LABELS[group]} failed to load.`;
+      return `${matchCount} matching ${matchCount === 1 ? noun.singular : noun.plural}`;
+    }
+
+    const loadingGroups = presentGroups.filter(
+      (g) => this.groups[g]!.status === 'loading' && this.groups[g]!.candidates.length === 0
+    );
+    if (loadingGroups.length === presentGroups.length) {
+      return 'Loading…';
+    }
+    const erroredGroups = presentGroups.filter((g) => this.groups[g]!.status === 'error');
+    const parts = [`${matchCount} matching ${matchCount === 1 ? 'result' : 'results'}`];
+    if (loadingGroups.length > 0) {
+      parts.push(`${loadingGroups.map((g) => PALETTE_GROUP_LABELS[g]).join(', ')} still loading`);
+    }
+    if (erroredGroups.length > 0) {
+      parts.push(`${erroredGroups.map((g) => PALETTE_GROUP_LABELS[g]).join(', ')} failed to load`);
+    }
+    return parts.join('; ');
+  }
+
   private renderPalette() {
     const activeDomId = this.activeId ? this.domIdFor(this.activeId) : undefined;
-    const agentsState = this.groups.agents;
-    const matchCount = this.rankedPaletteCandidates.length;
-    const statusText =
-      agentsState?.status === 'loading'
-        ? 'Loading agents…'
-        : agentsState?.status === 'error'
-          ? 'Agents failed to load.'
-          : `${matchCount} matching ${matchCount === 1 ? 'agent' : 'agents'}`;
 
     return html`
       <sl-dialog
@@ -767,7 +956,7 @@ export class ScionChatSwitcher extends LitElement {
             aria-controls="palette-result-list"
             aria-activedescendant=${activeDomId ?? nothing}
             aria-describedby="palette-keyboard-help"
-            placeholder="Search agents…"
+            placeholder="Search agents, threads, people…"
             .value=${this.queryText}
             autocomplete="off"
             @input=${this.handlePaletteQueryInput}
@@ -777,14 +966,18 @@ export class ScionChatSwitcher extends LitElement {
           />
         </div>
         <div id="palette-result-list" role="listbox" class="palette-results" aria-label="Results">
-          ${this.renderPaletteGroup('agents', 'Agents')}
+          ${this.renderPaletteGroup('agents')} ${this.renderPaletteGroup('threads')}
+          ${this.renderPaletteGroup('people')}
         </div>
         <div id="palette-keyboard-help" class="palette-help">
+          <span><kbd>Tab</kbd> next group</span>
           <span><kbd>↑↓</kbd> navigate</span>
           <span><kbd>↵</kbd> open</span>
           <span><kbd>esc</kbd> close</span>
         </div>
-        <div class="palette-status" role="status" aria-live="polite">${statusText}</div>
+        <div class="palette-status" role="status" aria-live="polite">
+          ${this.paletteStatusText()}
+        </div>
       </sl-dialog>
     `;
   }
