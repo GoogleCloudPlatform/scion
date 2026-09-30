@@ -22,6 +22,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -30,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/require"
 )
 
@@ -420,8 +422,10 @@ func TestAgentSecretRead_ViewerCatalogGrantsDoNotAdmit(t *testing.T) {
 
 // TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit covers check
 // 5: a project-scoped role binding that is not one of the built-in
-// membership roles (owner/admin/member) does not admit, no matter what
-// permissions it carries.
+// membership roles (owner/admin/member) does not satisfy
+// CheckEffectiveMembership, no matter what permissions it carries, and does
+// not qualify as exact system authority for secret.use either (it is a
+// project-scoped, not a system-scoped, binding).
 func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) {
 	f := newMaterialFixture(t, "unrelated-grant")
 	ctx := context.Background()
@@ -459,42 +463,215 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 	}
 }
 
-// TestAgentSecretRead_SystemRoleWithoutMembershipDeniedInterim documents the
-// interim rule: a super-admin or hub-admin root without a project membership
-// row is denied. System authority for the exact permission is evaluated in
-// a later change.
-func TestAgentSecretRead_SystemRoleWithoutMembershipDeniedInterim(t *testing.T) {
-	for _, roleName := range []string{store.SystemRoleSuperAdmin, store.SystemRoleHubAdmin} {
-		t.Run(roleName, func(t *testing.T) {
-			srv, s := testServer(t)
-			srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-			ctx := context.Background()
+// TestAgentSecretRead_SystemRoleExactPermissionAdmitted covers check 5's
+// system-authority leg: a system-scope role holding the exact secret.use
+// permission establishes target-applicable authority for the project, even
+// with no project membership row.
+func TestAgentSecretRead_SystemRoleExactPermissionAdmitted(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
 
-			projectID := tid("project-sysrole-" + roleName)
-			require.NoError(t, s.CreateProject(ctx, &store.Project{
-				ID: projectID, Name: "p", Slug: "p-sysrole-" + roleName, Created: time.Now(), Updated: time.Now(),
-			}))
-			userID := tid("user-sysrole-" + roleName)
-			createTestUserWithRole(t, s, userID, roleName+"@test.com", "member", roleName)
-			agentID := tid("agent-sysrole-" + roleName)
-			require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-				ID: agentID, Slug: "a-sysrole-" + roleName, Name: "a", ProjectID: projectID,
-				Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
-				Created: time.Now(), Updated: time.Now(),
-			}))
+	projectID := tid("project-sysrole-exact")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-exact", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-exact")
+	systemRoleUserWithPermissions(t, s, userID, []string{"secret.use"})
+	agentID := tid("agent-sysrole-exact")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-exact", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
 
-			ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
-			_, reason, status := srv.materialRuntimePrecheck(ctx, ident)
-			if status != http.StatusForbidden || reason != ReasonMembershipRequired {
-				t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
-			}
-		})
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	facts, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("expected check 5 to admit via exact system authority for secret.use, got %d/%s", status, reason)
+	}
+}
+
+// TestAgentSecretRead_SystemRoleUnrelatedPermissionDenied covers check 5's
+// system-authority leg: a system-scope role holding a permission other than
+// secret.use does not establish authority, so a root with no project
+// membership row is denied.
+func TestAgentSecretRead_SystemRoleUnrelatedPermissionDenied(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysrole-unrelated")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-unrelated", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-unrelated")
+	systemRoleUserWithPermissions(t, s, userID, []string{"agent.delete"})
+	agentID := tid("agent-sysrole-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-unrelated", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	_, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
+		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
+	}
+}
+
+// TestAgentSecretRead_SystemAuthorityLookupErrorDenies covers check 5's
+// system-authority leg: a genuine store fault while loading the principal's
+// active system-scope role bindings (SystemAuthorityProof ->
+// loadActiveSystemScopeCandidates -> ListRoleBindingsForPrincipals) fails
+// closed with a 500, not a 403. The no-fault positive control confirms the
+// same non-member root is otherwise admitted through secret.use system
+// authority, so the later denial is caused by the fault and not by a root
+// that was already denied for an unrelated reason.
+func TestAgentSecretRead_SystemAuthorityLookupErrorDenies(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysauth-lookup-error")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysauth-lookup-error", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysauth-lookup-error")
+	systemRoleUserWithPermissions(t, s, userID, []string{"secret.use"})
+	agentID := tid("agent-sysauth-lookup-error")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysauth-lookup-error", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+
+	facts, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("positive control: expected check 5 to admit via exact system authority for secret.use, got %d/%s", status, reason)
+	}
+
+	srv.authzService = NewAuthzService(&materialFailingStore{Store: s, listRoleBindingsForPrincipalsErr: errors.New("injected")}, logging.Subsystem("hub.auth"))
+
+	_, reason, status = srv.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusInternalServerError || reason != ReasonBackendError {
+		t.Fatalf("expected 500/%s, got %d/%s", ReasonBackendError, status, reason)
+	}
+}
+
+// TestAgentSecretRead_SystemAuthorityServiceUnavailableDenies covers check
+// 5's system-authority leg: with no authz service configured, a non-member
+// root is denied with a 500, not a 403 -- check 5 never silently skips this
+// leg when the service is unavailable.
+func TestAgentSecretRead_SystemAuthorityServiceUnavailableDenies(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysauth-unavailable")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysauth-unavailable", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysauth-unavailable")
+	systemRoleUserWithPermissions(t, s, userID, []string{"secret.use"})
+	agentID := tid("agent-sysauth-unavailable")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysauth-unavailable", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	srv.authzService = nil
+
+	_, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusInternalServerError || reason != ReasonBackendError {
+		t.Fatalf("expected 500/%s, got %d/%s", ReasonBackendError, status, reason)
+	}
+}
+
+// TestAgentSecretRead_HubAdminWithoutMembershipDenied covers check 5: a
+// hub-admin root without a project membership row is still denied.
+// hub-admin's curated permission set does not include secret.use, so check
+// 5's system-authority leg (SystemAuthorityProof for the exact secret.use
+// permission) does not admit it either. See
+// TestAgentSecretRead_SuperAdminExactPermissionAdmitted below for the
+// super-admin case, which does hold secret.use and is admitted.
+func TestAgentSecretRead_HubAdminWithoutMembershipDenied(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysrole-hub-admin")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-hub-admin", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-hub-admin")
+	createTestUserWithRole(t, s, userID, "hub-admin-sysrole@test.com", "member", store.SystemRoleHubAdmin)
+	agentID := tid("agent-sysrole-hub-admin")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-hub-admin", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ident := newFullAgentIdentity(agentID, projectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	_, reason, status := srv.materialRuntimePrecheck(ctx, ident)
+	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
+		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
+	}
+}
+
+// TestAgentSecretRead_SuperAdminExactPermissionAdmitted covers check 5's
+// system-authority leg: a super-admin root without a project membership row
+// is admitted, because super-admin holds every registry permission
+// (including secret.use) and SystemAuthorityProof admits a
+// target-applicable exact permission held through an active system-scope
+// role. Check 7 then decides project.secret_read for the agent, which
+// holds it through its project:secret:read scope; this test records no
+// delegation edge and no backfill marker, so the ceiling's pre-backfill
+// exception applies and the value is delivered end to end.
+func TestAgentSecretRead_SuperAdminExactPermissionAdmitted(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	projectID := tid("project-sysrole-super-admin")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "p", Slug: "p-sysrole-super-admin", Created: time.Now(), Updated: time.Now(),
+	}))
+	userID := tid("user-sysrole-super-admin")
+	createTestUserWithRole(t, s, userID, "super-admin-sysrole@test.com", "member", store.SystemRoleSuperAdmin)
+	agentID := tid("agent-sysrole-super-admin")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "a-sysrole-super-admin", Name: "a", ProjectID: projectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
+	require.NoError(t, err)
+
+	seedSecret(t, srv.secretBackend, "SUPERADMIN_KEY", "super-secret-value", "", "", projectID)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"SUPERADMIN_KEY"}}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp secretFetchResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	if len(resp.Secrets) != 1 || resp.Secrets[0].Status != "ok" || resp.Secrets[0].Value != "super-secret-value" {
+		t.Fatalf("expected the value delivered for the super-admin root, got %+v", resp.Secrets)
 	}
 }
 
 // TestAgentSecretRead_MembershipLookupErrorDenies covers check 5: a genuine
 // store fault while checking membership (as opposed to a definite
-// non-member) fails closed with a 500, not a 403.
+// non-member) fails closed with a 500, not a 403. Check 5 calls
+// CheckEffectiveMembership, which resolves a principal's direct bindings
+// through the singular ListRoleBindingsForPrincipal, so the fault is
+// injected there.
 func TestAgentSecretRead_MembershipLookupErrorDenies(t *testing.T) {
 	f := newMaterialFixture(t, "membership-lookup-error")
 	f.Server.store = &materialFailingStore{
