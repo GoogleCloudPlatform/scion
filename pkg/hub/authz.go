@@ -385,6 +385,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// with the DERIVED principal and credential — never the caller's
 	// rejected claim. Decide's single audit exit records it.
 	//
+	// A nil Principal.Identity denies first, with reason "missing principal";
+	// every other case below assumes at least an identity was supplied, even
+	// one of an unrecognized concrete type.
+	//
 	// A request with an omitted Principal.Kind/Credential.Kind derives both
 	// from the identity via the adapter below; an omitted kind never reaches
 	// either check.
@@ -404,6 +408,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// recognized one by supplied context.
 	var denyReason string
 	switch {
+	case request.Principal.Identity == nil:
+		denyReason = "missing principal"
 	case request.Principal.Kind != "" && request.Principal.Kind != derivedPrincipal.Kind:
 		denyReason = "principal kind does not match identity"
 	case !isRecognizedPrincipalKind(derivedPrincipal.Kind) || !isRecognizedCredentialKind(derivedCredential.Kind):

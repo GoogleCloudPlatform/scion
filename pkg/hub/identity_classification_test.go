@@ -477,21 +477,24 @@ func (e *countingAuditEmitter) EmitDecisionAudit(context.Context, *store.Decisio
 }
 
 // TestDecide_UnrecognizedDerivedPrincipalKindDenied: Decide denies a nil
-// identity, an identity of an unrecognized concrete type, an agent-shaped
-// identity that hasn't opted into ancestry attestation or classification, and
-// a user-shaped identity whose only resemblance to AuthenticatedUser is its
-// Type() string — all deny with "unrecognized principal kind" because
-// classification, not attestation and not Type(), gates entry. Exactly one
-// audit record is emitted per call.
+// identity with "missing principal", and denies an identity of an
+// unrecognized concrete type, an agent-shaped identity that hasn't opted into
+// ancestry attestation or classification, and a user-shaped identity whose
+// only resemblance to AuthenticatedUser is its Type() string, with
+// "unrecognized principal kind" — because classification, not attestation and
+// not Type(), gates entry. Exactly one audit record is emitted per call in
+// every case, decorated with the (empty, for the nil case) derived
+// classification.
 func TestDecide_UnrecognizedDerivedPrincipalKindDenied(t *testing.T) {
 	cases := []struct {
-		name     string
-		identity Identity
+		name       string
+		identity   Identity
+		wantReason string
 	}{
-		{"nil identity", nil},
-		{"unrecognized concrete type", &unclassifiedMockIdentity{id: tid("decide-unknown")}},
-		{"agent-shaped type without the ancestry or classification marker", &unattestedMockAgentIdentity{id: tid("decide-unattested-agent"), projectID: tid("decide-project"), ancestry: []string{tid("decide-user")}}},
-		{"user-shaped type with only Type()==\"user\"", &userShapedMockIdentity{id: tid("decide-user-shaped")}},
+		{"nil identity", nil, "missing principal"},
+		{"unrecognized concrete type", &unclassifiedMockIdentity{id: tid("decide-unknown")}, "unrecognized principal kind"},
+		{"agent-shaped type without the ancestry or classification marker", &unattestedMockAgentIdentity{id: tid("decide-unattested-agent"), projectID: tid("decide-project"), ancestry: []string{tid("decide-user")}}, "unrecognized principal kind"},
+		{"user-shaped type with only Type()==\"user\"", &userShapedMockIdentity{id: tid("decide-user-shaped")}, "unrecognized principal kind"},
 	}
 
 	for _, tc := range cases {
@@ -506,7 +509,7 @@ func TestDecide_UnrecognizedDerivedPrincipalKindDenied(t *testing.T) {
 			})
 
 			assert.False(t, decision.Allowed)
-			assert.Equal(t, "unrecognized principal kind", decision.Reason)
+			assert.Equal(t, tc.wantReason, decision.Reason)
 			assert.Equal(t, 1, emitter.calls, "exactly one audit record must be emitted")
 		})
 	}
@@ -705,6 +708,17 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 			wantPrincipalKind: "",
 			wantCredKind:      "",
 			wantPrincipalID:   unknownID,
+		},
+		{
+			name: "nil identity decorates the empty derived kind with its own reason",
+			request: AuthzRequest{
+				Resource: Resource{Type: "agent", ID: tid("audit-target")},
+				Action:   ActionRead,
+			},
+			wantReason:        "missing principal",
+			wantPrincipalKind: "",
+			wantCredKind:      "",
+			wantPrincipalID:   "",
 		},
 		{
 			name: "unrecognized supplied credential kind string decorates the derived kind, not the rejected string",
