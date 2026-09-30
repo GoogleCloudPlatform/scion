@@ -146,6 +146,29 @@ export class ScionPageProjectDetail extends LitElement {
   private fileBrowserDataSources: Record<string, FileBrowserDataSource> = {};
 
   /**
+   * Whether the (possibly below-the-fold) Files section has become visible
+   * or was otherwise explicitly triggered. Until then, only a lightweight
+   * placeholder is rendered — no `<scion-file-browser>` is mounted, so no
+   * listing request is issued. See observeFilesSection().
+   */
+  @state()
+  private filesSectionVisible = false;
+
+  /**
+   * Tab keys ('workspace' or shared-dir name) whose file browser has been
+   * mounted at least once. A `<scion-file-browser>` is only instantiated for
+   * tabs in this set, so switching to an unvisited tab is what triggers its
+   * one initial listing request. Visited tabs stay mounted (not torn down on
+   * tab switch) so filter/sort/scroll state and loaded files survive
+   * revisiting a tab.
+   */
+  @state()
+  private visitedFileTabs: Set<string> = new Set();
+
+  /** Observes the Files-section placeholder to lazily reveal it once it nears the viewport. */
+  private filesSectionObserver: IntersectionObserver | null = null;
+
+  /**
    * Loading state for stop-all action
    */
   @state()
@@ -970,6 +993,61 @@ export class ScionPageProjectDetail extends LitElement {
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
     );
+    this.filesSectionObserver?.disconnect();
+    this.filesSectionObserver = null;
+  }
+
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    this.observeFilesSection();
+  }
+
+  /**
+   * Lazily reveal the Files section once its placeholder nears the
+   * viewport, so a project page that never scrolls that far mounts zero
+   * file browsers and issues zero listing requests. Without
+   * IntersectionObserver support (older engines, tests) the section is
+   * revealed immediately — equivalent to "explicitly opened".
+   */
+  private observeFilesSection(): void {
+    if (this.filesSectionVisible) return;
+    const placeholder = this.shadowRoot?.querySelector('.files-section-placeholder');
+    if (!placeholder) return;
+
+    if (typeof IntersectionObserver !== 'function') {
+      this.revealFilesSection();
+      return;
+    }
+
+    if (!this.filesSectionObserver) {
+      this.filesSectionObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              this.revealFilesSection();
+              break;
+            }
+          }
+        },
+        { rootMargin: '200px' }
+      );
+    }
+    this.filesSectionObserver.observe(placeholder);
+  }
+
+  private revealFilesSection(): void {
+    if (this.filesSectionVisible) return;
+    this.filesSectionObserver?.disconnect();
+    this.filesSectionVisible = true;
+    // The active tab (default, or the first shared dir for git-based
+    // projects — see loadData()) is the one the user actually sees, so
+    // mount its browser now rather than waiting for a tab click.
+    this.markFileTabVisited(this.activeFileTab);
+  }
+
+  private markFileTabVisited(tab: string): void {
+    if (this.visitedFileTabs.has(tab)) return;
+    this.visitedFileTabs = new Set(this.visitedFileTabs).add(tab);
   }
 
   private onAgentsUpdated(): void {
@@ -2089,8 +2167,12 @@ export class ScionPageProjectDetail extends LitElement {
                   : this.renderAgentTable()}
           `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
-      ${this.shouldShowFilesSection() ? this.renderFilesSection() : ''} ${this.renderCloneDialog()}
-      ${this.renderTemplateDialog()}
+      ${this.shouldShowFilesSection()
+        ? this.filesSectionVisible
+          ? this.renderFilesSection()
+          : this.renderFilesSectionPlaceholder()
+        : ''}
+      ${this.renderCloneDialog()} ${this.renderTemplateDialog()}
     `;
   }
 
@@ -2170,6 +2252,25 @@ export class ScionPageProjectDetail extends LitElement {
     const panel = e.detail.name;
     if (!panel) return;
     this.activeFileTab = panel;
+    // Mount that tab's file browser now — this is what triggers its one
+    // initial listing request. Already-visited tabs stay mounted, so
+    // switching back to one does not refetch or lose local state.
+    this.markFileTabVisited(panel);
+  }
+
+  private renderFilesSectionPlaceholder() {
+    return html`
+      <div class="workspace-section files-section-placeholder">
+        <div class="workspace-header">
+          <div class="workspace-header-left">
+            <h2>Files</h2>
+          </div>
+        </div>
+        <div class="loading-state">
+          <sl-spinner></sl-spinner>
+        </div>
+      </div>
+    `;
   }
 
   private refreshActiveFileBrowser(): void {
@@ -2224,15 +2325,19 @@ export class ScionPageProjectDetail extends LitElement {
                   ${tabs.map(
                     (tab) => html`
                       <sl-tab-panel name=${tab.key}>
-                        <scion-file-browser
-                          data-tab=${tab.key}
-                          .dataSource=${this.getTabDataSource(tab.key)}
-                          ?editable=${isEditable}
-                          ?showArchive=${true}
-                          @file-edit-requested=${this.handleFileEditRequested}
-                          @file-preview-requested=${this.handleFilePreviewRequested}
-                          @file-create-requested=${this.handleFileCreateRequested}
-                        ></scion-file-browser>
+                        ${this.visitedFileTabs.has(tab.key)
+                          ? html`
+                              <scion-file-browser
+                                data-tab=${tab.key}
+                                .dataSource=${this.getTabDataSource(tab.key)}
+                                ?editable=${isEditable}
+                                ?showArchive=${true}
+                                @file-edit-requested=${this.handleFileEditRequested}
+                                @file-preview-requested=${this.handleFilePreviewRequested}
+                                @file-create-requested=${this.handleFileCreateRequested}
+                              ></scion-file-browser>
+                            `
+                          : nothing}
                       </sl-tab-panel>
                     `
                   )}
