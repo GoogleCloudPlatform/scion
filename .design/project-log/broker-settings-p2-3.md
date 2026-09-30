@@ -1,9 +1,11 @@
 # Broker settings P2.3: binding migration, createEntitlement 400, docs (ptone/scion#2061 P2-D4, ptone/scion#2063 items 2 and 3)
 
-Base: stacked on P2.1 (ptone/scion#2275, branch `scion/broker-settings-p2-1`), started at its head
-`0875d543a658cd77e7a9ec92ba42436878aa0839`. Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md`
-§5.5, §5.7 (P2.3), §5.8 (AC-P2-5), §6. Branch `scion/broker-settings-p2-3`. PR: ptone/scion#2306
-(draft, stacked on ptone/scion#2275 — **do not merge before #2275 lands**).
+Base: started stacked on P2.1 (ptone/scion#2275, branch `scion/broker-settings-p2-1`) at its head
+`0875d543a658cd77e7a9ec92ba42436878aa0839`, rebased onto P2.1's later fork head `19b8064d81` when
+P2.1 picked up its own review fixes, then rebased onto `upstream-main` after P2.1 merged upstream as
+GoogleCloudPlatform/scion#2126 (`86fc807b1`) — see "Upstream rebase" below. Design:
+`/scion-volumes/scratchpad/projects/broker-settings/design.md` §5.5, §5.7 (P2.3), §5.8 (AC-P2-5), §6.
+Branch `scion/broker-settings-p2-3`. PR: ptone/scion#2306 (draft).
 
 ## What shipped
 
@@ -189,3 +191,83 @@ Re-ran after the fixes: the full `TestBrokerQuotaBindingsToSettingsMigration_*` 
 `go build ./...`, `gofmt -l` on the changed files, and confirmed
 `git diff cmd/boot_broker_quota_bindings_to_settings.go` against the pre-mutation state is empty.
 Checked `git log --format=%B 0875d543..HEAD | grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'` prints nothing.
+
+## Upstream rebase (P2.1 merged as GoogleCloudPlatform/scion#2126)
+
+Old base: `19b8064d81d64b0416d113cd99e698dd7f1361f1` (P2.1's second fork head). Old head:
+`3c782655a74c17e08f715dac19dfc87e8b052bc8`. New base: `upstream-main` (fetched from
+`https://github.com/GoogleCloudPlatform/scion.git`), which contains P2.1 merged as
+GoogleCloudPlatform/scion#2126 at `86fc807b1`. New head: `d067b7b188887833262058b81b3f767468ff2f1c`.
+
+`git rebase --onto upstream-main 19b8064d81 ...`. Range-diff (`19b8064d81..3c782655a`
+`upstream-main..d067b7b18`): **6 of 7 commits `=`** (byte-identical), **1 `!`** — the docs commit
+(`docs: document the per-broker settings API and its migration`).
+
+The `!` commit conflicted in exactly the shape round-1 finding F10 predicted: P1a's own upstream
+rebase had, in the meantime, bumped the seed-default number from 12 to 100 and rewritten the same
+paragraph P2.3 had rewritten to describe the Broker Settings override, in both
+`docs-site/src/content/docs/hosted/ha/multi-broker.md` and `.../reference/api.md`. Resolution kept
+every unrelated P1a addition verbatim — the new default of 100, the Cloud Run sizing clause in
+multi-broker.md, and the entire new `PUT /limits/:id` mechanics paragraph in api.md (full-replace
+semantics, the 403 on name/resourceType/unit changes, the Cloud Run operator-docs pointer) — and
+replaced only the now-false "not supported yet / coming in P2" clause in each with P2.3's accurate
+pointer to the Broker Settings API. No other content changed. Full detail, including the exact
+before/after text for both hunks:
+`/scion-volumes/scratchpad/projects/broker-settings/notes/p2-3-rebase-upstream.md`.
+
+Gates: `go build ./...`, `go vet ./pkg/hub/` (with and without `-tags no_sqlite`), `cd web && npx tsc
+--noEmit`, and `golangci-lint --new-from-rev=upstream-main` all clean/0 new issues. Commit-message
+grep over `upstream-main..HEAD` clean. `make test-hub-sqlite` is covered under "pkg/hub SQLite
+tests" below rather than repeated here.
+
+## Review round 3 (rev-p2-3-3): REQUEST CHANGES
+
+Full review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-3-3.md`.
+The rebase conflict resolution itself was found correct and needed no rework. Two Required findings
+and one Nit, all closed in one follow-up commit `f19e87bb2` (no further rebase) plus one PR-body PATCH:
+
+- **R1 (Required, fixed in `f19e87bb2`):** a third copy of the "per-broker values are coming in P2"
+  claim survived in `docs-site/src/content/docs/hosted/single-node/hub-setup-cloudrun.md`. It came
+  from P1a, on a line the rebase's conflict resolution never touched (not a conflict hunk), so rounds
+  1 and 2 could not have seen it — P1a was not yet in their base at the time. Reworded to point at
+  Broker Settings, matching the other two pages; left the surrounding Cloud Run scaling guidance
+  unchanged. Grepped the whole docs tree for any other "coming in"/"not supported yet" per-broker
+  claims: none found (one unrelated hit in a deploy runbook, about an unrelated GKE project field).
+- **Nit (fixed in `f19e87bb2`):** the resolved `multi-broker.md` sentence kept the words "admin
+  limits API" but had dropped the link the upstream (P1a) sentence carried. Restored it.
+- **R2 (Required, fixed via PR-body PATCH, no commit):** the PR body's test-plan line claimed
+  `make test-hub-sqlite` was green post-rebase. It wasn't — updated to name both failures
+  (`TestCatalogHTTPEntryPoints_LiveMethodCheck`, `TestHandleAgentMessage_LogCapture_RawContentRedacted`)
+  and state that both reproduce on bare upstream main, independent of this PR. Applied with
+  `gh api -X PATCH repos/ptone/scion/pulls/2306 --input <json>`, verified with one `GET`.
+
+## Review round 4 (rev-p2-3-4): APPROVE
+
+Approved at head `f19e87bb2`. One remaining nit, PR-body only, no commit: item 3 ("Docs") in the
+summary still said the seed-default sentences were "left untouched... kept mechanical for its later
+rebase" — stale after the upstream rebase actually happened. Updated to say the docs keep P1a's
+merged default of 100 and point the per-broker override at Broker Settings everywhere, including the
+third hub-setup-cloudrun.md sentence R1 fixed, and added that file to the list of docs touched.
+Applied with one `gh api -X PATCH`, verified with one `GET` (confirmed the new text present, the old
+text gone, and the bare-`#N` grep on the body still clean). No push was needed for this fix — PR-body
+metadata only.
+
+## pkg/hub SQLite: two failures, both pre-existing on upstream main
+
+Both `TestCatalogHTTPEntryPoints_LiveMethodCheck` and `TestHandleAgentMessage_LogCapture_RawContentRedacted`
+fail when running the full `make test-hub-sqlite` target on this branch's post-rebase head. Both were
+independently reproduced on bare `upstream-main` (`f671d1a8d`, the commit this branch is rebased onto)
+by the round-3 reviewer and, before that, by checking out `upstream-main` into an isolated `git
+worktree` with zero P2.3 commits. Neither is caused by, or fixable within, this PR:
+- `TestCatalogHTTPEntryPoints_LiveMethodCheck` fails identically on both — `GET`/`PUT
+  /api/v1/runtime-brokers/{id}/settings` return 404 in the authzop live-inventory check, a P2.1
+  route-wiring gap. A separate fix is in progress (per the EM); the route/catalog owner for P2.1
+  should track it, not this PR.
+- `TestHandleAgentMessage_LogCapture_RawContentRedacted` fails only under the full `pkg/hub` run and
+  passes in isolation on both upstream main and this branch — an order-dependent flake (a shared
+  log-capture buffer racing with other tests), the same class of issue `f671d1a8d test(hub): fix
+  races in two flaky hub tests` already addresses elsewhere on `main`.
+
+The PR body's test plan and this log both now say so accurately; CI's "pkg/hub SQLite Tests" job is
+expected to go red on the branch for the same, pre-existing reason and should not block merge review
+on that basis.
