@@ -200,13 +200,16 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 	}
 
 	// Positive control for the second pass: with the same set, a reviewed
-	// deliver pair builds the progeny candidate, and the candidate is not
-	// rejected at the relationship_fact stage (the store adapter serves
-	// secret.deliver).
+	// deliver pair builds the progeny candidate and clears the
+	// relationship_policy, untrusted_ancestry and relationship_fact stages
+	// (the store adapter serves secret.deliver). It is then rejected by the
+	// restriction stage: this agent's JWT scopes do not map to
+	// secret.deliver (agentScopeRestriction), so RejectedBy names that
+	// restriction rather than an earlier relationship stage.
 	d := decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
 	result := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.Equal(t, "secret.deliver", result.Permission)
-	assert.NotEqual(t, RelationshipRejectFact, result.RejectedBy, "reason %q", result.Detail)
+	assert.Equal(t, "credential_scope", result.RejectedBy, "reason %q", result.Detail)
 }
 
 // secret.use is denied without a progeny relationship: unrelated ancestry,
