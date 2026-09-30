@@ -16,6 +16,7 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -268,6 +269,92 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 
 	if callCount != 0 {
 		t.Fatalf("expected 0 calls for non-matching topic, got %d", callCount)
+	}
+}
+
+// TestInProcessEventBus_UserTopicBufferFullReturnsError is a regression test
+// for ptone/scion#2311: a user-message publish that cannot be queued because
+// the matching subscriber's buffer is full must be reported to the caller
+// instead of silently dropped.
+func TestInProcessEventBus_UserTopicBufferFullReturnsError(t *testing.T) {
+	b := newTestEventBus()
+	defer func() { _ = b.Close() }()
+
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	_, err := b.Subscribe("scion.project.g1.user.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-block
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(block)
+
+	topic := "scion.project.g1.user.alice.messages"
+	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
+
+	// The first publish is picked up immediately by the dispatch goroutine
+	// and blocks it there, so the channel buffer is now free to absorb
+	// defaultSubscriberBuffer more sends before it is full.
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("unexpected error on first publish: %v", err)
+	}
+	<-started
+
+	for i := 0; i < defaultSubscriberBuffer; i++ {
+		if err := b.Publish(context.Background(), topic, msg); err != nil {
+			t.Fatalf("unexpected error while filling buffer (iteration %d): %v", i, err)
+		}
+	}
+
+	// The buffer is now full: the next publish must be dropped and reported.
+	if err := b.Publish(context.Background(), topic, msg); !errors.Is(err, ErrSubscriberBufferFull) {
+		t.Fatalf("expected ErrSubscriberBufferFull, got %v", err)
+	}
+}
+
+// TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget guards the
+// size-gated scope of the ptone/scion#2311 fix: every topic other than
+// user-messages keeps the historical fire-and-forget behaviour — the drop is
+// logged but Publish still returns nil.
+func TestInProcessEventBus_NonUserTopicBufferFullStaysFireAndForget(t *testing.T) {
+	b := newTestEventBus()
+	defer func() { _ = b.Close() }()
+
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	_, err := b.Subscribe("scion.project.g1.agent.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-block
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(block)
+
+	topic := "scion.project.g1.agent.myagent.messages"
+	msg := messages.NewInstruction("user:alice", "agent:myagent", "hi")
+
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("unexpected error on first publish: %v", err)
+	}
+	<-started
+
+	for i := 0; i < defaultSubscriberBuffer; i++ {
+		if err := b.Publish(context.Background(), topic, msg); err != nil {
+			t.Fatalf("unexpected error while filling buffer (iteration %d): %v", i, err)
+		}
+	}
+
+	if err := b.Publish(context.Background(), topic, msg); err != nil {
+		t.Fatalf("expected nil error for non-user-message topic drop (fire-and-forget unchanged), got %v", err)
 	}
 }
 

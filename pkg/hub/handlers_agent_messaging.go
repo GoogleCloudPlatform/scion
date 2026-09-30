@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1137,6 +1138,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg); err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
 					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
+					// The recipient's dispatch queue is backed up; nothing was
+					// queued, so a retry is expected to succeed once it drains
+					// (ptone/scion#2311).
+					writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
+					return
+				}
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
 					"Message delivery failed: "+err.Error(), nil)
 				return
