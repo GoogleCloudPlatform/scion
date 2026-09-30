@@ -1275,8 +1275,8 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 // folded into ptone/scion#2061 P2); until then this is one global value for
 // every broker on the hub.
 //
-// 100 is above the observed crash point of single-node Cloud Run (~17-18
-// agents on 4 CPU/8 GiB, ~51 on 8 CPU/32 GiB — see
+// 100 is above the observed crash point of single-node Cloud Run (~19-20
+// idle agents on 4 CPU/8 GiB, ~51 idle on 8 CPU/32 GiB — see
 // .design/hosted/cloud-run-single-node.md §9.1), so a fresh single-node
 // Cloud Run deployment is effectively unguarded by this default alone; the
 // cap still stops an unbounded runaway loop. Operators deploying single-node

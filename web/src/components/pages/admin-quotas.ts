@@ -99,7 +99,18 @@ export class ScionPageAdminQuotas extends LitElement {
   // --- Create/Edit limit dialog ---
   @state() private showLimitDialog = false;
   @state() private editingLimit: LimitDefinition | null = null;
-  @state() private limitForm = {
+  @state() private limitForm: {
+    name: string;
+    resourceType: string;
+    unit: string;
+    description: string;
+    // null means the field is empty or not a valid non-negative integer, so
+    // saveLimitDefinition can tell "cleared by the user" apart from an
+    // explicit 0 (= unlimited) and reject it instead of silently sending 0
+    // (ptone/scion#2061 P1a review F1: clearing this on a system row like
+    // max_agents_per_broker would otherwise turn off the crash ceiling).
+    defaultValue: number | null;
+  } = {
     name: '',
     resourceType: '',
     unit: '',
@@ -605,6 +616,10 @@ export class ScionPageAdminQuotas extends LitElement {
       this.limitDialogError = 'Resource type is required';
       return;
     }
+    if (this.limitForm.defaultValue === null) {
+      this.limitDialogError = 'Default Value is required and must be a non-negative integer (0 = unlimited)';
+      return;
+    }
 
     this.limitDialogSaving = true;
     this.limitDialogError = null;
@@ -615,7 +630,7 @@ export class ScionPageAdminQuotas extends LitElement {
         resourceType: this.limitForm.resourceType,
         unit: this.limitForm.unit.trim(),
         description: this.limitForm.description.trim(),
-        defaultValue: Number(this.limitForm.defaultValue) || 0,
+        defaultValue: this.limitForm.defaultValue,
       });
 
       let res: Response;
@@ -1173,11 +1188,14 @@ export class ScionPageAdminQuotas extends LitElement {
             type="number"
             min="0"
             placeholder="0 = unlimited"
-            value=${String(this.limitForm.defaultValue)}
+            help-text="Required. Use 0 for unlimited."
+            value=${this.limitForm.defaultValue === null ? '' : String(this.limitForm.defaultValue)}
             @sl-input=${(e: Event) => {
+              const raw = (e.target as HTMLInputElement).value.trim();
+              const parsed = raw === '' ? NaN : Number(raw);
               this.limitForm = {
                 ...this.limitForm,
-                defaultValue: Number((e.target as HTMLInputElement).value) || 0,
+                defaultValue: Number.isInteger(parsed) && parsed >= 0 ? parsed : null,
               };
             }}
           ></sl-input>

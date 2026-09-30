@@ -2852,7 +2852,7 @@ type LimitDefinition struct {
 	Unit         string    `json:"unit"`         // e.g. "count"
 	Description  string    `json:"description"`
 	DefaultValue int64     `json:"defaultValue"` // 0 = unlimited
-	System       bool      `json:"system"`       // true = seeded, not user-modifiable
+	System       bool      `json:"system"`       // true = seeded; only default_value/description are editable, cannot be deleted
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
