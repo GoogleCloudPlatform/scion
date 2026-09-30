@@ -211,7 +211,7 @@ func seedSQLiteSource(t *testing.T, ctx context.Context, path string) seededIDs 
 	}
 
 	if err := c.Project.Create().
-		SetID(ids.projectID).SetName("Demo").SetSlug("demo").SetVisibility("private").
+		SetID(ids.projectID).SetName("Demo").SetSlug("demo").
 		SetOwnerID(ids.userID.String()).SetCreated(now).SetUpdated(now).
 		Exec(ctx); err != nil {
 		t.Fatalf("seed project: %v", err)

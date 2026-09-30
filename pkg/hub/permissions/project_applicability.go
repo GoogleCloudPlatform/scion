@@ -124,7 +124,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.lifecycle_hooks.read": false, "hub.lifecycle_hooks.update": false,
 	"hub.allow_list.read": false, "hub.allow_list.update": false,
 	"hub.project_defaults.read": false, "hub.project_defaults.update": false,
-	"hub.messaging.update": false, "hub.auth_reset.execute": false,
+	"hub.messaging.update": false, "hub.experiments.update": false, "hub.auth_reset.execute": false,
 	"hub.scheduler.read": false, "hub.scheduler.update": false,
 	"hub.federation.read": false, "hub.federation.update": false,
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,

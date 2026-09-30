@@ -199,6 +199,11 @@ type AgentK8sMetadata struct {
 	Namespace string `json:"namespace"`
 	PodName   string `json:"podName"`
 	SyncedAt  string `json:"syncedAt,omitempty"`
+	// UID is the pod's Kubernetes-assigned unique identifier, distinct from
+	// PodName. Populated by KubernetesRuntime.List when available; empty for
+	// any other backend, or for a Kubernetes pod fetched through a path
+	// that does not set it.
+	UID string `json:"uid,omitempty"`
 }
 
 // SharedDir defines a project-level shared directory available to all agents.

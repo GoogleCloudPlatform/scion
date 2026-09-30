@@ -75,6 +75,34 @@ interface UsageReservation {
   reserved: number;
   createdAt: string;
   releasedAt?: string;
+  /**
+   * The broker's current effective max_agents_per_broker limit, present only
+   * for broker-scoped reservations under that limit (ptone/scion#2061 P2.2,
+   * design.md §5.9). Mirrors Go usageReservationView.BrokerAgentLimit
+   * (pkg/hub/handlers_quota.go) exactly — hand-written since there is no
+   * Go->TS generator (design.md §6). Absent for every other reservation.
+   */
+  brokerAgentLimit?: number;
+  /**
+   * The precedence step that produced brokerAgentLimit: "broker" |
+   * "entitlement" | "hub_default" | "unlimited" | "not_enforced". This names
+   * the step, not whether the result is a cap: when the broker is
+   * unlimited, brokerAgentLimit is absent but brokerAgentLimitSource is
+   * still whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide, a state in which this reservation (which requires
+   * quota enforcement to have run) would not exist to display in the first
+   * place.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: brokerAgentLimit keeps whatever the precedence steps
+   * resolved (a cap, or absent when that resolves to unlimited, exactly as
+   * above), but the value is informational only — it is not currently
+   * applied. The usage detail must show this visibly, not only in a
+   * tooltip.
+   */
+  brokerAgentLimitSource?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +286,21 @@ export class ScionPageAdminQuotas extends LitElement {
       font-weight: 600;
       background: var(--sl-color-neutral-100, #f1f5f9);
       color: var(--sl-color-neutral-600, #475569);
+    }
+
+    /* Visible marker for a broker cap whose source is "not_enforced"
+     * (design.md Amendment A1): the value shown is a real, resolved cap,
+     * but it is not currently enforced. Must not be tooltip-only. */
+    .not-enforced-marker {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.375rem;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
     }
 
     .meta-text {
@@ -924,8 +967,16 @@ export class ScionPageAdminQuotas extends LitElement {
   private renderLimitRow(limit: LimitDefinition) {
     const activeCount = this.usageSummary.get(limit.id) ?? 0;
     const isExpanded = this.expandedLimitId === limit.id;
+    // max_agents_per_broker's activeCount is a sum across every broker
+    // (ptone/scion#2061 P2.2), while defaultValue is the *per-broker* cap —
+    // dividing one by the other (e.g. "36 / 30" for three brokers at 12
+    // each) reads as a breached quota when no single broker is near its
+    // cap, and ignores per-broker overrides/entitlements entirely. Render
+    // just the count for this one limit; the per-broker expansion below
+    // still shows each broker's real effective cap and source.
+    const isPerBrokerLimit = limit.name === 'max_agents_per_broker';
     const pct =
-      limit.defaultValue > 0
+      !isPerBrokerLimit && limit.defaultValue > 0
         ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
         : 0;
 
@@ -956,10 +1007,21 @@ export class ScionPageAdminQuotas extends LitElement {
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            <span>${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span>
-            ${limit.defaultValue > 0
-              ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
-              : nothing}
+            ${isPerBrokerLimit
+              ? html`
+                  <span>${activeCount}</span>
+                  <span class="meta-text" style="font-size: 0.75rem"
+                    >across all brokers; cap is per broker</span
+                  >
+                `
+              : html`
+                  <span
+                    >${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span
+                  >
+                  ${limit.defaultValue > 0
+                    ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
+                    : nothing}
+                `}
           </div>
         </td>
         <td class="hide-mobile">
@@ -1094,6 +1156,39 @@ export class ScionPageAdminQuotas extends LitElement {
                             <div class="meta-text" style="font-size: 0.75rem">
                               Resource: <span class="mono">${r.resourceId}</span>
                             </div>
+                            ${r.brokerAgentLimitSource
+                              ? html`
+                                  <div class="meta-text" style="font-size: 0.75rem">
+                                    Broker cap:
+                                    <span class="mono"
+                                      >${r.brokerAgentLimit != null
+                                        ? this.formatValue(r.brokerAgentLimit)
+                                        : 'unlimited'}</span
+                                    >
+                                    <!-- Defensive: brokerAgentLimitSource is
+                                    "unlimited" only when no limit definition
+                                    or quota service is configured hub-wide,
+                                    a state this reservation (which requires
+                                    quota enforcement to have run) can't
+                                    actually reach — kept to avoid ever
+                                    rendering the redundant "(unlimited)".
+                                    "not_enforced" is suppressed here too: the
+                                    ".not-enforced-marker" pill below already
+                                    says "not enforced", so showing the raw
+                                    "(not_enforced)" token alongside it would
+                                    render the same fact twice. -->
+                                    ${r.brokerAgentLimitSource === 'unlimited' ||
+                                    r.brokerAgentLimitSource === 'not_enforced'
+                                      ? nothing
+                                      : html`<span title="Precedence source"
+                                          >(${r.brokerAgentLimitSource})</span
+                                        >`}
+                                    ${r.brokerAgentLimitSource === 'not_enforced'
+                                      ? html`<span class="not-enforced-marker">not enforced</span>`
+                                      : nothing}
+                                  </div>
+                                `
+                              : nothing}
                           </div>
                         `
                       )}

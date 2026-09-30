@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 const (
@@ -74,7 +75,13 @@ func NewInProcessEventBus(log *slog.Logger) *InProcessEventBus {
 }
 
 // Publish sends a message to all subscribers whose patterns match the topic.
-// Publishing is non-blocking: messages are dropped if a subscriber's buffer is full.
+// Publishing is non-blocking: messages are dropped if a subscriber's buffer
+// is full. For user-message topics (see isUserMessageTopic), a drop is
+// reported to the caller as ErrSubscriberBufferFull instead of being
+// silently swallowed, because nothing else re-delivers or surfaces the loss
+// of a user message (ptone/scion#2311). Every other topic keeps the
+// historical fire-and-forget behaviour: the drop is logged and Publish
+// still returns nil.
 func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -84,6 +91,8 @@ func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *mess
 	}
 
 	pm := publishedMessage{ctx: ctx, topic: topic, msg: msg}
+	reportDrop := isUserMessageTopic(topic)
+	var dropped bool
 
 	for _, sub := range b.subscribers {
 		if subjectMatchesPattern(sub.pattern, topic) {
@@ -92,11 +101,25 @@ func (b *InProcessEventBus) Publish(ctx context.Context, topic string, msg *mess
 			default:
 				b.log.Warn("Message dropped: subscriber buffer full",
 					"pattern", sub.pattern, "topic", topic)
+				dropped = true
 			}
 		}
 	}
 
+	if dropped && reportDrop {
+		return ErrSubscriberBufferFull
+	}
+
 	return nil
+}
+
+// isUserMessageTopic reports whether topic addresses a user-message topic
+// (projectkeys.TopicKindUser), e.g. "scion.project.<id>.user.<userId>.messages".
+// ParseTopic returns Topic by value, so a nil check on t is neither needed
+// nor possible: err == nil already guarantees a valid Topic with Kind set.
+func isUserMessageTopic(topic string) bool {
+	t, err := projectkeys.ParseTopic(topic)
+	return err == nil && t.Kind == projectkeys.TopicKindUser
 }
 
 // Subscribe registers a handler for messages matching the given pattern.

@@ -578,3 +578,46 @@ func TestConcurrentPropagation(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestSubscription_ExperimentsPropagatedAcrossReplicas exercises the
+// existing LISTEN/NOTIFY-style propagation path for the new "experiments"
+// section (ptone/scion#2217): a subscription-triggered Refresh must make a
+// write committed by another replica resolvable through the normal read
+// path, with no section-specific propagation code of its own.
+func TestSubscription_ExperimentsPropagatedAcrossReplicas(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeEP := newFakeEventPublisher()
+
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	ops.SetEventPublisher(fakeEP)
+	_, _ = ops.Refresh(context.Background())
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ops.StartPropagation(ctx, srv)
+	defer ops.StopPropagation()
+
+	if !srv.experimentEnabled("web.terminal_workspace") {
+		t.Fatal("expected web.terminal_workspace=true (registry default) before any write")
+	}
+
+	// Another replica writes an override directly through the store.
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`))
+	fakeEP.injectEvent(settingsUpdatedSubject, SettingsUpdatedEvent{Section: "experiments", Revision: 1})
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the experiments override to propagate")
+		default:
+		}
+		if !srv.experimentEnabled("web.terminal_workspace") {
+			return // success
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

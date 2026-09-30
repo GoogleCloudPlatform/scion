@@ -627,11 +627,29 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
 	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
+}
+
+// logCommandFailure logs a failed command's combined stdout/stderr, unless
+// ctx is marked via WithSensitiveExec — in which case the output is omitted
+// (never even truncated or hashed) because it may carry caller-supplied
+// content that must not reach logs at all. The command name, argument count
+// and duration are always logged regardless: only the output value itself is
+// sensitive. See WithSensitiveExec's doc comment for why this suppression
+// must live here rather than only at the broker layer.
+func logCommandFailure(ctx context.Context, command string, argc int, elapsed time.Duration, out []byte) {
+	if IsSensitiveExec(ctx) {
+		// No "output" key at all — matches this function's doc comment
+		// ("omitted"), not a placeholder value that would still need its own
+		// audit for leaking anything.
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
+		return
+	}
+	runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
 }
 
 // runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
@@ -648,7 +666,7 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
 	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
