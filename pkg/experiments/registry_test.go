@@ -134,8 +134,8 @@ func TestHasLayerAndStableOrder(t *testing.T) {
 
 // TestAll_ReturnsIndependentCopies proves that mutating a slice returned by
 // All(), or a Layers slice passed into NewRegistry, cannot reach the
-// Registry's internal state (design invariant: immutable, no shared mutable
-// state).
+// Registry's internal state: the Registry is immutable and shares no
+// mutable state with its callers (ptone/scion#2217).
 func TestAll_ReturnsIndependentCopies(t *testing.T) {
 	layers := []Layer{LayerWeb}
 	r, err := NewRegistry([]Experiment{valid("web.a", layers...)}, nil)

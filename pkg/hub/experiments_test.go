@@ -228,10 +228,10 @@ func TestRequireExperiment_PanicsAtRegistration(t *testing.T) {
 // TestRefreshMalformedPredicateMatchesParseExperimentsDoc proves that the
 // real Refresh ingest path -- not a second, in-test copy of the predicate --
 // agrees with opsettings.ParseExperimentsDoc on the shared document table
-// (design's "ParseExperimentsDoc applies exactly the Refresh/Update
-// predicate"). It reads the cached sectionState.Malformed directly (not
-// through ExperimentsSnapshot, which re-parses and would hide a disagreement
-// between Refresh's ingest-time check and ParseExperimentsDoc).
+// ("ParseExperimentsDoc applies exactly the Refresh/Update predicate";
+// ptone/scion#2217). It reads the cached sectionState.Malformed directly
+// (not through ExperimentsSnapshot, which re-parses and would hide a
+// disagreement between Refresh's ingest-time check and ParseExperimentsDoc).
 //
 // Only the Refresh side needs this table: Update rejects a schema-invalid
 // document (including a non-boolean override value) in opsettings.Validate
@@ -372,14 +372,14 @@ func TestReadAuthoritativeExperiments(t *testing.T) {
 }
 
 // assertOverrides checks that got is non-nil and holds exactly the entries
-// of want. Every caller in this file expects a non-nil map (§3.3: absent or
-// malformed still means "{}", not nil), because 1a-ii's PUT merges the
-// request onto ReadAuthoritativeExperiments().Overrides and a nil map there
-// panics on the first write to a hub with no row.
+// of want. Every caller in this file expects a non-nil map (absent or
+// malformed still means "{}", not nil; ptone/scion#2217), because 1a-ii's
+// PUT merges the request onto ReadAuthoritativeExperiments().Overrides and a
+// nil map there panics on the first write to a hub with no row.
 func assertOverrides(t *testing.T, got, want map[string]bool) {
 	t.Helper()
 	if got == nil {
-		t.Fatalf("Overrides is nil, want a non-nil map (got %v)", want)
+		t.Fatalf("Overrides is nil, want non-nil map %v", want)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("Overrides = %v, want %v", got, want)
