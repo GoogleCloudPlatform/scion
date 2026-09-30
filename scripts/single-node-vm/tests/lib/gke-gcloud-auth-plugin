@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# scripts/single-node-vm/tests/lib/gke-gcloud-auth-plugin — a fake GKE
+# auth plugin, present on PATH purely so hybrid_k8s_setup_kubeconfig's
+# `command -v gke-gcloud-auth-plugin` preflight finds something. The
+# stub `gcloud`'s own `container clusters get-credentials` handler never
+# actually shells out to this, so its body is never exercised -- only
+# its presence on PATH matters.
+exit 0
