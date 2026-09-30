@@ -761,6 +761,31 @@ class TestTomlEnteringArrayDepths(unittest.TestCase):
         self.assertEqual(depths[3], 0)
         self.assertTrue(sh.is_toml_table_header(lines[3], depths[3]))
 
+    def test_escaped_closing_delimiter_on_the_opening_line_does_not_close_early(self):
+        # ptone/scion#2427 review round 4 (R4-1): the round-2 escape fix
+        # only applied to the state-scan branch used for lines that start
+        # *already inside* an open string. The opening branch (a line that
+        # starts outside any string and opens one) searched for the closing
+        # delimiter with a separate, non-escape-aware `line.find`, so an
+        # escaped closing-delimiter sequence on the *same line that opens
+        # the string* still closed it early — the identical bug Consider 2
+        # closed for every other line, just not this one. Fixed by having
+        # the opening branch hand off to the escape-aware state-scan branch
+        # instead of duplicating the search.
+        lines = [
+            'a = """foo \\""" bar',
+            "[fake]",
+            '"""',
+            "[cli]",
+            "x = 1",
+        ]
+        depths = sh.toml_entering_array_depths(lines)
+        self.assertEqual(depths, [0, sh._TOML_IN_MULTILINE_STRING, sh._TOML_IN_MULTILINE_STRING, 0, 0])
+        result = sh.strip_toml_sections("\n".join(lines) + "\n", lambda h: h == "[cli]")
+        data = tomllib.loads(result)
+        self.assertNotIn("cli", data)
+        self.assertEqual(data["a"], 'foo """ bar\n[fake]\n')
+
 
 class TestIsTomlTableHeader(unittest.TestCase):
     def test_recognizes_simple_header_at_depth_zero(self):

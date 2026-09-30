@@ -1013,6 +1013,18 @@ def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | No
     all in TOML, so no such handling applies there — a `'''` can never
     legally appear in a literal multi-line string's body at all, escaped or
     not.
+
+    There is exactly one place in this function that ever searches for a
+    closing delimiter (`\"\"\"` or `'''`) — the state-scan branch just
+    above, which every opening delimiter hands off to immediately (setting
+    `state` and looping back around) rather than also searching for its
+    own closer. An earlier version had a second, non-escape-aware search
+    in the opening branch for a delimiter closing on the *same* line —
+    correct for `'''` (no escapes to consider) but wrong for `\"\"\"`,
+    since an escaped closing-delimiter sequence on that same line closed
+    the string early exactly as it did before "Consider 2", just one line
+    earlier than that fix covered (ptone/scion#2427 review round 4,
+    "R4-1").
     """
     out: list[str] = []
     i, n = 0, len(line)
@@ -1045,12 +1057,18 @@ def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | No
         if ch == "#":
             break
         if line[i:i + 3] in ('"""', "'''"):
-            delim = line[i:i + 3]
-            j = line.find(delim, i + 3)
-            if j == -1:
-                state = delim
-                break
-            i = j + 3
+            # Hand off to the state-scan branch above (loop back around)
+            # rather than searching for the closing delimiter here too: a
+            # second, non-escape-aware search here closed an escaped
+            # closing-delimiter sequence early when it appeared on the same
+            # line that opened the string (ptone/scion#2427 review round 4,
+            # R4-1) — the exact bug the state-scan branch was already
+            # hardened against for a string that opened on an *earlier*
+            # line. Falling through instead of duplicating the search means
+            # there is only one place that ever looks for a `"""` closing
+            # delimiter, and it's the escape-aware one.
+            state = line[i:i + 3]
+            i += 3
             continue
         if ch == '"':
             j = i + 1
