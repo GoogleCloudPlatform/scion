@@ -226,23 +226,30 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // (start, stop, restart, delete, exec, message, logs, list) writes to its
 // client on failure: op names the operation in the fixed message (e.g.
 // "stop agent", "list agents"), never anything about the specific agent,
-// runtime, or backend involved. writeRuntimeOpError is the one caller that
-// should ever reach for this directly; every runtime-op handler goes
-// through it instead of calling runtimeOpError/RuntimeError itself, so raw
-// err is never silently discarded on any of these paths.
+// runtime, or backend involved. writeRuntimeOpError is the preferred caller
+// for this; createAgent, the start/restart Manager.Start failure branches,
+// and the stop handler's record-less-probe branch (handlers.go) call
+// runtimeOpError/RuntimeError directly instead, each with its own inline
+// log call (and, for create/start, its own span.SetStatus) rather than
+// going through writeRuntimeOpError — raw err still always reaches the
+// log on every path, just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
 }
 
-// writeRuntimeOpError is the single call every runtime-op handler (start,
-// stop, restart, delete, exec, message, logs, list) makes on failure: it
-// logs err at scope op (plus any extra key/value pairs the caller has on
-// hand — an agent or project ID, for instance) via s.agentLifecycleLog,
-// records err on ctx's active span (trace.SpanFromContext(ctx) is a
-// documented no-op when ctx carries none, so this is always safe to call),
-// and writes the fixed, identity-free response body runtimeOpError builds.
-// Every runtime-op handler routes through this one call, so err always
-// reaches the server's own log and span, never just the client's opaque
+// writeRuntimeOpError is the call most runtime-op handlers (start, stop,
+// restart, delete, exec, message, logs, list) make on failure: it logs err
+// at scope op (plus any extra key/value pairs the caller has on hand — an
+// agent or project ID, for instance) via s.agentLifecycleLog, records err on
+// ctx's active span (trace.SpanFromContext(ctx) is a documented no-op when
+// ctx carries none, so this is always safe to call), and writes the fixed,
+// identity-free response body runtimeOpError builds.
+//
+// Not every runtime-op failure path routes through this one call — see
+// runtimeOpError's own doc comment for the create/start/restart/stop sites
+// that log and (mostly) set span status inline instead — but every one of
+// them still logs err before building the fixed response body, so err
+// always reaches the server's own log, never just the client's opaque
 // "Failed to <op>" message.
 //
 // Never call this with a *startContextError: that type carries its own

@@ -214,11 +214,11 @@ func pathPrefixes(dir string) []string {
 	return prefixes
 }
 
-// redactErr returns err's message unless it looks like it might carry file
-// contents (which could be secret material). Bootstrap file errors here are
-// always structural (bad path, bad base64, mkdir/write failure) and never
-// include content_b64 or decoded bytes, so this currently just documents
-// that invariant rather than performing scrubbing. Kept as a named seam so
-// future error paths added here must be checked against the same "no
-// secrets in logs or errors" requirement (substrate-runtime.md §6).
+// redactErr returns err unchanged. Bootstrap file errors here are always
+// structural (bad path, bad base64, mkdir/write failure) and never include
+// content_b64 or decoded bytes, so there is nothing to scrub today — this is
+// a named seam documenting that invariant, so a future error path added here
+// must be checked against the same "no secrets in logs or errors"
+// requirement (substrate-runtime.md §6) before it can pass straight through
+// like every existing one does.
 func redactErr(err error) error { return err }

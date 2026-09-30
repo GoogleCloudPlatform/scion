@@ -709,9 +709,10 @@ script itself stays root-owned and trusted — that classification still proves
 it is the genuine, broker-delivered file — but what it execs
 (`sciontool harness provision`, and in turn the harness's own `provision.py`)
 reads and writes `$HOME` and `/workspace`, both fully workload-controlled, so
-running it as root was never actually safe even under the "before the
-workload exists" premise: `$HOME` and `/workspace` are exactly the paths that
-premise is about. Because this drop does not depend on $HOME being fresh, it
+the "before the workload exists" premise that lets other root-owned hooks
+run safely does not apply here: `$HOME` and `/workspace` are exactly the
+paths that premise is about, so this step must drop privilege regardless of
+it. Because this drop does not depend on $HOME being fresh, it
 is unconditionally safe under a resume/re-bootstrap over a persisted `$HOME`
 too, unlike the project/hub hook case §11 still tracks.
 
@@ -993,8 +994,9 @@ every runtime — not a substrate-specific mechanism:
   project directory (file-only target), and a stop whose own container
   lookup errored rather than a genuine not-found, both of which fail
   closed with an explicit error rather than the idempotent path they would
-  otherwise fall back to (§9) — the actor is not touched either way, but the
-  caller is no longer told it is gone when it isn't. A record-less actor
+  otherwise fall back to (§9) — the actor is not touched either way, and the
+  caller is told the actor may still exist rather than being told it is
+  gone. A record-less actor
   already in `ACTOR_STATE_DELETING` is one of two exceptions (the other: a
   second substrate profile on a different ateapi endpoint, not probed until
   its first `Run`): it is never counted, so an ordinary same-project
@@ -1108,7 +1110,7 @@ every runtime — not a substrate-specific mechanism:
   a chance to write into. Revisit the exception (e.g. by having the bootstrap
   redirect's clear step report whether it found prior content, and treating
   that as "a workload may already have run here") before any such mechanism
-  ships. The harness provisioner no longer shares this exposure: it runs
+  ships. The harness provisioner does not share this exposure: it runs
   under the workload's own uid/gid regardless of `$HOME`'s freshness (§8.1),
   so a resume/re-bootstrap over a persisted `$HOME` cannot turn it into a
   root write against workload-controlled content the way it still could for

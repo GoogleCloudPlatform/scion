@@ -235,19 +235,21 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 // not buildBootstrapEnv's output either:
 //
 //   - externalEnvValues only covers cfg.Env and Harness.GetEnv(), and
-//     cross-checks against a final env map — it silently has no coverage
-//     for ResolvedAuth.EnvVars or ResolvedSecrets at all, which is exactly
-//     what let real secret values reach an unredacted error.
+//     cross-checks against a final env map — it has no coverage for
+//     ResolvedAuth.EnvVars or ResolvedSecrets at all, so it must not be
+//     treated as a substitute for this function.
 //   - buildBootstrapEnv's output isn't reusable as-is either: it adds
 //     SCION_RUNTIME=substrate, a runtime-synthesised constant that is also
 //     a substring of every one of this runtime's own error-message
 //     prefixes ("substrate: ..."). Feeding that into redactEnvValues (a
 //     blunt substring replace over the whole error text) would rewrite
 //     "substrate" everywhere it appears, corrupting unrelated error
-//     messages. If buildBootstrapEnv or this function ever gains another
-//     synthesised constant, keep mirroring the *external* sources here
-//     rather than importing the other function's whole output, so this bug
-//     class can't recur silently.
+//     messages. This function must mirror every *external* source itself,
+//     rather than importing another function's whole output — importing
+//     buildBootstrapEnv's output, or any future function that gains its own
+//     synthesised constant, reaches only whatever that function happens to
+//     cover, and secret values from any source it doesn't mirror reach
+//     error text unredacted.
 func substrateSecretCandidates(cfg RunConfig) map[string]string {
 	secrets := make(map[string]string)
 	// add keys by "<source>:<name>" rather than bare name. Two different

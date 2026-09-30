@@ -506,9 +506,8 @@ func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) in
 // command (bounded by its own timeout_s, up to maxExecTimeout = 10 minutes —
 // pkg/sciontool/substrate/exec.go) before writing any response, so a
 // WriteTimeout shorter than that would sever a legitimate long-running
-// exec's response after the command already completed, and one longer than
-// it would guard nothing WriteTimeout doesn't already leave exposed for
-// slow response writes.
+// exec's response after the command already completed; no single
+// WriteTimeout fits every route.
 func newSubstrateHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
