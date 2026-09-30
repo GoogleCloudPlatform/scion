@@ -299,8 +299,9 @@ Key points, restated because they are easy to get backwards:
   registry entry from `agent.message` (`registry.go:133`, `CapabilityKind: CapabilityScope`, no
   `AgentScopes`); granting one never grants the other. `agent.attach`'s `Enforcement` list
   currently reads `["pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"]`;
-  task 2.1 must append `"pkg/hub/authorize.go:authorizeAgentKeys"` to that list when it lands, so
-  the registry stays an accurate index of what enforces each permission.
+  task 2.1 must append `"pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"` to that list when it
+  lands (the file `authorizeAgentKeys` is actually defined in), so the registry stays an accurate
+  index of what enforces each permission.
 - CLI-side project resolution must honor the selected project: resolve a unique target within it,
   never pass an empty scope that could select a same-named agent from a different project.
   Projects without a Hub ID use the existing local project identity/filter; ambiguous resolution
@@ -337,6 +338,23 @@ Key points, restated because they are easy to get backwards:
      route specifically, no target-agent lookup of any kind, successful or not, may precede or be
      required by this comparison** (AK-21c).
   5. `authorizeAgentKeys` runs only after 1-4 pass.
+
+  **Phase-boundary clarification (design-owner ruling, recorded on ptone/scion#2195):** 2.1 owns and
+  implements now, on both route shapes with real route/store-spy tests: invariant 1 (authentication
+  precedes everything), invariant 4 (the project-boundary refusal decided before any target-agent
+  lookup on the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after invariants
+  1 and 4 pass — 2 and 3 are 2.2's), and invariant 3's *non-operation-ID* half — a resolution miss
+  must use keys' own `not_found` shape, not the other resolver's. 2.1 does **not** implement
+  invariant 2 (`ValidateBody`) and does not read the request body at all; invariant 3's
+  *operation-ID* half presupposes that validation having already run, so 2.1's routing seam may
+  emit its temporary, sanitized denials (`keys_denied`, `cross_project_keys_unsupported`,
+  keys-shaped `not_found`) **without** an operation ID — never a synthesized placeholder or an ID
+  minted ahead of validation. The success path stays non-executing (no dispatch case exists yet, so
+  it falls through to the existing generic "unknown action" 404). 2.2 (ptone/scion#2196) must
+  replace this seam wholesale, not layer on top of it: `ValidateBody` → mint one real operation ID →
+  2.1's already-established ordering/resolution behavior → `authorizeAgentKeys` → remaining
+  admission/dispatch, so every outcome from validation onward carries the real ID, matching
+  invariant 3 in full.
 
   **Top-level route (T), verified consistent with these invariants today:**
   `handlers_agents_core.go`'s `set_message_mode`/`reincarnate`/`message` special cases (`:2936`,
@@ -1432,6 +1450,10 @@ Dispatcher`); 2.3 follows 2.2 and 0.2 (owns the message-handler cutover using th
 §6.1); client owner → 3.1 (hubclient + CLI `keys`/alias, including the `cmd/keys.go` help-text fix
 from §2.3); docs/inventory owner → 3.2. Phase 5 (relationship-authorization integration) stays
 explicitly deferred pending #2119/#2120.
+
+**Phase boundary between 2.1 and 2.2:** see §3's "Phase-boundary clarification" paragraph for the
+normative text (what 2.1 implements now vs. what 2.2 must add) and ptone/scion#2196 for 2.2's
+integration obligation in full. Kept in one place to avoid the two copies drifting.
 
 ## 11. Retirement gate and master-body decision record (AC4)
 

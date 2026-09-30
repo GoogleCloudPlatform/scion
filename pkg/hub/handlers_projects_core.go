@@ -2419,6 +2419,56 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
+	// --- Keys action: routed through authorizeAgentKeys (contract §3.1) ---
+	// The agent-credential cross-project refusal must be decided before any
+	// agent-target lookup on this route (invariant 4, AK-21c): compare the
+	// caller's own project against the already-resolved {project} ID first,
+	// so a foreign agent identity never causes (or requires) a lookup for a
+	// same-slug agent that might exist in the URL's project. Only once that
+	// passes do we resolve the target, using the same canonical
+	// resolveProjectAgent the logs/cloud-logs/message-logs branches above
+	// already use, so a store failure surfaces as a generic 5xx via
+	// writeErrorFromErr rather than being collapsed into a misleading
+	// "agent does not exist" 404. A store.ErrNotFound miss is reported as
+	// keys' own "not_found" (invariant 3), not the shared resolution
+	// block's agent_not_found/{agent_slug,project_id} shape a few lines
+	// below, which is specific to every other (non-keys) action on this
+	// route.
+	//
+	// No separate nil-identity guard: authorizeAgentKeys already fails
+	// closed (keys_denied) on a nil identity, and the shared auth
+	// middleware answers an unauthenticated request with 401 before this
+	// handler ever runs -- an extra guard here would either be dead code
+	// or, placed after resolution, let an (unreachable) unauthenticated
+	// caller learn whether the agent exists before being refused.
+	if action == api.AgentActionKeys {
+		if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
+			writeAgentKeysAuthzDenial(w, *denial)
+			return
+		}
+		agent, err := s.resolveProjectAgent(ctx, projectID, agentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				NotFound(w, "Agent")
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		decision := s.authorizeAgentKeys(r, agent)
+		if !decision.Allowed {
+			writeAgentKeysAuthzDenial(w, decision)
+			return
+		}
+		// Task 2.2 adds the real handler; until then, an authorized call
+		// still 404s here, matching the two switches' shared
+		// `default: NotFound(w, "Action")` below for every other
+		// not-yet-implemented action on this route — not because it was
+		// denied.
+		NotFound(w, "Action")
+		return
+	}
+
 	// Resolve agent ID
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
