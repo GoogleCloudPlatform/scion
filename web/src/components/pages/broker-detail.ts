@@ -818,6 +818,13 @@ export class ScionPageBrokerDetail extends LitElement {
    * moment they're deciding whether to clear the override, named by its
    * actual source (hub default vs. entitlement), with 0 shown as
    * "unlimited" rather than the bare number. */
+  private inheritedRadioLabel(inherited: InheritedSetting): string {
+    if (inherited.value === null) return 'Use hub default';
+    const value = inherited.value === 0 ? 'unlimited' : String(inherited.value);
+    const sourceName = inherited.source === 'entitlement' ? 'entitlement default' : 'hub default';
+    return `Use ${sourceName} (${value})`;
+  }
+
   /** Whether the current form state would fail saveBrokerSettings's
    * validation (review round 4, F1) — used to disable Save proactively
    * rather than relying solely on the post-click rejection. */
@@ -827,13 +834,6 @@ export class ScionPageBrokerDetail extends LitElement {
     if (raw === '') return true;
     const parsed = Number(raw);
     return !Number.isInteger(parsed) || parsed < 0;
-  }
-
-  private inheritedRadioLabel(inherited: InheritedSetting): string {
-    if (inherited.value === null) return 'Use hub default';
-    const value = inherited.value === 0 ? 'unlimited' : String(inherited.value);
-    const sourceName = inherited.source === 'entitlement' ? 'entitlement default' : 'hub default';
-    return `Use ${sourceName} (${value})`;
   }
 
   /** Syncs the radio/number-input form state from the loaded settings
@@ -971,7 +971,9 @@ export class ScionPageBrokerDetail extends LitElement {
                   style="max-width: 8rem; margin-top: 0.5rem;"
                   .value=${this.brokerSettingsCustomValue}
                   ?disabled=${!canEdit || this.brokerSettingsSaving}
-                  help-text="0 means unlimited"
+                  help-text=${this.customValueInvalid
+                    ? 'Enter a whole number 0 or greater to enable Save (0 means unlimited)'
+                    : '0 means unlimited'}
                   @sl-input=${(e: Event) => {
                     this.brokerSettingsCustomValue = (e.target as HTMLInputElement).value;
                   }}
