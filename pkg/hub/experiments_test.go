@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -224,6 +225,57 @@ func TestRequireExperiment_PanicsAtRegistration(t *testing.T) {
 	}
 }
 
+// TestRefreshMalformedPredicateMatchesParseExperimentsDoc proves that the
+// real Refresh ingest path -- not a second, in-test copy of the predicate --
+// agrees with opsettings.ParseExperimentsDoc on the shared document table
+// (design's "ParseExperimentsDoc applies exactly the Refresh/Update
+// predicate"). It reads the cached sectionState.Malformed directly (not
+// through ExperimentsSnapshot, which re-parses and would hide a disagreement
+// between Refresh's ingest-time check and ParseExperimentsDoc).
+func TestRefreshMalformedPredicateMatchesParseExperimentsDoc(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"valid with overrides", `{"overrides":{"hub.test_gate":false}}`},
+		{"valid empty object", `{}`},
+		{"invalid json", `not json`},
+		{"non-boolean override value", `{"overrides":{"hub.test_gate":"nope"}}`},
+		{"parseable doc with extra top-level key", `{"overrides":{},"unexpected":true}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeStore := newFakeHubSettingStore()
+			fakeStore.seed("experiments", json.RawMessage(tt.raw))
+			ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+
+			ops.mu.RLock()
+			cachedMalformed := ops.cache["experiments"].Malformed
+			ops.mu.RUnlock()
+
+			_, wantMalformed := opsettings.ParseExperimentsDoc(json.RawMessage(tt.raw))
+			if cachedMalformed != wantMalformed {
+				t.Errorf("Refresh cached Malformed=%v, opsettings.ParseExperimentsDoc malformed=%v", cachedMalformed, wantMalformed)
+			}
+		})
+	}
+}
+
+// TestExperimentEnabled_NonBooleanOverrideValueResolvesOff exercises the real
+// Refresh path (not a synthetic ExperimentsSnapshot) with a row whose bytes
+// are valid JSON but whose override value is not a boolean. Refresh's
+// sec.New() type check catches this and caches the section as malformed;
+// hub.test_gate has LayerServer, so the malformed-row policy resolves it OFF.
+func TestExperimentEnabled_NonBooleanOverrideValueResolvesOff(t *testing.T) {
+	srv, _ := serverWithExperimentsDoc(t, `{"overrides":{"hub.test_gate":"nope"}}`)
+	if srv.experimentEnabled("hub.test_gate") {
+		t.Error("hub.test_gate must resolve OFF when the stored row has a non-boolean override value")
+	}
+}
+
 // --- ExperimentsSnapshot / ReadAuthoritativeExperiments ---
 
 // testUpdatedAt is a fixed, non-zero timestamp used to prove that
@@ -315,10 +367,16 @@ func TestReadAuthoritativeExperiments(t *testing.T) {
 	}
 }
 
-// assertOverrides checks that got holds exactly the entries of want (both
-// nil-safe: a nil got is only acceptable when want is also empty).
+// assertOverrides checks that got is non-nil and holds exactly the entries
+// of want. Every caller in this file expects a non-nil map (§3.3: absent or
+// malformed still means "{}", not nil), because 1a-ii's PUT merges the
+// request onto ReadAuthoritativeExperiments().Overrides and a nil map there
+// panics on the first write to a hub with no row.
 func assertOverrides(t *testing.T, got, want map[string]bool) {
 	t.Helper()
+	if got == nil {
+		t.Fatalf("Overrides is nil, want a non-nil map (got %v)", want)
+	}
 	if len(got) != len(want) {
 		t.Fatalf("Overrides = %v, want %v", got, want)
 	}

@@ -51,15 +51,16 @@ per §7.
 
 ## Deviations from the initial draft
 
-- Trimmed the first pass of tests (originally ~1,230 changed lines) toward
-  the M-size target by consolidating several single-assertion tests into
-  table-driven tests (`TestExperimentEnabledIn_Resolution`,
-  `TestExperimentsSnapshot`, `TestReadAuthoritativeExperiments`,
-  `TestNewRegistry_InvariantViolations`). Final diff is ~1,114 lines, still
-  above the ~450–600 target — the §9/§10 rows assigned to 1a-i cover a wide
-  matrix (registry invariants ×10, malformed-row policy, snapshot/read-result
-  ×3 each, requireExperiment ×5) and I did not cut coverage to hit the
-  number.
+- Trimmed the first pass of tests toward the M-size target by consolidating
+  several single-assertion tests into table-driven tests
+  (`TestExperimentEnabledIn_Resolution`, `TestExperimentsSnapshot`,
+  `TestReadAuthoritativeExperiments`, `TestNewRegistry_InvariantViolations`).
+  The diff still ends up above the ~450–600 target — the §9/§10 rows assigned
+  to 1a-i cover a wide matrix (registry invariants, the malformed-row policy,
+  snapshot/read-result cases, `requireExperiment`'s gate and panic behaviors)
+  plus two review rounds' worth of added coverage, and I did not cut coverage
+  to hit the number. See the PR diff stat for the current size rather than a
+  count here, which would go stale on the next push.
 
 ## Verification
 
