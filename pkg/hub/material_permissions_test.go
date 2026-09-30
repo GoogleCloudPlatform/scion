@@ -329,18 +329,21 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 	}
 }
 
-// TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation pins
-// the deliver rule: *.deliver is admitted only for the internal
-// hub-delivery credential (ptone/scion#2228), never for an agent JWT or any
-// other credential kind, and a role holding *.deliver never substitutes for
-// the association, progeny or skill-default grant required for the
-// selected item. Super-admin holds every registry permission, including
+// TestMaterialPermissions_SuperAdminHoldsDeliverButGateDenies pins the
+// deliver rule: *.deliver is admitted only for the internal hub-delivery
+// credential (ptone/scion#2228), never for an agent JWT or any other
+// credential kind, and a role holding *.deliver never substitutes for the
+// association, progeny or skill-default grant required for the selected
+// item. Super-admin holds every registry permission, including
 // secret.deliver, through allPermissionIDs, and is denied secret.deliver on
 // an interactive credential by the delivery credential gate. The positive
 // control shows the same super-admin, built from a real identity, admitted
 // for an ordinary permission (project.update), so the principal itself is
-// not the reason for the deny.
-func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testing.T) {
+// not the reason for the deny. The association half of the rule is pinned
+// separately by the skipped
+// TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant, since the gate
+// denies here before any grant stage runs.
+func TestMaterialPermissions_SuperAdminHoldsDeliverButGateDenies(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 
