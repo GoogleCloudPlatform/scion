@@ -466,7 +466,10 @@ var Catalog = []OperationSpec{
 		Domain:      "group",
 		Description: "Remove a member from a group",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{memberId}", Method: "DELETE"},
+			// handleGroupMemberByID (handlers_groups.go) requires the
+			// member type ("user", "group", or "agent") as its own path
+			// segment before the member ID.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -739,7 +742,15 @@ var Catalog = []OperationSpec{
 		Domain:      "gcp.identity",
 		Description: "Assign a GCP service account to an agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts/{id}/assign", Method: "POST"},
+			// There is no standalone "/assign" HTTP route: handleGCPServiceAccountByID
+			// (handlers_gcp_identity_scoped.go) only recognizes the "verify"
+			// action; any other action, including "assign", returns 404.
+			// The assign check (authorizeSAAssignment, ActionAssign on the
+			// gcp_service_account resource) is dispatched inline, from the
+			// GCPMetadataModeAssign branch of agent create and agent update,
+			// when the request body sets metadata_mode: "assign".
+			{Kind: EntryPointInternalDispatch, Pattern: "createAgentInProject:gcp-identity-assign"},
+			{Kind: EntryPointInternalDispatch, Pattern: "applyAgentUpdate:gcp-identity-assign"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -905,7 +916,10 @@ var Catalog = []OperationSpec{
 		Domain:      "agent.message",
 		Description: "Send a message to an agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads/{id}/messages", Method: "POST"},
+			// "/api/v1/chat/threads/{id}/messages" was never a registered
+			// route (handleChatThreadRoutes, handlers_chat.go, only accepts
+			// POST .../{agentId}/read); there is no live HTTP entry point
+			// for this operation today, only the broker-call path below.
 			{Kind: EntryPointBrokerCall, Pattern: "broker.inbound"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
@@ -992,7 +1006,8 @@ var Catalog = []OperationSpec{
 		Domain:      "secret",
 		Description: "Create or update project secrets",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets", Method: "POST"},
+			// handleSecrets (handlers_env_secrets.go) is GET-only (list);
+			// create-or-update and delete are both on the by-key route.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "DELETE"},
 		},
@@ -1154,7 +1169,14 @@ var Catalog = []OperationSpec{
 		Domain:      "hub",
 		Description: "Update server configuration sections",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/sections/{id}", Method: "PUT"},
+			// handleAdminServerConfig (admin_settings.go) accepts PUT,
+			// PATCH, and POST on the bare server-config resource.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config", Method: "PUT"},
+			// handleAdminServerConfigSectionReset (admin_settings.go) is a
+			// second, DELETE-only entry point on the same permission
+			// (route_metadata.go: admin.serverConfig.sections.byId) that
+			// resets one managed section to its bootstrap material.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/server-config/sections/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1189,12 +1211,17 @@ var Catalog = []OperationSpec{
 		Domain:      "hub",
 		Description: "Execute maintenance operations including migrations and restarts",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations", Method: "POST"},
+			// handleAdminMaintenanceOps (admin_maintenance.go): bare
+			// "/operations" and "/operations/{id}" are GET-only (list and
+			// get); execution is "/operations/{id}/run", POST-only.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/operations/{id}/run", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/restart", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/check-updates", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/migrations/{id}", Method: "POST"},
+			// handleAdminMaintenanceMigrations (admin_maintenance.go) only
+			// accepts "/migrations/{id}/run", not a bare "/migrations/{id}".
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/migrations/{id}/run", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "DELETE"},
 		},
@@ -1230,9 +1257,11 @@ var Catalog = []OperationSpec{
 		Domain:      "hub",
 		Description: "Manage the platform email allow list",
 		EntryPoints: []EntryPoint{
+			// handleAdminAllowList (admin_allow_list.go) accepts GET and
+			// POST (add), not PUT. handleAdminAllowListByEmail is
+			// DELETE-only; there is no PUT on the by-email route.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/{email}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/{email}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -1345,7 +1374,8 @@ var Catalog = []OperationSpec{
 		Domain:      "hub",
 		Description: "Validate resource definitions against schema",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/validate-resources", Method: "POST"},
+			// handleAdminValidateResources (admin_validate.go) is GET-only.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/validate-resources", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1525,7 +1555,9 @@ var Catalog = []OperationSpec{
 		Domain:      "agent",
 		Description: "Update agent configuration or metadata",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PUT"},
+			// handleAgentByID (handlers_agents_core.go) dispatches the
+			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1617,7 +1649,13 @@ var Catalog = []OperationSpec{
 		Domain:      "agent",
 		Description: "Change an agent's message mode",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message-mode", Method: "PUT"},
+			// The set_message_mode action is dispatched through the
+			// generic, POST-only agent-action gate (handleAgentAction,
+			// handlers_agents_core.go), not a PUT on a dedicated
+			// "message-mode" sub-resource. Both the agent-scoped and
+			// project-scoped forms reach handleSetMessageMode.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/set_message_mode", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/set_message_mode", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -1701,7 +1739,9 @@ var Catalog = []OperationSpec{
 		Domain:      "project",
 		Description: "Update project settings and metadata",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "PUT"},
+			// handleProjectByIDInternal (handlers_projects_core.go)
+			// dispatches on r.Method: PATCH, not PUT.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1741,7 +1781,10 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/discover-directory", Method: "GET"},
+			// handleSkillsDiscoverDirectory (handlers_skills_discover.go)
+			// is POST-only: it reads a filter/query body, it does not list
+			// via query string.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/discover-directory", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1775,7 +1818,9 @@ var Catalog = []OperationSpec{
 		Domain:      "skill",
 		Description: "Update an existing skill definition",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "PUT"},
+			// handleSkillByID (skill_handlers.go) dispatches on r.Method:
+			// PATCH, not PUT.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1848,7 +1893,9 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/resources/discover", Method: "GET"},
+			// handleResourcesDiscover (handlers_resource_import.go) is
+			// POST-only: it reads a discovery filter body.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/resources/discover", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -2041,7 +2088,9 @@ var Catalog = []OperationSpec{
 		Domain:      "group",
 		Description: "Update group metadata",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "PUT"},
+			// handleGroupRoutes (handlers_groups.go) dispatches on
+			// r.Method: PATCH, not PUT.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -2193,8 +2242,11 @@ var Catalog = []OperationSpec{
 		Domain:      "role.binding",
 		Description: "Read role binding assignments",
 		EntryPoints: []EntryPoint{
+			// handleAdminRoleBindingByID (handlers_roles.go) has no GET on
+			// a bare "/role-bindings/{id}" — that route is DELETE-only.
+			// The only GET is the user-scoped lookup.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/role-bindings/user/{userId}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -2254,8 +2306,11 @@ var Catalog = []OperationSpec{
 		Domain:      "quota",
 		Description: "Create limit definitions and entitlement bindings",
 		EntryPoints: []EntryPoint{
+			// handleAdminEntitlementByID (handlers_quota.go) is GET/PUT/
+			// DELETE only; creation is nested under its parent limit
+			// (handleLimitEntitlements), not the flat entitlements route.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/entitlements/{id}", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/limits/{id}/entitlements", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -2356,7 +2411,9 @@ var Catalog = []OperationSpec{
 		Domain:      "schedule",
 		Description: "Update a recurring schedule",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "PUT"},
+			// handleSchedules (handlers_schedules.go) dispatches on
+			// r.Method: PATCH, not PUT.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "PATCH"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
@@ -2404,14 +2461,25 @@ var Catalog = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads/{id}", Method: "GET"},
+			// "/chat/threads/{id}" (bare) was never a registered route;
+			// handleChatThreadRoutes (deprecated wave-1) only accepts POST
+			// .../{agentId}/read, on the same project.read permission
+			// (route_metadata.go: chat.threads.byId).
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads/{id}/read", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}", Method: "GET"},
+			// handleChatSpaceRoutes requires a sub-action after the space
+			// ID; there is no bare GET "/chat/spaces/{id}".
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces/{id}/threads", Method: "GET"},
+			// handleChatConversationRoutes requires a sub-action after the
+			// conversation key; there is no bare GET
+			// "/chat/conversations/{id}".
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/dms", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/search", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "GET"},
+			// handleChatAttachments (upload) is POST-only; only the
+			// by-ID download route (handleChatAttachmentByID) is GET.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
