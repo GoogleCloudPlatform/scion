@@ -739,14 +739,14 @@ server:
 :::note[Set a stable `hub_id`]
 `server.hub.hub_id` is a short string (recommended: lowercase letters,
 digits, hyphens — e.g. a project or environment slug such as
-`scion-hub-ha-prod`) that identifies this Hub instance, so all Cloud Run
-replicas must resolve to the **same** value; it should be unique among
-hubs that share a GCP project or bucket. Without an explicit `hub_id`,
-the Hub falls back to an implicit ID (a hash of the Cloud Run service
-name, or a per-host, hostname-derived value elsewhere). That value
-changes if the service is renamed or recreated under another name, and
-it differs for any process that does not run under the same service.
-The HA preflight therefore requires it to be pinned.
+`scion-hub-ha-prod`) that identifies this Hub instance. All Cloud Run
+replicas must resolve to the **same** value, and it should be unique
+among hubs that share a GCP project or bucket. Without an explicit
+`hub_id`, the Hub falls back to an implicit ID (a hash of the Cloud Run
+service name, or a per-host, hostname-derived value elsewhere). That
+value changes if the service is renamed or recreated under another
+name, and it differs for any process that does not run under the same
+service. The HA preflight therefore requires it to be pinned.
 
 The hub ID is permanent for the hub's lifetime: changing it changes the
 name prefix of every Secret Manager secret this hub writes
