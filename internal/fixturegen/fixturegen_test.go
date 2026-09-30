@@ -89,9 +89,9 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.EqualValues(t, 5, *settings.Settings.MaxAgents)
 
 	// The agent_identity_keys and external_identities rows must likewise be
-	// readable through their real store adapters, not just present as rows
-	// (ptone/scion#2279 review, O1): the same non-hex-id pitfall as above
-	// applies to these two tables' field.UUID("id", ...) columns.
+	// readable through their real store adapters, not just present as rows:
+	// the same non-hex-id pitfall as above applies to these two tables'
+	// field.UUID("id", ...) columns.
 	keys, err := entadapter.NewAgentIdentityKeyStore(client).ListAgentIdentityKeys(ctx, projectID)
 	require.NoError(t, err, "agent_identity_keys fixture row must be readable via AgentIdentityKeyStore")
 	require.Len(t, keys, 1)
