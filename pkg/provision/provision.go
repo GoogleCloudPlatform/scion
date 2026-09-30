@@ -2394,11 +2394,11 @@ func chownTarget(hostPath string) string {
 // NFS (slow, and unsafe to run concurrently with other starts, over the network).
 //
 // fsutil.CheckRoot runs first and refuses outright if projectRoot is a known
-// critical system path or looks like a filesystem root by content — defence
-// in depth against a resolution bug elsewhere computing an unintended chown
-// root, independent of chownTarget's own narrower "/" handling, and standing
-// in front of the shared-dir chown calls too, which bypass chownTarget
-// entirely.
+// critical system path or looks like a filesystem root by content — an
+// additional guard against a resolution bug elsewhere computing an
+// unintended chown root, independent of chownTarget's own narrower "/"
+// handling, and standing in front of the shared-dir chown calls too, which
+// do not route through chownTarget.
 //
 // Walks the tree itself (filepath.WalkDir + os.Lchown) rather than shelling
 // out to the chown binary, for two reasons:
@@ -2456,7 +2456,7 @@ func chownTarget(hostPath string) string {
 // the walk outright, matching the previous exec.CommandContext-based
 // implementation being killed on cancellation.
 //
-// TestChownProjectTree_DoesNotFollowDanglingSymlink is the regression guard
+// TestChownProjectTree_DanglingSymlink_DoesNotFail is the regression guard
 // on no-dereference: a symlink to a path that exists nowhere, so re-owning
 // the link itself (Lchown) succeeds while resolving it (Chown) would fail
 // with ENOENT. It needs no timing assumptions and fails deterministically if

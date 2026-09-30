@@ -44,8 +44,8 @@ const mountInfoPath = "/proc/self/mountinfo"
 // whole-root case is already caught by CheckRoot's content heuristic.
 //
 // If root is not a mount point, or the mount table is missing entirely
-// (e.g. not running on Linux, or no /proc), this is a no-op (nil) — it is a
-// defence-in-depth addition on top of CheckRoot, not a replacement for it,
+// (e.g. not running on Linux, or no /proc), this is a no-op (nil) — it is
+// an additional guard on top of CheckRoot, not a replacement for it,
 // and its absence must not be treated as a positive safety signal on its
 // own. If the mount table exists but fails to parse (a scan error), this
 // fails closed and returns that error, rather than silently treating an
