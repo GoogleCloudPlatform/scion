@@ -1,10 +1,11 @@
 # broker-settings P1b: broker-quota enforcement toggle (ptone/scion#2061)
 
 PR: ptone/scion#2270, branch `scion/broker-settings-p1b`.
-Base (as of the round-2 fixes below): upstream `GoogleCloudPlatform/scion` main
-`1526431232616f0b50d21d42db499e27710ccf5d` (rebased twice during review to pick
-up GoogleCloudPlatform/scion#2101 and GoogleCloudPlatform/scion#2103; see "Review rounds" below for the
-history of heads).
+Base (as of the round-4 fixes below): upstream `GoogleCloudPlatform/scion` main
+`e56b87b106269931f1b0ff126eb16a68f8264c61` (rebased three times during review
+to pick up GoogleCloudPlatform/scion#2101, GoogleCloudPlatform/scion#2103 and
+GoogleCloudPlatform/scion#2105; see "Review rounds" below for the history of
+heads and bases).
 Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md` §4.4, 4.5, 4.7 (P1b), 4.8 (AC4, AC5).
 
 ## What this adds
