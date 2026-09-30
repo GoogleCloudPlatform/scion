@@ -3066,6 +3066,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/runtime-brokers` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
@@ -3331,6 +3332,7 @@
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/limits/{id}` |
 | http_route | PUT | `/api/v1/admin/entitlements/{id}` |
+| http_route | PUT | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
