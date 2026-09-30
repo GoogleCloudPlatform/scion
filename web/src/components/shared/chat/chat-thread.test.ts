@@ -75,6 +75,7 @@ type Message = import('../../../shared/types.js').Message;
 type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -4776,10 +4777,27 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
     createdAt: '2026-01-01T00:01:00Z',
   };
 
+  /**
+   * A second roster entry, listed *before* the author in every fixture below,
+   * with `canAttach`/`projectId` deliberately opposite the author's. A lookup
+   * that resolved `agentMembers[0]` instead of matching `senderId` would gate
+   * "Open terminal" on this agent's `canAttach` and build the graph link from
+   * this agent's `projectId` instead of the author's — every assertion below
+   * is written so that substitution produces a visibly wrong result.
+   */
+  const OTHER_AGENT: ChatAgentMember = {
+    id: 'agent-other',
+    kind: 'agent',
+    displayName: 'Other',
+    canAttach: false,
+    projectId: 'proj-other',
+  };
+
   it('shows both items on an agent message and hides them on a user message', async () => {
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG, USER_MSG],
       [
+        OTHER_AGENT,
         {
           id: 'agent-1',
           kind: 'agent',
@@ -4803,11 +4821,53 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
     expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
   });
 
-  it('clicking "Open terminal" invokes the same nav-click action the toolbar button uses, for the message author agent', async () => {
-    const { terminalHref } = await import('../../../client/open-terminal.js');
+  it('resolves the lookup by the message author id, not roster position (roster-ordering regression)', async () => {
+    // The reviewer's exact repro (nc-msg-agent-actions-review.md, R1): the
+    // author is second in the roster, and the first entry has the opposite
+    // canAttach and a different projectId. `agentMembers[0]` would show
+    // terminal (the other agent can attach) and point the graph link at
+    // `proj-other` — both wrong for this message's actual author.
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG],
-      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+      [
+        {
+          id: 'agent-other',
+          kind: 'agent',
+          displayName: 'Other',
+          canAttach: true,
+          projectId: 'proj-other',
+        },
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: false,
+          projectId: 'proj-author',
+        },
+      ]
+    );
+
+    rightClick(bubbles[0]);
+    await el.updateComplete;
+    expect(menuItemLabels(el).some((l) => l.includes('Open terminal'))).toBe(false);
+
+    findMenuItem(el, 'Open in graph')!.click();
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+  });
+
+  it('clicking "Open terminal" invokes the same nav-click action the toolbar button uses, for the message author agent', async () => {
+    const { el, bubbles } = await mountWithMessages(
+      [AGENT_MSG],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
     );
 
     rightClick(bubbles[0]);
@@ -4832,7 +4892,16 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
   it('clicking "Open in graph" invokes the same navigation the toolbar button uses, for the message author agent', async () => {
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG],
-      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
     );
 
     rightClick(bubbles[0]);
@@ -4840,27 +4909,36 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
     findMenuItem(el, 'Open in graph')!.click();
     await el.updateComplete;
 
-    expect(navigateToMock).toHaveBeenCalledWith('/agents/graph?project=proj-1&focus=agent-1');
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-1', 'agent-1'));
     expect(el.shadowRoot?.querySelector('.context-menu')).toBeNull();
   });
 
   it('prefers the message senderProjectId over the roster projectId for the graph link (agents from another project, #1913)', async () => {
     const { el, bubbles } = await mountWithMessages(
-      [{ ...AGENT_MSG, senderProjectId: 'proj-other' }],
-      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true, projectId: 'proj-1' }]
+      [{ ...AGENT_MSG, senderProjectId: 'proj-sender' }],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
     );
 
     rightClick(bubbles[0]);
     await el.updateComplete;
     findMenuItem(el, 'Open in graph')!.click();
 
-    expect(navigateToMock).toHaveBeenCalledWith('/agents/graph?project=proj-other&focus=agent-1');
+    expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
   });
 
   it('hides "Open terminal" (fail closed) when canAttach is not explicitly true, but keeps "Open in graph"', async () => {
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG],
-      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', projectId: 'proj-1' }]
+      [OTHER_AGENT, { id: 'agent-1', kind: 'agent', displayName: 'Coder', projectId: 'proj-1' }]
     );
 
     rightClick(bubbles[0]);
@@ -4873,7 +4951,7 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
   it('hides "Open in graph" when no project can be resolved, but keeps "Open terminal"', async () => {
     const { el, bubbles } = await mountWithMessages(
       [AGENT_MSG],
-      [{ id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true }]
+      [OTHER_AGENT, { id: 'agent-1', kind: 'agent', displayName: 'Coder', canAttach: true }]
     );
 
     rightClick(bubbles[0]);
@@ -4883,13 +4961,66 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
     expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
   });
 
-  it('hides both items when the author agent is no longer in the roster (deleted/left)', async () => {
-    const { el, bubbles } = await mountWithMessages([AGENT_MSG], []);
+  it('hides both items when the message has no senderId, even if classified as agent-authored by type', async () => {
+    // isSenderAgent can return true by `msg.type` alone (assistant-reply /
+    // mention-reply) with no matching roster member. Without an id there is
+    // no agent to open a terminal on or focus the graph on.
+    const { el, bubbles } = await mountWithMessages(
+      [
+        {
+          id: 'm3',
+          sender: 'unknown',
+          senderId: '',
+          senderProjectId: 'proj-sender',
+          msg: 'no sender id',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:02:00Z',
+        },
+      ],
+      [
+        OTHER_AGENT,
+        {
+          id: 'agent-1',
+          kind: 'agent',
+          displayName: 'Coder',
+          canAttach: true,
+          projectId: 'proj-1',
+        },
+      ]
+    );
 
     rightClick(bubbles[0]);
     await el.updateComplete;
     const labels = menuItemLabels(el);
     expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
     expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+  });
+
+  describe('a departed author (no longer in the roster)', () => {
+    it('shows "Open in graph" using senderProjectId, but hides "Open terminal" (product decision: graph can still show the project/history)', async () => {
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, senderProjectId: 'proj-sender' }],
+        [OTHER_AGENT]
+      );
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
+    });
+
+    it('hides both items when the message also carries no senderProjectId', async () => {
+      const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
+    });
   });
 });

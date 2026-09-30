@@ -33,7 +33,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues } from 'lit';
 import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
 import { navigateTo } from '../../../client/main.js';
-import { openTerminal, terminalHref } from '../../../client/open-terminal.js';
+import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import './chat-avatar.js';
 import '../status-badge.js';
@@ -809,18 +809,14 @@ export class ScionChatMembers extends LitElement {
             </a>`}
         ${a.projectId
           ? html`<a
-              href="/agents/graph?project=${encodeURIComponent(
-                a.projectId
-              )}&focus=${encodeURIComponent(a.id)}"
+              href=${agentGraphHref(a.projectId, a.id)}
               class="agent-graph"
               title="Open in graph"
               @click=${(e: MouseEvent) => {
                 e.stopPropagation();
                 if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
                 e.preventDefault();
-                navigateTo(
-                  `/agents/graph?project=${encodeURIComponent(a.projectId!)}&focus=${encodeURIComponent(a.id)}`
-                );
+                navigateTo(agentGraphHref(a.projectId!, a.id));
               }}
             >
               <sl-icon name="diagram-3" style="font-size: var(--chat-fs-base);"></sl-icon>

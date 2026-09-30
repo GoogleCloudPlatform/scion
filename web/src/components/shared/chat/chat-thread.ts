@@ -37,6 +37,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
@@ -44,7 +45,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
 import type { ChatSendDetail } from './chat-composer.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
-import { openTerminal } from '../../../client/open-terminal.js';
+import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
@@ -3172,25 +3173,39 @@ export class ScionChatThread extends LitElement {
    * `renderAgent` (chat-members.ts), scoped to the author of this message
    * rather than the thread's default agent or DM peer.
    *
-   * Terminal is gated on `canAttach`, fail-closed exactly like the sidebar:
-   * absent, false, or the agent missing from `agentMembers` altogether (e.g.
-   * it left the space or was deleted — chat.ts drops deleted agents from
-   * that list) all hide the item rather than offering a control the server
-   * would refuse. Graph is gated on a resolvable project id, hidden when
-   * none is available — matching the toolbar's `projectId ? ... : nothing`.
+   * Terminal is gated on the author being a current roster member with
+   * `canAttach === true`, fail-closed exactly like the sidebar: absent,
+   * false, or the agent missing from `agentMembers` altogether (e.g. it left
+   * the space or was deleted — chat.ts drops deleted agents from that list)
+   * all hide the item rather than offering a control the server would
+   * refuse.
+   *
+   * Graph does not require a roster entry: it's gated only on a resolvable
+   * project id, which `senderProjectId` (#1913) supplies even for a departed
+   * author — the graph page can still show that project and the agent's
+   * history. An empty `senderId` hides both regardless (see
+   * `resolveAgentActionProjectId`): `isSenderAgent` can classify a message as
+   * agent-authored by `type` alone, with no id to act on.
    */
-  private renderAgentActionMenuItems(msg: Message) {
+  private renderAgentActionMenuItems(msg: Message): TemplateResult {
+    if (!msg.senderId) return html``;
     const member = this.agentMembers.find((m) => m.id === msg.senderId);
     const projectId = this.resolveAgentActionProjectId(msg);
     return html`
       ${member?.canAttach === true
-        ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuOpenTerminal()}>
+        ? html`<div
+            class="context-menu-item"
+            @click=${(): void => this.handleContextMenuOpenTerminal()}
+          >
             <sl-icon name="terminal"></sl-icon>
             Open terminal
           </div>`
         : nothing}
       ${projectId
-        ? html`<div class="context-menu-item" @click=${() => this.handleContextMenuOpenGraph()}>
+        ? html`<div
+            class="context-menu-item"
+            @click=${(): void => this.handleContextMenuOpenGraph()}
+          >
             <sl-icon name="diagram-3"></sl-icon>
             Open in graph
           </div>`
@@ -3202,10 +3217,13 @@ export class ScionChatThread extends LitElement {
    * Project id for the author agent's graph/terminal actions. Prefers the
    * server-derived `senderProjectId` (see #1913 — always set for agent
    * senders, and the only signal that's correct when the author belongs to
-   * a different project than this conversation), falling back to the
-   * roster's per-agent `projectId` for messages that predate that field.
+   * a different project than this conversation, or has since left the
+   * roster entirely), falling back to the roster's per-agent `projectId` for
+   * messages that predate that field. Empty when `senderId` is empty — there
+   * is no agent to focus the graph on.
    */
   private resolveAgentActionProjectId(msg: Message): string {
+    if (!msg.senderId) return '';
     const member = this.agentMembers.find((m) => m.id === msg.senderId);
     return msg.senderProjectId || member?.projectId || '';
   }
@@ -3374,9 +3392,7 @@ export class ScionChatThread extends LitElement {
     if (!msg) return;
     const projectId = this.resolveAgentActionProjectId(msg);
     if (!projectId) return;
-    navigateTo(
-      `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(msg.senderId)}`
-    );
+    navigateTo(agentGraphHref(projectId, msg.senderId));
   }
 
   // ---------------------------------------------------------------------------
