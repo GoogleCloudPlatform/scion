@@ -20,15 +20,31 @@ output "shared" {
     }
 
     nfs = {
-      server     = data.google_filestore_instance.this.networks[0].ip_addresses[0]
+      # try(), not a bare [0][0] index: networks is a purely Computed
+      # repeated block on the Filestore data source (no config-driven
+      # element count), so Terraform's mock-provider test framework can't
+      # synthesize an element for it without an explicit override_data —
+      # same shape of problem as gke.ca_certificate below (see
+      # gke-autopilot/outputs.tf for the full writeup). null, not "": a
+      # blank server string would let downstream NFS volume blocks look
+      # superficially valid and fail later with a confusing mount error;
+      # null instead fails at the point of use with a clear "required
+      # argument" error the first time this output is actually consumed
+      # without the data being populated.
+      server     = try(data.google_filestore_instance.this.networks[0].ip_addresses[0], null)
       share_path = "/${var.share_name}"
     }
 
     gke = {
-      name           = data.google_container_cluster.this.name
-      location       = data.google_container_cluster.this.location
-      endpoint       = data.google_container_cluster.this.endpoint
-      ca_certificate = data.google_container_cluster.this.master_auth[0].cluster_ca_certificate
+      name     = data.google_container_cluster.this.name
+      location = data.google_container_cluster.this.location
+      endpoint = data.google_container_cluster.this.endpoint
+      # try(), consistent with gke-autopilot/outputs.tf's ca_certificate
+      # output: master_auth is a purely Computed repeated block the mock
+      # provider can't populate on its own. null fallback (not ""), so a
+      # missing value fails loudly at base64decode() rather than silently
+      # producing an empty-but-valid-looking cluster_ca_certificate.
+      ca_certificate = try(data.google_container_cluster.this.master_auth[0].cluster_ca_certificate, null)
     }
 
     artifact_registry = {
