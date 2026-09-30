@@ -116,6 +116,14 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private reconnectFailed = false;
 
+  /**
+   * True while the underlying session's connection is 'idle': restored but
+   * not yet connected (design ptone/scion#2278 section 3.5.2). No Reconnect
+   * button and no error styling — just a neutral "select to connect" prompt.
+   */
+  @state()
+  private idle = false;
+
   /** Whether the failed attempt above was manually triggered. */
   @state()
   private reconnectFailedManual = false;
@@ -502,6 +510,36 @@ export class ScionTerminalPane extends LitElement {
       cursor: default;
     }
 
+    .idle-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .idle-overlay .overlay-title {
+      color: #94a3b8;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .idle-overlay .overlay-detail {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      max-width: 400px;
+      text-align: center;
+      line-height: 1.5;
+    }
+
     .drop-overlay {
       position: absolute;
       top: 0;
@@ -800,7 +838,11 @@ export class ScionTerminalPane extends LitElement {
    * The workspace must retain this element by session key: an existing session
    * cannot acquire a second renderer, and a pane cannot switch agent or registry.
    */
-  open(registry: TerminalSessionRegistry, agentId: string): TerminalSession {
+  open(
+    registry: TerminalSessionRegistry,
+    agentId: string,
+    options?: { deferConnect?: boolean }
+  ): TerminalSession {
     if (this.disposed) throw new Error('Terminal pane is disposed.');
     if (this.session) {
       if (this.registry === registry && this.agentId === agentId.toLowerCase()) return this.session;
@@ -810,18 +852,22 @@ export class ScionTerminalPane extends LitElement {
       throw new Error('Terminal session already has a pane; reuse its original element.');
     }
     this.registry = registry;
-    this.ownedSession = registry.open(agentId, async (_agent, signal) => {
-      this.loading = false;
-      await this.updateComplete;
-      signal.throwIfAborted();
-      try {
-        return await this.initTerminal(signal);
-      } catch (error) {
-        // Covers partial allocation before a failed/aborted layout continuation.
-        this.disposeTerminal();
-        throw error;
-      }
-    });
+    this.ownedSession = registry.open(
+      agentId,
+      async (_agent, signal) => {
+        this.loading = false;
+        await this.updateComplete;
+        signal.throwIfAborted();
+        try {
+          return await this.initTerminal(signal);
+        } catch (error) {
+          // Covers partial allocation before a failed/aborted layout continuation.
+          this.disposeTerminal();
+          throw error;
+        }
+      },
+      options
+    );
     this.metadataUnsubscribe = registry.metadata.subscribe(this.agentId, (value) =>
       this.applyMetadata(value)
     );
@@ -915,6 +961,7 @@ export class ScionTerminalPane extends LitElement {
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
     this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
     if (state.connection !== 'loading') this.loading = false;
@@ -2055,7 +2102,7 @@ export class ScionTerminalPane extends LitElement {
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
           ${this.connected ? 'Connected' : 'Disconnected'}
         </div>
-        ${!this.connected
+        ${!this.connected && !this.idle
           ? html`
               <button
                 class="reconnect-btn"
@@ -2087,6 +2134,12 @@ export class ScionTerminalPane extends LitElement {
         @drop=${(e: DragEvent) => this._onDrop(e)}
       >
         <div class="terminal-container"></div>
+        ${this.idle
+          ? html`<div class="idle-overlay">
+              <span class="overlay-title">Not connected.</span>
+              <span class="overlay-detail">Select this terminal to connect.</span>
+            </div>`
+          : ''}
         ${!this.connected && this.wasConnected
           ? html`<div
               class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''} ${this

@@ -191,7 +191,8 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
     {
       initialize: (): Promise<TerminalResources> =>
         Promise.reject(new Error('Retained pane initializer required.')),
-      create: (registry, agentId): TerminalSession => terminalWorkspace!.create(registry, agentId),
+      create: (registry, agentId, options): TerminalSession =>
+        terminalWorkspace!.create(registry, agentId, options),
       select: (session, signal, requestId): void => {
         if (signal.aborted) throw new Error('Terminal workspace stopped.');
         const expected = requestId && terminalNavigations.get(requestId);
