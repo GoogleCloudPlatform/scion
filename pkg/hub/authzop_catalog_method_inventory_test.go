@@ -563,11 +563,16 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// handler actually looks up the binding, which is what both the
 		// control and the suffix check need to observe.
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"roleDefinitionId": f.projectMemberRoleID},
-		// updateLimitDefinition (handlers_quota.go) 400s "name is
-		// required" on an empty body before the (correctly extracted) ID
-		// is used for anything; with a real name, the suffix check
-		// observes that the suffix is discarded and the update succeeds.
-		{"quota.update", "/api/v1/admin/limits/{id}"}: {"name": "li-limit-ud-updated", "defaultValue": 10},
+		// updateLimitDefinition (handlers_quota.go) overwrites
+		// resourceType and unit from the request unconditionally
+		// (handlers_quota.go:370-371), so an override missing either
+		// field 500s on the store update, on the bare path as much as the
+		// suffixed one. All four fields make the positive check exercise
+		// a real update (200); the suffix check stays excluded because
+		// the suffixed PUT also returns 200 — the suffix is discarded by
+		// handleAdminLimitByID's parts[0] extraction (see the exclusion
+		// reason above), not rejected.
+		{"quota.update", "/api/v1/admin/limits/{id}"}: {"name": "li-limit-ud-updated", "resourceType": "agent", "unit": "count", "defaultValue": 10},
 	}
 }
 
@@ -641,8 +646,8 @@ const bogusMethod = "PROPFIND"
 const bogusSegment = "live-inventory-bogus-suffix"
 
 // TestCatalogHTTPEntryPoints_LiveMethodCheck probes the real server mux for
-// every declared HTTP entry point in authzop.Catalog (skipping the small,
-// reviewed exclusion maps above) and makes three assertions per entry:
+// every declared HTTP entry point in authzop.Catalog (skipping the reviewed
+// exclusion maps above) and makes three assertions per entry:
 //
 //  1. Positive check: sending the catalog's declared method at a path built
 //     from the declared pattern, with real fixture IDs substituted wherever
@@ -670,14 +675,15 @@ const bogusSegment = "live-inventory-bogus-suffix"
 // actually had — a wrong method, or a wrong/incomplete path segment.
 //
 // What these checks do NOT prove, even for an included entry:
-//   - That the pattern is not too LONG — a handler that ignores or
-//     otherwise accepts an extra trailing segment (rather than 404/405ing
-//     it) will pass the suffix check regardless, and is listed in
-//     suffixCheckExclusions with the specific reason it does. A handful of
-//     handlers in this codebase are architecturally suffix-tolerant (e.g.
-//     handleUserByID only special-cases one specific suffix and otherwise
-//     falls through; extractID-based handlers fold a suffix into the ID
-//     itself), so this is a real, named limitation, not an oversight.
+//   - That the pattern is not too LONG. A handler that ignores or discards
+//     an extra trailing segment returns the same result as it does for the
+//     bare path, so the positive check cannot tell a too-long pattern from
+//     a correct one. Such a handler also FAILS the suffix check (it
+//     answers something other than 404/405), which is why it is listed in
+//     suffixCheckExclusions with the specific reason: e.g. handleUserByID
+//     falls through for any unrecognized suffix; extractID-based handlers
+//     truncate at the first '/' and discard the rest rather than folding
+//     it into the ID. This is a real, named limitation, not an oversight.
 //   - Full path correctness when the positive check's 2xx/4xx comes from a
 //     pre-dispatch condition unrelated to routing — most commonly a 5xx for
 //     a backend this test server does not configure (the secret backend,
