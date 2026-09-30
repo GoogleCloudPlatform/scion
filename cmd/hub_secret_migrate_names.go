@@ -150,8 +150,8 @@ legacy container it lived in.
 It is idempotent: re-running is always safe, and any candidate already fully
 migrated (copied, ref repaired, legacy gone or never existed) is skipped.
 
-Does not require a scion project; it can be run from any directory, for
-example a Cloud Run job.
+Does not require a scion project; it can be run from any directory or
+environment, for example a Cloud Run job.
 
 Examples:
   # Show what would be migrated without making changes

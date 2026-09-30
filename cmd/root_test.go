@@ -448,7 +448,7 @@ func TestHubSecretMigrateNamesAndMigrateDoNotRequireProject(t *testing.T) {
 // TestOrdinaryCommandStillRequiresProject guards against the migrate-names
 // exemption (ptone/scion#2396) becoming too broad: a command that isn't in
 // any exemption list or subtree must still fail with "not in a scion
-// project" when run outside one and without --global. It also checks two
+// project" when run outside one and without --global. It also checks three
 // commands chosen to share something with the new exemption case's guard
 // (`parentName == "secret" && commandInSubtree(cmd, "hub")`) without
 // satisfying all of it, so that dropping either half of the guard would
@@ -458,7 +458,13 @@ func TestHubSecretMigrateNamesAndMigrateDoNotRequireProject(t *testing.T) {
 //     ancestor.
 //   - a synthetic "secret -> migrate-names" tree shares both the
 //     "migrate-names" name and a "secret" parent, but (like the real
-//     top-level "scion secret" command) has no "hub" ancestor.
+//     top-level "scion secret" command) has no "hub" ancestor. Dropping the
+//     "commandInSubtree(cmd, "hub")" half of the guard would wrongly exempt
+//     this tree.
+//   - a synthetic "hub -> other -> migrate" tree has a "hub" ancestor, like
+//     the real exemption target, but its parent is "other", not "secret".
+//     Dropping the "parentName == "secret"" half of the guard would wrongly
+//     exempt this tree.
 func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 	setupNoProjectPreRun(t)
 
@@ -475,6 +481,15 @@ func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
 	migrateNamesChild := &cobra.Command{Use: "migrate-names"}
 	secretParent.AddCommand(migrateNamesChild)
 	err = rootCmd.PersistentPreRunE(migrateNamesChild, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	hubParent := &cobra.Command{Use: "hub"}
+	otherParent := &cobra.Command{Use: "other"}
+	migrateChild := &cobra.Command{Use: "migrate"}
+	hubParent.AddCommand(otherParent)
+	otherParent.AddCommand(migrateChild)
+	err = rootCmd.PersistentPreRunE(migrateChild, []string{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not in a scion project")
 }
