@@ -22,8 +22,15 @@
  * flags are retained and default-on.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { isFeatureEnabled, setFeatureFlag, NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  isFeatureEnabled,
+  setFeatureFlag,
+  setServerFlags,
+  resetServerFlagStateForTests,
+  NATIVE_CHAT_V2_FLAG,
+  TERMINAL_WORKSPACE_FLAG,
+} from './feature-flags.js';
 
 // Verify removed exports at the type level — these should not exist.
 // @ts-expect-error ACCESS_BOUNDARIES_READ_FLAG was removed
@@ -51,6 +58,7 @@ beforeEach(() => {
   } catch {
     // ignore in environments without localStorage
   }
+  resetServerFlagStateForTests();
 });
 
 // ---------------------------------------------------------------------------
@@ -187,5 +195,109 @@ describe('setFeatureFlag', () => {
   it('can disable a default-on flag', () => {
     setFeatureFlag('web.native_chat', false);
     expect(isFeatureEnabled('web.native_chat')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TERMINAL_WORKSPACE_FLAG (ptone/scion#2217 §3.9)
+// ---------------------------------------------------------------------------
+
+describe('TERMINAL_WORKSPACE_FLAG', () => {
+  it('exports the expected name', () => {
+    expect(TERMINAL_WORKSPACE_FLAG).toBe('web.terminal_workspace');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setServerFlags / resetServerFlagStateForTests — precedence matrix
+// (ptone/scion#2217 §3.4, §3.5)
+// ---------------------------------------------------------------------------
+
+describe('setServerFlags: precedence', () => {
+  it('a server value beats localStorage for a registered experiment', () => {
+    localStorage.setItem('scion:feature:web.terminal_workspace', 'true');
+    setServerFlags({ 'web.terminal_workspace': false });
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+  });
+
+  it('localStorage applies to names the server did not send', () => {
+    localStorage.setItem('scion:feature:test.flag', 'true');
+    setServerFlags({ 'web.terminal_workspace': false });
+    expect(isFeatureEnabled('test.flag')).toBe(true);
+  });
+
+  it('values in the bag before the first setServerFlags() call beat server values ("pinned")', () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
+    setServerFlags({ 'web.terminal_workspace': false });
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+  });
+
+  it('pinning only protects keys present at the first call, not later ones', () => {
+    window.__SCION_FEATURES__ = { 'a.flag': true };
+    setServerFlags({ 'a.flag': false });
+    expect(isFeatureEnabled('a.flag')).toBe(true);
+    // A second setServerFlags call still cannot override the pinned key...
+    setServerFlags({ 'a.flag': false, 'b.flag': true });
+    expect(isFeatureEnabled('a.flag')).toBe(true);
+    // ...but a name that wasn't pinned is applied normally.
+    expect(isFeatureEnabled('b.flag')).toBe(true);
+  });
+
+  it('resetServerFlagStateForTests() clears the pin so the next call re-pins from the current bag', () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
+    setServerFlags({ 'web.terminal_workspace': false });
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
+    setServerFlags({ 'web.terminal_workspace': false });
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+  });
+
+  it('a server value applies to an unregistered/dev name the same way', () => {
+    setServerFlags({ 'hub.future_thing': true });
+    expect(isFeatureEnabled('hub.future_thing')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shadowed-override logging — one console.info per flag per page load
+// ---------------------------------------------------------------------------
+
+describe('isFeatureEnabled: shadowed-override logging', () => {
+  it('logs once when a localStorage override is shadowed by a server value, not once per call', () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
+    setServerFlags({ 'web.terminal_workspace': true });
+
+    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.terminal_workspace');
+
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    infoSpy.mockRestore();
+  });
+
+  it('does not log when there is no localStorage override to shadow', () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    setServerFlags({ 'web.terminal_workspace': true });
+
+    isFeatureEnabled('web.terminal_workspace');
+
+    expect(infoSpy).not.toHaveBeenCalled();
+    infoSpy.mockRestore();
+  });
+
+  it('logs independently per flag name', () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
+    localStorage.setItem('scion:feature:web.native_chat', 'false');
+    setServerFlags({ 'web.terminal_workspace': true, 'web.native_chat': true });
+
+    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.native_chat');
+
+    expect(infoSpy).toHaveBeenCalledTimes(2);
+    infoSpy.mockRestore();
   });
 });

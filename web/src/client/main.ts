@@ -35,7 +35,12 @@ import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
-import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
+import {
+  isFeatureEnabled,
+  setFeatureFlag,
+  setServerFlags,
+  TERMINAL_WORKSPACE_FLAG,
+} from '../utils/feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -247,25 +252,57 @@ async function fetchCurrentUser(): Promise<User | null> {
 }
 
 /**
- * Apply server-published public settings to the client feature-flag layer.
+ * Fetches `res`, treating a non-OK status, a network error or a non-JSON
+ * body as "no data" rather than throwing, so callers can tell a successful
+ * fetch from a failed one without a try/catch of their own.
+ */
+async function okJsonOrNull(res: Response): Promise<unknown> {
+  if (!res.ok) return null;
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply server-published settings to the client feature-flag layer.
  *
- * The hub owns the native chat toggle (server.native_chat.enabled); when it is
- * off the chat API endpoints are not even registered, so the UI must not offer
- * chat. Resolving this before the first render keeps the /chat route gate in
- * renderRoute() honest. Failures leave the compiled defaults in place — a
- * transient settings fetch error should not hide a working feature.
+ * Two independent, unauthenticated-safe sources are fetched in parallel,
+ * with `Promise.allSettled` so that either one failing does not block the
+ * other:
+ *
+ * - `/api/v1/settings/public`: the hub owns the native chat toggle
+ *   (server.native_chat.enabled); when it is off the chat API endpoints are
+ *   not even registered, so the UI must not offer chat.
+ * - `/api/v1/experiments`: the hub-wide, admin-controlled experiment map
+ *   (ptone/scion#2217), signed-in callers only. A failure, 401, 404 or a
+ *   non-JSON 200 (e.g. a dev server with no hub) leaves the compiled
+ *   defaults and any localStorage override in place for this page load.
+ *
+ * Resolving both before the first render keeps the /chat route gate in
+ * renderRoute() honest and settles `terminalWorkspaceEnabled` before it is
+ * read.
  */
 async function applyServerFeatureFlags(): Promise<void> {
-  try {
-    const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
-    if (!res.ok) return;
-    const settings = (await res.json()) as { nativeChatEnabled?: boolean };
+  const [pub, exp] = await Promise.allSettled([
+    fetch('/api/v1/settings/public', { credentials: 'include' }).then(okJsonOrNull),
+    fetch('/api/v1/experiments', { credentials: 'include' }).then(okJsonOrNull),
+  ]);
+
+  if (pub.status === 'fulfilled' && pub.value) {
+    const settings = pub.value as { nativeChatEnabled?: boolean };
     if (settings.nativeChatEnabled === false) {
       setFeatureFlag('web.native_chat', false);
       setFeatureFlag('web.native_chat_v2', false);
     }
-  } catch {
-    // Public settings unavailable — keep the compiled defaults.
+  }
+
+  if (exp.status === 'fulfilled' && exp.value) {
+    const body = exp.value as { experiments?: Record<string, boolean> };
+    if (body.experiments && typeof body.experiments === 'object') {
+      setServerFlags(body.experiments);
+    }
   }
 }
 
@@ -828,7 +865,7 @@ async function init(): Promise<void> {
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
   await featureFlagsReady;
-  terminalWorkspaceEnabled = isFeatureEnabled('web.terminal_workspace');
+  terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
   // The tab-title unread badge is unread state, not notification state: it
@@ -1296,6 +1333,8 @@ if (document.readyState === 'loading') {
 // Re-export the central terminal helpers so tests and non-component callers
 // can reach them through the entry module without importing a second path.
 export { openTerminal, terminalHref } from './open-terminal.js';
+/** @internal test-only: exercises the boot-time parallel feature-flag fetch directly. */
+export { applyServerFeatureFlags as applyServerFeatureFlagsForTests };
 
 // Export for use in components and tests
 export { getInitialData, navigateTo, stateManager };

@@ -35,7 +35,7 @@ import { ACTIVITY_DISPLAY } from '../../../shared/agent-state-display.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
-import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../../utils/feature-flags.js';
 import './chat-avatar.js';
 import '../status-badge.js';
 
@@ -91,7 +91,7 @@ function openTerminalPopout(agentId: string): void {
  * When the workspace is disabled, falls back to the legacy popup behaviour.
  */
 function openTerminalFromChat(agentId: string): void {
-  if (isFeatureEnabled('web.terminal_workspace')) {
+  if (isFeatureEnabled(TERMINAL_WORKSPACE_FLAG)) {
     openTerminal(agentId);
   } else {
     openTerminalPopout(agentId);
