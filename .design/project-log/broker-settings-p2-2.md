@@ -76,15 +76,58 @@ merged), started from its head `0875d543a658cd77e7a9ec92ba42436878aa0839`. Desig
 
 ## Review round 1
 
-The EM asked to fold in the `getUsageSummary` fix rather than leave it as a flagged gap (my initial
-read was that it was aggregate-only and out of the brief's "per-broker row" scope; the EM's call was
-that a summary permanently showing 0 active agents is exactly the display bug P2.2 exists to fix, scope
-question aside). Fixed by reusing `listBrokerScopedActiveReservations` for `max_agents_per_broker` in
-`getUsageSummary` too, with two new tests
-(`TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`,
+Pre-report exchange with the EM (before formal review): asked to fold in the `getUsageSummary` fix
+rather than leave it as a flagged gap (my initial read was that it was aggregate-only and out of the
+brief's "per-broker row" scope; the EM's call was that a summary permanently showing 0 active agents is
+exactly the display bug P2.2 exists to fix, scope question aside). Fixed by reusing
+`listBrokerScopedActiveReservations` for `max_agents_per_broker` in `getUsageSummary` too, with two new
+tests (`TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`,
 `TestGetUsageSummary_NonBrokerLimit_Unaffected`). Investigated `getMyUsage` per the EM's conditional
 ask and found a related but distinct bug (see above) — left unchanged and reported rather than assumed
-"fix it the same way" applied.
+"fix it the same way" applied. **EM decision: leave `getMyUsage` as-is** (recorded above).
+
+### Formal review: `broker-settings-rev-p2-2-1`, verdict REQUEST CHANGES
+
+Full report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-1.md`
+(reviewed at `1030ec34`; confirmed the server-side read model, limitDef lookups, authz and Go/TS type
+parity are all correct). Disposition of every finding:
+
+- **F1 (Required, fixed):** `renderLimitRow` in `admin-quotas.ts` divided the new cross-broker sum by
+  the *per-broker* `defaultValue` (e.g. three brokers at 12 agents each with a default of 30 showed
+  "36 / 30" at a pegged 100% progress bar — a false breach, since no single broker was near its cap).
+  Fixed by rendering just the count for `max_agents_per_broker` (no denominator, no progress bar), plus
+  a hint ("across all brokers; cap is per broker"). Localized to `renderLimitRow`; did not touch the
+  entitlement/limit-dialog code P1a also edits in this file.
+- **F2 (Required, fixed):** added `TestListRuntimeBrokers_AgentCountAgreesWithReserve`
+  (`handlers_runtime_brokers_capacity_test.go`), which drives the actual enforcement path
+  (`checkAndReserveBrokerQuota`, the same helper `handlers_agents_core.go` calls) rather than a
+  manually-inserted reservation row: two reservations admitted, a third rejected at the cap, then the
+  cap cleared to unlimited (`maxAgents=0`) and re-asserted — `agentLimit` absent, `agentCount` still
+  present at 2, source still `"broker"`. This is the "agree with Reserve" half of AC-P2-10 the brief
+  asked for and the round-1 test suite was missing.
+- **F3 (Optional, declined by the EM for this PR):** `listBrokerScopedActiveReservations`'s 1+B queries
+  and 10,000-broker cap are correct (mirror `ReconcileStaleBrokerQuotaReservations` exactly) but not
+  optimal. Added a code comment on the function documenting the bound and the accepted follow-up (a
+  single-query store method), per the EM's call — no behavior change.
+- **F4 (Nit, fixed):** the doc comments for `AgentCount`/`AgentLimitSource`
+  (`response_types.go`, `handlers_quota.go`) and their TS mirrors (`types.ts`, `admin-quotas.ts`) said
+  they were absent "under the same conditions as AgentLimit" — wrong, since `AgentLimit` is also nil
+  when the broker is unlimited, and in that case the count and source *are* still present (source
+  `"unlimited"`). Reworded all four to state the real condition (absent only when resolution didn't run
+  or failed).
+- **F5 (Nit, fixed):** `brokers.ts`'s `renderAgentCapacity` showed the source twice (tooltip + small
+  text) — removed the redundant small-text line, keeping the tooltip. `admin-quotas.ts` rendered
+  "Broker cap: unlimited (unlimited)" — the parenthetical source is now omitted when the source itself
+  is `"unlimited"`. Added an explicit `TemplateResult` return type to `renderAgentCapacity`, which also
+  removed the one eslint warning this PR had introduced (45 → 44, back to the `main` baseline).
+- **F6, F7, F8 (FYI):** no action, per the EM.
+
+Re-verified after all fixes: `go build`/`go vet` (both build tags), the full
+`go test ./pkg/hub/ -run 'Usage|Broker|Provider|Quota'` subset (green, 119.5s, including the new F2
+test), `go test -tags no_sqlite ./pkg/hub/...` (green), `golangci-lint run ./pkg/hub/...` (same 11
+pre-existing issues, none in changed files — matches the reviewer's own gate exactly),
+`hack/check-authz-guards.sh` (clean), `tsc --noEmit` (clean), eslint on the three changed web files back
+to the exact `main` baseline (6 errors — all pre-existing — 44 warnings, F5's new warning removed).
 
 ## Tests
 
@@ -111,6 +154,10 @@ ask and found a related but distinct bug (see above) — left unchanged and repo
   another; the summary's `activeCount` for `max_agents_per_broker` must be 3, not 0.
 - `TestGetUsageSummary_NonBrokerLimit_Unaffected`: a system-scoped limit's summary count is unaffected
   by the broker-scoped enumeration.
+- `TestListRuntimeBrokers_AgentCountAgreesWithReserve` (review round 1, F2): drives
+  `checkAndReserveBrokerQuota` directly (two admitted, a third rejected at the cap), then clears the
+  cap to unlimited — asserts the brokers list's `agentCount`/`agentLimit`/`agentLimitSource` agree with
+  what Reserve actually enforced at every step, including the unlimited shape.
 
 ## Verification
 
