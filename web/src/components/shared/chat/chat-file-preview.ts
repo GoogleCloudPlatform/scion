@@ -44,6 +44,7 @@ import {
   isLikelyTextFileName,
   isLikelyTextMime,
   isLikelyBinaryFileName,
+  baseMimeType,
   TEXT_PREVIEW_MAX_BYTES,
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
@@ -221,7 +222,8 @@ export class ScionChatFilePreview extends LitElement {
     const isRecognizedText =
       target.kind === 'attachment'
         ? isLikelyTextMime(target.mime) ||
-          (target.mime === 'application/octet-stream' && isLikelyTextFileName(target.name))
+          (baseMimeType(target.mime) === 'application/octet-stream' &&
+            isLikelyTextFileName(target.name))
         : !isLikelyBinaryFileName(target.name);
     if (!isImage && !isRecognizedText) {
       this.loadState = { status: 'ready', isImage, isMarkdown, isBinary: true };

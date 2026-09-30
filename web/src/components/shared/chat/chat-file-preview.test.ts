@@ -264,6 +264,29 @@ describe('scion-chat-file-preview', () => {
     expect((editor as unknown as { content: string })?.content).toBe('#!/bin/sh\necho hi\n');
   });
 
+  it('renders an application/octet-stream attachment with a MIME parameter (e.g. charset) whose name is a recognized text file', async () => {
+    // The MIME comparison must normalize case and strip `;`-delimited
+    // parameters before comparing to `application/octet-stream` — a real
+    // server or proxy can report either variant.
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('#!/bin/sh\necho hi\n'),
+    });
+    const el = await mount();
+    el.target = {
+      kind: 'attachment',
+      id: 'att-run-sh-charset',
+      name: 'run.sh',
+      mime: 'Application/Octet-Stream; charset=binary',
+      size: 19,
+    };
+    await settle(el);
+
+    const editor = dialog(el)?.querySelector('scion-code-editor');
+    expect((editor as unknown as { content: string })?.content).toBe('#!/bin/sh\necho hi\n');
+  });
+
   it('still falls back to download-only for a generic application/octet-stream attachment whose name is not a recognized text file', async () => {
     const el = await mount();
     el.target = {
