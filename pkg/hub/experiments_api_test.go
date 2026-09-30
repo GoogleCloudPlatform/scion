@@ -176,6 +176,41 @@ func newTestServerWithMalformedSection(t *testing.T, reg *experiments.Registry, 
 	return srv, wrapped
 }
 
+// erroringGetStore wraps a real store.Store and forces GetHubSetting to
+// return a generic error (not store.ErrNotFound) for one section, to
+// exercise the "authoritative read failed" 503 path independent of the
+// malformed-row and stale-replica paths, which both need a real or faked row.
+type erroringGetStore struct {
+	store.Store
+	failSection string
+}
+
+var errSimulatedStoreFailure = errors.New("simulated store failure")
+
+func (e *erroringGetStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	if section == e.failSection {
+		return nil, errSimulatedStoreFailure
+	}
+	return e.Store.GetHubSetting(ctx, section)
+}
+
+func (e *erroringGetStore) DB() *sql.DB {
+	if p, ok := e.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+// newTestServerWithErroringGet builds a full-chain server whose store always
+// fails to read failSection, to exercise the 503 settings_unavailable path
+// on the authoritative (store) read used by PUT and DELETE.
+func newTestServerWithErroringGet(t *testing.T, failSection string) *Server {
+	t.Helper()
+	base := newBareTestStore(t)
+	wrapped := &erroringGetStore{Store: base, failSection: failSection}
+	return newTestServerFromStore(t, wrapped, nil)
+}
+
 // testServerWithOps builds a full-chain-capable server (real sqlite store,
 // dev super-admin auth) with a live OperationalSettings, matching how
 // cmd/server_foreground.go wires every driver in production. When reg is
@@ -222,6 +257,16 @@ func errorCodeAndDetails(t *testing.T, rec *httptest.ResponseRecorder) (string, 
 		t.Fatalf("expected a non-empty error code, got %s", rec.Body.String())
 	}
 	return body.Error.Code, body.Error.Details
+}
+
+// findEntry returns a pointer to the named entry in resp.Experiments, or nil.
+func findEntry(resp adminExperimentsResponse, name string) *adminExperimentEntry {
+	for i := range resp.Experiments {
+		if resp.Experiments[i].Name == name {
+			return &resp.Experiments[i]
+		}
+	}
+	return nil
 }
 
 // grantSystemPermissions creates a system-scoped role holding exactly the
@@ -480,6 +525,35 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 			t.Errorf("expected updated_by=%q (the write's own), got %v", row.UpdatedBy, body.UpdatedBy)
 		}
 
+		// override and enabled must reflect the stored override, not the
+		// registry default, in both the PUT response and a later admin GET.
+		putEntry := findEntry(body, "web.terminal_workspace")
+		if putEntry == nil {
+			t.Fatal("expected web.terminal_workspace in the PUT response")
+		}
+		if putEntry.Override == nil || *putEntry.Override != false {
+			t.Errorf("expected override=false in the PUT response, got %v", putEntry.Override)
+		}
+		if putEntry.Enabled {
+			t.Error("expected enabled=false in the PUT response, reflecting the stored override")
+		}
+
+		get := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+		var getBody adminExperimentsResponse
+		if err := json.Unmarshal(get.Body.Bytes(), &getBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		getEntry := findEntry(getBody, "web.terminal_workspace")
+		if getEntry == nil {
+			t.Fatal("expected web.terminal_workspace in the admin GET response")
+		}
+		if getEntry.Override == nil || *getEntry.Override != false {
+			t.Errorf("expected override=false in the admin GET response, got %v", getEntry.Override)
+		}
+		if getEntry.Enabled {
+			t.Error("expected enabled=false in the admin GET response, reflecting the stored override")
+		}
+
 		// GET /api/v1/experiments reflects the change without a restart.
 		exp := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
 		var expBody experimentsResponse
@@ -526,6 +600,56 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 			t.Error("expected web.terminal_workspace=true (the default) after resetting to the default")
 		}
 	})
+}
+
+// TestHandleAdminExperiments_ServerLayerOverrideReflectedInEnabled covers a
+// server-layer test-registry experiment (ptone/scion#2217): an override on
+// hub.test_gate (default on) must show up as override/enabled in the admin
+// PUT and GET responses, the same as the web-only case in
+// TestHandleAdminExperiments_RevisionChecks.
+func TestHandleAdminExperiments_ServerLayerOverrideReflectedInEnabled(t *testing.T) {
+	srv, _ := testServerWithOps(t, testRegistry(t))
+
+	put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
+		map[string]interface{}{"overrides": map[string]interface{}{"hub.test_gate": false}, "expected_revision": 0})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", put.Code, put.Body.String())
+	}
+	var putBody adminExperimentsResponse
+	if err := json.Unmarshal(put.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	putEntry := findEntry(putBody, "hub.test_gate")
+	if putEntry == nil {
+		t.Fatal("expected hub.test_gate in the PUT response")
+	}
+	if putEntry.Override == nil || *putEntry.Override != false {
+		t.Errorf("expected override=false in the PUT response, got %v", putEntry.Override)
+	}
+	if putEntry.Enabled {
+		t.Error("expected enabled=false in the PUT response, reflecting the stored override")
+	}
+
+	get := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+	var getBody adminExperimentsResponse
+	if err := json.Unmarshal(get.Body.Bytes(), &getBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	getEntry := findEntry(getBody, "hub.test_gate")
+	if getEntry == nil {
+		t.Fatal("expected hub.test_gate in the admin GET response")
+	}
+	if getEntry.Override == nil || *getEntry.Override != false {
+		t.Errorf("expected override=false in the admin GET response, got %v", getEntry.Override)
+	}
+	if getEntry.Enabled {
+		t.Error("expected enabled=false in the admin GET response, reflecting the stored override")
+	}
+
+	// requireExperiment must observe the same override at its decision point.
+	if srv.experimentEnabled("hub.test_gate") {
+		t.Error("expected hub.test_gate to resolve to false via experimentEnabled after the override")
+	}
 }
 
 // TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution covers the
@@ -633,6 +757,103 @@ func TestHandleAdminExperiments_StoreRace(t *testing.T) {
 	}
 	if code := errorCode(t, rec); code != "revision_conflict" {
 		t.Errorf("expected code=revision_conflict, got %q", code)
+	}
+}
+
+// TestHandleAdminExperiments_StoreReadError covers the 503 path on the
+// authoritative store read used by PUT and DELETE, distinct from the
+// malformed-row (409) and stale-replica (409) paths: here the read itself
+// fails, not just its content or its revision.
+func TestHandleAdminExperiments_StoreReadError(t *testing.T) {
+	srv := newTestServerWithErroringGet(t, "experiments")
+
+	t.Run("PUT", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
+			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "settings_unavailable" {
+			t.Errorf("expected code=settings_unavailable, got %q", code)
+		}
+	})
+
+	t.Run("DELETE", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/experiments",
+			map[string]interface{}{"expected_revision": 0})
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "settings_unavailable" {
+			t.Errorf("expected code=settings_unavailable, got %q", code)
+		}
+	})
+}
+
+// TestHandleAdminExperiments_NilOperationalSettings covers the 503 path taken
+// when OperationalSettings itself is unavailable (initialization failed),
+// for all three methods. A bare &Server{} has a nil OperationalSettings by
+// construction (GetOperationalSettings loads a zero-value atomic.Pointer),
+// so this needs no store at all, unlike TestHandleAdminExperiments_StoreReadError
+// (store reachable, read fails) or the malformed-row tests (store reachable,
+// content unreadable).
+func TestHandleAdminExperiments_NilOperationalSettings(t *testing.T) {
+	srv := &Server{}
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"GET", http.MethodGet, ""},
+		{"PUT", http.MethodPut, `{"overrides":{"web.terminal_workspace":false},"expected_revision":0}`},
+		{"DELETE", http.MethodDelete, `{"expected_revision":0}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/api/v1/admin/experiments", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			srv.handleAdminExperiments(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if code := errorCode(t, rec); code != "settings_unavailable" {
+				t.Errorf("expected code=settings_unavailable, got %q", code)
+			}
+		})
+	}
+}
+
+// TestHandleAdminExperiments_ReviewOverdueField asserts review_overdue at the
+// response level (pkg/experiments' TestReviewOverdue covers the method
+// itself, but nothing before this test called it through an admin response).
+func TestHandleAdminExperiments_ReviewOverdueField(t *testing.T) {
+	overdue := testExperiment("web.overdue_thing", true, experiments.LayerWeb)
+	overdue.ReviewBy = "2020-01-01"
+	fresh := testExperiment("web.fresh_thing", true, experiments.LayerWeb)
+	fresh.ReviewBy = "2099-01-01"
+	reg, err := experiments.NewRegistry([]experiments.Experiment{overdue, fresh}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	srv, _ := testServerWithOps(t, reg)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body adminExperimentsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	overdueEntry := findEntry(body, "web.overdue_thing")
+	if overdueEntry == nil || !overdueEntry.ReviewOverdue {
+		t.Errorf("expected web.overdue_thing review_overdue=true, got %v", overdueEntry)
+	}
+	freshEntry := findEntry(body, "web.fresh_thing")
+	if freshEntry == nil || freshEntry.ReviewOverdue {
+		t.Errorf("expected web.fresh_thing review_overdue=false, got %v", freshEntry)
 	}
 }
 
@@ -918,6 +1139,20 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 			t.Errorf("expected code=revision_conflict, got %q", code)
 		}
 		// Nothing is written: the row is still absent.
+		if _, err := s.GetHubSetting(ctx, "experiments"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected the row to still be absent, got err=%v", err)
+		}
+	})
+
+	t.Run("DELETE on a healthy row with a stale expected_revision is a conflict", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/experiments",
+			map[string]interface{}{"expected_revision": 999})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "revision_conflict" {
+			t.Errorf("expected code=revision_conflict, got %q", code)
+		}
 		if _, err := s.GetHubSetting(ctx, "experiments"); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("expected the row to still be absent, got err=%v", err)
 		}
