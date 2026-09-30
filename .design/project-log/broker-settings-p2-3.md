@@ -101,4 +101,45 @@ explicitly to the EM rather than silently only running SQLite.
   means when a `broker_settings` row exists but its `maxAgents` field is nil (as opposed to no row at
   all). I treated "has a setting" as "row exists AND `MaxAgents != nil`," preserving any other stored
   fields on write — there are none today, but this keeps the migration correct if a second
-  broker-settings key is added later.
+  broker-settings key is added later. This paid off in review round 1 (F4): a dedicated test
+  (`_NilMaxAgentsCASUpdate`) now proves the CAS-update branch this choice implies.
+
+## Review round 1 disposition (broker-settings-rev-p2-3-1, head `a11493c77`)
+
+Full review: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-3-1.md`.
+Verdict was REQUEST CHANGES on a single Required item (F1); everything else was Optional/Nit/FYI.
+All were addressed:
+
+- **F1 (Required, fixed):** the PR body had a bare `#2275` ("do not merge until #2275 has landed").
+  Fixed to `ptone/scion#2275` via `gh api repos/ptone/scion/pulls/2306 -X PATCH -f body=...` (`gh pr
+  edit` itself hit an unrelated "Projects (classic)" GraphQL deprecation error on this repo — the
+  REST PATCH avoids that code path entirely). Confirmed no other bare `#N` remains in the body.
+- **F2 (fixed):** the migration's doc comment wrongly claimed its grouping matched exactly what the
+  quota engine enforced. Rewritten to state accurately that `effectiveBrokerLimit` resolves with
+  `subjectID=brokerID`, so the engine only ever enforced two of the historical shapes, and the
+  migration deliberately takes every broker-scoped binding anyway (design §5.5), including ones the
+  engine silently ignored (the actual ptone/scion#2063 item-3 bug).
+- **F3 (fixed):** `_UserHackBindingBecomesSetting` now seeds `subjectId = broker.ID` (the real hack
+  shape) instead of an arbitrary user ID, so it proves AC-P2-5 literally. Added
+  `_NeverEnforcedSubjectStillMigrated` for the never-enforced-subject case.
+- **F4 (fixed):** added `_NilMaxAgentsCASUpdate` (existing row, `maxAgents` nil → CAS update, not a
+  failed create) and `_NegativeSelection` (system-scoped binding, a different limit's broker-scoped
+  binding, and an unrelated broker each correctly produce or affect nothing).
+- **F5-F7 (fixed, docs):** api.md now says clearing a migrated setting re-exposes any leftover shadowed
+  bindings (the precedence rule falls through to them); added `unlimited` to the `source` enum;
+  corrected the old-binding-shape wording (subject, not scopeId, is what distinguished the hack) and
+  the 400's scope (editing an existing broker-scoped binding is covered too, not just creating a new
+  one).
+- **F8 (fixed, docs, FYI-severity):** added a sentence that upgrading can newly impose or tighten a
+  broker's cap, by design — both because the migrated setting no longer merges with a system-scoped
+  binding via "most generous wins," and because of F2's never-enforced-subject rows. The reviewer is
+  raising the release-note version of this with the lead separately; not this PR's job.
+- **F9-F12 (FYI, no action):** `Residuals` counting brokers rather than binding rows (F9), the
+  expected one-line P1a rebase conflict at the two untouched seed-default sentences (F10), and the
+  Postgres-gap / race / failure-mode confirmations (F11, F12) needed no changes.
+
+Re-ran after the fixes: the full `TestBrokerQuotaBindingsToSettingsMigration_*` suite in `cmd`
+(10 tests, all passing, including the two new ones), the targeted `pkg/hub` tests
+(`-run 'Quota|Entitlement|BrokerSetting|Migrated'`), `go build ./...`, `gofmt -l`, and
+`golangci-lint run ./cmd/...` (clean on the touched files). Pushed as `a11493c77`; confirmed present
+on `origin/scion/broker-settings-p2-3`.
