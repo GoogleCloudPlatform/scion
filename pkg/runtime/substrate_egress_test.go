@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -182,6 +183,74 @@ func TestSubstrateEgressPolicy_EndToEndNoIPPatterns(t *testing.T) {
 	}
 	if !containsHost(patterns, "github.com") {
 		t.Errorf("HostnameRule.patterns = %v, want the normalized form of GitHub.COM.", patterns)
+	}
+}
+
+// TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts proves the
+// cloud metadata IP, a Kubernetes-API-shaped in-cluster host, and a bare
+// in-cluster suffix — each derived from a tenant-controllable source
+// (GitClone.URL or an OTEL endpoint env var) — never reach the actor's
+// EgressPolicy.
+func TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     RunConfig
+		env     map[string]string
+		refused string
+	}{
+		{
+			name:    "GitClone.URL is the cloud metadata IP",
+			cfg:     RunConfig{GitClone: &api.GitCloneConfig{URL: "https://169.254.169.254/repo.git"}},
+			refused: "169.254.169.254",
+		},
+		{
+			name:    "SCION_GIT_CLONE_URL is a Kubernetes API host",
+			env:     map[string]string{"SCION_GIT_CLONE_URL": "https://kubernetes.default.svc.cluster.local/repo.git"},
+			refused: "kubernetes.default.svc.cluster.local",
+		},
+		{
+			name:    "SCION_OTEL_ENDPOINT is a bare in-cluster suffix",
+			env:     map[string]string{"SCION_OTEL_ENDPOINT": "collector.otel-system.svc:4317"},
+			refused: "collector.otel-system.svc",
+		},
+		{
+			name:    "OTEL_EXPORTER_OTLP_ENDPOINT is a loopback address",
+			env:     map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318"},
+			refused: "127.0.0.1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hosts := substrateEgressHostnames(tc.cfg, tc.env, config.V1SubstrateConfig{})
+			if containsHost(hosts, tc.refused) {
+				t.Errorf("substrateEgressHostnames() = %v, must refuse tenant-derived host %q", hosts, tc.refused)
+			}
+		})
+	}
+}
+
+// TestSubstrateEgressHostnames_InClusterHubStillAllowed proves the operator-
+// config side of the trust split still works: an in-cluster hub endpoint
+// (the exact shape substrate.NormalizeEgressAllowEntry's public-hostname
+// grammar would reject) reaches the actor's EgressPolicy unchanged, because
+// the hub host is never routed through that validator.
+func TestSubstrateEgressHostnames_InClusterHubStillAllowed(t *testing.T) {
+	env := map[string]string{"SCION_HUB_ENDPOINT": "https://hub.scion-system.svc.cluster.local:8443"}
+	hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+	if !containsHost(hosts, "hub.scion-system.svc.cluster.local") {
+		t.Errorf("substrateEgressHostnames() = %v, want the in-cluster hub host still present", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed proves the
+// tenant-controllable path is refuse-invalid, not refuse-everything: an
+// ordinary public OTLP collector hostname still passes through
+// addTenantHost and reaches the result, normalized.
+func TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed(t *testing.T) {
+	env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://Otel-Collector.Example.COM:4318"}
+	hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+	if !containsHost(hosts, "otel-collector.example.com") {
+		t.Errorf("substrateEgressHostnames() = %v, want the normalized public OTEL host present", hosts)
 	}
 }
 

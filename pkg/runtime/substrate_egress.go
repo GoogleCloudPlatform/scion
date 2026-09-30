@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"log/slog"
 	"net/url"
 	"sort"
 	"strings"
@@ -43,6 +44,29 @@ var hardcodedModelEgressHosts = []string{
 // rather than failing Run — a missing hub or git host here means the
 // operator will see egress-denied failures on the cluster, which is
 // diagnosable, rather than Run refusing to create the actor at all.
+//
+// Every host added below falls into one of two trust sources, and each is
+// handled accordingly:
+//
+//   - Operator-config: the hub endpoint (broker/operator deployment config,
+//     resolved the same way every other runtime resolves it — see
+//     hostFromURLEnv's call site below) and hardcodedModelEgressHosts (a
+//     fixed literal in this binary). Neither is validated as a public
+//     hostname: an in-cluster hub (e.g. "hub.scion-system.svc.cluster.local")
+//     is a legitimate, common deployment shape that
+//     substrate.NormalizeEgressAllowEntry's public-hostname grammar would
+//     reject outright (it deliberately excludes "svc"/"cluster.local" and
+//     every other non-ICANN suffix — see that function's own doc comment).
+//   - Tenant-controllable: cfg.GitClone.URL/SCION_GIT_CLONE_URL (the
+//     workload's own configured git remote) and every OTEL_*/SCION_OTEL_*
+//     endpoint (agent/template env this function reads from the same env
+//     map the actor's own bootstrap payload is built from — see
+//     buildBootstrapEnv's callers). Each of these goes through
+//     addTenantHost, the same substrate.NormalizeEgressAllowEntry validator
+//     operator-configured egress_allow entries use below, which also
+//     rejects every IP-literal/CIDR form (loopback, link-local including
+//     the cloud metadata address, private, and any other numeric address)
+//     via its own looksLikeIPAttempt check.
 func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1SubstrateConfig) []string {
 	seen := make(map[string]struct{})
 	var hosts []string
@@ -57,6 +81,28 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		seen[h] = struct{}{}
 		hosts = append(hosts, h)
 	}
+	// addTenantHost validates h (a hostname derived from tenant-controllable
+	// input) the same way an operator's own egress_allow entry is validated,
+	// before it ever reaches the actor's EgressPolicy. A host that fails
+	// validation (an IP literal, a cluster-internal suffix, a malformed or
+	// oversized name) is dropped, not added — the caller only ever wanted
+	// egress to this workload's own legitimate remotes, so refusing an
+	// invalid one fails safe rather than open. Only the bare host is
+	// logged, matching NormalizeEgressAllowEntry's own callers elsewhere:
+	// never the userinfo, query, or full URL a caller derived it from,
+	// either of which could carry a credential.
+	addTenantHost := func(h string) {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			return
+		}
+		normalized, err := substrate.NormalizeEgressAllowEntry(h)
+		if err != nil {
+			slog.Warn("substrate: dropping invalid tenant-derived egress host", "host", h, "error", err)
+			return
+		}
+		add(normalized)
+	}
 
 	if h := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); h != "" {
 		add(h)
@@ -64,10 +110,10 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 
 	if cfg.GitClone != nil && cfg.GitClone.URL != "" {
 		if h := hostFromURL(cfg.GitClone.URL); h != "" {
-			add(h)
+			addTenantHost(h)
 		}
 	} else if h := hostFromURLEnv(env, "SCION_GIT_CLONE_URL"); h != "" {
-		add(h)
+		addTenantHost(h)
 	}
 
 	// The configured telemetry endpoint host (substrate-runtime.md §7).
@@ -84,7 +130,7 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", // OTel SDK per-signal override.
 	} {
 		if h := hostFromURLEnv(env, key); h != "" {
-			add(h)
+			addTenantHost(h)
 		}
 	}
 
