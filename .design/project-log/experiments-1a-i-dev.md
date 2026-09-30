@@ -44,7 +44,10 @@ per §7.
   `experimentsSnapshot()` are nil-safe (fall back to `experiments.Default()`
   and an empty snapshot respectively), matching the existing
   `route_classification_test.go` pattern of building `&Server{...}` by struct
-  literal without `New()`.
+  literal without `New()`. `TestNew_StoresServerConfigExperimentsRegistry`
+  (`experiments_new_test.go`, tagged `!no_sqlite` since it needs a real store)
+  separately covers the other end of that seam: the `New()` assignment that
+  actually carries `ServerConfig.Experiments` onto a real server.
 - **No package-level mutation.** All registry tests build fresh `*Registry`
   values via `NewRegistry`; none touch `compiled`/`compiledRetired` directly,
   so `t.Parallel()` would be safe if added later (design.md §3.2, §9).
@@ -58,9 +61,9 @@ per §7.
   The diff still ends up above the ~450–600 target — the §9/§10 rows assigned
   to 1a-i cover a wide matrix (registry invariants, the malformed-row policy,
   snapshot/read-result cases, `requireExperiment`'s gate and panic behaviors)
-  plus two review rounds' worth of added coverage, and I did not cut coverage
-  to hit the number. See the PR diff stat for the current size rather than a
-  count here, which would go stale on the next push.
+  plus coverage added during review, and I did not cut coverage to hit the
+  number. See the PR diff stat for the current size rather than a count here,
+  which would go stale on the next push.
 
 ## Verification
 

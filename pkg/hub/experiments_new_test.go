@@ -36,6 +36,7 @@ func TestNew_StoresServerConfigExperimentsRegistry(t *testing.T) {
 	if err := st.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() }) // Release in-memory SQLite database to avoid OOM across many tests.
 
 	reg := testRegistry(t)
 	cfg := DefaultServerConfig()
