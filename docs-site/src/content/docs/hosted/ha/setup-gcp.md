@@ -1157,6 +1157,25 @@ When redeploying the Hub with a new image:
      --region=$REGION --project=$PROJECT_ID --quiet
    ```
 
+### 7b. Secret Name Migration
+
+A hub deployed exactly as this guide describes is **not covered** by the Cloud Run
+job runbook in
+[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md):
+that runbook is scoped to hubs deployed with the hub-cloudrun Terraform module
+(private-IP Cloud SQL, Direct VPC egress, DSN as a separate secret env var). This
+guide's hub uses a public-IP Cloud SQL instance with no Direct VPC egress, and keeps
+its DSN inside `settings.yaml` (§3c) rather than a separate secret env var — none of
+which the runbook's discovery steps assume. No workstation ever fetches
+`scion-hub-settings` or runs `migrate-names` directly against this hub's database
+either; that path is deliberately unsupported (no human handles the DSN). There is
+currently no supported way to run `scion hub secret migrate-names` against a hub
+deployed exactly per this guide. This gap — the missing `server.hub.hub_id` this
+guide never sets, and a DSN-free migration path for this guide's hubs — is tracked in
+[ptone/scion#2395](https://github.com/ptone/scion/issues/2395). See
+[Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for what the command does in general, and `--help` for its flags.
+
 ---
 
 ## Appendix A: Complete settings.yaml Reference
