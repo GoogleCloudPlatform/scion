@@ -2829,8 +2829,10 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// The watermark must name a real, persisted message — existence only,
-	// not same-conversation membership (see the investigation doc for why).
+	// Reject IDs that aren't persisted messages: clients must never set a
+	// client-local placeholder as the watermark. Existence only, not also
+	// same-conversation membership — history lists by ConversationID, and a
+	// visible row's ThreadID may differ from key.
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil || targetMsg == nil {
 		ValidationError(w, "messageId does not refer to a known message", nil)

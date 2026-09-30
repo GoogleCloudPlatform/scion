@@ -931,13 +931,13 @@ func TestChatV2_ConversationRead(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleConversationRead: watermark validation (nc-self-unread round 2, R1)
+// handleConversationRead: watermark validation
 // ---------------------------------------------------------------------------
 
-// TestChatV2_ConversationRead_RejectsUnknownMessageID is the direct
-// regression test for R1: a client that POSTs an optimistic send's temporary
-// idempotency-key ID (never persisted) as the read watermark must be
-// rejected, not silently accepted as if it were a real message.
+// TestChatV2_ConversationRead_RejectsUnknownMessageID: a client that POSTs
+// an optimistic send's temporary idempotency-key ID (never persisted) as the
+// read watermark must be rejected, not silently accepted as if it were a
+// real message.
 func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 	srv, _, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -966,16 +966,13 @@ func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 	}
 }
 
-// TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID
-// pins the round-2 review R-A fix: the watermark guard checks existence
-// only, not same-conversation membership by ThreadID. A real, persisted
-// message with a ConversationID set but a ThreadID that doesn't match `key`
-// (the API-reachable shape review R-A identified: an agent API call with an
-// explicit conversation_id and an unrelated/absent thread_id) must still be
-// usable as a read watermark. Rejecting it would make the guard stricter
-// than handleConversationHistory's ConversationID-based filter — a 400
-// followed by a permanently stuck unread for a message the client can
-// already see.
+// TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID:
+// the watermark guard checks existence only, not same-conversation
+// membership by ThreadID. A real, persisted message with a ConversationID
+// set but a ThreadID that doesn't match `key` (e.g. an agent API call with
+// an explicit conversation_id and an unrelated/absent thread_id) must still
+// be usable as a read watermark — rejecting it would make the guard
+// stricter than handleConversationHistory's ConversationID-based filter.
 func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(t *testing.T) {
 	srv, s, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -1088,13 +1085,11 @@ func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
 	}
 }
 
-// TestChatV2_ConversationRead_MonotonicTieBreaksByID pins the round-2 review
-// R-A order fix: two messages with an identical CreatedAt must resolve the
-// tie the same way ListMessages does (ByCreated, ByID, entadapter/message_store.go) —
-// the higher-ID row, which sorts later in the history listing, counts as
-// newer. Comparing CreatedAt alone (the pre-fix behaviour) left this
-// order-dependent: whichever of the two was POSTed second lost, regardless
-// of which one history shows last.
+// TestChatV2_ConversationRead_MonotonicTieBreaksByID: two messages with an
+// identical CreatedAt must resolve the tie the same way ListMessages does
+// (ByCreated, ByID, entadapter/message_store.go) — the higher-ID row, which
+// sorts later in the history listing, counts as newer, and the lower-ID row
+// never counts as newer than it once it is the watermark.
 func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
 	srv, s, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -1136,9 +1131,8 @@ func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
 
 	// A same-timestamp POST for the higher-ID row — the one that sorts later
 	// in the history listing — must be accepted as newer via the ID
-	// tie-break, not skipped as "not strictly After". Comparing CreatedAt
-	// alone (the pre-R-A behaviour) would incorrectly no-op this, since
-	// neither timestamp is After the other.
+	// tie-break, not skipped as "not strictly After": neither timestamp is
+	// After the other.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
 		map[string]string{"messageId": hi.ID})
 	if rec.Code != http.StatusOK {
@@ -1151,6 +1145,25 @@ func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
 	}
 	if rs == nil || rs.LastReadMessageID != hi.ID {
 		t.Errorf("tie-break resolved wrong way: got %+v, want LastReadMessageID = %q (the higher ID)", rs, hi.ID)
+	}
+
+	// The reverse direction must also hold: a same-timestamp POST for the
+	// lower-ID row, now that hi is the watermark, must be a no-op, not a
+	// second "tie counts as newer" win. Without the ID comparison (treating
+	// every tie as newer), this POST would incorrectly roll the watermark
+	// back to lo.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": lo.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-advance to lo (stale tie): expected 200 (ignored, not an error), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err = wcs.GetReadState(ctx, DevUserID, "topic-tie")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != hi.ID {
+		t.Errorf("tie-break rolled back: got %+v, want LastReadMessageID to remain %q (the higher ID)", rs, hi.ID)
 	}
 }
 

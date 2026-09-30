@@ -946,14 +946,13 @@ describe('scion-chat-thread read watermark', () => {
   });
 
   /**
-   * Regression for nc-self-unread R1: an optimistic send's temporary
-   * idempotency-key ID must never be POSTed as the read watermark. On a slow
-   * send (sendAgentRouted can wait up to 30s per recipient on
-   * dispatchWithBrokerRetry) with no SSE echo yet, the optimistic message is
-   * the only, and therefore "last", message in the thread when the 1s
-   * maybeAdvanceReadWatermark debounce fires. Before the fix this POSTed the
-   * temp UUID; the server would now reject it (handleConversationRead), but
-   * the client must not even try.
+   * An optimistic send's temporary idempotency-key ID must never be POSTed
+   * as the read watermark. On a slow send (sendAgentRouted can wait up to
+   * 30s per recipient on dispatchWithBrokerRetry) with no SSE echo yet, the
+   * optimistic message is the only, and therefore "last", message in the
+   * thread when the 1s maybeAdvanceReadWatermark debounce fires. The server
+   * would reject that ID (handleConversationRead), but the client must not
+   * even try.
    */
   it('POSTs the last real message as the read watermark, not the optimistic send id, when no SSE echo has arrived', async () => {
     vi.useFakeTimers();
@@ -1032,8 +1031,8 @@ describe('scion-chat-thread read watermark', () => {
       expect(optimistic).toBeDefined();
 
       // Models the scroll event scrollToBottomAfterRender triggers in a real
-      // browser (review R1, ~L2524): the only trigger that would otherwise
-      // start the 1s debounce this early.
+      // browser: the only trigger that would otherwise start the 1s debounce
+      // this early.
       internals.maybeAdvanceReadWatermark();
       await vi.advanceTimersByTimeAsync(1001);
 

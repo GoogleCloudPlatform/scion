@@ -773,15 +773,13 @@ func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
 	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
 }
 
-// TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState is a
-// regression test for nc-self-unread FYI 1 (round 2): a human posting into a
-// web-visible agent DM from a non-web channel (e.g. Discord) must not see
-// their own message as unread when they later open that same DM in native
-// web chat. Before the fix, handleBrokerInbound advanced only the legacy
-// Wave-1 TouchThread watermark — never the v2 DM last-message watermark or
-// the sender's v2 read state — so the v2 unread computation
-// (LastMessageID != LastReadMessageID) stayed permanently unread for the
-// sender's own cross-channel message.
+// TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState: a human
+// posting into a web-visible agent DM from a non-web channel (e.g. Discord)
+// must not see their own message as unread when they later open that same
+// DM in native web chat. The v2 DM last-message watermark and the sender's
+// v2 read state must both advance — the legacy Wave-1 TouchThread watermark
+// is a different mechanism and does not feed the v2 unread computation
+// (LastMessageID != LastReadMessageID).
 func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -794,13 +792,11 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 	srv.SetWebChatStore(wcs)
 	srv.SetDispatcher(&brokerMockDispatcher{})
 
-	// R-B (round-2 review): assert the watermarks the same way
-	// TestChatV2_Send_*_ReadWatermarkAdvancedBeforePublish do — at the exact
-	// moment PublishUserMessage is called, not after the handler returns.
-	// Asserting only after-the-fact cannot distinguish "advanced before
-	// publish" from "advanced after publish": both leave the same final
-	// state, but the latter is the round-1 flash (the sender's own tab
-	// refetches unread state on this SSE event).
+	// Assert the watermarks at the exact moment PublishUserMessage is
+	// called, not after the handler returns: asserting only after-the-fact
+	// cannot distinguish "advanced before publish" (correct — the sender's
+	// own client refetches unread state on this event) from "advanced after
+	// publish" (both leave the same final state).
 	spy := &readStateAtPublishSpy{wcs: wcs}
 	srv.SetEventPublisher(spy)
 
@@ -894,8 +890,8 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 	assert.Equal(t, persisted.ID, rs.LastReadMessageID,
 		"sender read watermark was not advanced for the cross-channel message — would show unread in web chat")
 
-	// The load-bearing assertion (R-B): both watermarks were already current
-	// at the moment of publish, not merely by the time the test got around to
+	// The load-bearing assertion: both watermarks were already current at
+	// the moment of publish, not merely by the time the test got around to
 	// checking after the handler returned.
 	require.True(t, spy.called, "PublishUserMessage was never called")
 	assert.Equal(t, persisted.ID, spy.lastMessageIDAtPublish,

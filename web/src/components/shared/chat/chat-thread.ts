@@ -2421,8 +2421,7 @@ export class ScionChatThread extends LitElement {
    * other client) cannot resolve, and if the send is slow (e.g.
    * sendAgentRouted waiting on agent dispatch) or the SSE connection is
    * degraded, the 1s/500ms/2s timers below can fire before reconciliation
-   * replaces it (nc-self-unread R1). Returns '' if every message is still
-   * pending.
+   * replaces it. Returns '' if every message is still pending.
    */
   private lastReadableMessageId(): string {
     for (let i = this.messages.length - 1; i >= 0; i--) {
