@@ -304,11 +304,36 @@ comment-only nits, both fixed:
 
 - **F1:** `brokers.ts`'s `renderAgentCapacity` JSDoc still said `'-'` for the absent case; the code
   renders an em dash `"—"`. Corrected the doc to match.
-- **F2:** the round-2 section's F2 bullet above still cited `getUsageByLimit`/`getUsageSummary` for the
+- **F2:** the round-3 section's F2 bullet above still cited `getUsageByLimit`/`getUsageSummary` for the
   `BrokerAgentLimitSource` comment fix, but round 4 had since corrected the actual code comment to cite
   `getUsageByLimit` alone. Fixed the bullet to match and noted why.
 
 Last review round (6 of 6, including the initial submission). Re-verified: `cd web && npx tsc --noEmit`.
+
+## Review round 6: APPROVE (final, pre-rebase)
+
+Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-6.md`
+(reviewed at `9ed1ea38`, fix delta `a20cdb7e..9ed1ea38`: the `brokers.ts` JSDoc fix and the round-5
+project-log entry above). Both round-5 findings independently re-verified as resolved: the JSDoc now
+matches the em dash the code renders, and the round-3 F2 bullet's citation is confirmed accurate against
+`handlers_quota.go`. One new, non-blocking finding:
+
+- **F1 (Nit, deferred at the time, closed now):** the round-5 entry above said "the round-2 section's F2
+  bullet", but the bullet it corrected is in the "Review round 3" section, not round 2. Purely a
+  historical-record typo with no effect on code; the round-6 reviewer explicitly deferred the fix to "any
+  later touch of the log, e.g. during the pre-merge rebase" rather than spending another round on a
+  wording-only nit. That later touch is this entry — see the correction applied to the round-5 F2 bullet
+  above (now reads "the round-3 section's F2 bullet").
+- **F2 (FYI):** the PR's `updated_at` moved between checks with no body change — traced to the push
+  itself updating the timestamp, not a body edit. No action needed.
+
+Gates (detached checkout at `9ed1ea38`): `tsc --noEmit` pass; `eslint` on `brokers.ts` at the same base
+count as P2.1's `0875d543` (1 error/13 warnings, 0 new — the delta is JSDoc/log only); `go build ./...`
+pass. CI: Build & Test pass (7m32s, includes Verify Web Types), golangci-lint pass, T1 PostgreSQL,
+single-node-vm harness, shellcheck and Mergeability Gate all pass; Lint 405 (reporting-only) fails, same
+pre-existing issue as every prior round. `pkg/hub SQLite Tests` and the reporting-only Full Test Suite
+were still pending when the reviewer finished — neither is a required check, and this delta changes no
+Go code. Bare-`#N` greps on both the commit range and the live PR body: empty.
 
 ## Note on the upstream-main rebase step (superseded — see below)
 
@@ -463,12 +488,32 @@ Re-verified: `tsc --noEmit` clean; `vitest run` on both test files, 5/5 pass (F2
 the two changed page files stays at the stated 7/44 baseline (0 new); `go build ./pkg/hub/...` /
 `go vet ./pkg/hub/...` clean (Go changes remain comments-only); bare-`#N` grep empty.
 
-### Local `pkg/hub` SQLite suite: a stray FAIL, traced to output truncation, not a regression
+### Local `pkg/hub` SQLite suite FAIL: two tests, both traced to pre-existing upstream-main issues
 
-While waiting on this round, a local `make test-hub-sqlite`-equivalent run for the upstream-main rebase
-came back `FAIL` for the top-level `pkg/hub` package (every subpackage still `ok`). The run had been
-piped through `tail -200` for readability, which discarded the actual `--- FAIL: TestName` line along
-with the rest of the output — the failure existed in the log, but its identity did not survive the pipe.
-A follow-up untruncated re-run was launched to recover the specific test name; see the message log to the
-EM for its result once available. CI's own "pkg/hub SQLite Tests" job (which is what actually gates this
-PR) was still pending at the time and is unaffected by this local-only truncation issue either way.
+A local `make test-hub-sqlite`-equivalent run for the upstream-main rebase came back `FAIL` for the
+top-level `pkg/hub` package (every subpackage still `ok`). An initial pass at this note assumed the
+failure detail was lost to `tail -200` truncation; an untruncated re-run recovered it, and both findings
+were then confirmed against CI directly and against a clean upstream-main checkout, not just re-run
+locally:
+
+- **`TestCatalogHTTPEntryPoints_LiveMethodCheck`**: fails because `GET`/`PUT
+  /api/v1/runtime-brokers/{id}/settings` (P2.1's broker-settings route, merged upstream as
+  GoogleCloudPlatform/scion#2126) returns 404 in this authzop catalog live-route-reachability check
+  (`operation broker.read` / `quota.update`: "the catalog's declared path does not reach a live route for
+  this operation"). **Pre-existing on bare upstream main**: reproduced in a detached worktree at
+  `f671d1a8d` (upstream-main's tip, no P2.2 commits at all) running only this test — it fails there
+  identically. A gap in P2.1's merged catalog entries versus this test's live-route check, not something
+  P2.2 touches or could have caused.
+- **`TestHandleAgentMessage_LogCapture_RawContentRedacted`**: fails when run as part of the full
+  `pkg/hub` suite (confirmed independently via `gh api` on CI's own "pkg/hub SQLite Tests" job for commit
+  `0bb5c2c9`, conclusion `"failure"` — not a local-sandbox artifact), but **passes cleanly in isolation**
+  on the same upstream-main worktree. A test-isolation/ordering flake, consistent with upstream-main's
+  own tip commit at fetch time being `test(hub): fix races in two flaky hub tests` — evidently not an
+  exhaustive fix. Amendment A1's changes are comments and rendering-layer only and touch neither agent
+  messaging nor log redaction, so this cannot be a regression from this branch either.
+
+Neither failing test is in a file this PR touches, and both are reproducible independent of this branch
+(one on bare upstream main, the other in CI's own job for a commit that predates the Amendment A1
+commit). Reported to the EM with the reproduction evidence; no fix attempted here, since the fix belongs
+in upstream main / P1b's route registration and in whatever shared state the flaky test needs isolated,
+not in `scion/broker-settings-p2-2`.
