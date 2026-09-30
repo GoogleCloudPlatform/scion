@@ -15,7 +15,9 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,11 +54,157 @@ func TestOpaqueError_NeverExposesWrappedText(t *testing.T) {
 // is authorized to act on the agent itself.
 const identityLeakingRuntimeError = "rpc error: container my-actor-7f3 on node gke-pool-2 in namespace tenant-acme: connection refused"
 
+// TestWriteRuntimeOpError_LogsRawErrorRecordsSpanWritesFixedBody proves
+// writeRuntimeOpError is the one call site every runtime-op handler makes
+// on failure, and that it never silently discards the raw error: it logs
+// the raw error (identity and all) via s.agentLifecycleLog, and only the
+// fixed, identity-free message reaches the HTTP response body.
+func TestWriteRuntimeOpError_LogsRawErrorRecordsSpanWritesFixedBody(t *testing.T) {
+	srv := newTestServer(t)
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	rawErr := errors.New(identityLeakingRuntimeError)
+	w := httptest.NewRecorder()
+	srv.writeRuntimeOpError(w, t.Context(), "stop agent", rawErr, "agent_id", "test-agent-1")
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "stop agent") {
+		t.Errorf("log output missing op %q: %s", "stop agent", logOutput)
+	}
+	if !strings.Contains(logOutput, "test-agent-1") {
+		t.Errorf("log output missing extra field %q: %s", "test-agent-1", logOutput)
+	}
+	if !strings.Contains(logOutput, "my-actor-7f3") {
+		t.Errorf("log output missing the raw error's identity detail (my-actor-7f3): %s", logOutput)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "my-actor-7f3") {
+		t.Errorf("response body leaked the raw error's identity detail: %s", body)
+	}
+	if !strings.Contains(body, "Failed to stop agent") {
+		t.Errorf("response body missing the fixed message: %s", body)
+	}
+}
+
+// TestWriteStartContextError_PassesThroughStatusAndMessageVerbatim proves
+// a *startContextError's own Status and Message — broker-composed at
+// buildStartContext, not raw runtime topology — reach the client
+// unchanged, never replaced by runtimeOpError's generic "Failed to <op>"
+// message.
+func TestWriteStartContextError_PassesThroughStatusAndMessageVerbatim(t *testing.T) {
+	sce := &startContextError{
+		Status:  http.StatusBadRequest,
+		Message: "image must be pinned by digest",
+	}
+	w := httptest.NewRecorder()
+	writeStartContextError(w, sce, "start agent")
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "image must be pinned by digest") {
+		t.Errorf("response body = %s, want the curated message verbatim", body)
+	}
+	if strings.Contains(body, "Failed to") {
+		t.Errorf("response body = %s, want the curated message, not runtimeOpError's generic form", body)
+	}
+}
+
+// TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage
+// proves writeStartContextError's routing: an IsHubError *startContextError
+// (as buildStartContext returns from a template/harness-config hydration
+// failure) must reach the response body only as the fixed "Failed to <op>"
+// text — its Message embeds the hydration failure's own error text, which
+// is never shown verbatim outside createAgent's own hub-connectivity
+// special case — while a non-IsHubError, 4xx *startContextError's Message
+// (buildStartContext's own curated, client-safe text) is written verbatim.
+func TestWriteStartContextError_HidesHubHydrationTextButPassesCuratedMessage(t *testing.T) {
+	// A hydration failure's identity-bearing text, deliberately free of any
+	// of templatecache.IsHubConnectivityError's own connectivity-pattern
+	// substrings (e.g. "connection refused", "timeout"): this subtest
+	// exercises the non-connectivity IsHubError branch specifically, so
+	// OriginalErr here must not accidentally also satisfy the connectivity
+	// check and route into the unrelated 503 branch instead.
+	const hydrationIdentityLeak = "rpc error: container my-actor-7f3 on node gke-pool-2 in namespace tenant-acme: permission denied"
+	hubErr := &startContextError{
+		Status:      http.StatusInternalServerError,
+		Message:     "Failed to hydrate harness-config: " + hydrationIdentityLeak,
+		IsHubError:  true,
+		OriginalErr: errors.New(hydrationIdentityLeak),
+	}
+	w := httptest.NewRecorder()
+	writeStartContextError(w, hubErr, "start agent")
+	body := w.Body.String()
+	if strings.Contains(body, "my-actor-7f3") {
+		t.Errorf("IsHubError case: response body leaked the hydration error's identity detail: %s", body)
+	}
+	if !strings.Contains(body, "Failed to start agent") {
+		t.Errorf("IsHubError case: response body = %s, want the fixed op message", body)
+	}
+
+	curatedErr := &startContextError{
+		Status:  http.StatusBadRequest,
+		Message: "image must be pinned by digest",
+	}
+	w2 := httptest.NewRecorder()
+	writeStartContextError(w2, curatedErr, "start agent")
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("curated case: status = %d, want %d", w2.Code, http.StatusBadRequest)
+	}
+	body2 := w2.Body.String()
+	if !strings.Contains(body2, "image must be pinned by digest") {
+		t.Errorf("curated case: response body = %s, want the curated message verbatim", body2)
+	}
+	if strings.Contains(body2, "Failed to") {
+		t.Errorf("curated case: response body = %s, want the curated message, not the generic op message", body2)
+	}
+}
+
+// TestWriteStartContextError_LogsOriginalErrNotFixedMessage proves a
+// startContextError whose curated Message is a fixed string with the real
+// diagnostic detail in OriginalErr (e.g. buildStartContext's
+// global-config-dir or hub-endpoint-resolution failures) still gets that
+// detail into the server's own log — not just the same fixed string the
+// client already received. err.Error() on a *startContextError returns
+// Message itself, so a log call that used it directly (rather than
+// OriginalErr) would otherwise discard the one place this detail could
+// reach any diagnostic surface.
+func TestWriteStartContextError_LogsOriginalErrNotFixedMessage(t *testing.T) {
+	var logBuf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	rawErr := errors.New(identityLeakingRuntimeError)
+	sce := &startContextError{
+		Status:      http.StatusInternalServerError,
+		Message:     "Failed to resolve the hub endpoint",
+		OriginalErr: rawErr,
+	}
+	w := httptest.NewRecorder()
+	writeStartContextError(w, sce, "start agent")
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "my-actor-7f3") {
+		t.Errorf("log output missing the OriginalErr detail (my-actor-7f3): %s", logOutput)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "my-actor-7f3") {
+		t.Errorf("response body leaked the OriginalErr detail: %s", body)
+	}
+	if !strings.Contains(body, "Failed to start agent") {
+		t.Errorf("response body = %s, want the fixed, op-labeled message", body)
+	}
+}
+
 // TestBrokerRuntimeOpHandlers_RedactRawErrorFromResponseBody is the table
-// test over the broker's runtime-op handler set required by this class of
-// fix: for each handler, a raw (identity-bearing) runtime error injected at
-// the manager boundary must never reach the HTTP response body — only the
-// fixed, per-operation message must appear there.
+// test over the broker's runtime-op handler set: for each handler, a raw
+// (identity-bearing) runtime error injected at the manager boundary must
+// never reach the HTTP response body — only the fixed, per-operation
+// message must appear there.
 func TestBrokerRuntimeOpHandlers_RedactRawErrorFromResponseBody(t *testing.T) {
 	cases := []struct {
 		name        string

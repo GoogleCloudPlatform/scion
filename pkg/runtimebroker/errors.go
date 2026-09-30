@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // APIError represents a standardized error response.
@@ -223,11 +226,39 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // (start, stop, restart, delete, exec, message, logs, list) writes to its
 // client on failure: op names the operation in the fixed message (e.g.
 // "stop agent", "list agents"), never anything about the specific agent,
-// runtime, or backend involved. Callers keep passing the real err to
-// span.SetStatus/logging themselves; this only ever governs what reaches
-// the HTTP response body.
+// runtime, or backend involved. writeRuntimeOpError is the one caller that
+// should ever reach for this directly; every runtime-op handler goes
+// through it instead of calling runtimeOpError/RuntimeError itself, so raw
+// err is never silently discarded on any of these paths.
 func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+}
+
+// writeRuntimeOpError is the single call every runtime-op handler (start,
+// stop, restart, delete, exec, message, logs, list) makes on failure: it
+// logs err at scope op (plus any extra key/value pairs the caller has on
+// hand — an agent or project ID, for instance) via s.agentLifecycleLog,
+// records err on ctx's active span (trace.SpanFromContext(ctx) is a
+// documented no-op when ctx carries none, so this is always safe to call),
+// and writes the fixed, identity-free response body runtimeOpError builds.
+// Every runtime-op handler routes through this one call, so err always
+// reaches the server's own log and span, never just the client's opaque
+// "Failed to <op>" message.
+//
+// Never call this with a *startContextError: that type carries its own
+// curated Status/Message from buildStartContext (a template/config
+// problem, not runtime topology) and must go through
+// writeStartContextError instead — routing it through runtimeOpError's
+// fixed "Failed to <op>" message would discard a message that was already
+// safe to show the caller verbatim.
+func (s *Server) writeRuntimeOpError(w http.ResponseWriter, ctx context.Context, op string, err error, extra ...any) {
+	args := make([]any, 0, len(extra)+2)
+	args = append(args, "op", op)
+	args = append(args, extra...)
+	args = append(args, "error", err)
+	s.agentLifecycleLog.Error("runtime op failed", args...)
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, err.Error())
+	RuntimeError(w, runtimeOpError(op, err).Error())
 }
 
 // RuntimeUnavailable writes a 503 error for a transient container-runtime

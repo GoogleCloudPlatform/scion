@@ -427,7 +427,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		RuntimeError(w, runtimeOpError("list agents", err).Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err)
 		return
 	}
 
@@ -1199,7 +1199,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
-			RuntimeError(w, runtimeOpError("provision agent", err).Error())
+			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
 		}
 
@@ -1742,7 +1742,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, runtimeOpError("list agents", err).Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 
@@ -1806,7 +1806,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			return
 		}
 		if errors.Is(err, errDeleteTargetUnknown) {
-			RuntimeError(w, runtimeOpError("delete agent", err).Error())
+			s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 			return
 		}
 		if errors.Is(err, errAgentIdentityUnknown) {
@@ -1888,8 +1888,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 
 	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		RuntimeError(w, runtimeOpError("delete agent", err).Error())
+		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
 	if target.containerID == "" {
@@ -2425,8 +2424,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			AgentLookupUnavailable(w, err, id, "stop", "")
 			return
 		}
-		s.agentLifecycleLog.Warn("Stop agent: lookup failed", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to stop agent")
+		s.writeRuntimeOpError(w, ctx, "stop agent", err, "agent_id", id)
 		return
 	}
 	if target == "" {
@@ -2492,8 +2490,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				"agent_id", id,
 				"phase", string(state.PhaseStopped))
 		} else {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, runtimeOpError("stop agent", err).Error())
+			s.writeRuntimeOpError(w, ctx, "stop agent", err, "agent_id", id)
 			return
 		}
 	} else {
@@ -2607,8 +2604,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			AgentLookupUnavailable(w, err, id, "restart", "")
 			return
 		}
-		s.agentLifecycleLog.Warn("Restart agent: lookup failed", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to restart agent")
+		s.writeRuntimeOpError(w, ctx, "restart agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
 	// An empty target means the agent isn't present in this project — skip the
@@ -2694,12 +2690,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
 	if isRaw {
 		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
-			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
+				span.SetStatus(codes.Error, err.Error())
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, runtimeOpError("send message to agent", err).Error())
+			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
 			return
 		}
 	} else {
@@ -2725,12 +2721,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			})
 		}
 		if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
-			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
+				span.SetStatus(codes.Error, err.Error())
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, runtimeOpError("send message to agent", err).Error())
+			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
 			return
 		}
 	}
@@ -3123,7 +3119,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 			})
 			return
 		}
-		RuntimeError(w, runtimeOpError("execute command on agent", err).Error())
+		s.writeRuntimeOpError(w, ctx, "execute command on agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
 
@@ -3197,8 +3193,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
-		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
-		RuntimeError(w, runtimeOpError("write token file on agent", err).Error())
+		s.writeRuntimeOpError(w, ctx, "write token file on agent", err, "agent_id", id)
 		return
 	}
 
@@ -3237,7 +3232,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	// Try to read agent.log from the filesystem first (preferred source).
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, runtimeOpError("list agents", err).Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 
@@ -3287,7 +3282,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
 			return
 		}
-		RuntimeError(w, runtimeOpError("get logs for agent", err).Error())
+		s.writeRuntimeOpError(w, ctx, "get logs for agent", err, "agent_id", id)
 		return
 	}
 
@@ -3316,7 +3311,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 	// Find the agent to get its project path
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, runtimeOpError("list agents", err).Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 

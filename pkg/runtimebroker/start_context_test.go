@@ -1857,6 +1857,79 @@ func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_GlobalDirFailureMessageOmitsRawError proves that a
+// config.GetGlobalDir failure (ProjectSlug set, HOME unresolvable) returns a
+// startContextError whose Message is a fixed string, not "...: " + the raw
+// os.UserHomeDir error text — a 4xx Status writes Message verbatim to the
+// HTTP response body (writeStartContextError), so it must never be built by
+// string-concatenating a wrapped error even when this particular failure
+// isn't itself a 4xx.
+func TestBuildStartContext_GlobalDirFailureMessageOmitsRawError(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-1",
+		ProjectSlug: "my-project",
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatal("buildStartContext() with unresolvable HOME: expected an error, got nil")
+	}
+	sce, ok := err.(*startContextError)
+	if !ok {
+		t.Fatalf("err = %T, want *startContextError", err)
+	}
+	if strings.Contains(sce.Message, "$HOME") || strings.Contains(sce.Message, "defined") {
+		t.Errorf("Message = %q, embeds the raw os.UserHomeDir error text", sce.Message)
+	}
+	if sce.Message != "Failed to resolve the global config directory" {
+		t.Errorf("Message = %q, want the fixed string", sce.Message)
+	}
+	if sce.OriginalErr == nil {
+		t.Error("OriginalErr = nil, want the underlying error preserved for logging/span")
+	}
+}
+
+// TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError
+// proves the same for resolveEffectiveHubEndpoint's failure path (triggered
+// here via cloudrun-sandbox with no configured hub listen port): Message
+// must be a fixed string, not the wrapped error's own text.
+func TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.HubListenPort = 0
+	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox-no-port",
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatal("buildStartContext() with HubListenPort=0 on cloudrun-sandbox: expected an error, got nil")
+	}
+	sce, ok := err.(*startContextError)
+	if !ok {
+		t.Fatalf("err = %T, want *startContextError", err)
+	}
+	if strings.Contains(sce.Message, "listen port") {
+		t.Errorf("Message = %q, embeds the raw hub-endpoint-resolution error text", sce.Message)
+	}
+	if sce.Message != "Failed to resolve the hub endpoint" {
+		t.Errorf("Message = %q, want the fixed string", sce.Message)
+	}
+	if sce.OriginalErr == nil {
+		t.Error("OriginalErr = nil, want the underlying error preserved for logging/span")
+	}
+}
+
 func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testing.T) {
 	t.Run("preserves when external config dir exists", func(t *testing.T) {
 		cfg := DefaultServerConfig()

@@ -153,7 +153,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
-			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to get global dir: " + err.Error()}
+			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to resolve the global config directory", OriginalErr: err}
 		}
 		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
 		if s.config.Debug {
@@ -476,8 +476,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	})
 	if err != nil {
 		return nil, &startContextError{
-			Status:  http.StatusInternalServerError,
-			Message: err.Error(),
+			Status:      http.StatusInternalServerError,
+			Message:     "Failed to resolve the hub endpoint",
+			OriginalErr: err,
 		}
 	}
 	if hubEndpoint != "" {
