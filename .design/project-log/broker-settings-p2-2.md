@@ -239,7 +239,12 @@ Disposition of the remaining, non-blocking findings:
   those (`TestGetUsageSummary_MaxAgentsPerBroker_SumsAcrossBrokers`,
   `TestGetUsageSummary_NonBrokerLimit_Unaffected`, `TestListRuntimeBrokers_AgentCountAgreesWithReserve`).
   It also said the UI renders "-" when capacity fields are absent; the code renders an em dash "—".
-  Refreshed the PR body's Summary and Test plan to match the PR as it now stands.
+  **Correction (round 4): this disposition was wrong.** The `gh pr edit` command run at this point
+  reported a `GraphQL: ... (repository.pullRequest.projectCards)` error and exited non-zero, but that
+  exit status was not checked, and a follow-up `gh pr view --json body | head -5` looked unchanged only
+  because the new body's first five lines happen to be identical to the old ones — the actual edit never
+  applied. `gh api repos/ptone/scion/pulls/2303 --jq '.updated_at,.body'` still showed the pre-round-3
+  body and an unchanged `updated_at`. Caught by the round-4 review; see that section for the real fix.
 - **F2 (Nit, fixed):** the `BrokerAgentLimitSource` doc comment (`handlers_quota.go`) gave the wrong
   reason for a correct conclusion — it said `"unlimited"` is unreachable here because `brokerCapacity`
   "returns before counting", but skipping the count has nothing to do with reachability (this view
@@ -260,6 +265,35 @@ Disposition of the remaining, non-blocking findings:
 
 Re-verified after F2/F4: `go build ./pkg/hub/...` and `go vet ./pkg/hub/...`. F1 (the PR body refresh)
 needs no code verification.
+
+## Review round 4: REQUEST CHANGES
+
+Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-p2-2-4.md`.
+
+- **F1 (Required, fixed for real this time):** the round-3 PR body refresh had not actually applied.
+  `gh pr edit 2303 -R ptone/scion --body-file <path>` fails on this `gh` CLI (2.23.0) with
+  `GraphQL: Projects (classic) is being deprecated ... (repository.pullRequest.projectCards)` and exits
+  non-zero — an old CLI querying a field GitHub has since removed from schema for repos where Projects
+  Classic is fully sunset. The round-3 attempt did not check the exit code, and the follow-up spot check
+  (`gh pr view --json body | head -5`) missed the failure because the new body's first five lines are
+  identical to the old ones (the changes are further down). `gh api
+  repos/ptone/scion/pulls/2303 --jq '.updated_at,.body'` — a direct, cache-proof read of the REST
+  resource — confirmed the body and `updated_at` were both still the pre-round-3 values.
+  - Fixed by writing the body to
+    `/scion-volumes/scratchpad/projects/broker-settings/notes/p2-2-pr-body.md` and applying it with
+    `gh api -X PATCH repos/ptone/scion/pulls/2303 --input <json payload wrapping that file's content>`
+    instead of `gh pr edit` — the REST PATCH endpoint doesn't hit the deprecated GraphQL field.
+    Confirmed with exit code 0 and a fresh `updated_at`, then re-ran the exact verification grep the EM
+    specified; all four required strings (`SumsAcrossBrokers`, `NonBrokerLimit_Unaffected`,
+    `AgentCountAgreesWithReserve`, `getUsageSummary`) and the em dash are present in the live PR body.
+  - Corrected the false round-3 F1 disposition above rather than quietly rewriting history.
+- **F2 (Nit, fixed):** the `BrokerAgentLimitSource` comment's "see getUsageByLimit/getUsageSummary"
+  citation was wrong — only `getUsageByLimit` builds `usageReservationView` (the struct this comment is
+  on); `getUsageSummary` only sums counts and never touches this type. Changed the citation to
+  `getUsageByLimit` alone.
+
+Re-verified: `go build ./pkg/hub/...` and `go vet ./pkg/hub/...`. `gh api ... --jq '.updated_at,.body'`
+piped through the EM's exact grep, pasted into the report back to the EM.
 
 ## Note on the upstream-main rebase step
 
