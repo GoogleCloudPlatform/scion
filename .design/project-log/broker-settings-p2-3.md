@@ -271,3 +271,42 @@ worktree` with zero P2.3 commits. Neither is caused by, or fixable within, this 
 The PR body's test plan and this log both now say so accurately; CI's "pkg/hub SQLite Tests" job is
 expected to go red on the branch for the same, pre-existing reason and should not block merge review
 on that basis.
+
+## Upstream feedback (GoogleCloudPlatform/scion#2142), items 6-12
+
+Second rebase before starting: upstream main had advanced (`f671d1a8d` -> `84aecd566`, 6 commits:
+GoogleCloudPlatform/scion#2121, GoogleCloudPlatform/scion#2119, GoogleCloudPlatform/scion#2076,
+GoogleCloudPlatform/scion#2132, GoogleCloudPlatform/scion#2136, GoogleCloudPlatform/scion#2129, none
+touching `handlers_quota.go` or the
+`cmd/boot_broker_quota_bindings_to_settings.go` family). `git rebase upstream-main` from old head
+`705157a86` produced a pure rebase — range-diff (`f671d1a8d..705157a86` `upstream-main..4e5c8b4ab`):
+all 9 commits `=`. New head `4e5c8b4ab`, pushed before starting the review-feedback work, per the
+EM's instruction to report the rebase before touching anything else.
+
+Full brief: `/scion-volumes/scratchpad/projects/broker-settings/reviews/upstream-2141-2142-brief.md`.
+Reply drafts (URL, disposition, reply text, evidence per thread):
+`/scion-volumes/scratchpad/projects/broker-settings/reviews/upstream-replies-2142.md`.
+
+Gemini-code-assist raised 7 "medium" defensive-nil-check comments against this PR's diff (items 6-12
+of the combined brief covering both P2.2 and P2.3). Each was checked against the real contract —
+`pkg/store/entadapter/` is the only production `store.Store` implementation — and the established
+convention for the same callee elsewhere in the repo, rather than accepted or rejected mechanically.
+**All seven were DECLINED; no production code changed.**
+
+| # | Location | Disposition | Why |
+|---|---|---|---|
+| 6 | `handlers_quota.go:472-486`, nil `limitDef` in `createEntitlement` | DECLINED | `GetLimitDefinition`'s only implementation (`quota_store.go:115-123`) never returns `(nil, nil)` — `entLimitDefinitionToStore` (`:42-54`) always allocates. Four pre-existing call sites in this same file (`:313,359,415,668`) and `quota.go:307` all skip the guard. |
+| 7 | `handlers_quota.go:584-593`, nil `limitDef` in `updateEntitlement` | DECLINED | Same contract and convention as item 6 — the second of the two call sites this PR added. |
+| 8 | `boot_broker_quota_bindings_to_settings.go:103`, nil `limitDef` from `GetLimitDefinitionByName` | DECLINED | Same non-nil guarantee via `entLimitDefinitionToStore`. `broker_quota.go:179` uses the identical call with no guard. (Noted honestly: `quota.go`'s `Reserve`/`Release` *do* add a defensive guard there, treating it as "no limit configured" — the exception, not the rule, and not the right semantics for a migration that only proceeds once the limit is confirmed to exist.) |
+| 9 | `boot_broker_quota_bindings_to_settings.go:111`, nil `b` in the grouping loop | DECLINED | `ListEntitlementBindings`'s only implementation (`quota_store.go:231-248`) builds every element via `entEntitlementBindingToStore` (`:56-68`, always non-nil) from ent's own `.All(ctx)`, which never contains nil elements. `quota.go`'s four binding-iteration sites (`:230,250,264,320`) never guard nil elements either. |
+| 10 | `boot_broker_quota_bindings_to_settings.go:154`, nil `existing` with `err == nil` | DECLINED | `GetBrokerSettings`'s only implementation (`brokersetting_store.go:77-85`) always returns a non-nil `entBrokerSettingToStore(row)` (`:62-74`) on success. P2.1's own `broker_capacity.go:111-121` dereferences the identical call's result with no guard. |
+| 11 | `maxAgentsFromBindings`, nil `b` | DECLINED | Same contract/convention as item 9 — every slice passed in is sourced from the same non-nil-guaranteed `ListEntitlementBindings` grouping. |
+| 12 | `entitlementBindingIDs`, nil `b` | DECLINED | Same contract/convention as item 9. |
+
+No fixes were needed, so no code commit was made for this round — this project-log update is the
+only change, plus the reply-draft file above (outside the repo). Gates run: `git log --format=%B
+upstream-main..HEAD \| grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'` (clean); the same grep over this log file
+and the reply-draft file (clean, after rewording two internal table cross-references from `#6`/`#9`
+to `item 6`/`item 9` so they wouldn't false-positive as issue refs). No `gh` calls beyond the one
+batched fetch of the seven review-comment bodies by ID, and no CI watch, per the EM's instruction to
+keep `gh` usage minimal.
