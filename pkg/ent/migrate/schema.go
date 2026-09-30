@@ -187,6 +187,14 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{AgentsColumns[44]},
 			},
+			{
+				Name:    "agent_harness_config_reconcile_pending",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "harness_config IS NULL AND applied_config IS NOT NULL",
+				},
+			},
 		},
 	}
 	// AgentCredentialsColumns holds the columns for the "agent_credentials" table.

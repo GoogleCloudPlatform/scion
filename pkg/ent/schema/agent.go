@@ -326,5 +326,29 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
+		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
+		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered
+		// by id. The WHERE clause matches that predicate exactly, so the
+		// index holds only rows still needing reconciliation — it shrinks
+		// toward empty as they're caught up, instead of growing with the
+		// whole table forever the way an unconditional index on
+		// harness_config would. Same shape as this file's launch_deadline
+		// index above and notification.go's dispatched-false index.
+		//
+		// Deliberately does not serve the CLI --harness filter
+		// (agent.HarnessConfigEQ in agent_store.go): that predicate only
+		// ever matches a non-empty harness value, which this index excludes
+		// by construction. An index for that filter is a separate, still-open
+		// question — it would need to combine with the AuthorizedProjectIDs
+		// project scope every --harness query already carries, and the
+		// agents table has no project_id index today for it to pair with —
+		// not something this reconcile-only index should be widened to cover
+		// speculatively.
+		index.Fields("id").
+			StorageKey("agent_harness_config_reconcile_pending").
+			Annotations(
+				entsql.IndexWhere("harness_config IS NULL AND applied_config IS NOT NULL"),
+			),
 	}
 }
