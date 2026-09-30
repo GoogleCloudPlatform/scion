@@ -101,6 +101,7 @@ class BuildTelemetryEnvTest(BaseTelemetryTest):
         self.assertEqual(env["OTEL_METRICS_EXPORTER"], "otlp")
         self.assertEqual(env["OTEL_LOGS_EXPORTER"], "otlp")
         self.assertEqual(env["OTEL_METRIC_EXPORT_INTERVAL"], "30000")
+        self.assertEqual(env["OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"], "delta")
 
     def test_custom_port(self) -> None:
         env = provision._build_telemetry_env({"SCION_OTEL_HTTP_PORT": "14318"})
