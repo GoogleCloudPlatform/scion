@@ -127,6 +127,14 @@ type usageReservationView struct {
 	// limit definition (never nil — see getUsageByLimit, the only builder of
 	// usageReservationView), and s.quotaService is always constructed in
 	// NewServer (server.go).
+	//
+	// "not_enforced" (design.md Amendment A1, ptone/scion#2270/P1b, not yet
+	// wired as of this field) means the P1b enforcement switch is off:
+	// BrokerAgentLimit is still the real, resolved cap — not omitted, unlike
+	// the "unlimited" case above — but it is informational only and is not
+	// currently enforced by Reserve. The usage page must render this
+	// visibly (not tooltip-only) next to the cap, since a limit shown
+	// without that context would look enforced when it is not.
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 

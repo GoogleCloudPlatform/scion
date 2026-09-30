@@ -310,7 +310,7 @@ comment-only nits, both fixed:
 
 Last review round (6 of 6, including the initial submission). Re-verified: `cd web && npx tsc --noEmit`.
 
-## Note on the upstream-main rebase step
+## Note on the upstream-main rebase step (superseded — see below)
 
 `dev-common-rules.md` asks every branch to rebase onto `GoogleCloudPlatform/scion` `main` before
 reporting ready. This branch is stacked on P2.1, which is itself still based on `ptone/scion` `main`
@@ -319,3 +319,99 @@ commits inside this branch and desync it from the actual `scion/broker-settings-
 tracks. Per the brief's explicit stacking instructions ("rebase with `--onto <new base> 0875d543`"
 only when P2.1's base changes), that rebase was deliberately not run independently; flagged to the EM
 in the completion message in case an upstream sync is wanted before P2.1 lands.
+
+**Update:** this held only while P2.1 was unmerged. P2.1 landed upstream (see below), and the branch has
+since been rebased onto real upstream main as the EM instructed.
+
+## Rebase 1: onto P2.1's new approved fork head (19b8064d)
+
+P2.1 gained a new approved head on the fork, `19b8064d81d64b0416d113cd99e698dd7f1361f1` (old:
+`0875d543`), still unmerged upstream. Per the EM: `git rebase --onto 19b8064d... 0875d543...`, a pure
+rebase (no content changes). Result: clean, no conflicts, 18/18 commits `=` in
+`git range-diff 0875d543..<old head 9ed1ea381> 19b8064d..<new head 0e4adb627>`, and
+`git diff <old head> <new head>` byte-identical to `git diff 0875d543 19b8064d` (confirmed with `diff`
+on both outputs). `go build ./pkg/hub/...` / `go vet ./pkg/hub/...` clean. Pushed with
+`--force-with-lease`; reported to the EM. Superseded within the hour by rebase 2 below, before its own
+CI watch finished.
+
+## Rebase 2: onto upstream main (P2.1 merged as GoogleCloudPlatform/scion#2126)
+
+P2.1 merged upstream at 2026-09-30 13:06Z as `86fc807b` (after itself being rebased onto upstream main
+as `d37a6215` first — the EM's HOLD caught this branch mid-CI-watch on the now-obsolete `19b8064d`
+target, so the rebase above was superseded before it was fully verified end-to-end). Per the EM:
+
+```
+git fetch https://github.com/GoogleCloudPlatform/scion.git main:upstream-main
+git rebase --onto upstream-main 19b8064d81d64b0416d113cd99e698dd7f1361f1   # OLDBASE
+```
+
+OLDBASE confirmed via `git merge-base --is-ancestor 19b8064d... HEAD` (the branch's 18 P2.2 commits sat
+directly on it). Result: clean, no conflicts — recorded (as "none") in
+`/scion-volumes/scratchpad/projects/broker-settings/notes/p2-2-rebase-upstream.md`. All 18 commits show
+`=` in `git range-diff 19b8064d..0e4adb627 upstream-main..0bb5c2c97`. New head: `0bb5c2c9703f83a04e304eef4c96349a1782028d`.
+
+Gates: `go build ./...`, `go vet ./pkg/hub/` (+`-tags no_sqlite`), `tsc --noEmit`,
+`golangci-lint --new-from-rev=upstream-main ./pkg/hub/...` (0 issues) all clean; bare-`#N` grep on
+`upstream-main..HEAD` empty. eslint on the three changed web files reads 7 errors/44 warnings — one more
+error than the pre-rebase 6, traced to `admin-quotas.ts` alone: upstream `main` now includes P1a's
+merged system-limit-editing UI in this same file, and linting *that* file in isolation at
+`upstream-main` (before any P2.2 commit) already shows 6 errors/31 warnings — a pre-existing prettier
+finding in P1a's code, not ours. Combined with `brokers.ts`'s unchanged 1 error/13 warnings, 7/44 is the
+new correct baseline; 0 new from P2.2's own commits. `make test-hub-sqlite` and CI were run and reported
+separately (see the message log to the EM) rather than duplicated here.
+
+Pushed with `--force-with-lease`. PR body updated (metadata only, via `gh api -X PATCH`, not `gh pr
+edit` — see the "gh pr edit reliability" note in review round 4's section) to say P2.1 merged upstream
+as GoogleCloudPlatform/scion#2126 instead of "stacked on P2.1, do not merge". PR kept in draft, per the
+EM's explicit instruction that they will mark it ready themselves after verification.
+
+## Amendment A1: `not_enforced` visible marker
+
+Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md`, "Amendment A1" (added
+2026-09-30 13:10Z, after P2.2's own review rounds closed): when the P1b enforcement switch is off, the
+effective limit keeps its resolved value but the source becomes `not_enforced`; every surface showing
+the limit must show that it is not enforced, visibly — not tooltip-only.
+
+**Scope, one commit on top of the upstream-main rebase, per the EM's addendum:**
+- `web/src/components/pages/brokers.ts`: `renderAgentCapacity` (shared by the table cell and the grid
+  stat — one change covers both) now appends a `.not-enforced-marker` badge ("not enforced") next to the
+  value when `agentLimitSource === 'not_enforced'`. The existing tooltip is unchanged; the badge is the
+  new, non-tooltip-only signal.
+- `web/src/components/pages/admin-quotas.ts`: the usage-detail reservation card shows the same badge
+  next to "Broker cap: N (source)" when `brokerAgentLimitSource === 'not_enforced'`.
+- The summary row (`renderLimitRow`) was left alone: for `max_agents_per_broker` it already renders only
+  the cross-broker count with no cap/denominator (round-1 F1's fix), so there is no cap shown there for
+  the marker to attach to — the EM's own instruction anticipated this ("if it mentions a cap, apply the
+  same rule; otherwise leave it").
+- `pkg/hub/response_types.go` (`AgentLimitSource`) and `pkg/hub/handlers_quota.go`
+  (`BrokerAgentLimitSource`): added a paragraph stating that `not_enforced` means the value is a real,
+  resolved cap that is informational only — not currently enforced — and that every caller rendering the
+  limit must also render the source, visibly, for that reason. **Deliberately did not** extend the
+  TS-side doc comments (`shared/types.ts`, the local `admin-quotas.ts` interface) beyond what the EM
+  named — only the two Go locations were requested, and this PR's whole review history is about doc/code
+  drift from comments touched beyond what was asked; noted here rather than silently expanding scope.
+- The backend does not produce `not_enforced` yet (P1b, ptone/scion#2270, is a separate in-progress PR).
+  Per the EM's instruction, the rendering contract is tested ahead of that wiring with a stubbed source,
+  using the repo's existing page-component test pattern (Vitest + happy-dom, mounting the real custom
+  element and reading `shadowRoot`, the same pattern `project-detail.test.ts` and `admin-users.test.ts`
+  already use) rather than a Go handler test — the change is entirely in the rendering layer, so a web
+  test exercises the actual code path directly instead of only its data contract:
+  - `web/src/components/pages/brokers.test.ts` (new): three tests — grid view and table view both show
+    `"7 / 30"` plus a visible `.not-enforced-marker` element containing "not enforced" text when
+    `agentLimitSource: 'not_enforced'` is stubbed on the `/api/v1/runtime-brokers` response; a third test
+    confirms the marker is absent for an ordinary `hub_default` source.
+  - `web/src/components/pages/admin-quotas.test.ts` (new): mounts the page, stubs
+    `/api/v1/admin/limits`, `/api/v1/admin/usage`, `/api/v1/admin/limits/{id}/entitlements` and
+    `/api/v1/admin/usage/{id}`, clicks the limit row to expand it, and asserts the rendered usage card
+    shows the marker for a stubbed `brokerAgentLimitSource: 'not_enforced'` reservation.
+  - Both mounted-component tests needed the same `FakeEventSource`/`localStorage` stubbing
+    `project-detail.test.ts` already established for happy-dom (which has no native `EventSource`).
+
+Verification: `cd web && npx tsc --noEmit` clean; `npx vitest run
+src/components/pages/brokers.test.ts src/components/pages/admin-quotas.test.ts` — 4/4 pass; `npx eslint`
+on the two changed page files plus the two new test files — the non-test files stay at the 7/44
+baseline (0 new); the two new `.test.ts` files themselves hit a pre-existing, repo-wide parsing error
+("TSConfig does not include this file") that every other `*.test.ts` file in the repo also hits (verified
+by linting `admin-users.test.ts` in isolation) — not something introduced here, and not part of any
+gate this project runs. `go build ./pkg/hub/...` / `go vet ./pkg/hub/...` clean (Go changes are
+comments-only).

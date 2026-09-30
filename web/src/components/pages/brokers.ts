@@ -20,7 +20,7 @@
  * Displays all runtime brokers with their status, version, and capabilities
  */
 
-import { LitElement, html, css, type TemplateResult } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
@@ -108,6 +108,21 @@ export class ScionPageBrokers extends LitElement {
       .capability-tag.enabled {
         background: var(--sl-color-success-100, #dcfce7);
         color: var(--sl-color-success-700, #15803d);
+      }
+
+      /* Visible marker for a broker cap whose source is "not_enforced"
+       * (design.md Amendment A1): the value shown is a real, resolved cap
+       * that is not currently enforced. Must not be tooltip-only. */
+      .not-enforced-marker {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 0.375rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #a16207);
       }
 
       .broker-meta {
@@ -244,7 +259,11 @@ export class ScionPageBrokers extends LitElement {
    * "7 / unlimited", with the precedence source in a tooltip
    * (ptone/scion#2061 P2.2, design.md §5.6). Renders an em dash "—" when the
    * fields are absent — e.g. the caller lacks visibility, or capacity
-   * resolution didn't run.
+   * resolution didn't run. When agentLimitSource is "not_enforced" (design.md
+   * Amendment A1), the shown value is a real, resolved cap that is not
+   * currently enforced — a visible "not enforced" marker is appended next to
+   * it; the source tooltip alone is not enough (a caller must not have to
+   * hover to learn the cap doesn't apply).
    */
   private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
     if (broker.agentCount === undefined) {
@@ -259,6 +278,9 @@ export class ScionPageBrokers extends LitElement {
       <span class="mono-cell stat-value" title="Source: ${broker.agentLimitSource || 'unknown'}"
         >${broker.agentCount} / ${capLabel}</span
       >
+      ${broker.agentLimitSource === 'not_enforced'
+        ? html`<span class="not-enforced-marker">not enforced</span>`
+        : nothing}
     `;
   }
 

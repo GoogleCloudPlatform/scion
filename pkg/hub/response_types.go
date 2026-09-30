@@ -263,6 +263,15 @@ type RuntimeBrokerWithCapabilities struct {
 	// resolveBrokerCapacity omits all three fields, so "unlimited" is never
 	// actually observed here in practice (present in the source constants,
 	// not in this field's real values).
+	//
+	// "not_enforced" (design.md Amendment A1, ptone/scion#2270/P1b, not yet
+	// wired as of this field) means the P1b enforcement switch is off:
+	// AgentLimit is still the real, resolved cap — not omitted, unlike the
+	// "unlimited" case above — but it is informational only and is not
+	// currently enforced by Reserve. Every caller that renders AgentLimit
+	// must also render AgentLimitSource, and must show "not_enforced"
+	// visibly (not tooltip-only), since a limit shown without that context
+	// would look enforced when it is not.
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 

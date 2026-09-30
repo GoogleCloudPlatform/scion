@@ -280,6 +280,21 @@ export class ScionPageAdminQuotas extends LitElement {
       color: var(--sl-color-neutral-600, #475569);
     }
 
+    /* Visible marker for a broker cap whose source is "not_enforced"
+     * (design.md Amendment A1): the value shown is a real, resolved cap,
+     * but it is not currently enforced. Must not be tooltip-only. */
+    .not-enforced-marker {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.375rem;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+
     .meta-text {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
@@ -1154,6 +1169,9 @@ export class ScionPageAdminQuotas extends LitElement {
                                       : html`<span title="Precedence source"
                                           >(${r.brokerAgentLimitSource})</span
                                         >`}
+                                    ${r.brokerAgentLimitSource === 'not_enforced'
+                                      ? html`<span class="not-enforced-marker">not enforced</span>`
+                                      : nothing}
                                   </div>
                                 `
                               : nothing}
