@@ -587,6 +587,66 @@ func TestApplySnapshot_EnforceBrokerQuotasAppliedTracking(t *testing.T) {
 	}
 }
 
+// TestApplySnapshot_AgentSecretsUserScopeOnlyClearedResetsToPermissive
+// mirrors TestApplySnapshot_EnforceBrokerQuotasClearedResetsToEnforced: for
+// AgentSecretsUserScopeOnly, nil is a meaningful value (the permissive
+// default), not "leave whatever is currently in memory alone". A snapshot
+// that clears the switch (DELETE the section, or PUT {}) must flip a
+// previously-set true back to permissive, turning live enforcement off
+// without a restart (design ptone/scion#2291 §5).
+func TestApplySnapshot_AgentSecretsUserScopeOnlyClearedResetsToPermissive(t *testing.T) {
+	on := true
+	srv := &Server{
+		config:      ServerConfig{AgentSecretsUserScopeOnly: &on},
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true before applying the cleared snapshot")
+	}
+
+	ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: nil})
+
+	if srv.config.AgentSecretsUserScopeOnly != nil {
+		t.Errorf("want AgentSecretsUserScopeOnly=nil after applying a cleared snapshot, got %v", *srv.config.AgentSecretsUserScopeOnly)
+	}
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("want agentSecretsUserScopeOnly()=false after applying a cleared snapshot (permissive default)")
+	}
+}
+
+// TestApplySnapshot_AgentSecretsUserScopeOnlyAppliedTracking mirrors
+// TestApplySnapshot_EnforceBrokerQuotasAppliedTracking.
+func TestApplySnapshot_AgentSecretsUserScopeOnlyAppliedTracking(t *testing.T) {
+	on := true
+	off := false
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	result := ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
+	applied, _ := result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("nil -> true should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
+	applied, _ = result["applied"].([]string)
+	if containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("true -> true (idempotent re-apply) should not be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &off})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("true -> false should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: nil})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("false -> nil (cleared) should be reported as applied, got %v", applied)
+	}
+}
+
 func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	telEnabled := true
 	gc := &config.GlobalConfig{
@@ -618,6 +678,22 @@ func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	}
 	if snap.GitHubAppID != 99 {
 		t.Errorf("GitHubAppID: want 99, got %d", snap.GitHubAppID)
+	}
+}
+
+// TestBuildLayer1SnapshotFromFile_AgentSecrets verifies that
+// AgentSecretsUserScopeOnly is read from GlobalConfig, so a file-mode admin
+// save takes effect without a restart (design ptone/scion#2291 §5).
+func TestBuildLayer1SnapshotFromFile_AgentSecrets(t *testing.T) {
+	on := true
+	gc := &config.GlobalConfig{
+		AgentSecretsUserScopeOnly: &on,
+	}
+
+	snap := BuildLayer1SnapshotFromFile(gc)
+
+	if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
+		t.Errorf("AgentSecretsUserScopeOnly: want true, got %v", snap.AgentSecretsUserScopeOnly)
 	}
 }
 
@@ -656,6 +732,22 @@ func TestSnapshot_TelemetryFromDB(t *testing.T) {
 	}
 	if snap.TelemetryConfig == nil {
 		t.Fatal("want non-nil TelemetryConfig")
+	}
+}
+
+// TestSnapshot_AgentSecretsFromDB mirrors TestSnapshot_TelemetryFromDB and
+// exercises buildSnapshotFromKoanf's handling of the agent_secrets section
+// via the DB-backed Refresh path.
+func TestSnapshot_AgentSecretsFromDB(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("agent_secrets", json.RawMessage(`{"user_scope_only":true}`))
+
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+
+	snap := ops.Snapshot()
+	if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
+		t.Error("want AgentSecretsUserScopeOnly true")
 	}
 }
 

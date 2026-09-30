@@ -105,6 +105,13 @@ func init() {
 			New: func() any { return &QuotaSettings{} },
 		},
 		{
+			Name: "agent_secrets",
+			KoanfPaths: []string{
+				"agent_secrets.user_scope_only",
+			},
+			New: func() any { return &AgentSecretsSettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -365,6 +372,15 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// agent_secrets schema is hand-written — like quotas, it has no
+		// $defs in settings-v1.schema.json.
+		"agent_secrets": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"user_scope_only": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},
