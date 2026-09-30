@@ -12,6 +12,11 @@ validated end-to-end against a real project. Modularity seams
 (`shared_overrides` for hand-built infra, moving every remaining variable
 to typed `validation`, per-module READMEs) are not implemented yet.
 
+**Docs.** This README is the detailed reference. For a short operator
+how-to, see [`docs/deploy/terraform-ha.md`](../../docs/deploy/terraform-ha.md).
+For an AI agent running this end to end, see
+[`docs/deploy/agent-runbook-terraform-ha.md`](../../docs/deploy/agent-runbook-terraform-ha.md).
+
 ## Layout
 
 ```

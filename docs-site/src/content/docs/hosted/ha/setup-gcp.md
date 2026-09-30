@@ -23,8 +23,9 @@ agent dispatch, and **Cloud SQL** for durable state.
 This guide walks through the manual `gcloud`/`kubectl` steps. If you'd rather
 provision this same architecture declaratively — including support for
 multiple hubs sharing one project's shared infrastructure (network, Cloud
-SQL, Filestore, GKE Autopilot, Artifact Registry) — see the Terraform module
-set at
+SQL, Filestore, GKE Autopilot, Artifact Registry) — see
+[Multi-Hub HA with Terraform](/scion/hosted/ha/terraform/) and the Terraform
+module set at
 [`deploy/terraform/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/deploy/terraform/README.md)
 in the repository. It automates most of the steps below; the two approaches
 are not meant to be mixed against the same project.
