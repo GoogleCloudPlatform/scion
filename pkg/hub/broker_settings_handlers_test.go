@@ -767,10 +767,7 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 // real source with no other change (AC-P2-6's "switch on: sources
 // unchanged" leg). inheritedBrokerLimit (the "clear the override" preview)
 // must keep reporting its real step throughout — Amendment A1 explicitly
-// carves it out. (Review round 1, R1: the switch-off block previously only
-// exercised the broker-override and hub_default cases even though this
-// comment already claimed full coverage; entitlement and resolved-zero were
-// silently untested.)
+// carves it out.
 func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -794,15 +791,15 @@ func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing
 	hubDefaultBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-hubdefault", "")
 
 	// A separate broker carries only the entitlement binding (30), with no
-	// override, so it stays on the entitlement step even after `broker`
-	// above is given a maxAgents override (R1: `broker` itself cannot be
-	// used to check the entitlement step under the switch-off section,
-	// since by then it has already been overridden to 3).
+	// override, so it stays on the entitlement step throughout — `broker`
+	// above cannot be reused for this, since it is given a maxAgents
+	// override later on and would no longer exercise the entitlement step
+	// once the switch-off section runs.
 	entitlementBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-entitlement", "")
 	seedBinding(t, s, def.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeBroker, entitlementBroker.ID, 30)
 
 	// A broker overridden to 0 resolves to a value of 0 (unlimited) via the
-	// broker-override step (R1: the resolved-zero/unlimited case).
+	// broker-override step — the resolved-zero/unlimited case.
 	zeroBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-zero", "")
 	zeroRec := doRequest(t, srv, http.MethodPut, settingsPath(zeroBroker.ID), map[string]interface{}{
 		"settings":         map[string]interface{}{"maxAgents": 0},

@@ -141,6 +141,47 @@ All in `pkg/hub/broker_settings_handlers_test.go` unless noted:
 - Bare-`#N` audit (`git log --format=%B upstream-main..HEAD | grep -nE '(^|[^/A-Za-z0-9])#[0-9]+'`)
   — prints nothing.
 
+## Review rounds
+
+**Round 1** (`reviews/broker-settings-rev-not-enforced-1.md`, reviewed head `6baa498e`):
+REQUEST CHANGES, one Required finding; the implementation itself was confirmed correct per
+Amendment A1.
+- **Required — the switch-off assertions didn't match the test's own doc comment.** The doc
+  comment claimed coverage of "all three precedence steps," but the switch-off section only
+  asserted the broker-override and hub_default cases: by the time it ran, the one broker used for
+  the entitlement check earlier in the test had already been given an override, so the entitlement
+  step was never checked with the switch off, and a resolved-zero/unlimited cap was never checked
+  at all. Fixed by adding two more test brokers — one carrying only an entitlement binding, one
+  overridden to 0 — each checked under the switch on and off, plus a direct `brokerCapacity` check
+  that a resolved value of 0 still yields `Limit == nil` while `Source == not_enforced`.
+- **Nit — a confusing comment** claimed a hub-default-only broker's source became not_enforced
+  "once the entitlement binding is superseded," when nothing is superseded; that broker simply
+  never had a binding or an override. Reworded.
+- **Nit — a CLI test case's name didn't match its input** ("empty source" but
+  `AgentLimitSource: "broker"`). Renamed to match, and added a genuine empty-source case alongside
+  it.
+- **Optional, accepted — nested parentheses in the broker-detail rendering.** `sourceLabel`'s
+  `not_enforced` text carried its own parenthetical inside the shared `"(from ...)"` wrapper every
+  source uses, so the page read `"(from not enforced (quota switch is off))"`. Reworded to a plain
+  string with no embedded parentheses. No vitest assertion added: there is no existing test harness
+  for this card.
+- **Nit — a stale precedence-step number.** `inheritedBrokerLimit`'s comment still called the
+  broker override "step 2," left over from before `effectiveBrokerLimit`'s doc above it was
+  renumbered to call the override "step 1" — the two comments read as contradicting each other.
+  Pointed it at the override step by name instead of a number.
+- Fixed in commit `19ab4f8a`, one commit, no rebase.
+
+**Round 2** (`reviews/broker-settings-rev-not-enforced-2.md`, reviewed head `19ab4f8a`): APPROVED,
+one nit — several of round 1's fixes had left comments that narrated the review itself (citing
+"R1," "N3," "review round 1 on ptone/scion#2330," etc.) rather than explaining what the code does
+and why, which would read oddly to an upstream reviewer with no access to this project's review
+history. Removed all such narration from `broker_settings_handlers_test.go` and
+`broker-detail.ts`, keeping the underlying explanation (why a separate broker is needed for the
+entitlement/zero cases; why the `not_enforced` label avoids parentheses) reworded on its own terms.
+Also declined, per the EM: re-checking a second precedence step on the switch-back-on leg — the
+switch-off section already exercises every step, and the on-leg only needs to prove the switch
+itself restores the real source, which the existing single check already does.
+
 ## Deliverables
 
 - Fork PR ptone/scion#2330 (draft) against `ptone/scion` `main` from
