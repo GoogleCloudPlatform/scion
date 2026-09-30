@@ -22,7 +22,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,9 +191,11 @@ func TestCreateScheduledEvent_CapturesInitiatorAttribution(t *testing.T) {
 	assert.Equal(t, 1, stored.AuthorizationRevision)
 	assert.Equal(t, "dev", stored.InitiatorPrincipalKind) // doRequest authenticates via the dev-auth identity
 	assert.Equal(t, DevUserID, stored.InitiatorPrincipalID)
-	// Dev auth has no interactive session and no UAT/agent credential, so
-	// it is recorded as legacy_unknown, never "session".
-	assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, stored.InitiatorCredentialKind)
+	// doRequest authenticates through the real DevAuthMiddleware/
+	// UnifiedAuthMiddleware dev-token arm, producing the concrete trusted
+	// *DevUser with ID()==DevUserID (ptone/scion#2342): it is recorded as
+	// dev_local, never legacy_unknown or session.
+	assert.Equal(t, store.InitiatorCredentialKindDevLocal, stored.InitiatorCredentialKind)
 }
 
 // TestCreateSchedule_CapturesInitiatorAttribution mirrors the scheduled-event
@@ -219,7 +223,66 @@ func TestCreateSchedule_CapturesInitiatorAttribution(t *testing.T) {
 	assert.Equal(t, 1, stored.AuthorizationRevision)
 	assert.Equal(t, "dev", stored.InitiatorPrincipalKind)
 	assert.Equal(t, DevUserID, stored.InitiatorPrincipalID)
-	assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, stored.InitiatorCredentialKind)
+	// See TestCreateScheduledEvent_CapturesInitiatorAttribution: the
+	// dev-auth identity behind doRequest is the concrete trusted *DevUser,
+	// so this records dev_local (ptone/scion#2342).
+	assert.Equal(t, store.InitiatorCredentialKindDevLocal, stored.InitiatorCredentialKind)
+}
+
+// TestUpdateSchedule_AuthorityChangingEditByDevUserRecordsDevLocal covers
+// ptone/scion#2342's authority-changing-edit acceptance criterion end to
+// end through the real DevAuthMiddleware/UnifiedAuthMiddleware dev-token
+// arm (via doRequest), not only the captureInitiatorAttribution helper: a
+// payload-changing PATCH re-attributes to the concrete trusted *DevUser and
+// bumps AuthorizationRevision.
+func TestUpdateSchedule_AuthorityChangingEditByDevUserRecordsDevLocal(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "p1"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	// A payload change is a future-dispatch-changing edit (ruling Q2): it
+	// re-attributes and bumps the revision.
+	updateReq := UpdateScheduleRequest{Payload: `{"agentName":"all","message":"p2"}`}
+	rec2 := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+created.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	stored, err := s.GetSchedule(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, stored.AuthorizationRevision)
+	assert.Equal(t, "dev", stored.InitiatorPrincipalKind)
+	assert.Equal(t, DevUserID, stored.InitiatorPrincipalID)
+	assert.Equal(t, store.InitiatorCredentialKindDevLocal, stored.InitiatorCredentialKind)
+}
+
+// TestResumeSchedule_ByDevUserRecordsDevLocal covers ptone/scion#2342's
+// resume acceptance criterion end to end through the real
+// DevAuthMiddleware/UnifiedAuthMiddleware dev-token arm (via doRequest):
+// resuming a paused schedule re-attributes to the concrete trusted *DevUser.
+func TestResumeSchedule_ByDevUserRecordsDevLocal(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+
+	createReq := CreateScheduleRequest{Name: "n1", CronExpr: "0 9 * * *", EventType: "message", AgentName: "all", Message: "hi"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", createReq)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+	pauseRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/pause", nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+	resumeRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules/"+created.ID+"/resume", nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+
+	stored, err := s.GetSchedule(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, stored.AuthorizationRevision)
+	assert.Equal(t, "dev", stored.InitiatorPrincipalKind)
+	assert.Equal(t, DevUserID, stored.InitiatorPrincipalID)
+	assert.Equal(t, store.InitiatorCredentialKindDevLocal, stored.InitiatorCredentialKind)
 }
 
 // TestExecuteSchedule_RecurrenceCopiesInitiatorAttribution pins plan §3.5's
@@ -827,6 +890,46 @@ func TestResumeSchedule_RevisionSetButVersionNilSucceeds(t *testing.T) {
 	assert.Equal(t, 2, after.AuthorizationRevision, "resume must succeed and bump the revision even when attribution_version was NULL")
 }
 
+// TestUpdateSchedule_LegacyRowMetadataOnlyEditDoesNotAcquireDevLocal covers
+// ptone/scion#2342's exclusion: a pre-E.2b legacy_unknown/version-0 row must
+// not acquire dev_local (or any kind) merely by being read or
+// metadata-edited by the trusted dev user — no backfill, no
+// reinterpretation of legacy rows. Only an authority-changing edit (ruling
+// Q2) ever replaces attribution, and this edit is deliberately
+// metadata-only (a rename).
+func TestUpdateSchedule_LegacyRowMetadataOnlyEditDoesNotAcquireDevLocal(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+
+	sched := &store.Schedule{
+		ID:        tid("e2b-2342-legacy-sched"),
+		ProjectID: projectID,
+		Name:      "legacy",
+		CronExpr:  "0 9 * * *",
+		EventType: "message",
+		Payload:   `{"agentName":"all","message":"hi"}`,
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateSchedule(ctx, sched))
+
+	before, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	require.Equal(t, 0, before.AttributionVersion)
+	require.Equal(t, store.InitiatorCredentialKindLegacyUnknown, before.InitiatorCredentialKind)
+
+	updateReq := UpdateScheduleRequest{Name: "renamed"}
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+sched.ID, updateReq)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", after.Name)
+	assert.Equal(t, 0, after.AttributionVersion, "a metadata-only edit must not touch a legacy row's attribution version")
+	assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, after.InitiatorCredentialKind,
+		"a legacy row must never acquire dev_local (or any kind) from a non-authority edit, even by the trusted dev user")
+}
+
 // TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution: none of
 // the initiator/attribution fields may appear on the wire, in create or list
 // responses, for either resource.
@@ -1103,36 +1206,229 @@ func TestCaptureInitiatorAttribution_NoIdentityReadsAsLegacyUnknown(t *testing.T
 }
 
 // TestInitiatorCredentialKindFor pins the committed
-// session|uat|agent|legacy_unknown domain (rulings "E.2b field names"): only
-// a genuine interactive session maps to "session". Absent, federation,
-// broker and dev credentials all map to legacy_unknown, never to an
-// interactive-style value.
+// session|uat|agent|dev_local|legacy_unknown domain (rulings "E.2b field
+// names"; dev_local added by ptone/scion#2342): only a genuine interactive
+// session maps to "session"; only the concrete trusted *DevUser paired with
+// CredentialKindDev maps to "dev_local". Absent, federation, and broker
+// credentials all map to legacy_unknown, never to an interactive-style
+// value — and CredentialKindDev without the trusted identity also falls
+// back to legacy_unknown rather than session or dev_local.
 func TestInitiatorCredentialKindFor(t *testing.T) {
+	devUser := NewDevUser(DevUserConfig{})
+
 	cases := []struct {
-		kind CredentialKind
-		want string
+		name     string
+		identity Identity
+		kind     CredentialKind
+		want     string
 	}{
-		{CredentialKindUAT, store.InitiatorCredentialKindUAT},
-		{CredentialKindAgentJWT, store.InitiatorCredentialKindAgent},
-		{CredentialKindInteractive, store.InitiatorCredentialKindSession},
-		{CredentialKindDev, store.InitiatorCredentialKindLegacyUnknown},
-		{CredentialKindFederation, store.InitiatorCredentialKindLegacyUnknown},
-		{CredentialKindBroker, store.InitiatorCredentialKindLegacyUnknown},
-		{CredentialKind(""), store.InitiatorCredentialKindLegacyUnknown},
+		{"uat", nil, CredentialKindUAT, store.InitiatorCredentialKindUAT},
+		{"agent", nil, CredentialKindAgentJWT, store.InitiatorCredentialKindAgent},
+		{"interactive session", nil, CredentialKindInteractive, store.InitiatorCredentialKindSession},
+		{"trusted DevUser + dev credential kind: dev_local", devUser, CredentialKindDev, store.InitiatorCredentialKindDevLocal},
+		{"dev credential kind without the trusted identity: legacy_unknown", nil, CredentialKindDev, store.InitiatorCredentialKindLegacyUnknown},
+		{"federation", nil, CredentialKindFederation, store.InitiatorCredentialKindLegacyUnknown},
+		{"broker", nil, CredentialKindBroker, store.InitiatorCredentialKindLegacyUnknown},
+		{"absent", nil, CredentialKind(""), store.InitiatorCredentialKindLegacyUnknown},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, initiatorCredentialKindFor(tc.kind), "kind=%q", tc.kind)
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, initiatorCredentialKindFor(tc.identity, tc.kind), "identity=%v kind=%q", tc.identity, tc.kind)
+		})
 	}
 }
 
-// TestHubCredentialKindForInitiator pins the reverse mapping: only
-// uat/agent/session round-trip to a real hub.CredentialKind; legacy_unknown
-// (or anything else) means "leave the column unset".
+// TestIsTrustedLocalDevUser is the table test for the shared predicate
+// (binding addition from pat-e-lead/pat-b-lead on ptone/scion#2342): only
+// the concrete *DevUser with ID()==DevUserID is trusted. A nil identity, a
+// nil *DevUser, a wrapper that embeds *DevUser, a distinct look-alike type
+// reporting the same ID, and a *DevUser with the wrong ID must all be
+// rejected.
+func TestIsTrustedLocalDevUser(t *testing.T) {
+	genuine := NewDevUser(DevUserConfig{})
+	wrongID := &DevUser{id: "not-the-dev-user-id"}
+	var nilDevUser *DevUser
+	wrapped := &devUserEmbeddingWrapper{DevUser: genuine}
+	lookAlike := &devLookAlikeIdentity{id: DevUserID}
+
+	cases := []struct {
+		name     string
+		identity Identity
+		want     bool
+	}{
+		{"genuine DevUser", genuine, true},
+		{"nil Identity", nil, false},
+		{"non-nil Identity holding a nil *DevUser", nilDevUser, false},
+		{"DevUser with the wrong ID", wrongID, false},
+		{"wrapper embedding *DevUser", wrapped, false},
+		{"look-alike identity with the same ID and Type()==\"dev\"", lookAlike, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isTrustedLocalDevUser(tc.identity))
+		})
+	}
+}
+
+// TestAuthzService_DevLocalAuthorityEnabled pins B.3 R6's invariant
+// (binding design addition, ptone/scion#2342): devLocalAuthorityEnabled()
+// tracks the exact server-wide condition that lets a request authenticate
+// as the trusted dev user (ServerConfig.DevAuthToken != "", see
+// devLocalAuthorityEnabled's doc comment in devauth.go for the precise
+// server.go/auth.go line references) — not merely whether the seeded
+// DevUserID row happens to exist in the store.
+func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
+	t.Run("dev-auth on: flag true, and a real dev-token request is trusted", func(t *testing.T) {
+		srv, _ := testServer(t) // testServer enables dev auth (testDevToken).
+		require.True(t, srv.authzService.devLocalAuthorityEnabled())
+
+		var gotIdentity Identity
+		handler := UnifiedAuthMiddleware(srv.authConfig)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotIdentity = GetIdentityFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.True(t, isTrustedLocalDevUser(gotIdentity), "a real dev-token request must authenticate as the trusted *DevUser")
+	})
+
+	t.Run("dev-auth off: flag false even though the seeded DevUserID row exists", func(t *testing.T) {
+		s, err := newTestStore(":memory:")
+		if err != nil {
+			if strings.Contains(err.Error(), "sqlite driver not registered") {
+				t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
+			}
+			t.Fatalf("failed to create test store: %v", err)
+		}
+		ctx := context.Background()
+		require.NoError(t, s.Migrate(ctx))
+		_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
+
+		// Seed the DevUserID row directly, exactly as server.go's startup
+		// path would (seedDevUser) — but this server's config disables
+		// dev-auth, so the row's mere existence must not be what the flag
+		// reports.
+		seedDevUser(ctx, s, DevUserConfig{})
+
+		cfg := DefaultServerConfig()
+		cfg.DevAuthToken = "" // dev-auth off
+		srv, err := New(cfg, s)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = srv.Shutdown(context.Background())
+			_ = s.Close()
+		})
+
+		assert.False(t, srv.authzService.devLocalAuthorityEnabled())
+	})
+}
+
+// devLookAlikeIdentity is a minimal Identity implementation that reports
+// Type()=="dev" and the well-known DevUserID without being a *DevUser. It
+// models "a look-alike identity type with the same ID and Type()==\"dev\""
+// (ptone/scion#2342 AC): the dev_local decision must not be derivable from
+// Type() or ID() alone.
+type devLookAlikeIdentity struct{ id string }
+
+func (d *devLookAlikeIdentity) ID() string   { return d.id }
+func (d *devLookAlikeIdentity) Type() string { return "dev" }
+
+// devTypedUserIdentity is a full UserIdentity implementation (not merely a
+// minimal Identity stub) whose Type() happens to be "dev" with the
+// well-known DevUserID — modeling "a real user whose Type() is dev"
+// (ptone/scion#2342 AC), distinct from devLookAlikeIdentity's bare stub.
+type devTypedUserIdentity struct{ id string }
+
+func (d *devTypedUserIdentity) ID() string          { return d.id }
+func (d *devTypedUserIdentity) Type() string        { return "dev" }
+func (d *devTypedUserIdentity) Email() string       { return "look-alike@example.com" }
+func (d *devTypedUserIdentity) DisplayName() string { return "Look-Alike Dev-Typed User" }
+func (d *devTypedUserIdentity) Role() string        { return "member" }
+
+var _ UserIdentity = (*devTypedUserIdentity)(nil)
+
+// devUserEmbeddingWrapper embeds *DevUser (promoting its ID()/Type()
+// methods) but is itself a distinct concrete type. Go type assertions do
+// not see through embedding to an outer type, so isTrustedLocalDevUser must
+// reject this even though it satisfies Identity identically to a genuine
+// *DevUser. Models "a *DevUser-like wrapper" (ptone/scion#2342 AC).
+type devUserEmbeddingWrapper struct{ *DevUser }
+
+// TestInitiatorCredentialKindFor_NonDevLookAlikesRecordLegacyUnknown covers
+// the negative acceptance criteria directly at the mapping level: every
+// non-genuine dev-shaped identity records legacy_unknown, never dev_local —
+// including when its ambient CredentialKind is CredentialKindDev (which
+// credentialContextForIdentity assigns to ANY identity whose Type() is
+// "dev", genuine or not).
+func TestInitiatorCredentialKindFor_NonDevLookAlikesRecordLegacyUnknown(t *testing.T) {
+	cases := []struct {
+		name     string
+		identity Identity
+	}{
+		{"look-alike identity, same ID, Type()==\"dev\"", &devLookAlikeIdentity{id: DevUserID}},
+		{"full UserIdentity, same ID, Type()==\"dev\"", &devTypedUserIdentity{id: DevUserID}},
+		{"wrapper embedding a genuine *DevUser", &devUserEmbeddingWrapper{DevUser: NewDevUser(DevUserConfig{})}},
+		{"DevUser with the wrong ID", &DevUser{id: "not-the-dev-user-id"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := initiatorCredentialKindFor(tc.identity, CredentialKindDev)
+			assert.Equal(t, store.InitiatorCredentialKindLegacyUnknown, got)
+			assert.NotEqual(t, store.InitiatorCredentialKindDevLocal, got)
+		})
+	}
+}
+
+// TestInitiatorCredentialKindFor_NonDevIdentitiesNeverEmitDevLocal is the
+// positive-domain counterpart (binding addition from
+// pat-e-lead/pat-b-lead on ptone/scion#2342): every ordinary,
+// non-dev-shaped identity/credential-kind pairing keeps its own mapping and
+// never emits dev_local — session, UAT, agent, broker, and a "system"
+// context with no ambient identity at all (a deferred/scheduler execution
+// context; see TestCaptureInitiatorAttribution_NoIdentityReadsAsLegacyUnknown).
+func TestInitiatorCredentialKindFor_NonDevIdentitiesNeverEmitDevLocal(t *testing.T) {
+	sessionUser := NewAuthenticatedUser(tid("e2b-nondev-session"), "s@example.com", "S", "member", "api")
+	uatBase := NewAuthenticatedUser(tid("e2b-nondev-uat-user"), "u@example.com", "U", "member", "api")
+	scopedUAT := NewScopedUserIdentityWithCredentialID(uatBase, tid("e2b-nondev-proj"), []string{"schedule:create"}, tid("e2b-nondev-tok"))
+	agent := &agentIdentityWrapper{&AgentTokenClaims{}}
+	broker := NewBrokerIdentity(tid("e2b-nondev-broker"))
+
+	cases := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+		want     string
+	}{
+		{"session", sessionUser, CredentialKindInteractive, store.InitiatorCredentialKindSession},
+		{"uat", scopedUAT, CredentialKindUAT, store.InitiatorCredentialKindUAT},
+		{"agent", agent, CredentialKindAgentJWT, store.InitiatorCredentialKindAgent},
+		{"broker", broker, CredentialKindBroker, store.InitiatorCredentialKindLegacyUnknown},
+		{"system (no ambient identity)", nil, CredentialKind(""), store.InitiatorCredentialKindLegacyUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := initiatorCredentialKindFor(tc.identity, tc.kind)
+			assert.Equal(t, tc.want, got)
+			assert.NotEqual(t, store.InitiatorCredentialKindDevLocal, got)
+		})
+	}
+}
+
+// TestHubCredentialKindForInitiator pins the reverse mapping:
+// uat/agent/session/dev_local round-trip to a real hub.CredentialKind, with
+// dev_local mapping to CredentialKindDev ("dev") so audit/log attribution
+// stays visibly distinct from an ordinary interactive session
+// (ptone/scion#2342); legacy_unknown (or anything else) means "leave the
+// column unset".
 func TestHubCredentialKindForInitiator(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{store.InitiatorCredentialKindUAT, string(CredentialKindUAT)},
 		{store.InitiatorCredentialKindAgent, string(CredentialKindAgentJWT)},
 		{store.InitiatorCredentialKindSession, string(CredentialKindInteractive)},
+		{store.InitiatorCredentialKindDevLocal, string(CredentialKindDev)},
 		{store.InitiatorCredentialKindLegacyUnknown, ""},
 		{"", ""},
 	}

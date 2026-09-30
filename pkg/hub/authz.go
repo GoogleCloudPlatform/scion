@@ -334,6 +334,15 @@ type AuthzService struct {
 	// progenyAdapters holds progeny sharing-source adapters registered
 	// through RegisterProgenyAdapter.
 	progenyAdapters progenyAdapterRegistry
+
+	// devLocalEnabled backs devLocalAuthorityEnabled (devauth.go,
+	// ptone/scion#2342 B.3 R6). Set once at server construction via
+	// setDevLocalAuthorityEnabled, from the same ServerConfig.DevAuthToken
+	// != "" condition that gates dev-token acceptance and DevUserID
+	// seeding. Zero value false: an AuthzService built without going
+	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
+	// closed.
+	devLocalEnabled bool
 }
 
 // NewAuthzService creates a new AuthzService.

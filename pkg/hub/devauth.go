@@ -95,6 +95,89 @@ func (u *DevUser) DisplayName() string { return u.displayName }
 // Role returns the user role.
 func (u *DevUser) Role() string { return "admin" }
 
+// isTrustedLocalDevUser reports whether identity is the concrete, trusted
+// local development identity constructed by NewDevUser (DevAuthMiddleware /
+// UnifiedAuthMiddleware's dev-token arm; also seed.go's seeding path). This
+// is the single predicate ptone/scion#2342's dev_local attribution and B.3's
+// fire-time reconstruction both call — do not reimplement the type
+// assertion elsewhere.
+//
+// The check is deliberately narrow and exact, per the issue's security
+// contract:
+//   - identity must type-assert to the concrete *DevUser (not merely
+//     satisfy Identity, and not a distinct type that embeds or wraps
+//     *DevUser — Go type assertions do not see through embedding to an
+//     outer type, so a wrapper fails this assertion even though it promotes
+//     DevUser's methods).
+//   - a nil identity, or a non-nil Identity holding a nil *DevUser, is
+//     rejected explicitly rather than by relying on a nil ID() call (which
+//     would panic here, since DevUser.ID() does not guard against a nil
+//     receiver).
+//   - the identity's ID must equal the well-known DevUserID. NewDevUser
+//     always sets this id itself; nothing here reads it from a request.
+//
+// It is never derived from identity.Type() == "dev" alone: that string is
+// self-reported by any Identity implementation and proves nothing about
+// which concrete type produced it.
+func isTrustedLocalDevUser(identity Identity) bool {
+	du, ok := identity.(*DevUser)
+	if !ok || du == nil {
+		return false
+	}
+	return du.ID() == DevUserID
+}
+
+// devLocalAuthorityEnabled reports whether THIS server currently accepts
+// the recognized local dev user as an authority source at all (B.3 R6,
+// ptone/scion#2342): dev-token authentication is enabled and the well-known
+// DevUserID row has been seeded.
+//
+// Both of those are gated by the single ServerConfig.DevAuthToken != ""
+// condition, so that one bit is exactly what this reports:
+//   - pkg/hub/server.go builds AuthConfig.DevAuthEnabled as
+//     cfg.DevAuthToken != "" (server.go, "Build unified auth configuration"
+//     block, ~line 1723), which is what UnifiedAuthMiddleware's dev-token
+//     arms check before accepting a dev token (pkg/hub/auth.go ~line 396
+//     "if !cfg.DevAuthEnabled" and the tokenTypeUser fallback at ~line 452
+//     "if cfg.DevAuthEnabled && apiclient.ValidateDevToken(...)").
+//   - pkg/hub/server.go seeds the DevUserID row only "if cfg.DevAuthToken
+//     != ..." (server.go ~line 1650, guarding the seedDevUser call), so a
+//     server with dev-auth off never seeds it during that startup (a row
+//     seeded some other way, e.g. directly in a test, does not change this
+//     bit — see setDevLocalAuthorityEnabled).
+//
+// A nil receiver (a zero-value or never-constructed AuthzService) reports
+// false: fail closed.
+//
+// Invariant: for any single running server, isTrustedLocalDevUser(id) ==
+// true implies devLocalAuthorityEnabled() == true — the concrete *DevUser
+// this server's request pipeline can produce only ever comes from
+// NewDevUser, itself only reachable through the same dev-token code paths
+// this bit tracks. This method does not change isTrustedLocalDevUser's
+// semantics, and it does not change E.2b's attribution (initiatorCredentialKindFor
+// still requires the identity assertion regardless of this flag); it exists
+// so B.3's fire-time authority decision can additionally confirm this
+// server currently admits dev_local at all before trusting a previously
+// stored dev_local row (a server later reconfigured with dev-auth off must
+// not honor an old dev_local row's authority).
+func (a *AuthzService) devLocalAuthorityEnabled() bool {
+	if a == nil {
+		return false
+	}
+	return a.devLocalEnabled
+}
+
+// setDevLocalAuthorityEnabled sets the bit devLocalAuthorityEnabled reports.
+// Called exactly once, at server construction (server.go, immediately after
+// NewAuthzService), from the same cfg.DevAuthToken != "" condition that
+// governs dev-token acceptance and DevUserID seeding — never from a
+// request. A setter (rather than a NewAuthzService parameter) keeps
+// NewAuthzService(store, logger)'s signature unchanged for its many
+// existing callers.
+func (a *AuthzService) setDevLocalAuthorityEnabled(enabled bool) {
+	a.devLocalEnabled = enabled
+}
+
 // userContextKey is the key for storing the user in the request context.
 type userContextKey struct{}
 

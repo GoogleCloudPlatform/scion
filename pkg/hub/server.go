@@ -1497,6 +1497,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize authorization service
 	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	// ptone/scion#2342 (B.3 R6): the same condition that enables dev-token
+	// acceptance and DevUserID seeding below (cfg.DevAuthToken != "") also
+	// gates whether this server currently admits dev_local authority at
+	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
+	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))

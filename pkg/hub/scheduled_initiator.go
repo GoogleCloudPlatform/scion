@@ -41,19 +41,37 @@ import (
 // E.2b and reads as legacy_unknown.
 const initiatorAttributionVersion = 1
 
-// initiatorCredentialKindFor maps a live request's ambient CredentialKind to
-// InitiatorAttribution's smaller, committed domain
-// (session|uat|agent|legacy_unknown). Attribution never stores
+// initiatorCredentialKindFor maps a live request's identity and ambient
+// CredentialKind to InitiatorAttribution's smaller, committed domain
+// (session|uat|agent|dev_local|legacy_unknown). Attribution never stores
 // hub.CredentialKind's full domain: a caller of scheduledInitiator only ever
-// sees one of these four values.
+// sees one of these five values.
 //
 // Only a genuine interactive session maps to "session". Everything else —
-// no ambient credential at all, federation, broker, or dev — maps to
+// no ambient credential at all, federation, or broker — maps to
 // legacy_unknown, never to session: plan correction (c) and ruling Q2 ("a
 // mutation without recordable provenance never falls back to the creator's
 // interactive authority") both forbid treating unknown or absent provenance
 // as an interactive-style credential.
-func initiatorCredentialKindFor(kind CredentialKind) string {
+//
+// dev_local (ptone/scion#2342) is the one narrow exception, and it is
+// checked first: it requires BOTH isTrustedLocalDevUser(identity) (the
+// concrete trusted *DevUser, by exact type assertion, with
+// ID()==DevUserID) AND kind==CredentialKindDev. Requiring the ambient
+// CredentialKind in addition to the identity assertion is defence in depth,
+// not an independent gate: DevAuthMiddleware/UnifiedAuthMiddleware's dev-arm
+// always sets both together (contextWithIdentity(devUser) paired with
+// contextWithCredentialContext(credentialContextForIdentity(devUser)), see
+// auth.go), so every genuine dev-local request satisfies both, and nothing
+// here loosens the identity check — a look-alike identity whose Type() is
+// "dev" also gets CredentialKindDev from credentialContextForIdentity, but
+// still fails isTrustedLocalDevUser and falls through to legacy_unknown
+// below. Never derived from identity.Type() == "dev", request fields,
+// headers, or stored descriptive labels.
+func initiatorCredentialKindFor(identity Identity, kind CredentialKind) string {
+	if kind == CredentialKindDev && isTrustedLocalDevUser(identity) {
+		return store.InitiatorCredentialKindDevLocal
+	}
 	switch kind {
 	case CredentialKindUAT:
 		return store.InitiatorCredentialKindUAT
@@ -67,12 +85,16 @@ func initiatorCredentialKindFor(kind CredentialKind) string {
 }
 
 // hubCredentialKindForInitiator maps InitiatorAttribution's committed
-// session|uat|agent|legacy_unknown domain back to hub.CredentialKind's
-// vocabulary (interactive|uat|agent_jwt), for the one place — the
-// scheduled-dispatch success audit — that records a credential kind in a
-// column every other mutation-audit writer fills with hub.CredentialKind
-// (audit_actor.go:auditActorFromContext). Returns "" for legacy_unknown (or
-// any other value), meaning "leave this column unset".
+// session|uat|agent|dev_local|legacy_unknown domain back to
+// hub.CredentialKind's vocabulary (interactive|uat|agent_jwt|dev), for the
+// one place — the scheduled-dispatch success audit — that records a
+// credential kind in a column every other mutation-audit writer fills with
+// hub.CredentialKind (audit_actor.go:auditActorFromContext). Returns "" for
+// legacy_unknown (or any other value), meaning "leave this column unset".
+//
+// dev_local maps to CredentialKindDev ("dev"), not CredentialKindInteractive
+// ("interactive"): audit and log attribution for a trusted local-dev
+// initiator must stay visibly distinct from an ordinary browser/API session.
 func hubCredentialKindForInitiator(kind string) string {
 	switch kind {
 	case store.InitiatorCredentialKindUAT:
@@ -81,6 +103,8 @@ func hubCredentialKindForInitiator(kind string) string {
 		return string(CredentialKindAgentJWT)
 	case store.InitiatorCredentialKindSession:
 		return string(CredentialKindInteractive)
+	case store.InitiatorCredentialKindDevLocal:
+		return string(CredentialKindDev)
 	default:
 		return ""
 	}
@@ -164,7 +188,7 @@ func captureInitiatorAttribution(ctx context.Context) store.InitiatorAttribution
 	attr.InitiatorPrincipalID = identity.ID()
 
 	cred := GetCredentialContextFromContext(ctx)
-	attr.InitiatorCredentialKind = initiatorCredentialKindFor(cred.Kind)
+	attr.InitiatorCredentialKind = initiatorCredentialKindFor(identity, cred.Kind)
 	attr.InitiatorCredentialID = cred.ID
 	attr.InitiatorCredentialSnapshot = initiatorCredentialSnapshotJSON(cred)
 	attr.AttributionVersion = initiatorAttributionVersion
@@ -222,7 +246,7 @@ func setBrokerDispatchInitiator(ctx context.Context, d *store.BrokerDispatch) {
 type ScheduledInitiator struct {
 	PrincipalKind      string
 	PrincipalID        string
-	CredentialKind     string // session | uat | agent | legacy_unknown -- never "interactive"
+	CredentialKind     string // session | uat | agent | dev_local | legacy_unknown -- never "interactive"
 	CredentialID       string
 	CredentialSnapshot string // bounded JSON; "" when absent
 	LegacyUnknown      bool
