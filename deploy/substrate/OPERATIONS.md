@@ -364,6 +364,9 @@ this broker are:
   endpoint, never an agent- or template-supplied `SCION_HUB_ENDPOINT`
   override — an override still changes which endpoint the agent itself
   calls, but not which host the actor may reach.
+- The broker→router hop is plaintext HTTP, and bootstrap credentials cross
+  it; NetworkPolicy and the first-bootstrap-wins nonce mitigate this, not
+  transport encryption — see `README.md` for the fix options.
 
 ## TODO (not automated yet)
 
