@@ -139,11 +139,11 @@ func TestEvaluateSAAssignment_CeilingOrphanedDelegator(t *testing.T) {
 
 // TestEvaluateSAAssignment_CeilingDelegatorLacksPermission covers the second
 // ceiling cause: the delegator still exists and is active, but does not hold
-// gcp_service_account.assign. Since GoogleCloudPlatform/scion#2062 added that
-// permission to all three built-in project roles, only a custom role (or
-// super-admin, which the ceiling treats as holding every permission) can lack
-// it, so the delegator is bound to a minimal custom role instead of a seeded
-// one.
+// gcp_service_account.assign. Every built-in project role has carried that
+// permission since GoogleCloudPlatform/scion#2062, and the ceiling treats a
+// super-admin as holding every permission, so only a delegator bound to a
+// custom role that omits the permission can lack it — hence the delegator
+// here is bound to a minimal custom role instead of a seeded one.
 func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
