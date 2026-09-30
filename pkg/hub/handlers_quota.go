@@ -469,12 +469,22 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 	}
 
 	// Validate the referenced limit definition exists.
-	if _, err := s.store.GetLimitDefinition(r.Context(), limitID); err != nil {
+	limitDef, err := s.store.GetLimitDefinition(r.Context(), limitID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Limit Definition")
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: per-broker
+	// max_agents_per_broker caps are set via the broker settings API, not
+	// via a broker-scoped entitlement binding. System-scoped bindings for
+	// this limit are unaffected — they remain the hub-wide override.
+	if limitDef.Name == store.LimitMaxAgentsPerBroker && req.ScopeType == store.QuotaScopeBroker {
+		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
 		return
 	}
 
@@ -564,6 +574,24 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: an update can
+	// reshape an existing binding into the same broker-scoped
+	// max_agents_per_broker shape that createEntitlement rejects. Block it
+	// here too, so PUT cannot be used to bypass the POST check.
+	limitDef, err := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Limit Definition")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if limitDef.Name == store.LimitMaxAgentsPerBroker && req.ScopeType == store.QuotaScopeBroker {
+		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
 		return
 	}
 
