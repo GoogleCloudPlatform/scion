@@ -25,17 +25,26 @@
 BUILDER_MODE="target"
 
 # Single-harness targets (ptone/scion#2354) generate a throwaway Cloud Build
-# config per step ID, in ${TMPDIR:-/tmp}, rather than editing a static file
-# in-tree. cloud_build_config_for_target can be called more than once per
-# `build-images.sh` invocation (build-images.sh's own
+# config per step ID, in a private temp directory, rather than editing a
+# static file in-tree. cloud_build_config_for_target can be called more than
+# once per `build-images.sh` invocation (build-images.sh's own
 # warn_if_scion_base_not_in_run peeks at the config too), each call in its
 # own command-substitution subshell -- so an EXIT trap set inside a function
 # would only ever see its own subshell's copy. Register a single, real
 # process-wide EXIT trap here, at source time (before any target is
-# resolved), naming every file this run could produce by its "$$" (this
-# script's own PID, stable across subshells) instead of relying on each
-# call site to clean up after itself.
-trap 'rm -f "${TMPDIR:-/tmp}"/cloudbuild-single-harness-$$-*.yaml' EXIT
+# resolved), that removes the one directory every such call writes into.
+# Subshells from command substitution inherit CLOUD_BUILD_TMPDIR, so every
+# call site shares it without reporting a randomized name back.
+#
+# mktemp -d (rather than a predictable "${TMPDIR:-/tmp}/..." path) avoids a
+# classic insecure-tempfile bug (CWE-377): a predictable path in a shared
+# temp directory lets another local user plant a symlink or a file they can
+# write ahead of time, so the config this builder feeds to
+# `gcloud builds submit` could be attacker-controlled. build-images.sh must
+# not set its own EXIT trap before sourcing this file (or must chain it),
+# or that trap would replace this one.
+CLOUD_BUILD_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudbuild-single-harness.XXXXXX")"
+trap 'rm -rf "${CLOUD_BUILD_TMPDIR}"' EXIT
 
 builder_check() {
   if ! command -v gcloud >/dev/null 2>&1; then
@@ -58,14 +67,19 @@ builder_prepare() {
 # harness via Cloud Build instead of the whole catalog. is_harness_step and
 # IMAGE_BUILD_DIR come from lib/targets.sh / build-images.sh, both sourced
 # into the same process before any builder runs.
+#
+# Keep this step in sync by hand with its sibling in cloudbuild-harnesses.yaml
+# (name, dir, tag pair, env, and build args): check-harness-coverage.sh only
+# checks the static cloudbuild-*.yaml files, not this generated one, so a
+# future edit to the static step (e.g. a new --build-arg) will not be caught
+# here automatically.
 generate_single_harness_config() {
   local step_id="$1"
   local harness_name="${step_id#scion-}"
-  # Deterministic per-PID, per-step path (no mktemp): a second call for the
-  # same step_id in this process just overwrites identical content, and the
-  # EXIT trap above can name the file without the generator having reported
-  # its randomized name back.
-  local out="${TMPDIR:-/tmp}/cloudbuild-single-harness-$$-${step_id}.yaml"
+  # Written into the private CLOUD_BUILD_TMPDIR (see the source-time trap
+  # above); a second call for the same step_id in this process just
+  # overwrites identical content.
+  local out="${CLOUD_BUILD_TMPDIR}/${step_id}.yaml"
   cat >"${out}" <<EOF
 steps:
   - name: 'gcr.io/cloud-builders/gcloud'
