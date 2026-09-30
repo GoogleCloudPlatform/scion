@@ -55,8 +55,9 @@ constant, was the natural fix and removes the duplication at the same time.
   replica's cache synchronously, so the post-write response normally reads
   `updated_at`/`updated_by` from a fresh `ExperimentsSnapshot()`. If that
   snapshot's revision doesn't match the revision the write just produced
-  (a later refresh landed in between), the response falls back to the
-  caller's identity and the current time, per the design's tie-break rule.
+  (a later refresh landed in between), the tie-break rule applies: the
+  response is attributed to the caller's identity and the current time
+  instead, so it is never attributed to another writer.
 - **Audit logging.** One `slog.Info` per name the request actually changed
   (comparing the merged result against the pre-write authoritative read),
   and one `slog.Warn` for a reset-all, plus a `slog.Warn` when a
@@ -141,3 +142,23 @@ constant, was the natural fix and removes the duplication at the same time.
   pre-existing failures on the 1a-i base, unrelated to this change; the
   full suite can exceed the sandbox's ~25-minute budget. The targeted runs
   above cover every package and test name this change touches.
+
+## Rebase onto merged 1a-i (ptone/scion#2217)
+
+1a-i merged upstream as a squash commit (GoogleCloudPlatform/scion#2121,
+`84aecd566`). Fork `main` fast-forwarded to it, the fork's
+`scion/experiments-1a-i` branch was deleted, and the stacked PR
+ptone/scion#2299 was auto-closed. This branch was rebased with
+`git rebase --onto upstream-main 9846241f scion/experiments-1a-ii`
+(`9846241f` was the old branch point, the last 1a-i commit below the first
+1a-ii commit). The rebase was clean — no conflicts — because 1a-ii never
+touches `operational_settings.go`, which is where 1a-i's internal rework
+(parsed overrides cached in `sectionState.ExperimentsOverrides`,
+`setExperimentsCacheLocked` removed, `ExperimentsSnapshot()` returning
+`maps.Clone(...)`) landed; the public surface 1a-ii calls
+(`ExperimentsSnapshot()`, `ReadAuthoritativeExperiments()`, `Update()`) kept
+its names, signatures, and returned struct shapes.
+`git range-diff 9846241f..ab3ffb2f upstream-main..HEAD` shows all 8 commits
+as `=` (byte-identical patches, only the base changed). Re-ran every gate
+above after the rebase; all still pass. New head `eaaac21a`. New fork PR
+against `main`: ptone/scion#2360 (the old stacked PR is not reopened).
