@@ -405,13 +405,14 @@ func TestExecuteScriptEnforced_NonExecutableScriptIsSkipped(t *testing.T) {
 // TestBuildEnforcedCmd_AsRoot verifies the "as root" branch at pre-start
 // still runs a project/hub pre-start hook (any root-eligible script other
 // than the harness-provision wrapper) via the calling process's own
-// credentials (no Credential override) and the plain hookEnv (AgentHome-owned
-// HOME, no USER/LOGNAME rewrite, no hardening) — that hook's own required
-// environment, unchanged from before the provisioner-specific carve-out
-// below existed. Dir is hardened to "/" here exactly as it is on the
-// post-workload root branch (TestBuildEnforcedCmd_AsRootPostWorkloadEvent):
-// PID 1's inherited cwd is the workload's own, workload-writable git
-// workspace, not root's, whether or not the workload exists yet.
+// credentials (no Credential override), under the same hardened,
+// allowlisted environment hardenedRootHookEnv builds for every other
+// root-eligible event: HOME=/root, never AgentHome, with AgentHome exposed
+// instead via SCION_AGENT_HOME so the hook can still find what was staged
+// there. Dir is hardened to "/" here exactly as it is on the post-workload
+// root branch (TestBuildEnforcedCmd_AsRootPostWorkloadEvent): PID 1's
+// inherited cwd is the workload's own, workload-writable git workspace, not
+// root's, whether or not the workload exists yet.
 func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "30-project-custom")
@@ -430,11 +431,14 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	if cmd.Dir != "/" {
 		t.Errorf("Dir = %q, want \"/\": never inherit init's own cwd, even at pre-start", cmd.Dir)
 	}
-	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
-		t.Errorf("HOME = %q, want /home/scion (the hook's required env, unhardened at pre-start)", got)
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
+		t.Errorf("HOME = %q, want /root (never the workload-owned AgentHome, even at pre-start)", got)
+	}
+	if got := findEnvVar(cmd.Env, "SCION_AGENT_HOME"); got != "/home/scion" {
+		t.Errorf("SCION_AGENT_HOME = %q, want /home/scion (how a pre-start hook finds staged content without HOME pointing at it)", got)
 	}
 	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
-		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\" (cheap even at pre-start, and the only guard if a re-bootstrap ever runs pre-start over a $HOME the workload already touched)", got)
+		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\"", got)
 	}
 	if got := findEnvVar(cmd.Env, "SCION_HOOK_PATH"); got != script {
 		t.Errorf("SCION_HOOK_PATH = %q, want %q", got, script)
@@ -442,14 +446,12 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 }
 
 // TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars
-// proves the one thing the pre-start-as-root branch must never simply
-// inherit from this process's own environment, even though (unlike every
-// other root exec in this codebase) it deliberately inherits everything
-// else a project/hub hook needs: PATH. A workload-owned directory sitting
-// ahead of the trusted system directories on this process's own inherited
-// PATH (see the rootexec package doc comment) must never reach a root
-// pre-start hook's own PATH-based lookups, and neither must an
-// LD_PRELOAD/BASH_ENV-style variable.
+// proves the pre-start-as-root branch never simply inherits this process's
+// own environment: a workload-owned directory sitting ahead of the trusted
+// system directories on this process's own inherited PATH (see the
+// rootexec package doc comment) must never reach a root pre-start hook's
+// own PATH-based lookups, and neither must an LD_PRELOAD/BASH_ENV-style
+// variable, nor an inherited HOME.
 func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "30-project-custom")
@@ -457,6 +459,7 @@ func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *tes
 	f, _ := openScriptForTest(t, script)
 
 	t.Setenv("PATH", "/workload-owned/bin:/usr/bin")
+	t.Setenv("HOME", "/workload-owned/home")
 	t.Setenv("LD_PRELOAD", "/workload-owned/evil.so")
 	t.Setenv("LD_LIBRARY_PATH", "/workload-owned")
 	t.Setenv("BASH_ENV", "/workload-owned/evil.sh")
@@ -483,11 +486,8 @@ func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *tes
 			t.Errorf("%s = %q, want stripped entirely", key, got)
 		}
 	}
-	// HOME must still come through unhardened at pre-start (the workload
-	// doesn't exist yet — see TestBuildEnforcedCmd_AsRoot) — this branch
-	// keeps everything else, only PATH/LD_*/BASH_ENV/ENV/IFS are fixed.
-	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
-		t.Errorf("HOME = %q, want /home/scion (still inherited at pre-start)", got)
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
+		t.Errorf("HOME = %q, want /root, never the inherited workload-owned value", got)
 	}
 }
 
@@ -580,10 +580,10 @@ func TestHarnessProvisionHookFilenameMatchesWriter(t *testing.T) {
 	}
 }
 
-// TestBuildEnforcedCmd_AsRootPostWorkloadEvent is the hardening a root-
-// eligible hook at any event AFTER pre-start needs: it must never run with
-// HOME pointed at the workload's own home directory, and it must never run
-// with init's own cwd, which — since nothing in sciontool ever chdirs — is
+// TestBuildEnforcedCmd_AsRootPostWorkloadEvent is the hardening every
+// root-eligible hook needs, pre-start included: it must never run with HOME
+// pointed at the workload's own home directory, and it must never run with
+// init's own cwd, which — since nothing in sciontool ever chdirs — is
 // whatever the image sets (e.g. a Dockerfile WORKDIR), the workload's own
 // writable git workspace. Either one left unguarded lets a root-run
 // python/bash/git/pip/node hook load workload-planted content and execute
@@ -595,7 +595,7 @@ func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
 	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	for _, event := range []string{EventPostStart, EventPreStop, EventSessionEnd} {
+	for _, event := range []string{EventPreStart, EventPostStart, EventPreStop, EventSessionEnd} {
 		cmd, err := m.buildEnforcedCmd(f, script, event, true)
 		if err != nil {
 			t.Fatalf("event %s: buildEnforcedCmd: %v", event, err)
@@ -701,6 +701,7 @@ func TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides(t *testing.T) {
 		"PYTHONNOUSERSITE":        true,
 		"PYTHONDONTWRITEBYTECODE": true,
 		"SCION_HOOK_PATH":         true,
+		"SCION_AGENT_HOME":        true,
 	}
 	for name := range rootHookEnvAllowlist {
 		allowed[name] = true
@@ -1058,6 +1059,51 @@ func TestExecuteScriptEnforced_NonEnforcedModeUnchanged(t *testing.T) {
 	}
 	if string(got) != "ran" {
 		t.Fatalf("expected the legacy exec path to run the script unconditionally, got %q", got)
+	}
+}
+
+// TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening proves ruling
+// 3's "non-enforced (docker) behaviour is unchanged" requirement for the
+// pre-start hardening in this same commit: a non-enforced LifecycleManager
+// (EnforcePrivilegeDrop false, the zero value) still runs a pre-start hook
+// via the unfiltered m.hookEnv() — the exact pre-existing path
+// executeScript's own doc comment describes — never hardenedRootHookEnv's
+// allowlist. Variables hardenedRootHookEnv now strips in enforced mode
+// (NODE_OPTIONS, GIT_CONFIG_GLOBAL) must still reach the script unchanged
+// here, and HOME must still be the workload-owned AgentHome, not /root.
+//
+// MUTATION: gate hardenedRootHookEnv (or its pre-start call) on something
+// other than EnforcePrivilegeDrop, or apply it unconditionally — this test
+// goes red (NODE_OPTIONS/GIT_CONFIG_GLOBAL would be missing, or HOME would
+// be /root instead of AgentHome).
+func TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening(t *testing.T) {
+	t.Setenv("NODE_OPTIONS", "--require /home/scion/evil.js")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/home/scion/.gitconfig")
+	t.Setenv("HOME", "/should-not-be-used")
+
+	dir := t.TempDir()
+	agentHome := t.TempDir()
+	out := filepath.Join(dir, "out")
+	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
+	mustWriteExecutableScript(t, script,
+		"#!/bin/sh\nprintenv NODE_OPTIONS > "+out+"\nprintenv GIT_CONFIG_GLOBAL >> "+out+"\nprintenv HOME >> "+out+"\n")
+
+	m := &LifecycleManager{
+		HooksDirs: []string{dir},
+		Handlers:  map[string][]Handler{},
+		AgentHome: agentHome,
+		// EnforcePrivilegeDrop left at its zero value (false).
+	}
+	if err := m.RunPreStart(); err != nil {
+		t.Fatalf("RunPreStart: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read out: %v", err)
+	}
+	want := "--require /home/scion/evil.js\n/home/scion/.gitconfig\n" + agentHome + "\n"
+	if string(got) != want {
+		t.Errorf("non-enforced pre-start env = %q, want %q (unfiltered hookEnv, AgentHome-owned HOME, never the enforced-mode allowlist)", got, want)
 	}
 }
 

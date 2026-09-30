@@ -443,52 +443,29 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 			// privilege to matter either way.
 			return m.buildDroppedProvisionCmd(cmd, path)
 		}
-		if eventName == EventPreStart {
-			// Any OTHER root-eligible pre-start hook — in practice, a
-			// project/hub-owned script staged alongside the provisioner —
-			// runs once, before the workload exists at all — there is no
-			// workload-owned $HOME content yet for it to load — and (like
-			// the provisioner) needs HOME=AgentHome to find what was staged
-			// there. PYTHONNOUSERSITE is still set here too: it costs
-			// nothing and removes one vector for the one scenario (a
-			// re-bootstrap over a $HOME a workload already touched) where this
-			// branch's own "no workload yet" premise would not hold. Unlike
-			// the provisioner above, there is no fixed-name carve-out here:
-			// a re-bootstrap over an already-workload-touched $HOME remains a
-			// separate, out-of-scope concern for project/hub hooks.
-			//
-			// rootexec.SanitizeInheritedEnv keeps every other inherited,
-			// workload-derived variable this branch needs (HOME=AgentHome
-			// above all) but replaces PATH with rootexec's own fixed list
-			// and strips LD_*/BASH_ENV/ENV/IFS/GIT_*(other than the two
-			// names a shared-workspace git rewrite deliberately sets
-			// itself)/PYTHON* outright: this hook still
-			// runs as root, and PID 1's own inherited PATH includes a
-			// directory the workload owns outright (see the rootexec
-			// package doc comment) — the one thing this branch may never
-			// simply inherit, even though it inherits everything else.
-			cmd.Env = setEnvVar(rootexec.SanitizeInheritedEnv(m.hookEnv()), "PYTHONNOUSERSITE", "1")
-			// Never inherit init's cwd, for the same reason the non-pre-start
-			// root branch below sets it: PID 1's cwd is the workload's own,
-			// workload-writable git workspace, not root's, and a root hook
-			// that merely runs an interpreter or build tool would otherwise
-			// load workload-planted content from cwd.
-			cmd.Dir = "/"
-		} else {
-			cmd.Env = m.hardenedRootHookEnv()
-			// Never inherit init's cwd. Nothing in sciontool ever chdirs,
-			// so that cwd is whatever the image sets (e.g. Dockerfile
-			// WORKDIR /workspace) — the workload's own, workload-writable
-			// git workspace, not root's. Many interpreters and tools
-			// resolve code relative to cwd (python3 -c/-m puts '' first on
-			// sys.path, node -e uses ./node_modules, make reads
-			// ./Makefile, dotenv loaders read ./.env): left unset, a root
-			// hook that merely runs one of those tools would load
-			// workload-planted content from cwd, the same escalation class
-			// HOME=/root above exists to close. A hook that genuinely needs
-			// the workspace must cd there explicitly.
-			cmd.Dir = "/"
-		}
+		// Every other root-eligible hook — pre-start (in practice, a
+		// project/hub-owned script staged alongside the provisioner) included
+		// — gets the same hardened, allowlisted environment
+		// hardenedRootHookEnv builds: HOME=/root, never AgentHome, which is
+		// workload-writable the instant a re-bootstrap runs a pre-start hook
+		// over an already-workload-touched $HOME. A hook that genuinely needs
+		// to find what was staged under AgentHome reads SCION_AGENT_HOME
+		// instead of relying on HOME for it. Unlike the provisioner above,
+		// there is no fixed-name carve-out here: every other pre-start hook
+		// runs as root under this same hardened environment regardless of
+		// whether $HOME has ever been workload-touched.
+		cmd.Env = m.hardenedRootHookEnv()
+		// Never inherit init's cwd. Nothing in sciontool ever chdirs, so that
+		// cwd is whatever the image sets (e.g. Dockerfile WORKDIR
+		// /workspace) — the workload's own, workload-writable git workspace,
+		// not root's. Many interpreters and tools resolve code relative to
+		// cwd (python3 -c/-m puts '' first on sys.path, node -e uses
+		// ./node_modules, make reads ./Makefile, dotenv loaders read ./.env):
+		// left unset, a root hook that merely runs one of those tools would
+		// load workload-planted content from cwd, the same escalation class
+		// HOME=/root above exists to close. A hook that genuinely needs the
+		// workspace must cd there explicitly.
+		cmd.Dir = "/"
 		cmd.Env = setEnvVar(cmd.Env, "SCION_HOOK_PATH", path)
 		return cmd, nil
 	}
@@ -623,35 +600,37 @@ var rootHookEnvAllowlist = map[string]bool{
 	"TERM": true,
 }
 
-// hardenedRootHookEnv builds the environment for a root-eligible hook script
-// at any event AFTER pre-start (post-start, pre-stop, session-end) — i.e.
-// while or after the workload has had control of $HOME. hookEnv's own
+// hardenedRootHookEnv builds the environment for every root-eligible hook
+// script this package execs, at any event including pre-start. hookEnv's own
 // HOME=AgentHome (the workload's own, workload-owned home directory) would
 // let such a root-run hook — if it happens to invoke python, bash, git, pip,
 // or anything else that consults its HOME for rc/site/config files — load
 // workload-planted content (~/.bashrc, a PYTHONPATH-adjacent site
 // customization, ~/.gitconfig, a pip user config) and execute it as root:
 // exactly the escalation class DecideExecAsRoot exists to close, reintroduced
-// through the environment instead of the exec path. So a root hook at these
-// events gets HOME=/root (never workload-owned), PYTHONNOUSERSITE=1
-// (disables Python's per-user site-packages lookup, which HOME would
-// otherwise influence), and a fixed, minimal PATH that never includes
-// anything workload-writable — and, unlike hookEnv, does NOT otherwise
-// inherit the process environment at all: only the exact names in
-// rootHookEnvAllowlist survive from it, so an interpreter/loader redirector
-// variable (see that var's own doc comment) never reaches this branch
-// regardless of where it came from. The dropped branch (droppedHookEnv) is
-// unaffected by any of this — a dropped hook gets the same environment the
-// harness child process itself gets, unfiltered.
+// through the environment instead of the exec path. So a root hook gets
+// HOME=/root (never workload-owned), PYTHONNOUSERSITE=1 (disables Python's
+// per-user site-packages lookup, which HOME would otherwise influence), and
+// a fixed, minimal PATH that never includes anything workload-writable —
+// and, unlike hookEnv, does NOT otherwise inherit the process environment at
+// all: only the exact names in rootHookEnvAllowlist survive from it, so an
+// interpreter/loader redirector variable (see that var's own doc comment) —
+// including one this denylist-based construction used to miss entirely,
+// such as NODE_OPTIONS, PERL5OPT, RUBYOPT, or XDG_CONFIG_HOME — never
+// reaches a root-eligible hook regardless of where it came from. The dropped
+// branch (droppedHookEnv) is unaffected by any of this — a dropped hook gets
+// the same environment the harness child process itself gets, unfiltered.
 //
-// Pre-start is exempt — see buildEnforcedCmd's own call site — because the
-// only root-eligible pre-start hook this applies to is a project/hub hook,
-// which runs once, before the workload exists at all, and needs
-// HOME=AgentHome to find what was staged there. The harness-provision
-// wrapper is also classified root-eligible at pre-start, but never reaches
-// this function at all: buildEnforcedCmd recognizes it by name and routes it
-// to buildDroppedProvisionCmd instead, since — unlike a project/hub hook —
-// it goes on to read and write $HOME and /workspace itself.
+// SCION_AGENT_HOME is set explicitly (never via HOME) so a pre-start
+// project/hub hook — which runs once, before the workload exists at all,
+// and needs to find whatever was staged under AgentHome — can still do so
+// without HOME itself ever pointing at a workload-writable location, even
+// across a future resume/re-bootstrap over a $HOME the workload has already
+// touched. The harness-provision wrapper is also classified root-eligible at
+// pre-start, but never reaches this function at all: buildEnforcedCmd
+// recognizes it by name and routes it to buildDroppedProvisionCmd instead,
+// since — unlike a project/hub hook — it goes on to read and write $HOME and
+// /workspace itself.
 func (m *LifecycleManager) hardenedRootHookEnv() []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -667,6 +646,7 @@ func (m *LifecycleManager) hardenedRootHookEnv() []string {
 	env = setEnvVar(env, "HOME", "/root")
 	env = setEnvVar(env, "PYTHONNOUSERSITE", "1")
 	env = setEnvVar(env, "PATH", strings.Join(rootexec.SearchPath, ":"))
+	env = setEnvVar(env, "SCION_AGENT_HOME", m.AgentHome)
 	return env
 }
 
