@@ -88,6 +88,20 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	startEntry := time.Now()
+	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
+	// caller passed it in — captured before anything below ever writes to
+	// opts.Env, so it can never reflect the agent-level Hub config or
+	// template env overrides applied further down, both of which a creator
+	// controls (inline req.Config.Hub, template hub.endpoint via
+	// MergeScionConfig). In broker mode this is the runtime broker's own
+	// resolved value; see the trustedHubEndpoint computation below for how
+	// it (and, outside broker mode, project settings) become the one
+	// source Substrate's egress allowlist trusts.
+	var callerHubEndpoint string
+	if opts.Env != nil {
+		callerHubEndpoint = opts.Env["SCION_HUB_ENDPOINT"]
+	}
+
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
@@ -883,13 +897,20 @@ authDone:
 
 	// If hub endpoint not yet set from agent config or caller's opts.Env,
 	// check project settings so locally-started agents in hub-connected
-	// projects also get hub connectivity.
+	// projects also get hub connectivity. projectSettingsHubEndpoint
+	// records this specific source's own resolved value (see
+	// trustedHubEndpoint below): this branch only ever runs when neither
+	// callerHubEndpoint nor the agent-level Hub config above set it, so
+	// project settings — an operator-controlled file, not a creator input —
+	// is the only source that can land here.
+	var projectSettingsHubEndpoint string
 	if _, hubSet := opts.Env["SCION_HUB_ENDPOINT"]; !hubSet {
 		if projectSettings, err := config.LoadSettings(projectDir); err == nil {
 			if projectSettings.IsHubEnabled() {
 				if ep := projectSettings.GetHubEndpoint(); ep != "" {
 					opts.Env["SCION_HUB_ENDPOINT"] = ep
 					opts.Env["SCION_HUB_URL"] = ep
+					projectSettingsHubEndpoint = ep
 				}
 			}
 		}
@@ -902,6 +923,22 @@ authDone:
 				opts.Env["SCION_AUTH_TOKEN"] = token
 			}
 		}
+	}
+
+	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
+	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
+	// broker mode, callerHubEndpoint ONLY — the runtime broker's own
+	// resolved value, captured at the top of Start before any override
+	// could touch it; if empty, no hub host is trusted at all (fail closed;
+	// see substrateEgressHostnames). Outside broker mode, callerHubEndpoint,
+	// falling back to projectSettingsHubEndpoint (an operator-controlled
+	// file). The agent-level Hub config and template env overrides — both
+	// creator-controlled, applied above and below — never feed this value:
+	// they can still redirect the agent's own hub calls, but must never
+	// widen what the actor's egress allowlist may reach.
+	trustedHubEndpoint := callerHubEndpoint
+	if trustedHubEndpoint == "" && !opts.BrokerMode {
+		trustedHubEndpoint = projectSettingsHubEndpoint
 	}
 
 	// Explicit SCION_HUB_ENDPOINT in scion config env section takes
@@ -1543,10 +1580,11 @@ authDone:
 			}
 			return k8sCfg
 		}(),
-		GitClone:         opts.GitClone,
-		SharedDirs:       effectiveSharedDirs,
-		SharedDirStorage: sharedDirStorage,
-		BrokerMode:       opts.BrokerMode,
+		GitClone:           opts.GitClone,
+		TrustedHubEndpoint: trustedHubEndpoint,
+		SharedDirs:         effectiveSharedDirs,
+		SharedDirStorage:   sharedDirStorage,
+		BrokerMode:         opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
 		NoAuthMessage: func() string {

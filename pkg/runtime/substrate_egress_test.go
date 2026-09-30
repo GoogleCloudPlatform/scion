@@ -235,10 +235,63 @@ func TestSubstrateEgressHostnames_TenantSourcesDropInvalidHosts(t *testing.T) {
 // grammar would reject) reaches the actor's EgressPolicy unchanged, because
 // the hub host is never routed through that validator.
 func TestSubstrateEgressHostnames_InClusterHubStillAllowed(t *testing.T) {
-	env := map[string]string{"SCION_HUB_ENDPOINT": "https://hub.scion-system.svc.cluster.local:8443"}
-	hosts := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{})
+	cfg := RunConfig{TrustedHubEndpoint: "https://hub.scion-system.svc.cluster.local:8443"}
+	hosts := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
 	if !containsHost(hosts, "hub.scion-system.svc.cluster.local") {
-		t.Errorf("substrateEgressHostnames() = %v, want the in-cluster hub host still present", hosts)
+		t.Errorf("substrateEgressHostnames() = %v, want the trusted in-cluster hub host present", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_HubEndpointOverrideIgnored proves that an
+// agent/template config can still override SCION_HUB_ENDPOINT in the FINAL
+// env (pkg/agent/run.go's own "final priority" override), but that override
+// host never reaches the egress allowlist — only cfg.TrustedHubEndpoint
+// (captured before the override applies) does. A template pointing
+// SCION_HUB_ENDPOINT at the cloud metadata address, the in-cluster
+// Kubernetes API, or any other arbitrary public host does not widen egress
+// to reach it.
+func TestSubstrateEgressHostnames_HubEndpointOverrideIgnored(t *testing.T) {
+	const trusted = "https://hub.scion-system.svc.cluster.local:8443"
+	cases := []struct {
+		name     string
+		override string
+		refused  string
+	}{
+		{"override to the cloud metadata IP", "http://169.254.169.254/", "169.254.169.254"},
+		{"override to the Kubernetes API", "https://kubernetes.default.svc:443", "kubernetes.default.svc"},
+		{"override to an arbitrary public host", "https://attacker.example.com", "attacker.example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := RunConfig{TrustedHubEndpoint: trusted}
+			env := map[string]string{"SCION_HUB_ENDPOINT": tc.override}
+			hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+			if containsHost(hosts, tc.refused) {
+				t.Errorf("substrateEgressHostnames() = %v, must not add the overridden hub host %q", hosts, tc.refused)
+			}
+			if !containsHost(hosts, "hub.scion-system.svc.cluster.local") {
+				t.Errorf("substrateEgressHostnames() = %v, want the trusted hub host still present", hosts)
+			}
+		})
+	}
+}
+
+// TestSubstrateEgressHostnames_HubEndpointOverrideEqualToTrustedNoDup proves
+// the equal-value case is still allowed, exactly once: when the final env's
+// SCION_HUB_ENDPOINT happens to match cfg.TrustedHubEndpoint (the common
+// case — no override in effect), the host appears once, not twice.
+func TestSubstrateEgressHostnames_HubEndpointOverrideEqualToTrustedNoDup(t *testing.T) {
+	cfg := RunConfig{TrustedHubEndpoint: "https://hub.scion-system.svc.cluster.local:8443"}
+	env := map[string]string{"SCION_HUB_ENDPOINT": "https://hub.scion-system.svc.cluster.local:8443"}
+	hosts := substrateEgressHostnames(cfg, env, config.V1SubstrateConfig{})
+	count := 0
+	for _, h := range hosts {
+		if h == "hub.scion-system.svc.cluster.local" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("substrateEgressHostnames() = %v, want the hub host exactly once, got %d", hosts, count)
 	}
 }
 

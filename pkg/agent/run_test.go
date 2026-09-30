@@ -5112,6 +5112,187 @@ profiles:
 	}
 }
 
+// setupTrustedHubEndpointTestProject writes the project/template/harness-config
+// fixture TestStartTrustedHubEndpoint's cases share: a project with
+// projectSettingsHubEndpoint configured (used only by the non-broker-mode
+// case), and an agent whose scion-agent.json sets both hub.endpoint and
+// env.SCION_HUB_ENDPOINT to creator-controlled values distinct from the
+// caller-provided one, so a test can assert neither ever reaches
+// TrustedHubEndpoint.
+func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEndpoint, templateEnvHubEndpoint string) (projectScionDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	for _, k := range []string{"SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir = filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n  endpoint: \"http://project-settings:9810\"\n"), 0644)
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "gemini", "hub": {"endpoint": %q}, "env": {"SCION_HUB_ENDPOINT": %q}}`,
+		agentLevelHubEndpoint, templateEnvHubEndpoint)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	return projectScionDir
+}
+
+// TestStartTrustedHubEndpoint pins the Start->RunConfig.TrustedHubEndpoint
+// path directly (not just substrateEgressHostnames), so that capturing
+// callerHubEndpoint anywhere other than the top of Start — in particular,
+// after the agent-level Hub-config override applies — fails one of these
+// cases.
+func TestStartTrustedHubEndpoint(t *testing.T) {
+	const (
+		brokerHubEndpoint      = "http://broker-hub:9810"
+		agentLevelHubEndpoint  = "http://169.254.169.254"
+		templateEnvHubEndpoint = "http://host.docker.internal:8080"
+	)
+
+	t.Run("broker opts.Env hub is trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-1", agentLevelHubEndpoint, templateEnvHubEndpoint)
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-1",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the broker-supplied opts.Env value)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint)
+		}
+	})
+
+	t.Run("agent-level hub.endpoint never trusted, broker host still is", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-2", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-2",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (agent-level hub.endpoint %q must never win)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint, agentLevelHubEndpoint)
+		}
+	})
+
+	t.Run("template env SCION_HUB_ENDPOINT override never trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-3", "", templateEnvHubEndpoint)
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-3",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (template env override %q must never win)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint, templateEnvHubEndpoint)
+		}
+		// Confirm the override DOES still reach the final container env,
+		// proving this case actually exercises the override path rather
+		// than a no-op.
+		envMap := make(map[string]string)
+		for _, e := range capturedConfig.Env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				envMap[parts[0]] = parts[1]
+			}
+		}
+		if got := envMap["SCION_HUB_ENDPOINT"]; got != templateEnvHubEndpoint {
+			t.Fatalf("existence control failed: final env SCION_HUB_ENDPOINT = %q, want %q — the override was not applied", got, templateEnvHubEndpoint)
+		}
+	})
+
+	t.Run("empty caller hub in broker mode adds no hub host", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-4", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-4",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			// No SCION_HUB_ENDPOINT in opts.Env at all.
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (broker mode with no caller-supplied hub endpoint must not fall back to agent-level config or project settings)", capturedConfig.TrustedHubEndpoint)
+		}
+	})
+}
+
 func TestProfileEnvVisibleInAuthOverlay(t *testing.T) {
 	// Regression: profile env vars must be injected into opts.Env BEFORE
 	// buildAuthEnvOverlay is called. Previously the overlay was built first,

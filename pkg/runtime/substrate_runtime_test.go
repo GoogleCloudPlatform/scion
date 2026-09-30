@@ -373,7 +373,14 @@ func testSubstrateRunConfig() RunConfig {
 		UnixUsername: "scion",
 		Harness:      &mockHarness{command: []string{"claude", "--dangerously-skip-permissions"}},
 		Env:          []string{"SCION_AGENT_ID=agent-1", "SCION_HUB_ENDPOINT=https://hub.example.com"},
-		Labels:       map[string]string{"scion.agent_id": "agent-1"},
+		// Matches the SCION_HUB_ENDPOINT entry in Env above: this fixture
+		// has no agent/template override in play, so the trusted and final
+		// hub hosts agree, and substrateEgressHostnames's mismatch Warn
+		// (see its own doc comment) stays silent for every test that uses
+		// this shared config instead of exercising the hub-endpoint-
+		// mismatch path incidentally.
+		TrustedHubEndpoint: "https://hub.example.com",
+		Labels:             map[string]string{"scion.agent_id": "agent-1"},
 	}
 }
 

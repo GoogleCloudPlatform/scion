@@ -360,6 +360,10 @@ this broker are:
 - `worker_selector` matching the wrong label silently reporting "no free
   workers" instead of a selector-mismatch error — see `cluster/README.md`,
   "`worker_selector`".
+- An actor's egress allowlist admits only the operator-configured hub
+  endpoint, never an agent- or template-supplied `SCION_HUB_ENDPOINT`
+  override — an override still changes which endpoint the agent itself
+  calls, but not which host the actor may reach.
 
 ## TODO (not automated yet)
 

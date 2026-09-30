@@ -48,15 +48,19 @@ var hardcodedModelEgressHosts = []string{
 // Every host added below falls into one of two trust sources, and each is
 // handled accordingly:
 //
-//   - Operator-config: the hub endpoint (broker/operator deployment config,
-//     resolved the same way every other runtime resolves it — see
-//     hostFromURLEnv's call site below) and hardcodedModelEgressHosts (a
-//     fixed literal in this binary). Neither is validated as a public
-//     hostname: an in-cluster hub (e.g. "hub.scion-system.svc.cluster.local")
-//     is a legitimate, common deployment shape that
-//     substrate.NormalizeEgressAllowEntry's public-hostname grammar would
-//     reject outright (it deliberately excludes "svc"/"cluster.local" and
-//     every other non-ICANN suffix — see that function's own doc comment).
+//   - Operator-config: cfg.TrustedHubEndpoint (captured broker/operator-side
+//     before an agent/template env override can change it — see RunConfig's
+//     own doc comment and pkg/agent/run.go) and hardcodedModelEgressHosts (a
+//     fixed literal in this binary, never derived from any input). Neither
+//     is validated as a public hostname: an in-cluster hub (e.g.
+//     "hub.scion-system.svc.cluster.local") is a legitimate, common
+//     deployment shape that substrate.NormalizeEgressAllowEntry's
+//     public-hostname grammar would reject outright (it deliberately
+//     excludes "svc"/"cluster.local" and every other non-ICANN suffix — see
+//     that function's own doc comment). The FINAL env's own
+//     SCION_HUB_ENDPOINT/SCION_HUB_URL — which an agent/template override
+//     can still change — is read only to detect and log a mismatch against
+//     the trusted host; it is never itself added.
 //   - Tenant-controllable: cfg.GitClone.URL/SCION_GIT_CLONE_URL (the
 //     workload's own configured git remote) and every OTEL_*/SCION_OTEL_*
 //     endpoint (agent/template env this function reads from the same env
@@ -104,8 +108,31 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		add(normalized)
 	}
 
-	if h := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); h != "" {
-		add(h)
+	// The trusted hub host — resolved from cfg.TrustedHubEndpoint, which
+	// RunConfig's own doc comment guarantees is broker/operator-controlled
+	// (captured before an agent/template config's own SCION_HUB_ENDPOINT
+	// env entry can override it — see pkg/agent/run.go) — is the only hub
+	// host ever added, and is never run through addTenantHost/
+	// NormalizeEgressAllowEntry: an in-cluster hub (e.g.
+	// "hub.scion-system.svc.cluster.local") is legitimate precisely because
+	// it comes from the operator, and that validator's public-hostname
+	// grammar would reject it outright. If the FINAL env's own
+	// SCION_HUB_ENDPOINT/SCION_HUB_URL host (env, not cfg.TrustedHubEndpoint
+	// — this is deliberately the value an agent/template override can have
+	// changed) differs from the trusted host, the override is never added:
+	// widening egress to match an agent-chosen value (the cloud metadata
+	// address, the in-cluster Kubernetes API, or any other host) would
+	// defeat the whole point of resolving a trusted value separately. The
+	// agent's own hub calls may still fail in that case — fail closed, not
+	// a wider allowlist — logged here with both hosts, never a scheme,
+	// userinfo, path, or query.
+	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
+	if trustedHubHost != "" {
+		add(trustedHubHost)
+	}
+	if finalHubHost := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); finalHubHost != "" && finalHubHost != trustedHubHost {
+		slog.Warn("substrate: ignoring agent env hub endpoint that does not match the operator-configured hub",
+			"trusted_host", trustedHubHost, "env_host", finalHubHost)
 	}
 
 	if cfg.GitClone != nil && cfg.GitClone.URL != "" {

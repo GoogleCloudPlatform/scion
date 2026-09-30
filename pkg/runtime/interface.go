@@ -45,6 +45,22 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// TrustedHubEndpoint is the hub endpoint resolved from broker/operator-
+	// controlled sources only: the caller-provided opts.Env's own
+	// SCION_HUB_ENDPOINT, captured at the top of Start before anything can
+	// override it, or — outside broker mode, when that is empty — the
+	// project settings file. Neither the agent-level Hub config nor an
+	// agent/template config's own SCION_HUB_ENDPOINT env entry ever feeds
+	// this field (pkg/agent/run.go): both are creator-controlled and are
+	// applied only to the final agent env, after this value is captured.
+	// Every runtime except Substrate ignores this field; base
+	// env-resolution behaviour for every other runtime is unchanged.
+	// Substrate uses it as the one egress-allowlisted hub host, independent
+	// of whatever SCION_HUB_ENDPOINT/SCION_HUB_URL end up in the final
+	// agent env (see substrateEgressHostnames) — an agent/template env
+	// override can point the *agent's own* hub calls at a different value,
+	// but must never widen the egress allowlist to match it.
+	TrustedHubEndpoint string
 	SharedDirs         []api.SharedDir
 	// SharedDirStorage holds the resolved shared-dir storage plan when
 	// server.shared_dir_storage.backend is "nfs" (design
