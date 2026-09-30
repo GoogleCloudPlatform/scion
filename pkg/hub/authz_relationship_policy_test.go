@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 // Consistency and drift tests for permissions.RelationshipPolicies, the one
@@ -36,7 +38,6 @@ var knownRelationshipNames = map[string]bool{
 	"ancestor":             true,
 	"progeny":              true,
 	"hub_member_sa_assign": true,
-	"creator_user_skill":   true,
 	"project_association":  true,
 	"hub_association":      true,
 	"broker_association":   true,
@@ -79,7 +80,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 		"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",
 		"gcp_service_account.list", "gcp_service_account.verify", "gcp_service_account.mint",
 	},
-	{"creator_user_skill", "agent", "skill"}: {
+	{"progeny", "agent", "skill"}: {
 		"skill.create", "skill.create_global", "skill.update", "skill.delete", "skill.list", "skill.register",
 	},
 }
@@ -224,9 +225,9 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 		}
 	}
 
-	// Progeny and creator skill rows are read only.
+	// Progeny rows (including personal skills) are read only.
 	for _, row := range permissions.RelationshipPolicies {
-		if row.Relationship == "progeny" || row.Relationship == "creator_user_skill" {
+		if row.Relationship == "progeny" {
 			assert.True(t, row.ReadOnly, "%s/%s must be read only", row.Relationship, row.ResourceType)
 		}
 	}
@@ -236,7 +237,7 @@ func TestRelationshipPolicy_Consistency(t *testing.T) {
 // owner/ancestor user attach and port access cells.
 func TestRelationshipPolicy_MintEligibleUnchanged(t *testing.T) {
 	for _, p := range permissions.Registry {
-		for _, rel := range []string{"owner", "ancestor", "progeny", "hub_member_sa_assign", "creator_user_skill"} {
+		for _, rel := range []string{"owner", "ancestor", "progeny", "hub_member_sa_assign"} {
 			for _, kind := range []string{"user", "agent"} {
 				for _, rt := range []string{"agent", "project", "template", "harness_config", "group", "broker", "gcp_service_account", "skill", "secret"} {
 					want := false

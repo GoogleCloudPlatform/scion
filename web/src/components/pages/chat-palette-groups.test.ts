@@ -895,52 +895,58 @@ describe('_loadPalettePeople', () => {
   });
 
   describe('unknown identity — connected element: no route side effects from resolving it', () => {
-    it('does not re-parse the route, replace v2Conversation, or refetch members/topic detail — but does refresh a currentUserId binding', async () => {
-      window.history.pushState({}, '', '/chat/alpha/topic-1');
-      const el = createPage();
-      el.isV2 = true;
-      el.pageData = { user: {} }; // pageData.user already exists, but its id is unknown
-      el._slugToProjectId.set('alpha', 'p1');
+    it.each([
+      ['pageData.user already exists, with its id unknown', { user: {} }],
+      ['pageData has no user at all', {}],
+    ])(
+      'does not re-parse the route, replace v2Conversation, or refetch members/topic detail — but does refresh a currentUserId binding (%s)',
+      async (_label, pageData) => {
+        window.history.pushState({}, '', '/chat/alpha/topic-1');
+        const el = createPage();
+        el.isV2 = true;
+        el.pageData = pageData;
+        el._slugToProjectId.set('alpha', 'p1');
 
-      const fetchedUrls: string[] = [];
-      vi.mocked(apiFetch).mockImplementation((url: string) => {
-        fetchedUrls.push(url);
-        if (url === '/api/v1/auth/me') {
-          return Promise.resolve(jsonResponse({ id: 'resolved-self' }));
-        }
-        return Promise.resolve(jsonResponse({}));
-      });
+        const fetchedUrls: string[] = [];
+        vi.mocked(apiFetch).mockImplementation((url: string) => {
+          fetchedUrls.push(url);
+          if (url === '/api/v1/auth/me') {
+            return Promise.resolve(jsonResponse({ id: 'resolved-self' }));
+          }
+          return Promise.resolve(jsonResponse({}));
+        });
 
-      document.body.appendChild(el);
-      await el.updateComplete;
-      // Let connectedCallback's own fire-and-forget initV2 (lazy rail/members
-      // import, its own initial route parse, its own member/rail loads)
-      // fully settle before this test's own baseline.
-      await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
-      await new Promise((r) => setTimeout(r, 20));
-      await el.updateComplete;
+        document.body.appendChild(el);
+        await el.updateComplete;
+        // Let connectedCallback's own fire-and-forget initV2 (lazy rail/members
+        // import, its own initial route parse, its own member/rail loads)
+        // fully settle before this test's own baseline.
+        await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
+        await new Promise((r) => setTimeout(r, 20));
+        await el.updateComplete;
 
-      // An empty threadName/defaultAgent is what a fresh route parse would
-      // also produce on first reaching this thread (no known metadata yet),
-      // so a wrongly re-triggered parse is detectable by reference identity
-      // and by re-issuing the members/topic-detail fetches, not only by a
-      // value that would happen to differ.
-      el.v2Conversation = { ...el.v2Conversation, threadName: '', defaultAgent: '' };
-      await el.updateComplete;
-      fetchedUrls.length = 0;
-      const conversationBefore = el.v2Conversation;
+        // An empty threadName/defaultAgent is what a fresh route parse would
+        // also produce on first reaching this thread (no known metadata yet),
+        // so a wrongly re-triggered parse is detectable by reference identity
+        // and by re-issuing the members/topic-detail fetches, not only by a
+        // value that would happen to differ.
+        el.v2Conversation = { ...el.v2Conversation, threadName: '', defaultAgent: '' };
+        await el.updateComplete;
+        fetchedUrls.length = 0;
+        const conversationBefore = el.v2Conversation;
 
-      await el._resolveSelfUserId();
-      await el.updateComplete;
+        await el._resolveSelfUserId();
+        await el.updateComplete;
 
-      expect(el.v2Conversation).toBe(conversationBefore);
-      expect(fetchedUrls).toEqual(['/api/v1/auth/me']);
-      expect(el.shadowRoot?.querySelector('scion-chat-space-rail')?.currentUserId).toBe(
-        'resolved-self'
-      );
+        expect(el.v2Conversation).toBe(conversationBefore);
+        expect(fetchedUrls).toEqual(['/api/v1/auth/me']);
+        expect(el.shadowRoot?.querySelector('scion-chat-space-rail')?.currentUserId).toBe(
+          'resolved-self'
+        );
 
-      el.remove();
-    });
+        el.remove();
+      }
+    );
   });
 });
 
