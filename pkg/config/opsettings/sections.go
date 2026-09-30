@@ -163,6 +163,14 @@ type MessagingSettings struct {
 	// This is a security-critical flag requiring revision/ETag concurrency.
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
 
+	// OffloadThresholdRunes is the rune-count threshold above which an
+	// agent-recipient DM body is replaced by a fetch stub at dispatch
+	// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Compiled
+	// default 0 (disabled); negative values are treated as 0. Nothing in
+	// Phase 1/2 wires `offload_fetch_by_id` — that setting is added in
+	// Phase 3.
+	OffloadThresholdRunes *int `json:"offload_threshold_runes,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`

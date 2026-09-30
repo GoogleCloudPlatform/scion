@@ -494,6 +494,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		ConversationAsserted: input.Asserted,
 	}
 
+	// #2257 step 7b (design auto-offload-large-dm §4.2 item 1): strip
+	// hub-reserved offload metadata keys before this StructuredMessage is
+	// rendered or dispatched, so a client can never spoof
+	// body_offloaded/body_chars/body_sha256. This covers the outbound
+	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
+	// fan-out (fanOutAgentMentions builds fresh metadata anyway, so this is
+	// a no-op on that path).
+	structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+
 	// Stamp attachment metadata onto the structured message.
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
 		if structuredMsg.Metadata == nil {
@@ -564,16 +573,59 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}, nil
 	}
 
+	// 10b. Offload (#2257, design auto-offload-large-dm §4.4): replace the
+	// DISPATCHED copy's body with a stub when it qualifies and a usable
+	// fetch form exists. The persisted row (storeMsg), the rendered
+	// structuredMsg.DeliveryText above, and every observer (step 13) keep
+	// the full body unchanged — dispatchMsg is used for render (just above,
+	// when offloaded) and dispatch only, never for anything derived after
+	// dispatch (mention fan-out, observers, responses).
+	dispatchMsg := structuredMsg
+	pol := s.offloadPolicy()
+	if messaging.Qualifies(storeMsg.Msg, structuredMsg.Raw, structuredMsg.Plain, pol) {
+		// No caller has to remember to hold a *store.Conversation: this is
+		// the one place ExecuteAgentDM looks it up, and only on the
+		// over-threshold path — a small DM pays nothing extra (design §4.3).
+		var conv *store.Conversation
+		if input.ConversationID != "" {
+			conv, _ = s.store.GetConversation(ctx, input.ConversationID)
+		}
+		canRead := conv != nil && s.recipientCanReadConversation(ctx, conv, input.TargetAgent)
+
+		deliverMsg, off := messaging.OffloadForDelivery(messaging.OffloadInput{
+			Msg:                  structuredMsg,
+			PersistedBody:        storeMsg.Msg,
+			MessageID:            msgID,
+			ConversationID:       storeMsg.ConversationID,
+			RecipientCanReadConv: canRead,
+			FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
+		}, pol)
+		if off.Offloaded {
+			if s.writeDenyEnabled() {
+				deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  storeMsg.ID,
+					ConvResult: input.ConvResult,
+					Msg:        deliverMsg,
+					CreatedAt:  storeMsg.CreatedAt,
+					IsMention:  input.Type == messages.TypeMention,
+				})
+			}
+			dispatchMsg = deliverMsg
+		}
+	}
+
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
 	//   - Ambiguous (context cancelled) → leave pending, return ambiguous (AC-4)
 	var dispatchErr error
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
+		// D4: managed runtimes stay unconverted — a managed agent may not
+		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
 		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
+		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 		retryCancel()
 	}
 

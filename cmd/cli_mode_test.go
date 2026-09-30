@@ -574,6 +574,15 @@ func TestAgentAllowedSkillBrowse(t *testing.T) {
 	}
 }
 
+// ptone/scion#2257: a large-DM offload stub names `scion conversation
+// get-message <ref> <id> --body` as its fetch command, so the recipient
+// agent must be able to run it in agent mode.
+func TestAgentAllowedConversationGetMessage(t *testing.T) {
+	assert.True(t, agentAllowed["conversation.get-message"], "agentAllowed should contain conversation.get-message")
+	assert.NotNil(t, resolveCommandPath(rootCmd, "conversation.get-message"),
+		"agentAllowed key conversation.get-message must resolve to a real command")
+}
+
 // cloneCommandShape copies the names of cmd and its subcommands into a fresh
 // tree, so mode filtering can run against the real command layout without
 // mutating the shared rootCmd.

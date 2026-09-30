@@ -337,6 +337,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
+				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 			},
 			"additionalProperties": false,
 		},

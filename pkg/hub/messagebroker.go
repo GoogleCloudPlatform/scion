@@ -709,19 +709,25 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
+	// msg may be a pointer shared across broker event-bus subscribers, so it
+	// is never mutated in place — a private copy is made once here (cheap:
+	// struct fields only, no deep copy needed unless a field below is
+	// reassigned) and both the "!" rewrite and the #2257 P2 metadata strip
+	// (design auto-offload-large-dm §4.2 item 1) apply to that copy.
+	copied := *msg
+	msg = &copied
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// A leading "!" in the message body acts as an inline interrupt signal:
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
-	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
 	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
-		stripped := *msg
 		content := strings.TrimSpace(trimmed[1:])
 		if content == "" {
 			content = "interrupt"
 		}
-		stripped.Msg = content
-		stripped.Urgent = true
-		msg = &stripped
+		msg.Msg = content
+		msg.Urgent = true
 	}
 
 	dispatcher := p.getDispatcher()

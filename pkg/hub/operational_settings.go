@@ -1336,6 +1336,40 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	return true // field omitted in doc → compiled default → ON
 }
 
+// OffloadThresholdRunes returns the rune-count threshold above which an
+// agent-recipient DM body is offloaded to a fetch stub at dispatch
+// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Returns 0
+// (disabled) when the section is absent, the document is malformed, the
+// field is omitted, or the stored value is negative — matching
+// messaging.OffloadPolicy's "<= 0 disables" contract.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) OffloadThresholdRunes() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return 0 // section absent → compiled default → disabled
+	}
+	if state.Malformed {
+		return 0 // unreadable → fail closed → disabled
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return 0 // parse error → fail closed → disabled
+	}
+
+	if ms.OffloadThresholdRunes == nil {
+		return 0 // field omitted → compiled default → disabled
+	}
+	if *ms.OffloadThresholdRunes < 0 {
+		return 0
+	}
+	return *ms.OffloadThresholdRunes
+}
+
 // SectionRevision returns the current revision of the named settings section.
 // Returns 0 if the section does not exist or operational settings are unavailable.
 func (o *OperationalSettings) SectionRevision(section string) int64 {
