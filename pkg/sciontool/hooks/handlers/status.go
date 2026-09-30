@@ -3,6 +3,9 @@ Copyright 2025 The Scion Authors.
 */
 
 // Package handlers provides hook handler implementations.
+//
+// Design references in this package (section N, Dn) are to
+// .design/hosted/usage-telemetry.md (ptone/scion#2053).
 package handlers
 
 import (

@@ -229,9 +229,11 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 //
 // ⚠️ ActionAssign, not ActionRead. A grant to READ a service account is not a
 // grant to ASSIGN one; the two were conflated here until svc-accnt Step 2.
-// Reachability is preserved by the assign baselines that landed first for this
-// purpose: authz.go step 3b for agent callers, the per-project
-// member-assign-service-accounts policy in seed.go for humans.
+// Reachability for project-scoped accounts comes from: authz.go's AgentScopes
+// wiring (project:agent:create) for agent callers, and the
+// gcp_service_account.assign permission curated into the project-owner,
+// project-admin and project-member RoleDefinitions in seed.go for humans
+// (ptone/scion#2147).
 //
 // ⚠️ WHAT THE CONVERSION CHANGES DEPENDS ON THE CALLER KIND. Hub scope removes
 // confinement for humans and adds it for agents, so no single sentence about
@@ -312,6 +314,46 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 	}
 }
 
+// saAssignGenericForbiddenMsg is the response for every SA-assign denial that
+// has no more specific diagnosis. That spans both layers: Layer 1 (Hub
+// policy) uses it for ordinary policy denials, a ceiling store fault
+// (DenyCauseCeilingError), and the no-authz-service guard; Layer 2 (GCP
+// actAs) uses it when the caller principal cannot be resolved. It must stay
+// byte-identical: it predates DenyCause and callers may already match on it.
+const saAssignGenericForbiddenMsg = "You don't have permission to assign this GCP service account"
+
+// saAssignForbiddenMessage maps a Decision.DenyCause to the 403 body Layer 1
+// of evaluateSAAssignment returns. Pulled out as its own function so a table
+// test can drive every DenyCause value, including one no constant names,
+// without going through the full evaluateSAAssignment call chain.
+//
+// The two ceiling messages name "a principal in its delegation chain" rather
+// than "the principal that created it": cause is set (and propagated) at
+// every depth of walkDelegationChain's recursion (authz_delegation_ceiling.go),
+// so the failing link can be the agent's own creator or any creator further
+// up the chain. Saying "the principal that created it" would be false
+// whenever the failure is a grandparent or higher — see the DenyCause doc
+// comment on authz.go, which already says "directly or transitively".
+//
+// DenyCauseCeilingError and any unrecognised cause (including "", the zero
+// value) fall through to the generic message: a store fault is
+// transient/internal, not a fact about the caller worth surfacing, and an
+// unknown cause is safer treated as no diagnosis than guessed at.
+func saAssignForbiddenMessage(cause DenyCause) string {
+	switch cause {
+	case DenyCauseCeilingOrphaned:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not exist. " +
+			"Ask an admin to recreate the agent under a current user."
+	case DenyCauseCeilingDelegatorLacksPermission:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not hold permission " +
+			"to assign this service account."
+	default:
+		return saAssignGenericForbiddenMsg
+	}
+}
+
 // evaluateSAAssignment is the transport-independent body of
 // authorizeSAAssignment: every check, log line and audit record, with the
 // caller taken from the identity on ctx. It returns nil when the assignment
@@ -355,12 +397,12 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if s.authzService == nil {
 		logAuthzDenial(r, identity, resource, ActionAssign, "no authz service")
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: "You don't have permission to assign this GCP service account", resourceType: resource.Type}
+			msg: saAssignGenericForbiddenMsg, resourceType: resource.Type}
 	}
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: "You don't have permission to assign this GCP service account", resourceType: resource.Type}
+			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type}
 	}
 
 	// Layer 2: GCP actAs.
@@ -368,7 +410,7 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if err != nil {
 		logAuthzDenial(r, identity, resource, ActionAssign, "caller principal: "+err.Error())
 		return &saAssignDenial{kind: saAssignDenyForbidden,
-			msg: "You don't have permission to assign this GCP service account"}
+			msg: saAssignGenericForbiddenMsg}
 	}
 
 	// The decision sequence — same-account propagation, no-GCP-identity denial,

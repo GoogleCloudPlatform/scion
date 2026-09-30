@@ -873,6 +873,7 @@ type Server struct {
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
 	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
+	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
@@ -968,6 +969,10 @@ type Server struct {
 	// Per-sender token-bucket limiter for the chat send paths (#1054).
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
+
+	// Per-pair sliding-window limiter for agent @mention fan-out loop/storm
+	// protection. Set once in New and read without the lock; nil-safe.
+	mentionPairLimiter *mentionPairLimiter
 
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
@@ -1265,6 +1270,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.chatSendLimiter = newChatSendLimiter()
 	srv.chatIdempotency = NewChatIdempotencyCache()
 
+	// Per-pair agent mention loop/storm protection.
+	srv.mentionPairLimiter = newMentionPairLimiter()
+
 	ctx := context.Background()
 
 	_, isGCPBackend := srv.secretBackend.(*secret.GCPBackend)
@@ -1316,6 +1324,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize the dedicated download-URL signing key (#1792).
 	if err := srv.initDownloadSigningKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the dedicated authorized-list cursor sealing key
+	// (ptone/scion#2124).
+	if err := srv.initListCursorSealer(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1763,6 +1777,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Give the resolver's existing-record-by-email branch the same
+	// account-state handling (invited activation, role re-evaluation,
+	// super-admin binding, grant sync, audit) that provisionUser's
+	// existing-record branch uses — see signInPolicyDeps / SetSignInPolicyDeps.
+	googleResolver.SetSignInPolicyDeps(srv.signInPolicyDeps())
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
 	// base validator. The exchange endpoint below is
@@ -2311,6 +2330,29 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 		case <-ctx.Done():
 		}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return embeddedBrokerState{
+		id:      s.embeddedBrokerID,
+		regErr:  s.embeddedBrokerRegErr,
+		pending: s.embeddedBrokerPending != nil,
+	}
+}
+
+// embeddedBrokerSnapshot returns the current embedded broker state without
+// waiting for a pending co-located registration to resolve. GetHealthInfo
+// (/healthz and the admin health summary) calls this instead of
+// waitForEmbeddedBroker: it is polled frequently (and often with short
+// client-side timeouts), so blocking up to embeddedBrokerWaitTimeout on
+// every call would make a probe hitting the process during the startup race
+// look like a timeout instead of the deliberate "not registered yet" status
+// it should report. /readyz does not call this and is intentionally
+// unaffected — see checkColocatedBrokerHealth in handlers_health.go for why
+// /healthz degrades on this instead. A pending state self-corrects on the
+// next poll once SetEmbeddedBrokerID or EmbeddedBrokerRegistrationFailed
+// runs; a failure does not self-correct at all (no retry), so it persists
+// until the broker configuration is fixed and the process is restarted.
+func (s *Server) embeddedBrokerSnapshot() embeddedBrokerState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return embeddedBrokerState{
@@ -3496,6 +3538,20 @@ func (s *Server) messageEventHandler() EventHandler {
 			return authErr
 		}
 
+		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
+		// O-a (p2a-r2 review): checked AFTER authorization, not before —
+		// same invariant deliverToAgent states explicitly: a denied creator
+		// must learn nothing about the recipient's migration state. Scheduled
+		// messages are not deferred (there is no sender to persist a "saved
+		// to history" row for, and no request to answer 202 to) — a
+		// scheduled message firing mid-`scion reincarnate` fails loudly
+		// instead of dispatching into a stopped or absent container and
+		// silently succeeding. The event records this as a failure so the
+		// blocked-wait pairing agents rely on is not silently lost.
+		if reincarnationInFlight(agent) {
+			return fmt.Errorf("target agent is reincarnating")
+		}
+
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			return fmt.Errorf("no dispatcher available to deliver message")
@@ -3529,8 +3585,19 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
+		// Log the recorded initiator alongside the executor context set by
+		// the caller (fireEvent / executeSchedule), so a scheduled message is
+		// distinguishable in logs from a live send without changing the live
+		// authorization identity above (cutover rule).
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
-			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
+			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
+			"initiator_principal_kind", initiator.PrincipalKind,
+			"initiator_credential_kind", initiator.CredentialKind,
+			"initiator_credential_id", initiator.CredentialID,
+			"executor_kind", executor.Kind,
+			"executor_id", executor.ID)
 		return nil
 	}
 }
@@ -4024,6 +4091,42 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
 
+		// E.2b: success-path audit for scheduled dispatch. The deny-path
+		// records for this same CanDelegate check are in
+		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
+		// that deny-audit convention (the resolved creator/execution
+		// identity, required non-empty by the ent schema) — the cutover rule
+		// keeps the fire-time execution/authorization identity as CreatedBy,
+		// so the deny and allow audits for the same check agree on who the
+		// actor is.
+		//
+		// The recorded initiator's credential is copied onto the audit ONLY
+		// when the initiator is the same principal as the creator: after an
+		// update or resume by a different user, the initiator is not the
+		// creator, and ApplyActor exists specifically to prevent naming
+		// principal A with principal B's credential. When it does match, the
+		// value is mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// column every other writer fills from that domain, not
+		// InitiatorAttribution's smaller one.
+		scheduledDispatchAudit := &store.MutationAuditRecord{
+			MutationType:       "agent_delegation",
+			ActorPrincipalKind: creatorIdentity.Type(),
+			ActorPrincipalID:   creatorIdentity.ID(),
+			TargetType:         "agent",
+			TargetID:           agent.ID,
+			CanDelegateResult:  "allow",
+		}
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		if !initiator.LegacyUnknown &&
+			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
+				scheduledDispatchAudit.ActorCredentialType = hubKind
+				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
+			}
+		}
+		s.emitMutationAudit(ctx, scheduledDispatchAudit)
+
 		// Record delegation edge (Phase 1G) from the schedule creator to the
 		// dispatched agent. Best-effort: log errors but do not fail dispatch.
 		// Determine delegator type by looking up whether the creator is an agent.
@@ -4041,12 +4144,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
+		dispatchExecutor, _ := ExecutorContextFromContext(ctx)
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			slog.Warn("Scheduler: no dispatcher available, agent created but not started",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
-				"agentName", agent.Name)
+				"agentName", agent.Name,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return nil
 		}
 
@@ -4055,13 +4161,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"agentName", agent.Name,
-				"error", err)
+				"error", err,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"project_id", evt.ProjectID)
+			"project_id", evt.ProjectID,
+			"executor_kind", dispatchExecutor.Kind,
+			"executor_id", dispatchExecutor.ID)
 		return nil
 	}
 }
@@ -4120,6 +4230,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		Status:     store.ScheduledEventPending,
 		CreatedBy:  sched.CreatedBy,
 		ScheduleID: sched.ID,
+		// E.2b: every recurrence copies the schedule's current initiator
+		// attribution verbatim (plan §3.5) — a single struct assignment,
+		// since Schedule and ScheduledEvent share the same mixin. The
+		// materialized event then keeps this snapshot unchanged even if the
+		// schedule is later re-attributed.
+		InitiatorAttribution: sched.InitiatorAttribution,
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
@@ -4136,7 +4252,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		errMsg = fmt.Sprintf("unknown event type: %s", sched.EventType)
 		log.Error("schedule-evaluator: unknown event type", "event_type", sched.EventType)
 	} else {
-		handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// E.2b: mark this as deferred execution of the schedule, distinct
+		// from the initiator attribution just copied onto evt above.
+		handlerCtx, cancel := context.WithTimeout(
+			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
+			30*time.Second)
 		if handlerErr := handler(handlerCtx, evt); handlerErr != nil {
 			errMsg = handlerErr.Error()
 			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
@@ -4947,11 +5067,6 @@ func (s *Server) registerRoutes() {
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
-	if s.requestLogger != nil {
-		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
-	} else {
-		h = s.loggingMiddleware(h)
-	}
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
@@ -4975,6 +5090,19 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// The request logger wraps UnifiedAuthMiddleware, so it is the request
+	// logger's own next.ServeHTTP call that invokes auth: every request is
+	// logged with its final response status, whether auth allows it through
+	// or rejects it outright. auth_type and principal/credential attributes
+	// come from logging.SetRequestAuth on the shared *RequestMeta this
+	// middleware installs (see RequestLogMiddleware), reachable from every
+	// context derived from it.
+	if s.requestLogger != nil {
+		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
+	} else {
+		h = s.loggingMiddleware(h)
+	}
 
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)

@@ -147,8 +147,12 @@ def _resolve_otel_environment(telemetry: dict[str, Any], env: dict[str, str] | N
     return "production"
 
 
-def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
-    if not telemetry:
+def _telemetry_enabled(telemetry: Any) -> bool:
+    # ApplyTelemetrySettings only ever writes an object or null, so a
+    # non-dict value can't reach here in production -- but treat anything
+    # that isn't a dict (True, a string, a list, ...) the same as absent,
+    # rather than crashing on `.get()`.
+    if not isinstance(telemetry, dict) or not telemetry:
         return False
     enabled = telemetry.get("enabled")
     if enabled is None:
@@ -156,17 +160,61 @@ def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
     return bool(enabled)
 
 
+def _telemetry_output_env(telemetry: dict[str, Any] | None) -> dict[str, str]:
+    """The telemetry-derived entries of outputs/env.json (ptone/scion#2053
+    phase 3c). SCION_USAGE_SOURCE is set only when telemetry is enabled:
+    codex's usage (gen_ai.api.calls / scion.usage.tokens) is derived by
+    sciontool's receiver from the native codex.sse_event response.completed
+    log event. This is narrow to usage only (D4): tool, session and turn
+    hook telemetry are unaffected, and unset here means no usage is
+    published at all (D10)."""
+    enabled = _telemetry_enabled(telemetry)
+    env = {"SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled"}
+    if enabled:
+        env["SCION_USAGE_SOURCE"] = "native"
+    return env
+
+
+def _telemetry_provider(telemetry: Any, env: dict[str, str] | None) -> str:
+    """Resolves the configured telemetry cloud provider ("gcp", or "" when
+    unset or some other provider). An explicit env override wins over the
+    staged telemetry config, mirroring harnesses/claude/provision.py's
+    provider resolution, minus claude's stricter "explicit provider
+    required" validation, which is out of scope for codex."""
+    env = env or {}
+    # Same non-dict defensiveness as _telemetry_enabled above: a non-dict
+    # telemetry (e.g. True) would otherwise crash `.get("cloud")`.
+    cloud = telemetry.get("cloud") if isinstance(telemetry, dict) else None
+    configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
+    staged_provider = env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
+    return staged_provider or configured_provider
+
+
 def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
     endpoint = _resolve_endpoint(telemetry, env)
     environment = _resolve_otel_environment(telemetry, env)
+    provider = _telemetry_provider(telemetry, env)
 
     exporter_key = "otlp-grpc"
+    # Native metrics stay off on GCP, the same as claude (ptone/scion#2053
+    # design §3.7 "codex" bullet): the GCP admission allowlist rejects
+    # codex's raw metric attributes today, so forwarding them just to have
+    # them dropped is pointless, and Codex's own usage now reaches the
+    # dashboard through the native log-event deriver instead (see
+    # _telemetry_output_env's SCION_USAGE_SOURCE). Logs and traces are
+    # unaffected: this is narrow to metrics, the same as the usage-source
+    # switch is narrow to usage.
+    metrics_line = (
+        'metrics_exporter = "none"'
+        if provider == "gcp"
+        else f'metrics_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"'
+    )
 
     lines = [
         "[otel]",
         f'environment = "{scion_harness.toml_escape(environment)}"',
         "log_user_prompt = false",
-        f'metrics_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
+        metrics_line,
         f'exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
         f'trace_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
     ]
@@ -364,10 +412,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     extra: dict[str, Any] | None = None
     if resolved.method == "auth-file":
         extra = {"auth_file_written": True}
-    ctx.write_outputs(resolved, env={
-        "CODEX_HOME": os.path.join(ctx.home, ".codex"),
-        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if _telemetry_enabled(telemetry) else "disabled",
-    }, extra=extra)
+    env: dict[str, str] = {"CODEX_HOME": os.path.join(ctx.home, ".codex")}
+    env.update(_telemetry_output_env(telemetry))
+    ctx.write_outputs(resolved, env=env, extra=extra)
 
     scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
 

@@ -133,6 +133,7 @@ The Hub's project file handlers serve project workspaces and shared directories.
 - **Deletes**: Deleting a symlink removes the link only, never its target.
 - **No implicit creation**: Read and delete requests on a missing workspace or shared directory no longer create it. Only uploads and writes do.
 - **Attachment ingest and staging**: Attachments are resolved through an `os.Root` anchored on the project scratchpad, so a symlink at any intermediate directory component cannot redirect them. A shared directory that is itself a symlink is refused.
+- **Untrusted content isolation**: Workspace and shared-directory files are written by users and agents, not by the Hub. Responses that serve them, including `?view=true` previews, the project WebDAV endpoint, and chat attachments, carry a `Content-Security-Policy: sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads` header and `X-Content-Type-Options: nosniff`. The sandbox omits `allow-same-origin`, so a sandboxed document gets an opaque origin: `allow-scripts` lets its scripts run, so generated HTML reports keep working in the file browser's preview, but it cannot act with the viewer's Hub session. WebDAV reads (`GET`, `HEAD`) are served as attachments, so browsers download them instead of rendering them.
 - **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
 
 ## 4. Secret Management
@@ -206,6 +207,10 @@ The following broker-related secrets are stored in the Hub database and are not 
 - **Shared secrets**: Stored as binary BLOBs in the `broker_secrets` table; used for HMAC-SHA256 request signing.
 
 These are infrastructure-level secrets established during broker registration and are managed by the broker authentication subsystem rather than the user-facing secrets API.
+
+### 4.8 Credential Redaction in Logs
+
+The Hub masks the password in its database connection string (DSN) before writing it to logs or stdout. This covers Hub startup and the `scion server recover-authz` and `scion server migrate-storage` commands. Both URL-style (`postgres://user:pw@host/db`) and libpq keyword/value DSNs (`password=...`) are masked, including Cloud SQL Unix-socket hosts and credentials passed as query parameters (`?password=`, `sslpassword=`). A non-SQLite DSN that cannot be parsed is replaced with a placeholder rather than logged. SQLite paths carry no credential and are logged unchanged.
 
 ## 5. Development Security
 

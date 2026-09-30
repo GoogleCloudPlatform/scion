@@ -1063,9 +1063,8 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			return // error response already written by sendAgentRouted
 		}
 		recordIdempotency(msgID)
-		if isDM {
-			s.ensureDMRegistered(ctx, key, user.ID())
-		}
+		// DM registration now happens inside sendAgentRouted, before its
+		// watermark update — see the comment there.
 		return
 	}
 
@@ -1389,6 +1388,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
 	var dispatchFailureCode string
 
+	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
+	// `isAgentUnreachable` only covers suspended/stopping/stopped/error, so
+	// a primary mid-`scion reincarnate` during `pending` (phase still
+	// "running") or `provisioning`/`starting` (neither phase is in
+	// unreachablePhases) fell through and dispatched normally into a
+	// stopped or not-yet-existing container. Checked ahead of
+	// primaryUnreachable so a migrating agent whose phase happens to be
+	// "stopping" is deferred, not marked failed.
+	primaryReincarnating := reincarnationInFlight(primaryAgent)
+
 	// F2b (design doc §3.3): agents actually dispatched into a group
 	// conversation become participants (a listing index, not an ACL —
 	// project membership already gates reads per §3.2). Review round 1
@@ -1423,7 +1432,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
 	}
-	if primaryUnreachable {
+	if primaryReincarnating {
+		// Not a failure: the message is saved for catch-up, not dropped.
+		storeMsg.DispatchState = store.MessageDispatchDeferred
+	} else if primaryUnreachable {
 		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
@@ -1443,6 +1455,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			if wcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(wcs))
 			}
+			// A25.6 F1/F3: key may be a dm: route (chat v2's 1:1 DM URLs,
+			// report-7-gteam-2a case (e)); register both principals so the
+			// conversation is discoverable via `conversation list`.
+			threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 			if convErr != nil {
@@ -1511,6 +1527,21 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
+	// For DMs, ensure DM registry rows exist for both participants. This must
+	// precede the watermark update: touchConversationActivity is a plain
+	// UPDATE and would affect zero rows on the first message of a DM. (Moved
+	// here from the isDM branch in the caller, which ran this after
+	// sendAgentRouted had already returned — too late for the first message's
+	// watermark update below to find a row to update.)
+	if strings.HasPrefix(key, "dm:") {
+		s.ensureDMRegistered(ctx, key, user.ID())
+	}
+
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
+	s.touchConversationActivity(ctx, key, storeMsg.ID)
+	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -1533,10 +1564,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	// Dispatch to the primary agent — skipped entirely when the phase gate
-	// above already marked the row failed.
+	// above already marked the row failed or deferred.
 	dispatcher := s.GetDispatcher()
 	primaryDispatchOK := true
-	if primaryUnreachable {
+	if primaryReincarnating || primaryUnreachable {
 		primaryDispatchOK = false
 	} else if dispatcher != nil {
 		// withDispatchMessageID carries the hub message ID to the broker so a
@@ -1589,6 +1620,18 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			mentionMsg.Attachments = msg.Attachments
 			mentionMsg.Metadata = msg.Metadata
 
+			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
+			// review): a mentioned (secondary) agent is a recipient in its
+			// own right, independent of the primary gated above. This
+			// mention already gets a real conversation (thread or DM,
+			// below), so — unlike handlers_agent_messaging.go's
+			// processMentions (F3) — no extra linkage work is needed here.
+			mentionDeferred := reincarnationInFlight(mentionAgent)
+			mentionDispatchState := store.MessageDispatchDispatched
+			if mentionDeferred {
+				mentionDispatchState = store.MessageDispatchDeferred
+			}
+
 			mentionStoreMsg := &store.Message{
 				ID:            api.NewUUID(),
 				ProjectID:     projectID,
@@ -1601,7 +1644,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				AgentID:       mentionAgent.ID,
 				Channel:       "web",
 				ThreadID:      key,
-				DispatchState: store.MessageDispatchDispatched,
+				DispatchState: mentionDispatchState,
 				CreatedAt:     now,
 			}
 			// B15 dual-write: resolve-or-create conversation for web chat mention fan-out.
@@ -1616,6 +1659,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					if mentionWcs != nil {
 						threadOpts = append(threadOpts, messaging.WithTopicLookup(mentionWcs))
 					}
+					// A25.6 F1/F3: key may be a dm: route; register both
+					// principals so the mention's conversation is
+					// discoverable via `conversation list`.
+					threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 					if convErr != nil {
@@ -1643,8 +1690,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				}
 				mentionConvResult = convResult
 			}
+			mentionPersisted := true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
+				mentionPersisted = false
 			} else {
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
 			}
@@ -1653,7 +1702,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
 			// and the same CoAddressees as the primary, so every agent sees the
 			// identical "to" list naming the full group.
-			if s.writeDenyEnabled() {
+			if s.writeDenyEnabled() && mentionPersisted {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
 					ConvResult:   mentionConvResult,
@@ -1663,6 +1712,27 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					CoAddressees: groupCoAddressees(agents),
 					ReplyToID:    replyToID,
 				})
+			}
+
+			// Migration gate: skip dispatch for a migrating secondary — the
+			// row above is already persisted as deferred. F1 (p2a-r2
+			// review): "deferred" means saved for catch-up; if persistence
+			// itself failed, report error instead, never deferred. Either
+			// way this recipient is not appended to dispatchedAgents
+			// (F2b: participant = dispatched).
+			if mentionDeferred {
+				for i, mr := range mentionResults {
+					if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+						if mentionPersisted {
+							mentionResults[i].Status = "deferred"
+						} else {
+							mentionResults[i].Status = "error"
+							mentionResults[i].Error = "failed to persist message; agent is reincarnating, retry"
+						}
+						break
+					}
+				}
+				continue
 			}
 
 			mentionDispatchOK := true
@@ -1690,14 +1760,6 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
-
-	// Update topic/DM watermark.
-	s.touchConversationActivity(ctx, key, storeMsg.ID)
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the thread as unread.  The user just sent the message, so they have
-	// implicitly read everything up to and including it.
-	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// --- W6: Human mention notifications ---
 	// Resolve @mentions that didn't match agents — they may be human members.
@@ -1863,6 +1925,20 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 			if h2hWcs != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(h2hWcs))
 			}
+			// A25.6 F1/F3, tightened by A25.11 R1 (p2a-u5 review): key may be
+			// a dm: route. isDMParticipant (handleConversationSend) only
+			// authenticates the CALLER's own slot in the key — the other
+			// slot (the peer) is a caller-chosen path segment that was never
+			// resolved. Register both principals only when the peer is
+			// store-resolved with its matching kind; otherwise the
+			// conversation is still created (as at base, pre-A25.6) but
+			// with no participant rows, exactly like an unauthenticated
+			// third party never being written. See resolveDMPeerPrincipal.
+			if strings.HasPrefix(key, "dm:") {
+				if _, _, resolved := s.resolveDMPeerPrincipal(ctx, key, user.ID()); resolved {
+					threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
+				}
+			}
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {
@@ -1913,11 +1989,6 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		}
 	}
 
-	// Publish SSE event. For the unreachable-default override, this carries
-	// the row's actual failed state so other open tabs see "Agent
-	// unreachable" too, not a false "Delivered".
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-
 	// For DMs, ensure DM registry rows exist for both participants. This must
 	// precede the watermark update: touchConversationActivity is a plain
 	// UPDATE and would affect zero rows on the first message of a DM.
@@ -1925,14 +1996,17 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
-	// Update conversation watermark.
+	// Both watermarks must be current before publish: clients refetch unread
+	// state on this event.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
 	}
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the conversation as unread.
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
+	// Publish SSE event. For the unreachable-default override, this carries
+	// the row's actual failed state so other open tabs see "Agent
+	// unreachable" too, not a false "Delivered".
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// --- W6: Chat notifications ---
 	// Shared unconditionally with the unreachable-default override (R1): a
@@ -2753,6 +2827,46 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	if body.MessageID == "" {
 		ValidationError(w, "messageId is required", nil)
 		return
+	}
+
+	existing, rsErr := wcs.GetReadState(ctx, user.ID(), key)
+	hasExisting := rsErr == nil && existing != nil && existing.LastReadMessageID != ""
+
+	// Fast path: re-marking with the already-current watermark is a no-op —
+	// skip the message lookup and the write entirely.
+	if hasExisting && existing.LastReadMessageID == body.MessageID {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Reject IDs that aren't persisted messages: clients must never set a
+	// client-local placeholder as the watermark. Existence only, not also
+	// same-conversation membership — history lists by ConversationID, and a
+	// visible row's ThreadID may differ from key.
+	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			ValidationError(w, "messageId does not refer to a known message", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
+		}
+		return
+	}
+	if targetMsg == nil {
+		ValidationError(w, "messageId does not refer to a known message", nil)
+		return
+	}
+	// Monotonic: a stale advance must never roll the watermark backward;
+	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
+	if hasExisting {
+		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil && currentMsg != nil {
+			newer := targetMsg.CreatedAt.After(currentMsg.CreatedAt) ||
+				(targetMsg.CreatedAt.Equal(currentMsg.CreatedAt) && targetMsg.ID > currentMsg.ID)
+			if !newer {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
+			}
+		}
 	}
 
 	if err := wcs.SetReadState(ctx, user.ID(), key, body.MessageID); err != nil {
@@ -3912,6 +4026,60 @@ func dmUserParticipants(key string) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// resolveDMPeerPrincipal parses a canonical "dm:<kind>:<id>:<kind>:<id>" key
+// and resolves the principal that is NOT the caller, verifying it exists in
+// the store with its matching kind (A25.11 R1, p2a-u5 review). Before this,
+// sendHumanToHuman's isDMParticipant check authenticated only the CALLER's
+// own slot; the other slot was never resolved, so an authenticated human
+// could name an unresolved ID (an agent's UUID, or a UUID matching nothing)
+// in a "dm:user:...:user:..." key and get it registered as a participant —
+// the same phantom-row class A25.7 R2 and A25.8 R1 closed on the agent
+// paths, now via a URL path segment instead of a JSON payload field.
+//
+// callerID is assumed to be the value isDMParticipant already matched
+// against a "user"-kind slot (handleConversationSend authorizes this before
+// sendHumanToHuman ever runs), so the OTHER slot is unambiguously the peer.
+//
+// resolved is true only when the peer's ID is found in the store under its
+// exact kind — a user ID that happens to equal an agent's UUID does not
+// count, and vice versa. A store error other than "not found" is logged as
+// a non-fatal WARN (G2 style) and treated the same as unresolved: the
+// caller must never learn anything about the peer's existence from this
+// path, and denying the send over a transient lookup failure would turn a
+// listing concern into an outage.
+func (s *Server) resolveDMPeerPrincipal(ctx context.Context, key, callerID string) (peerKind, peerID string, resolved bool) {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+	if err != nil {
+		return "", "", false
+	}
+	peerKind, peerID = kindA, idA
+	if kindA == "user" && idA == callerID {
+		peerKind, peerID = kindB, idB
+	}
+	switch peerKind {
+	case "user":
+		if _, getErr := s.store.GetUser(ctx, peerID); getErr != nil {
+			if !errors.Is(getErr, store.ErrNotFound) {
+				s.messageLog.Warn("chat v2 DM peer lookup failed (listing gap, not access)",
+					"principal_kind", peerKind, "principal_id", peerID, "error", getErr)
+			}
+			return peerKind, peerID, false
+		}
+		return peerKind, peerID, true
+	case "agent":
+		if _, getErr := s.store.GetAgent(ctx, peerID); getErr != nil {
+			if !errors.Is(getErr, store.ErrNotFound) {
+				s.messageLog.Warn("chat v2 DM peer lookup failed (listing gap, not access)",
+					"principal_kind", peerKind, "principal_id", peerID, "error", getErr)
+			}
+			return peerKind, peerID, false
+		}
+		return peerKind, peerID, true
+	default:
+		return peerKind, peerID, false
+	}
 }
 
 // resolveDMPeer extracts the peer's ID from a DM key given the caller's ID.

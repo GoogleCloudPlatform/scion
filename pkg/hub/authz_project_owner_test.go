@@ -430,10 +430,13 @@ func TestCapabilities_ProjectOwnerBypass_ProjectAllActions(t *testing.T) {
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	caps := srv.authzService.ComputeCapabilities(ctx, user, projectResource(project))
+	// Capabilities are the decision for each action.
 	for _, action := range ResourceActions["project"] {
-		assert.Contains(t, caps.Actions, string(action),
-			"non-creator project owner should have %q on project", action)
+		want := srv.authzService.CheckAccess(ctx, user, projectResource(project), action).Allowed
+		assert.Equal(t, want, capabilityAllows(caps, action),
+			"non-creator project owner capability %q must equal the decision", action)
 	}
+	assert.True(t, capabilityAllows(caps, ActionUpdate), "non-creator project owner can update the project")
 }
 
 func TestCapabilities_ProjectOwnerBypass_AgentAllActions(t *testing.T) {
@@ -454,13 +457,14 @@ func TestCapabilities_ProjectOwnerBypass_AgentAllActions(t *testing.T) {
 	for _, action := range ResourceActions["agent"] {
 		// miller79/scion#88: attach/port_access to another member's agent
 		// would expose that member's user-scoped secrets.
-		if ownerAdminExcludedActions[action] {
+		if relationshipOnlyAgentActions[action] {
 			assert.NotContains(t, caps.Actions, string(action),
 				"project owner must NOT have %q on another member's agent", action)
 			continue
 		}
-		assert.Contains(t, caps.Actions, string(action),
-			"project owner should have %q on another member's agent", action)
+		want := srv.authzService.CheckAccess(ctx, user, agentResource(a), action).Allowed
+		assert.Equal(t, want, capabilityAllows(caps, action),
+			"project owner capability %q on another member's agent must equal the decision", action)
 	}
 }
 
@@ -493,13 +497,14 @@ func TestCapabilities_ProjectOwnerBypass_BatchAllActions(t *testing.T) {
 		for _, action := range ResourceActions["agent"] {
 			// miller79/scion#88: attach/port_access only on bob's own agent
 			// (index 1), never on alice's (index 0).
-			if ownerAdminExcludedActions[action] && i == 0 {
+			if relationshipOnlyAgentActions[action] && i == 0 {
 				assert.NotContains(t, caps.Actions, string(action),
 					"agent[%d]: project owner must NOT have %q on another member's agent", i, action)
 				continue
 			}
-			assert.Contains(t, caps.Actions, string(action),
-				"agent[%d]: project owner should have %q in batch result", i, action)
+			want := srv.authzService.CheckAccess(ctx, user, resources[i], action).Allowed
+			assert.Equal(t, want, capabilityAllows(caps, action),
+				"agent[%d]: project owner capability %q must equal the decision", i, action)
 		}
 	}
 }
@@ -695,7 +700,66 @@ func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testin
 	assert.Equal(t, []string{"read", "assign"}, hubCaps.Actions,
 		"hub member should see read (hub-member-read-all) + assign (D5 baseline) on hub-scoped SA")
 
+	// The project-scoped control: each capability equals the decision.
 	projectCaps := srv.authzService.ComputeCapabilities(ctx, user, gcpServiceAccountResource(saProject))
-	assert.Equal(t, []string{"read", "delete", "verify", "assign"}, projectCaps.Actions,
-		"the project-scoped control should still get the full bypass")
+	for _, action := range ResourceActions["gcp_service_account"] {
+		want := srv.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(saProject), action).Allowed
+		assert.Equal(t, want, capabilityAllows(projectCaps, action),
+			"project-scoped SA capability %q must equal the decision", action)
+	}
+}
+
+// relationshipOnlyAgentActions are agent actions the seeded project roles do
+// not carry; they come only from the owner or ancestor relationship to the
+// agent.
+var relationshipOnlyAgentActions = map[Action]bool{
+	ActionAttach:     true,
+	ActionPortAccess: true,
+}
+
+// TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel
+// pins ptone/scion#2147: the project-owner/-admin capability short-circuit
+// (projectOwnerAdminCapabilities) shows "assign" for a project-scoped SA
+// regardless of who created it, and that agrees with CheckAccess because the
+// project-owner and project-admin RoleDefinitions grant
+// gcp_service_account.assign.
+func TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	admin := makeProjectMemberUser(t, s, project, tid("sa-caps-admin"), "Admin", store.GroupMemberRoleAdmin)
+
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sa-project-scoped-owner-admin-agreement"),
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
+		Email:     "sa-owner-admin-agreement@example.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		// Created by bob, a plain project member — neither alice (owner) nor
+		// admin owns this resource, so the resource-owner relationship grant
+		// does not apply and the only route to an allow is the role permission.
+		CreatedBy: bob.ID,
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+	resource := gcpServiceAccountResource(sa)
+
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"owner", alice},
+		{"admin", admin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity := NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, "member", "api")
+
+			caps := srv.authzService.ComputeCapabilities(ctx, identity, resource)
+			assert.Contains(t, caps.Actions, "assign",
+				"%s short-circuit should list assign", tc.name)
+
+			decision := srv.authzService.CheckAccess(ctx, identity, resource, ActionAssign)
+			assert.True(t, decision.Allowed,
+				"%s CheckAccess(assign) should agree with the short-circuit's capability list", tc.name)
+		})
+	}
 }

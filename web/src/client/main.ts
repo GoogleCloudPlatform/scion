@@ -42,7 +42,12 @@ import {
   ROUTE_PERMISSION_MAP,
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
-import { ACCOUNT_TEARDOWN_EVENT } from '../utils/auth.js';
+import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
+import { chatRecentFiles } from './chat-recent-files.js';
+import {
+  buildRecentFilesScope,
+  shouldClearRecentFilesOnTeardown,
+} from './chat-recent-files-lifecycle.js';
 
 /**
  * Strip the Vite base path prefix from a URL pathname so the client-side
@@ -783,6 +788,12 @@ async function init(): Promise<void> {
     // Mention/DM popups are driven off those events. Started here rather than
     // from the chat page because a mention has to reach you on any page.
     chatNotifications.start(currentUser.id);
+    // The recent-files index (native chat quick palette "Documents") is
+    // scoped to this identity + hub/base path; initialize only now that the
+    // user is known.
+    chatRecentFiles.setScope(
+      buildRecentFilesScope(currentUser, window.location.origin, import.meta.env.BASE_URL)
+    );
   }
 
   // Wait for core shell components to be defined (page components are lazy-loaded)
@@ -840,7 +851,17 @@ async function init(): Promise<void> {
   // Account teardown: dispose terminals on logout/auth-expiry before redirect.
   // The event fires synchronously from performLogout() or auth-expiry detection
   // so cross-tab teardown completes before the page navigates away.
-  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, () => {
+  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
+    // Explicit logout only: suspend ingestion and clear this account's
+    // persisted key and memory before the logout POST runs, so nothing async
+    // can race a response into a store that is no longer this identity's. An
+    // auth-expiry teardown may resume the same account after re-auth, so it
+    // does not clear recents.
+    const reason = (e as CustomEvent<AccountTeardownDetail>).detail?.reason;
+    if (shouldClearRecentFilesOnTeardown(reason)) {
+      chatRecentFiles.clearForLogout();
+    }
+
     if (accountTornDown) return;
     accountTornDown = true;
     try {

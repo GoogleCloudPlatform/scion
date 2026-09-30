@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const stuckMessageThreshold = 5 * time.Minute
@@ -62,7 +64,7 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		}
 
 		expireCutoff := time.Now().UTC().Add(-stuckMessageExpireTTL)
-		expired, err := s.store.ExpireStuckPendingMessages(ctx, expireCutoff, "expired: stuck in pending state beyond TTL")
+		expired, err := s.store.ExpireStuckPendingMessages(ctx, expireCutoff, store.MessageExpiredStuckPendingReason)
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: expire stuck pending messages failed", "error", err)
 			return

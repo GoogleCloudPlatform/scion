@@ -82,6 +82,67 @@ test-hub-sqlite:
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
 		./pkg/hub/...
 
+## test-launch-store-postgres: Run the T1 async-create launch store/reaper
+# suite against a real Postgres server (design t1-async-create-v11.md §6,
+# "Postgres in CI"). Requires -tags integration and SCION_TEST_POSTGRES_URL;
+# see pkg/store/enttest's package doc for the connection string format.
+#
+# pkg/store/integrationtest runs in full (its own self-contained Postgres-only
+# harness). pkg/store/entadapter is scoped with -run to just the new launch
+# store/reaper/report tests, per the design's literal wording ("runs
+# pkg/store/integrationtest ... plus the new store and report-handler
+# tests") -- NOT the whole existing entadapter suite. That distinction
+# matters: this is the first CI job ever to run entadapter's existing tests
+# against real Postgres (they otherwise only run against SQLite, or against
+# Postgres in a developer's local -tags integration run), and running the
+# full package here surfaced multiple pre-existing failures unrelated to T1
+# (a backfill migration's raw SQL is invalid on Postgres; a conversation
+# upsert test asserts timestamp equality at a precision Postgres does not
+# preserve). Fixing those is out of scope for this design; -run keeps this
+# job to what it was scoped to test.
+#
+# Fail loudly, not green, if a Postgres-only case in this job's own suite
+# skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
+# first; on -v test output, any "--- SKIP" line (including an indented
+# subtest skip) also fails the target, since in this job every test that
+# self-skips on a missing Postgres backend (enttest.Active() == false)
+# indicates the job is misconfigured, not that skipping is an acceptable
+# outcome here.
+#
+# pkg/store/integrationtest is exempt from that skip check: its Category 7
+# (multi-process) tests always self-skip TestWorker_AdvisoryLock and
+# TestWorker_NotifyPublisher when run normally -- those are child-process
+# entrypoints a parent test in the same file launches as a subprocess with
+# SCION_TEST_WORKER_DSN set (see multiprocess_test.go's package comment),
+# not Postgres-availability skips. They are excluded by name so a genuine
+# new skip in that package still fails the target.
+test-launch-store-postgres:
+	@echo "Running launch store tests against Postgres..."
+	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_URL is not set -- the Postgres-only cases would silently skip instead of running." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 20m -v \
+		./pkg/store/integrationtest/... > /tmp/test-launch-store-postgres-integrationtest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-integrationtest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -E '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-integrationtest.log \
+		| grep -qvE 'TestWorker_(AdvisoryLock|NotifyPublisher)'; then \
+		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_)' \
+		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
+		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+
 ## vet: Run go vet
 vet:
 	@go vet ./...

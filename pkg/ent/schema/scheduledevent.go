@@ -36,6 +36,15 @@ type ScheduledEvent struct {
 	ent.Schema
 }
 
+// Mixin of the ScheduledEvent. InitiatorAttributionMixin is shared verbatim
+// with Schedule (E.2b) so the two schemas expose an identical attribution
+// column set, and recurrence propagation is a single struct assignment.
+func (ScheduledEvent) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		InitiatorAttributionMixin{},
+	}
+}
+
 // Fields of the ScheduledEvent.
 func (ScheduledEvent) Fields() []ent.Field {
 	return []ent.Field{

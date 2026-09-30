@@ -207,17 +207,11 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, cursor := GetIdentityFromContext(ctx), query.Get("cursor")
-	cursorBinding := authorizedListCursorBinding("templates", filter)
-	if cursor != "" {
-		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
-			return
-		}
-	}
+	cursorBinding := scopedCursorBinding("templates", filter, identity)
 	wideAccess := s.hasCatalogWideListAccess(ctx, identity, "template", "template.list")
 	authorizeEach := identity != nil && !wideAccess
 	result, err := listAuthorizedOrAll(
-		ctx, identity, cursor, limit, cursorBinding, authorizeEach,
+		ctx, identity, cursor, limit, cursorBinding, s.listCursorSealer, authorizeEach,
 		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Template], error) {
 			return s.store.ListTemplates(ctx, filter, opts)
 		},
