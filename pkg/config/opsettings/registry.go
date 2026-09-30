@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -97,6 +98,13 @@ func init() {
 			New: func() any { return &AutoExposePortsSettings{} },
 		},
 		{
+			Name: "quotas",
+			KoanfPaths: []string{
+				"quotas.enforce_broker_quotas",
+			},
+			New: func() any { return &QuotaSettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -171,6 +179,16 @@ func init() {
 			Name:       "harness_configs",
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+		},
+		{
+			// experiments is durable via DB but has no settings.yaml
+			// representation. It is runtime/API-owned state: absent DB
+			// row = compiled registry defaults for every experiment.
+			// Seeding skips this section (KoanfPaths nil) -- experiment
+			// names contain dots, which koanf would otherwise split on.
+			Name:       "experiments",
+			KoanfPaths: nil,
+			New:        func() any { return &ExperimentsSettings{} },
 		},
 	}
 
@@ -330,6 +348,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
+				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 			},
 			"additionalProperties": false,
 		},
@@ -337,6 +356,34 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"enabled": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// quotas schema is hand-written — like auto_expose_ports, it has no
+		// $defs in settings-v1.schema.json.
+		"quotas": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// experiments schema is hand-written -- it is runtime/API-owned
+		// state with no $defs in settings-v1.schema.json (like maintenance
+		// and messaging). overrides is a map of experiment name -> bool;
+		// the pattern is the single definition in experiments.NamePattern
+		// (pkg/experiments), so this schema cannot drift from NewRegistry's
+		// own name validation.
+		"experiments": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"overrides": map[string]interface{}{
+					"type": "object",
+					"patternProperties": map[string]interface{}{
+						experiments.NamePattern: map[string]interface{}{"type": "boolean"},
+					},
+					"additionalProperties": false,
+				},
 			},
 			"additionalProperties": false,
 		},

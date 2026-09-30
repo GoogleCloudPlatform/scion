@@ -632,13 +632,13 @@ test_hardened_org_8080_rule_drift_detects_port_only() {
     "the warning should show the actual (wrong) allowed port"
 }
 
-# N7-2: an empty sourceRanges (an unscoped or hand-edited rule) is the one
-# shape that exercises deploy.sh's own reason for not splitting the
-# combined describe with `IFS=$'\t' read`: bash's `read` collapses a
-# leading empty field on a whitespace IFS character like tab instead of
-# leaving it blank, which would shift every field after it and mislabel
-# them in the warning below (though the drift *decision* itself would
-# still come out right either way, since no real field value is empty).
+# An empty sourceRanges (an unscoped or hand-edited rule) is one shape
+# that exercises deploy.sh's own reason for not splitting the combined
+# describe with `IFS=$'\t' read`: bash's `read` collapses a leading empty
+# field on a whitespace IFS character like tab instead of leaving it
+# blank, which would shift every field after it and mislabel them in the
+# warning below (though the drift *decision* itself would still come out
+# right either way, since no real field value is empty).
 test_hardened_org_8080_rule_drift_with_empty_source_range_labels_fields_correctly() {
   fresh_gcloud_state
   seed_firewall_rule_json "$FW_8080_RULE_NAME" \

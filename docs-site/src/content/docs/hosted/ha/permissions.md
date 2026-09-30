@@ -220,7 +220,7 @@ These built-in roles bundle common permissions for human users:
 |------|-------------|
 | `super-admin` | Full platform administrator with all permissions (System Role). |
 | `hub-admin` | Hub administrator with scopeable admin permissions (System Role). |
-| `hub-member` | Standard user; read access to directory resources and can create their own projects (System Role). |
+| `hub-member` | Standard user; read access to directory resources, can create their own projects and register Runtime Brokers (`broker.create`) (System Role). |
 | `hub-viewer` | Read-only access to directory resources (System Role). |
 | `global-catalog-author` | Non-admin global skill authoring; grants only `skill.create_global` (System Role). |
 | `project-owner` | Full project permissions, including agent lifecycle and messaging. Does not include `agent.attach` or `agent.port_access` on other members' agents. |
@@ -238,8 +238,8 @@ Every user has one **hub role**: `admin`, `member` or `viewer`. It is shown in *
 | Hub role | Granted through | What it allows |
 |----------|-----------------|----------------|
 | `admin` | A system-scope `super-admin` binding | Full administrative access to the hub. |
-| `member` | Membership of the `hub-members` group, which holds the `hub-member` role | Read the hub directory and catalogs (users, groups, templates, harness configs, brokers, skills, and so on) and **create projects**. |
-| `viewer` | A system-scope `hub-viewer` binding | The same as `member`, but **cannot create projects**. This includes cloning a project. |
+| `member` | Membership of the `hub-members` group, which holds the `hub-member` role | Read the hub directory and catalogs (users, groups, templates, harness configs, brokers, skills, and so on), **create projects** and **register Runtime Brokers**. |
+| `viewer` | A system-scope `hub-viewer` binding | The same as `member`, but **cannot create projects** or **register Runtime Brokers**. This includes cloning a project. |
 
 - **Project roles are independent of the hub role.** A viewer can still be added to a project, and then works in it according to their project role (`project-member`, `project-admin` or `project-owner`). The hub role only controls hub-level actions, such as creating a project.
 - **New users** get the hub role set by [`server.auth.default_user_role`](/scion/reference/server-config/#authentication-serverauth) (`member` unless configured otherwise). It is applied when the account is first created or activated, which includes the first sign-in of an invited or allow-listed user. Invites and allow-list entries carry no role of their own. Users listed in `admin_emails` are always admins.

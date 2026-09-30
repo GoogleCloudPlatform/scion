@@ -37,6 +37,15 @@ var deliveryMetadataAllowlist = map[string]bool{
 	"channel":          true,
 	"thread_id":        true,
 	"system_category":  true,
+	// ptone/scion#2257 (design auto-offload-large-dm §4.2 item 3): hub-set
+	// only — messaging.OffloadForDelivery deletes any client-supplied value
+	// and sets these itself only when it offloads. Adding them here lets the
+	// switch-OFF (legacy) renderer show them; it does NOT add them to
+	// internalMetadataKeys, which would hide them from the switch-ON hub
+	// envelope instead.
+	"body_offloaded": true,
+	"body_chars":     true,
+	"body_sha256":    true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

@@ -1405,8 +1405,11 @@ gcloud beta services identity create \
 # for the operator to make explicitly, not something to do silently on
 # their behalf -- so this fails fast, before any resource in this script
 # is created, rather than creating one itself. See the hardened-org
-# addendum doc for the exact command to create it (an auto-mode network,
-# which is all this script needs).
+# addendum doc for the exact commands to create it -- either an auto-mode
+# network, or (for organizations that block those) a custom-mode network
+# with an explicitly-created "default" subnet in this region. Either
+# shape works; this script only needs a subnet named "default" to exist
+# in REGION.
 #
 # Runs AFTER "Enable APIs" above, not before: on a brand-new project in an
 # ordinary (non-hardened) org, compute.googleapis.com has never been
@@ -1949,7 +1952,7 @@ DEFAULT_SUBNET_CIDR="$(gcloud compute networks subnets describe default \
   --format="value(ipCidrRange)" 2>/dev/null)" || true
 if [[ -z "$DEFAULT_SUBNET_CIDR" ]]; then
   err "Could not determine the IP range of the 'default' subnet in ${REGION}."
-  err "An auto-mode default network creates one subnet per region automatically; see https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout)."
+  err "An auto-mode default network creates one subnet per region automatically; a custom-mode network needs one created explicitly. See https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout) for both."
   exit 1
 fi
 echo "  Default subnet CIDR (${REGION}): ${DEFAULT_SUBNET_CIDR}"
@@ -1965,9 +1968,10 @@ info "Creating proxy-to-VM firewall rule (if needed)..."
 # field case (an empty or absent field renders as nothing between the
 # tabs on either side of it, never omitted or reflowed). Split with plain
 # parameter expansion, not `read -d $'\t'`/`IFS=$'\t' read`: bash's `read`
-# classifies tab as "IFS whitespace" and silently strips/collapses a
-# leading or trailing empty field (verified by hand), which would shift
-# every field after it instead of just leaving one blank.
+# classifies tab as "IFS whitespace" and silently collapses a leading
+# empty field, or adjacent tabs around an empty middle field (verified by
+# hand), which would shift every field after it instead of just leaving
+# one blank. A trailing empty field alone splits fine.
 if FW_8080_DESCRIBE="$(gcloud compute firewall-rules describe "${FW_8080_RULE_NAME}" \
     --project="${PROJECT_ID}" \
     --format="value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" \
@@ -2032,9 +2036,34 @@ else
     hybrid_ensure_internal_ip_new_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default"
     VM_EXTRA_CREATE_ARGS+=(--private-network-ip="${HYBRID_INTERNAL_IP}")
   fi
+  # --subnet=default is required, not cosmetic, for a custom-mode
+  # "default" network: the Compute API requires an explicit subnetwork
+  # for custom-mode networks and only makes it optional for auto-mode
+  # ones, so without this flag the create fails here -- after the SAs,
+  # IAM bindings, NAT and both firewall rules already exist -- on any
+  # project whose "default" network happens to be custom-mode (a
+  # hand-built network, a platform-team baseline, or an org that blocks
+  # auto-mode networks entirely; see the hardened-org addendum). In auto
+  # mode the per-region subnet is also named "default", so this changes
+  # nothing there. --network=default is passed alongside it: subnet names
+  # are unique per project and region regardless of which network owns
+  # them (a project can never have two subnets both named "default" in
+  # REGION), so --subnet=default alone can't be ambiguous, but it also
+  # doesn't check which network it resolves to. Per `gcloud compute
+  # instances create --help`, when both flags are given "subnet must be a
+  # subnetwork of the network specified by [--network]", so pairing them
+  # makes a misconfigured project (a "default" subnet in REGION that
+  # belongs to some other VPC) fail the create with a clear error instead
+  # of silently landing the VM in that other VPC's subnet. This also
+  # makes the VM create consistent with the Cloud Run Direct VPC egress
+  # deploy below (which already passes both flags), Cloud NAT and the
+  # CIDR lookup above, which already all assume a subnet named "default"
+  # in REGION owned by the network named "default".
   gcloud compute instances create "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
+    --network=default \
+    --subnet=default \
     --machine-type="${MACHINE_TYPE}" \
     --no-address \
     --service-account="${SA_EMAIL}" \
@@ -2374,6 +2403,11 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+# Explicit default harness. Boot already gets antigravity from the embedded
+# defaults via the operational-settings seed, but file-mode paths that read
+# settings.yaml directly (admin server-config page; reloadSettings after an
+# admin save) do not merge embedded defaults and would otherwise see \"\".
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
@@ -2988,6 +3022,11 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+# Explicit default harness. Boot already gets antigravity from the embedded
+# defaults via the operational-settings seed, but file-mode paths that read
+# settings.yaml directly (admin server-config page; reloadSettings after an
+# admin save) do not merge embedded defaults and would otherwise see \"\".
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).

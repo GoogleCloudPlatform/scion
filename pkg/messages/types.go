@@ -292,13 +292,23 @@ var logMetadataSkipKeys = map[string]bool{
 	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
 }
 
+// redactedRawContent replaces message_content in log output for raw
+// messages. Raw payloads are literal terminal keystrokes and must never
+// appear in Hub/broker message logs (normal or debug) while legacy raw
+// delivery remains reachable (ptone/scion#2192).
+const redactedRawContent = "[redacted: raw message content]"
+
 // LogAttrs returns slog attributes for structured logging of this message.
 func (m *StructuredMessage) LogAttrs() []any {
+	messageContent := m.Msg
+	if m.Raw {
+		messageContent = redactedRawContent
+	}
 	attrs := []any{
 		"sender", m.Sender,
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
-		"message_content", m.Msg,
+		"message_content", messageContent,
 		"urgent", m.Urgent,
 		"broadcasted", m.Broadcasted,
 		"plain", m.Plain,

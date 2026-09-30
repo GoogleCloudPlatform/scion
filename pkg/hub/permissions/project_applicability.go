@@ -153,6 +153,12 @@ var ProjectTargetApplicability = map[string]bool{
 	"scheduled_event.delete": true, "scheduled_event.update": true,
 
 	"project.secret_read": true,
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129): every
+	// one of them can apply to an existing project target (a project-scope
+	// secret/env var/skill, or a project-parented GCP service account).
+	"secret.deliver": true, "env_var.deliver": true, "skill_injection.deliver": true,
+	"secret.use": true, "gcp_service_account.use": true,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for

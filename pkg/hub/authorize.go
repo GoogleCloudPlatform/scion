@@ -494,6 +494,18 @@ func agentActionPermission(action string) Action {
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend,
 		api.AgentActionRestart, api.AgentActionRestore:
 		return ActionLifecycle
+	case api.AgentActionKeys:
+		// Explicit, not a fallthrough to default: the agent-keys contract
+		// (.design/agent-keys-contract.md, decision 2 / ptone/scion#2191)
+		// requires that api.AgentActionKeys map to the existing attach
+		// permission and its credential ceilings by a visible, auditable
+		// registration rather than by accidentally landing in this
+		// function's default branch. The route action itself is not a new
+		// independently granted permission. This case is reached only
+		// through the generic authz block (no action-dispatch switch has
+		// a case for api.AgentActionKeys yet, so dispatch still 404s — see
+		// that constant's doc comment in pkg/api/agent_actions.go).
+		return ActionAttach
 	default:
 		return ActionAttach
 	}

@@ -199,6 +199,9 @@ type Store interface {
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
 
+	// BrokerSetting operations (ptone/scion#2061 P2, ptone/scion#2177)
+	BrokerSettingStore
+
 	// SkillInjection operations (Injected-Skills List)
 	SkillInjectionStore
 
@@ -973,6 +976,22 @@ type SecretStore interface {
 	// Increments the version automatically.
 	// Returns ErrNotFound if the secret doesn't exist.
 	UpdateSecret(ctx context.Context, secret *Secret) error
+
+	// UpdateSecretRefIfMatches conditionally updates only the SecretRef column,
+	// applying the change and incrementing Version only if the row's current
+	// SecretRef equals expectedRef AND its current Version equals
+	// expectedVersion. Returns applied=false (no error) if the row doesn't
+	// exist or either check fails — e.g. a concurrent Set() raced ahead and
+	// updated the value and the ref, or an old binary rewrote the value
+	// through a ref string that happens to read back unchanged (Version
+	// still increments on every write, so the version check catches that
+	// same-ref case the ref check alone would miss — ptone/scion#2152
+	// round-4 review finding 1). Every other column is left untouched, so
+	// callers that only need to repoint the ref (such as GCP SM
+	// name-migration tooling) never clobber a concurrent metadata edit the
+	// way a GetSecret-then-UpdateSecret read-modify-write would
+	// (ptone/scion#2152 round-2 review finding 11).
+	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
 
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.
@@ -1856,6 +1875,28 @@ type HubSettingStore interface {
 	// the origin field. Rows with updated_by="seed" get origin="seeded";
 	// all other non-_meta rows get origin="managed". Idempotent.
 	BackfillOrigin(ctx context.Context) error
+}
+
+// BrokerSettingStore defines persistence operations for general per-broker
+// settings (ptone/scion#2061 P2, ptone/scion#2177). One row per broker holds
+// a BrokerSettings document; see pkg/hub/brokersettings for the key
+// registry that validates and authorizes writes to individual keys.
+type BrokerSettingStore interface {
+	// GetBrokerSettings retrieves brokerID's settings document.
+	// Returns ErrNotFound if the broker has no settings row.
+	GetBrokerSettings(ctx context.Context, brokerID string) (*BrokerSettingsRecord, error)
+
+	// PutBrokerSettings replaces brokerID's settings document with CAS
+	// semantics.
+	//   expectedRevision == 0: create-only; returns ErrRevisionConflict if a row already exists.
+	//   expectedRevision > 0:  CAS update; returns ErrRevisionConflict if the current revision differs.
+	PutBrokerSettings(ctx context.Context, brokerID string, settings BrokerSettings,
+		expectedRevision int64, updatedBy string) (*BrokerSettingsRecord, error)
+
+	// DeleteBrokerSettings removes brokerID's settings row, if any. It is a
+	// no-op (not an error) when no row exists, so it is safe to call
+	// unconditionally from DeleteRuntimeBroker.
+	DeleteBrokerSettings(ctx context.Context, brokerID string) error
 }
 
 // =============================================================================

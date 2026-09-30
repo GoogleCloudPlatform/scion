@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -128,6 +129,35 @@ func TestConversationGetMessageFlags(t *testing.T) {
 	f := flags.Lookup("json")
 	require.NotNil(t, f, "--json flag should exist")
 	assert.Equal(t, "false", f.DefValue)
+
+	f = flags.Lookup("body")
+	require.NotNil(t, f, "--body flag should exist")
+	assert.Equal(t, "false", f.DefValue)
+}
+
+// U6 (ptone/scion#2257): --body must print exactly msg.Msg, with no added
+// bytes — no trailing newline, no label — for every body shape a large-DM
+// offload stub's fetch command might need to reproduce byte-for-byte.
+func TestWriteMessageBody_GoldenBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"crlf", "line one\r\nline two\r\n"},
+		{"trailing_newline", "hello world\n"},
+		{"no_trailing_newline", "hello world"},
+		{"unicode", "héllo wörld 🚀 中文"},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			msg := &store.Message{Msg: tc.body}
+			require.NoError(t, writeMessageBody(&buf, msg))
+			assert.Equal(t, tc.body, buf.String(), "must write exactly the persisted body, no additions")
+			assert.Equal(t, len(tc.body), buf.Len(), "byte count must match exactly (no added bytes)")
+		})
+	}
 }
 
 func TestConversationMessagesRequiresArgs(t *testing.T) {

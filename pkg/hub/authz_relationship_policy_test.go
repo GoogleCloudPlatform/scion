@@ -62,13 +62,18 @@ var readClassActions = map[string]bool{"read": true, "list": true, "verify": tru
 // registered permission on one of these resource types fails
 // TestRelationshipPolicy_DriftRequiresDecision until it is placed in one list.
 var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
-	{"owner", "user", "agent"}:               {},
-	{"owner", "user", "project"}:             {},
-	{"owner", "user", "template"}:            {},
-	{"owner", "user", "harness_config"}:      {},
-	{"owner", "user", "group"}:               {},
-	{"owner", "user", "broker"}:              {},
-	{"owner", "user", "gcp_service_account"}: {},
+	{"owner", "user", "agent"}:          {},
+	{"owner", "user", "project"}:        {},
+	{"owner", "user", "template"}:       {},
+	{"owner", "user", "harness_config"}: {},
+	{"owner", "user", "group"}:          {},
+	{"owner", "user", "broker"}:         {},
+	// gcp_service_account.use (ptone/scion#2129) is meant for an agent's own
+	// token-mint request. It has no AgentScopes: the GCP token scope is per
+	// service account and cannot be matched statically, so no credential
+	// satisfies it until the slice that wires the token-mint check adds that
+	// mapping. No user relationship, including ownership, should grant it.
+	{"owner", "user", "gcp_service_account"}: {"gcp_service_account.use"},
 	{"owner", "user", "skill"}:               {},
 	{"ancestor", "user", "agent"}:            {},
 	// Agent ancestors: permissions with no agent JWT scope.
@@ -79,6 +84,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {
 		"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",
 		"gcp_service_account.list", "gcp_service_account.verify", "gcp_service_account.mint",
+		"gcp_service_account.use",
 	},
 	{"progeny", "agent", "skill"}: {
 		"skill.create", "skill.create_global", "skill.update", "skill.delete", "skill.list", "skill.register",

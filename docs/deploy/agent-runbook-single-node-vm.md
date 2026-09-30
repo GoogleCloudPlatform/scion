@@ -204,7 +204,7 @@ Ask the user each question below in natural conversation. Use the defaults when
 the user does not have a preference. Validate each answer before moving on.
 
 > **Agent optimization:** Rather than prompting the user for each question
-> individually (10 round trips), detect defaults from the ambient GCP environment
+> individually (up to 11 round trips), detect defaults from the ambient GCP environment
 > first, then present the full candidate configuration as a single table and ask
 > for confirmation or targeted overrides in one prompt:
 >
@@ -272,7 +272,7 @@ Replace each placeholder with the gathered value:
 | `REGION` | Question 3 answer |
 | `MACHINE_SIZE` | Question 4 answer (`small` or `medium`) |
 | `DISK_SIZE_GB` | Question 5 answer (integer, no quotes) |
-| `CHAT_PLUGINS` | Question 9 answers as quoted, comma-separated strings, e.g., `"telegram", "slack"`. Use `[]` for none. |
+| `CHAT_PLUGINS` | Question 10 answers as quoted, comma-separated strings, e.g., `"telegram", "slack"`. Use `[]` for none. |
 | `SOURCE` | Question 6 answer (`build` or `registry`) |
 | `REGISTRY` | Question 6 registry path if source is `registry`, otherwise `""` |
 | `ADMIN_EMAIL` | Question 7 answer |
