@@ -996,6 +996,125 @@ func TestQuotaAPI_CreateEntitlement_ZeroValue(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2 — broker-scoped
+// max_agents_per_broker bindings are rejected; the broker settings API
+// replaces them.
+// ---------------------------------------------------------------------------
+
+// maxAgentsPerBrokerLimit fetches the max_agents_per_broker limit
+// definition, which testServer's startup seeding already creates (it is a
+// system-seeded limit — creating a second one via the API would conflict).
+func maxAgentsPerBrokerLimit(t *testing.T, s store.Store) *store.LimitDefinition {
+	t.Helper()
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+	return def
+}
+
+// TestQuotaAPI_CreateEntitlement_MaxAgentsPerBrokerBrokerScoped_Rejected
+// proves a new broker-scoped binding on max_agents_per_broker is rejected
+// with 400 pointing at the settings API, rather than silently creating a
+// binding the entitlement engine no longer honours for this limit/scope.
+func TestQuotaAPI_CreateEntitlement_MaxAgentsPerBrokerBrokerScoped_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	limit := maxAgentsPerBrokerLimit(t, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectUser,
+		SubjectID:   "user-1",
+		ScopeType:   store.QuotaScopeBroker,
+		ScopeID:     "broker-1",
+		Value:       5,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PUT /api/v1/runtime-brokers/{id}/settings")
+}
+
+// TestQuotaAPI_CreateEntitlement_MaxAgentsPerBrokerSystemScoped_StillWorks
+// proves the hub-wide, system-scoped override for max_agents_per_broker
+// (P1-D6 / ptone/scion#2063 item 1's companion path) is unaffected by the
+// broker-scope rejection.
+func TestQuotaAPI_CreateEntitlement_MaxAgentsPerBrokerSystemScoped_StillWorks(t *testing.T) {
+	srv, s := testServer(t)
+	limit := maxAgentsPerBrokerLimit(t, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectSystemDefault,
+		SubjectID:   "system",
+		ScopeType:   store.QuotaScopeSystem,
+		Value:       50,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestQuotaAPI_CreateEntitlement_BrokerScopedOtherLimit_Unaffected proves the
+// rejection is specific to max_agents_per_broker: a broker-scoped binding on
+// a different limit is unaffected.
+func TestQuotaAPI_CreateEntitlement_BrokerScopedOtherLimit_Unaffected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	limit := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "some_other_broker_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+limit.ID+"/entitlements", createEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectUser,
+		SubjectID:   "user-1",
+		ScopeType:   store.QuotaScopeBroker,
+		ScopeID:     "broker-1",
+		Value:       5,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestQuotaAPI_UpdateEntitlement_MaxAgentsPerBrokerBrokerScoped_Rejected
+// proves the update path cannot be used to reshape an existing binding into
+// the same rejected broker-scoped max_agents_per_broker shape — closing the
+// gap createEntitlement alone would leave open.
+func TestQuotaAPI_UpdateEntitlement_MaxAgentsPerBrokerBrokerScoped_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	limit := maxAgentsPerBrokerLimit(t, s)
+	binding := createEntitlementViaAPI(t, srv, limit.ID, createEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectSystemDefault,
+		SubjectID:   "system",
+		ScopeType:   store.QuotaScopeSystem,
+		Value:       50,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+binding.ID, updateEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectUser,
+		SubjectID:   "user-1",
+		ScopeType:   store.QuotaScopeBroker,
+		ScopeID:     "broker-1",
+		Value:       5,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PUT /api/v1/runtime-brokers/{id}/settings")
+}
+
+// TestQuotaAPI_UpdateEntitlement_MaxAgentsPerBrokerSystemScoped_StillWorks
+// proves an ordinary update to a system-scoped max_agents_per_broker binding
+// still works.
+func TestQuotaAPI_UpdateEntitlement_MaxAgentsPerBrokerSystemScoped_StillWorks(t *testing.T) {
+	srv, s := testServer(t)
+	limit := maxAgentsPerBrokerLimit(t, s)
+	binding := createEntitlementViaAPI(t, srv, limit.ID, createEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectSystemDefault,
+		SubjectID:   "system",
+		ScopeType:   store.QuotaScopeSystem,
+		Value:       50,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+binding.ID, updateEntitlementBindingRequest{
+		SubjectType: store.EntitlementSubjectSystemDefault,
+		SubjectID:   "system",
+		ScopeType:   store.QuotaScopeSystem,
+		Value:       75,
+	})
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Fix B3 — nil quotaService returns empty usage (HIGH)
 // ---------------------------------------------------------------------------
 

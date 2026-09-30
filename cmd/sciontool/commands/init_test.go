@@ -1076,3 +1076,185 @@ func TestParseCapSetUID(t *testing.T) {
 		})
 	}
 }
+
+// --- Regression coverage for the PID-1 reaper race ---
+//
+// The reaper race itself (a SIGCHLD handler calling wait4(-1, ...) racing
+// exec.Cmd.Wait for the same PID) is exercised in
+// pkg/sciontool/procreap's tests, since that's where the fix (managed-PID
+// registry consulted by the reaper) lives. The tests below cover the
+// consequence that motivated the extra "clean up the whole attempt, not
+// just .git" fix requested during review: a git step (e.g. `git checkout`)
+// can genuinely succeed and populate the workspace, yet still be reported
+// as a failure — the ECHILD race is one way that happens, but it is not
+// the only one, so this cleanup path is tested independently of the race.
+
+func TestPreExistingWorkspaceEntries(t *testing.T) {
+	t.Run("nonexistent directory returns empty set", func(t *testing.T) {
+		got := preExistingWorkspaceEntries("/nonexistent/path/12345")
+		if len(got) != 0 {
+			t.Errorf("expected empty set, got %v", got)
+		}
+	})
+
+	t.Run("captures marker directories present before clone", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		got := preExistingWorkspaceEntries(tmpDir)
+		if _, ok := got[".scion-volumes"]; !ok {
+			t.Errorf("expected .scion-volumes to be captured, got %v", got)
+		}
+		if len(got) != 1 {
+			t.Errorf("expected exactly 1 entry, got %v", got)
+		}
+	})
+}
+
+func TestCleanFailedCloneAttempt(t *testing.T) {
+	t.Run("removes everything not in the pre-existing set", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		// Pre-existing bind-mount marker, present before the clone attempt.
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		preExisting := preExistingWorkspaceEntries(tmpDir)
+
+		// Simulate what a clone attempt wrote: a real .git dir plus checked
+		// out working-tree files (the leftover-files scenario from a git
+		// step that succeeded but was reported as failed).
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("hi"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(tmpDir, "pkg"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		cleanFailedCloneAttempt(tmpDir, preExisting)
+
+		if !isWorkspaceEmpty(tmpDir) {
+			entries, _ := os.ReadDir(tmpDir)
+			names := make([]string, len(entries))
+			for i, e := range entries {
+				names[i] = e.Name()
+			}
+			t.Errorf("expected workspace to be cloneable again after cleanup, found: %v", names)
+		}
+		// The pre-existing marker must survive.
+		if _, err := os.Stat(filepath.Join(tmpDir, ".scion-volumes")); err != nil {
+			t.Errorf(".scion-volumes should have survived cleanup: %v", err)
+		}
+	})
+
+	t.Run("never touches pre-existing content", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, "keep-me.txt"), []byte("pre-existing"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		preExisting := preExistingWorkspaceEntries(tmpDir)
+
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		cleanFailedCloneAttempt(tmpDir, preExisting)
+
+		if _, err := os.Stat(filepath.Join(tmpDir, "keep-me.txt")); err != nil {
+			t.Errorf("pre-existing content should never be removed by cleanup: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(tmpDir, ".git")); !os.IsNotExist(err) {
+			t.Errorf("expected .git created by the attempt to be removed, stat err: %v", err)
+		}
+	})
+}
+
+// runGitForTest runs git in dir with the given args, failing the test on error.
+func runGitForTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = filterHubEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+// TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds
+// simulates exactly the scenario the review flagged: a git step (`git
+// checkout`, populating the working tree) succeeds, but a later step in
+// the same clone attempt fails — here we force the credential-helper config
+// step to fail deterministically by pointing agentHome at a path whose
+// parent doesn't exist, so `git config --file <agentHome>/.gitconfig ...`
+// cannot create the file. This reproduces the shape of the reaper-race bug
+// (a step reported as failed after real content was already written)
+// without depending on the race itself being scheduled.
+//
+// It asserts the whole workspace — not just .git — is cleaned up, and that
+// a subsequent retry (the same call, now with a valid agentHome) clones
+// successfully into the now-empty workspace.
+func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// A local, offline "origin" repo with one commit on main.
+	originDir := t.TempDir()
+	runGitForTest(t, originDir, "init", "-b", "main")
+	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
+	runGitForTest(t, originDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, originDir, "add", "README.md")
+	runGitForTest(t, originDir, "commit", "-m", "init")
+
+	workspacePath := t.TempDir()
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+
+	// agentHome whose parent doesn't exist: the credential-helper config
+	// step (which runs after the working tree is already checked out) will
+	// fail to create <agentHome>/.gitconfig.
+	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
+
+	err := gitCloneWorkspace(0, 0, badAgentHome)
+	if err == nil {
+		t.Fatal("expected gitCloneWorkspace to fail at the credential-helper config step")
+	}
+	if !strings.Contains(err.Error(), "credential helper") {
+		t.Fatalf("expected failure at the credential-helper config step, got: %v", err)
+	}
+
+	// The whole attempt must be cleaned up — not just .git/ — so the
+	// workspace is cloneable again. Before this fix, checked-out files from
+	// the (successful) checkout step would remain, and isWorkspaceEmpty
+	// would see them and skip cloning on retry forever.
+	if !isWorkspaceEmpty(workspacePath) {
+		entries, _ := os.ReadDir(workspacePath)
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("expected workspace to be fully cleaned up after failure, found: %v", names)
+	}
+
+	// Retry with a valid agentHome: must succeed and populate the workspace.
+	goodAgentHome := t.TempDir()
+	if err := gitCloneWorkspace(0, 0, goodAgentHome); err != nil {
+		t.Fatalf("retry after cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
+		t.Fatalf("expected README.md to exist after successful retry clone: %v", err)
+	}
+}

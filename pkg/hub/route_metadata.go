@@ -154,6 +154,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/experiments": {
+		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -684,6 +688,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/messaging", RouteID: "admin.messaging",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/admin/experiments": {
+		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",

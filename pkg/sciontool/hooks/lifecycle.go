@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 )
 
 // LifecycleManager handles Scion lifecycle hooks.
@@ -211,7 +213,10 @@ func (m *LifecycleManager) executeScript(path string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = m.hookEnv()
 
-	if err := cmd.Run(); err != nil {
+	// Hook scripts run inside sciontool init's PID-1 process while its
+	// zombie reaper is active; RunManaged registers this child's PID so the
+	// reaper leaves it for this Wait call to reap instead of racing it.
+	if err := procreap.RunManaged(cmd); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
 	}
 	return nil
