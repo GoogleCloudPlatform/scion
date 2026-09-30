@@ -213,42 +213,23 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		opts.ProjectID = projectID
 		agentSvc = hubCtx.Client.ProjectAgents(projectID)
-	} else if hubCtx.CredentialKind == hubsync.CredentialKindAgentToken && (filterDescendants != "" || filterAncestors != "" || filterLineage != "") {
-		// An agent TOKEN has no hub-wide list authority by default: the
-		// global endpoint (what --all drives the final listing through)
-		// returns nothing for a bare agent token, even for the caller's own
-		// ID — only the project-scoped endpoint's same-project carve-out
-		// (listProjectAgents, pkg/hub/handlers_projects_core.go) lets an
-		// agent list anything without extra grants. Failing loudly here
-		// means an agent caller gets a clear error instead of a wrong,
-		// silently empty list indistinguishable from "no descendants"
-		// (ptone/scion#2146); humans keep the existing global-endpoint
-		// behavior for --all regardless of which project a named reference
-		// lives in.
+	}
+	// This check only applies under --all: the project-scoped branch above
+	// already handles !listAll, and a project-scoped agent token has its
+	// own same-project carve-out (listProjectAgents,
+	// pkg/hub/handlers_projects_core.go).
+	if listAll && hubCtx.CredentialKind == hubsync.CredentialKindAgentToken && (filterDescendants != "" || filterAncestors != "" || filterLineage != "") {
+		// A bare agent token has no hub-wide list authority: the global
+		// endpoint --all drives the final listing through returns nothing
+		// for it, which would otherwise look like a wrong, silently empty
+		// list indistinguishable from "no descendants" (ptone/scion#2146).
 		//
-		// This keys on hubCtx.CredentialKind — the credential
-		// hubsync.createHubClient actually selected; getHubClient,
-		// cmd/hub.go's independent implementation of the same auth-priority
-		// logic (tracked as a duplication in ptone/scion#2213), never sets
-		// it, and scion list never calls getHubClient — not on CLI mode.
-		// This distinguishes a
-		// user-authenticated caller (OAuth, or dev auth on a localhost hub
-		// for a non-hub-managed agent — see hubsync.createHubClient's auth
-		// priority order) running inside an agent container from an actual
-		// agent-token caller: only the latter is blocked. It does not
-		// distinguish an agent token that carries a group-derived
-		// agent.list grant, which gets a non-empty (if project-limited)
-		// global result — "would always be empty" is not a universal
-		// guarantee for every agent token, but the remedy ("drop --all")
-		// still yields the same set in that case, so this is accepted.
-		//
-		// Note: hubCtx.CredentialKind is set only for a HubContext built via
-		// CheckHubAvailability* (which is how `scion list` always gets one);
-		// its zero value, hubsync.CredentialKindUnknown, never equals
-		// CredentialKindAgentToken, so a HubContext built any other way
-		// (there is one such call site, for template sync, which never
-		// reaches this guard) simply never triggers this guard rather than
-		// triggering it incorrectly.
+		// Keys on hubCtx.CredentialKind — the credential
+		// hubsync.createHubClient actually selected, not CLI mode — so a
+		// user-authenticated caller (OAuth, or dev auth on a localhost hub)
+		// running inside an agent container is not blocked. This does not
+		// catch an agent token that carries a group-derived agent.list
+		// grant; "drop --all" is still the correct remedy in that case too.
 		return fmt.Errorf("--all cannot be combined with --descendants/--ancestors/--lineage when authenticated with an agent token: " +
 			"an agent token can only list agents in its own project; drop --all")
 	}
