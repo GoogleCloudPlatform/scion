@@ -62,6 +62,14 @@ func def158BrokerSetup(t *testing.T) (
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	// Production forces MaxOpenConns=1 for SQLite to serialize writes
+	// (pkg/config/hub_config.go, applyDatabasePoolDefaults). Without it here,
+	// concurrent access from the broker's dispatch goroutine and this test's
+	// own goroutine can make database/sql open a second physical connection;
+	// since the DSN is ":memory:" (no shared cache), that connection is a
+	// distinct, schema-less database, which surfaces as spurious
+	// "no such table" errors under contention.
+	db.SetMaxOpenConns(1)
 
 	wcs = NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -229,6 +237,9 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	// Serialize writes (see def158BrokerSetup) — this handle is also hit
+	// concurrently by the broker's dispatch goroutine.
+	db.SetMaxOpenConns(1)
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
@@ -408,30 +419,54 @@ func TestDEF158_AC6_Notification_And_Watermark_Fire(t *testing.T) {
 	// Register DM participants so TouchDMActivity has rows to update.
 	registerDMParticipants(ctx, wcs, dmKey)
 
+	// deliverToUser publishes user.<id>.message via PublishUserMessage
+	// immediately after TouchDMActivity, on the same goroutine (the
+	// InProcessEventBus subscriber dispatch goroutine). Waiting on that
+	// event is therefore a deterministic proof that the watermark write
+	// has already been attempted, regardless of dispatch scheduling delay.
+	bp := srv.GetMessageBrokerProxy()
+	require.NotNil(t, bp, "broker proxy must be wired by def158BrokerSetup")
+	cep, ok := bp.events.(*ChannelEventPublisher)
+	require.True(t, ok, "broker proxy events publisher must be a *ChannelEventPublisher in this test setup")
+	userMsgEvents, unsubscribe := cep.Subscribe("user." + user.ID + ".message")
+	defer unsubscribe()
+
 	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID,
 		"signal test", "conv:"+dmConv.ID)
 	require.Equal(t, http.StatusOK, rr.Code,
 		"send must succeed; body: %s", rr.Body.String())
 
+	// Block for the completion signal rather than polling on a fixed
+	// budget. The timeout here is a deadlock backstop, not the
+	// synchronization mechanism.
+	select {
+	case <-userMsgEvents:
+	case <-time.After(10 * time.Second):
+		t.Fatal("AC-6: timed out waiting for user.message event — deliverToUser did not run")
+	}
+
 	// C2: prove the watermark fires — TouchDMActivity updates
 	// webchat_dm.last_message_id. Check behaviourally via ListDMs, not by
-	// field inspection of ThreadID.
-	require.Eventually(t, func() bool {
-		dms, err := wcs.ListDMs(ctx, user.ID)
-		if err != nil {
-			return false
+	// field inspection of ThreadID. The user.message event above is
+	// published strictly after TouchDMActivity in deliverToUser, so no
+	// polling is needed here.
+	dms, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	found := false
+	for _, dm := range dms {
+		if dm.ConversationKey == dmKey && dm.LastMessageID != "" {
+			found = true
+			break
 		}
-		for _, dm := range dms {
-			if dm.ConversationKey == dmKey && dm.LastMessageID != "" {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 50*time.Millisecond,
+	}
+	require.True(t, found,
 		"AC-6: TouchDMActivity did not fire — no DM watermark for user+dmKey")
 
 	// C2: prove NotifyDMReceived fires — it creates a notification in the
-	// store. The goroutine needs a moment to complete.
+	// store. NotifyDMReceived runs in its own goroutine, separate from the
+	// user.message event awaited above, so it is still exposed to the same
+	// scheduling delay under contention; this budget is intentionally kept
+	// time-bounded (10s, matching the event wait above) rather than event-gated.
 	require.Eventually(t, func() bool {
 		notifs, err := s.GetNotifications(ctx, "user", user.ID, false)
 		if err != nil {
@@ -443,7 +478,7 @@ func TestDEF158_AC6_Notification_And_Watermark_Fire(t *testing.T) {
 			}
 		}
 		return false
-	}, 5*time.Second, 50*time.Millisecond,
+	}, 10*time.Second, 50*time.Millisecond,
 		"AC-6: NotifyDMReceived did not fire — no DM notification for recipient")
 }
 
@@ -557,6 +592,9 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	// Serialize writes (see def158BrokerSetup) — this handle is also hit
+	// concurrently by the broker's dispatch goroutine.
+	db.SetMaxOpenConns(1)
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

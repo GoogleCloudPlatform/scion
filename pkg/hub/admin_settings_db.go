@@ -255,6 +255,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Quotas
+	if snap.EnforceBrokerQuotas != nil {
+		resp.Quotas = &config.QuotaSettings{
+			EnforceBrokerQuotas: snap.EnforceBrokerQuotas,
+		}
+	}
+
 	// Federation — populate from snapshot's FederationConfig.
 	if snap.FederationConfig != nil {
 		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
@@ -881,6 +888,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		keys = append(keys, "auto_expose_ports.enabled")
 	}
 
+	if req.Quotas != nil {
+		keys = append(keys, "quotas.enforce_broker_quotas")
+	}
+
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
 	}
@@ -1403,6 +1414,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "auto_expose_ports":
 		if req.AutoExposePorts != nil {
 			doc = req.AutoExposePorts
+		} else {
+			return nil, nil
+		}
+
+	case "quotas":
+		if req.Quotas != nil {
+			doc = req.Quotas
 		} else {
 			return nil, nil
 		}

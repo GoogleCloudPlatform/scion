@@ -170,6 +170,8 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 
 The user or service account running scion needs the following RBAC permissions in the target namespace:
 
+When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails (for example, `gke-gcloud-auth-plugin` is not on the process `PATH`), it falls back to Application Default Credentials and requests the `cloud-platform` and `userinfo.email` scopes. The `userinfo.email` scope makes GKE see the caller as its service account email rather than its numeric ID, so RBAC bindings whose subject is the email match. On a plain GCE VM, the instance's access scopes must already include `userinfo.email` for this to work.
+
 ### Minimum RBAC
 
 | Resource | Verbs |

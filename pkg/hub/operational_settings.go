@@ -100,6 +100,9 @@ type Layer1Snapshot struct {
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
 
+	// Quotas
+	EnforceBrokerQuotas *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -777,6 +780,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.AutoExposePortsEnabled = &v
 	}
 
+	// Quotas
+	if k.Exists("quotas.enforce_broker_quotas") {
+		v := k.Bool("quotas.enforce_broker_quotas")
+		snap.EnforceBrokerQuotas = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -922,6 +931,11 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Quotas — read from settings.yaml top-level quotas section, so a
+	// file-mode admin save takes effect without a restart (unlike
+	// AutoExposePortsEnabled, which is intentionally not populated here).
+	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
@@ -933,6 +947,17 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	}
 
 	return snap
+}
+
+// boolPtrEqual reports whether two *bool values are equal, treating nil as a
+// distinct value from both true and false (unlike dereferencing, which would
+// panic on nil, or treating nil as false, which would conflate "unset" with
+// "explicitly false").
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -976,6 +1001,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if oldVal == nil || *oldVal != *snap.DefaultScratchpad {
 			applied = append(applied, "default_scratchpad")
 		}
+	}
+
+	// Quotas. Unlike the other *bool settings above, nil here is a real,
+	// meaningful value — the fail-safe default (enforced) — not "unset,
+	// leave the current value alone". So this assigns unconditionally: a
+	// snapshot with EnforceBrokerQuotas==nil (switch cleared, section
+	// deleted, or a PUT of {}) must flip the live hub back to enforced, not
+	// silently keep an old in-memory `false` in place while GET/the UI both
+	// report "enforced" (findings F3).
+	oldEnforceBrokerQuotas := s.config.EnforceBrokerQuotas
+	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
+		applied = append(applied, "enforce_broker_quotas")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
@@ -1296,6 +1334,40 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 		return *ms.ConversationEnvelopeSwitch
 	}
 	return true // field omitted in doc → compiled default → ON
+}
+
+// OffloadThresholdRunes returns the rune-count threshold above which an
+// agent-recipient DM body is offloaded to a fetch stub at dispatch
+// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Returns 0
+// (disabled) when the section is absent, the document is malformed, the
+// field is omitted, or the stored value is negative — matching
+// messaging.OffloadPolicy's "<= 0 disables" contract.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) OffloadThresholdRunes() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return 0 // section absent → compiled default → disabled
+	}
+	if state.Malformed {
+		return 0 // unreadable → fail closed → disabled
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return 0 // parse error → fail closed → disabled
+	}
+
+	if ms.OffloadThresholdRunes == nil {
+		return 0 // field omitted → compiled default → disabled
+	}
+	if *ms.OffloadThresholdRunes < 0 {
+		return 0
+	}
+	return *ms.OffloadThresholdRunes
 }
 
 // SectionRevision returns the current revision of the named settings section.

@@ -257,6 +257,42 @@ func (c *HubServerConfig) ResolveHubID() string {
 	return ResolveHubIDFromEnv()
 }
 
+// ResolveHubIDFromEnvReadOnly mirrors ResolveHubIDFromEnv's environment
+// fallback precedence (SCION_SERVER_HUB_HUBID, then K_SERVICE, then the
+// persisted workstation ID) but never derives-and-persists a fresh ID to
+// disk (ptone/scion#2152 round-3 review finding 1). It reports ok=false when
+// the only way to resolve an ID would be to create ~/.scion/hub-id for the
+// first time via PersistentHubID — a write a read-only caller (e.g.
+// `hub secret migrate-names --dry-run`) must not perform, since a value
+// derived-but-not-persisted here could disagree with whatever a later real
+// run ends up persisting.
+//
+// This does not use or populate ResolveHubIDFromEnv's process-lifetime
+// cache: the two are expected to disagree on the first-boot, no-file-yet
+// case, for exactly the reason above.
+func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
+	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+		return v, true
+	}
+	if kService := os.Getenv("K_SERVICE"); kService != "" {
+		h := sha256.Sum256([]byte(kService))
+		return hex.EncodeToString(h[:6]), true
+	}
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return "", false
+	}
+	stored := strings.TrimSpace(string(data))
+	if stored == "" {
+		return "", false
+	}
+	return stored, true
+}
+
 // IsHubIDUnconfigured returns true when hub_id was not explicitly set in
 // config. On Cloud Run, ResolveHubID() will still produce a stable ID via
 // K_SERVICE, but this method checks whether the operator explicitly pinned
@@ -709,6 +745,13 @@ type GlobalConfig struct {
 	// "scratchpad" shared directory. Populated from settings.yaml
 	// project_defaults.default_scratchpad in file/SQLite mode.
 	DefaultScratchpad *bool `json:"-" yaml:"-" koanf:"-"`
+
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. Populated from
+	// settings.yaml quotas.enforce_broker_quotas in file/SQLite mode, so a
+	// file-mode admin save takes effect without a restart. nil means
+	// unset — the fail-safe default (enforced) applies.
+	EnforceBrokerQuotas *bool `json:"-" yaml:"-" koanf:"-"`
 
 	// DefaultHarnessConfig is the hub-level default harness config name.
 	// Populated from the top-level default_harness_config key in settings.yaml
@@ -1761,6 +1804,18 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 			if ds, ok := pdMap["default_scratchpad"]; ok {
 				if b, ok := ds.(bool); ok {
 					gc.DefaultScratchpad = &b
+				}
+			}
+		}
+	}
+
+	// Check for top-level "quotas" section — it lives outside "server" in
+	// settings.yaml and controls hub-level quota enforcement toggles.
+	if qRaw, ok := raw["quotas"]; ok && qRaw != nil {
+		if qMap, ok := qRaw.(map[string]interface{}); ok {
+			if eb, ok := qMap["enforce_broker_quotas"]; ok {
+				if b, ok := eb.(bool); ok {
+					gc.EnforceBrokerQuotas = &b
 				}
 			}
 		}

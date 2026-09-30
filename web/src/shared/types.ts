@@ -792,6 +792,74 @@ export interface RuntimeBroker {
   _capabilities?: Capabilities;
 }
 
+/**
+ * General per-broker settings document (ptone/scion#2061 P2,
+ * ptone/scion#2177). Mirrors the Go store.BrokerSettings JSON tags exactly
+ * (pkg/store/models.go) — hand-written since there is no Go->TS generator
+ * (design.md §6). undefined/absent means "inherit" (fall through to the
+ * entitlement engine / hub-wide default); 0 means unlimited.
+ */
+export interface BrokerSettings {
+  maxAgents?: number;
+}
+
+/**
+ * The resolved value of one broker-settings key plus the precedence step
+ * that produced it (design.md §5.2, §5.9). Mirrors Go EffectiveSetting
+ * (pkg/hub/broker_settings_handlers.go).
+ */
+export interface EffectiveSetting {
+  /** null only when resolution errored outright; source is then "" too.
+   * Every other outcome, including "no quota configured" (source
+   * "unlimited"), is a concrete number (0 = unlimited). */
+  value: number | null;
+  /** "broker" | "entitlement" | "hub_default" | "unlimited" | "not_enforced" | "" */
+  source: string;
+  /** Current active-reservation count for this key, the same value Reserve
+   * counts against (shared via brokerCapacity, AC-P2-9/AC-P2-10). Omitted
+   * when resolution failed or the key isn't quota-backed. */
+  count?: number;
+  /** What value/source would apply if this key's own broker override were
+   * cleared (the entitlement engine: bindings, then the hub-wide default).
+   * Populated in every state, including while an override is active, so the
+   * UI can label "Use hub default (N)" correctly at exactly the moment an
+   * admin is deciding whether to clear it. */
+  inherited: InheritedSetting;
+}
+
+/**
+ * EffectiveSetting.inherited's shape (design.md §5.6, review round 2 R2).
+ * Mirrors Go InheritedSetting (pkg/hub/broker_settings_handlers.go).
+ */
+export interface InheritedSetting {
+  /** null only when resolution errored; source is then "" too. */
+  value: number | null;
+  /** "entitlement" | "hub_default" | "unlimited" | "" */
+  source: string;
+}
+
+/**
+ * GET/PUT /api/v1/runtime-brokers/{id}/settings response (design.md §5.4).
+ * Mirrors Go BrokerSettingsResponse (pkg/hub/broker_settings_handlers.go).
+ */
+export interface BrokerSettingsResponse {
+  brokerId: string;
+  /** Stored values only; a key absent here means "inherit". */
+  settings: BrokerSettings;
+  effective: {
+    maxAgents: EffectiveSetting;
+  };
+  /** Optimistic concurrency revision; 0 when the broker has no settings row. */
+  revision: number;
+  updatedBy?: string;
+  /** Absent when the broker has no settings row yet. */
+  updated?: string;
+  /** Per-key write permission for the caller. */
+  _capabilities: {
+    update: boolean;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Messages (inbox)
 // ---------------------------------------------------------------------------

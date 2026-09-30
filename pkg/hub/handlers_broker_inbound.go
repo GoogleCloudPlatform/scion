@@ -97,6 +97,23 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 0.2 (ptone/scion#2192): broker/plugin ingress cannot use a raw
+	// message to obtain terminal authority through a claimed sender. Reject
+	// before sender identity synthesis, conversation resolution, mention
+	// work or dispatch — this integration may still send ordinary messages,
+	// just never raw ones. Trusted Hub-to-runtime-broker /keys dispatch is a
+	// distinct, separately authorized operation and is not affected.
+	if req.Message.Raw {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBrokerIngressUnsupported,
+			"raw message delivery is not supported on broker inbound ingress"))
+		return
+	}
+
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys from plugin-supplied messages before any further
+	// processing, render, or dispatch.
+	req.Message.Metadata = messaging.StripReservedMetadata(req.Message.Metadata)
+
 	// Parse topic to extract project ID and agent slug
 	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
 	if err != nil {
