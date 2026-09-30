@@ -49,30 +49,13 @@ func TestQualifies_ThresholdEdges(t *testing.T) {
 	fourByte := strings.Repeat("🚀", threshold+1)  // 4 bytes/rune
 	assert.True(t, Qualifies(multiByte, false, false, pol))
 	assert.True(t, Qualifies(fourByte, false, false, pol))
-}
 
-func TestQualifies_ByteLengthEarlyReturnBoundary(t *testing.T) {
-	const threshold = 10
-	pol := OffloadPolicy{ThresholdRunes: threshold}
-
-	tests := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"ascii exactly threshold bytes", strings.Repeat("a", threshold), false},
-		{"ascii threshold+1 bytes", strings.Repeat("a", threshold+1), true},
-		// Byte length (12) exceeds the threshold while the rune count (6)
-		// does not: the byte-length early return in Qualifies must not fire
-		// here, and the rune-based check it falls through to must say no.
-		{"multibyte bytes exceed threshold but runes do not", strings.Repeat("é", 6), false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, Qualifies(tt.body, false, false, pol))
-		})
-	}
+	// Byte length (12) exceeds a threshold of 10 while the rune count (6)
+	// does not: the byte-length early return in Qualifies must not fire
+	// here, and the rune-based check it falls through to must say no.
+	shortThreshold := OffloadPolicy{ThresholdRunes: 10}
+	assert.False(t, Qualifies(strings.Repeat("é", 6), false, false, shortThreshold),
+		"byte length over threshold but rune count under threshold must not qualify")
 }
 
 func TestQualifies_ThresholdZeroOrNegativeNeverOffloads(t *testing.T) {
