@@ -757,8 +757,7 @@ old value — see
 for the naming scheme. Set it once and keep every redeploy and revision
 on the same value. If `server.hub.hub_id` is missing on an HA deployment,
 the Hub refuses to start (`hosted HA deployment requires an explicit
-server.hub.hub_id`, see `validateHostedHAPreflight` in
-`cmd/server_foreground.go`).
+server.hub.hub_id`).
 :::
 
 :::caution[Critical: Distinguishing IAP Audiences]
