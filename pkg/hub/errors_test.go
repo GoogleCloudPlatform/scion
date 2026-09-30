@@ -78,13 +78,6 @@ func errorsHelperRecordAtLevel(t *testing.T, buf *bytes.Buffer, level string) ma
 	return nil
 }
 
-// errorsHelperCountRecords returns the number of records from
-// errorsHelperAPIRecords.
-func errorsHelperCountRecords(t *testing.T, buf *bytes.Buffer) int {
-	t.Helper()
-	return len(errorsHelperAPIRecords(t, buf))
-}
-
 func TestWriteErrorFromErr_PermissionError(t *testing.T) {
 	// Simulate a PermissionDenied error from GCP Secret Manager
 	grpcErr := status.Errorf(codes.PermissionDenied, "caller does not have permission")
@@ -206,7 +199,7 @@ func TestWriteError_LogLevel(t *testing.T) {
 			if rec == nil {
 				t.Fatalf("expected a %s record for status %d, got none", tt.level, tt.status)
 			}
-			if n := errorsHelperCountRecords(t, buf); n != 1 {
+			if n := len(errorsHelperAPIRecords(t, buf)); n != 1 {
 				t.Errorf("expected exactly one API log record for status %d, got %d", tt.status, n)
 			}
 		})
@@ -253,7 +246,7 @@ func TestWriteErrorFromErr_LogLevel(t *testing.T) {
 			if tt.elevated {
 				want = 2
 			}
-			if n := errorsHelperCountRecords(t, buf); n != want {
+			if n := len(errorsHelperAPIRecords(t, buf)); n != want {
 				t.Errorf("expected exactly %d API log record(s) for %s, got %d", want, tt.name, n)
 			}
 
