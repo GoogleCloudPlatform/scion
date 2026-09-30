@@ -2356,6 +2356,8 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentAction(w, r, id, api.AgentActionReincarnate)
 	case AgentRouteActionResetAuth:
 		s.handleAgentAction(w, r, id, api.AgentActionResetAuth)
+	case AgentRouteActionKeys:
+		s.handleAgentAction(w, r, id, api.AgentActionKeys)
 
 	case AgentRouteRoot:
 		switch r.Method {

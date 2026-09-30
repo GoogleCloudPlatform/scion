@@ -64,6 +64,7 @@ const (
 	AgentRouteActionMessageMode  AgentSubRouteID = "agents.action.setMessageMode"
 	AgentRouteActionReincarnate  AgentSubRouteID = "agents.action.reincarnate"
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
+	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -89,6 +90,7 @@ const (
 	ProjectAgentRouteActionMessageMode AgentSubRouteID = "projects.agents.action.setMessageMode"
 	ProjectAgentRouteActionReincarnate AgentSubRouteID = "projects.agents.action.reincarnate"
 	ProjectAgentRouteActionResetAuth   AgentSubRouteID = "projects.agents.action.resetAuth"
+	ProjectAgentRouteActionKeys        AgentSubRouteID = "projects.agents.action.keys"
 )
 
 // AgentSubRouteSuffix is the typed tail of an agent sub-route.
@@ -218,6 +220,12 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}},
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
+	// AgentRouteActionKeys has no ops entry, like message and set_message_mode
+	// above: the keys action is routed and authorized by its own early-branch
+	// choke point (authorizeAgentKeys in handleAgentAction), not by the
+	// generic authz block this table's ops mapping feeds. Task 2.2 has not
+	// added a catalog operation for it yet.
+	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
 
 	// --- /api/v1/projects/{projectId}/agents ---
 	{id: ProjectAgentRouteCollection, form: agentFormProject, noAgent: true, trailingSlash: true},
@@ -241,6 +249,9 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: ProjectAgentRouteActionMessageMode, form: agentFormProject, segs: []string{"set_message_mode"}},
 	{id: ProjectAgentRouteActionReincarnate, form: agentFormProject, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: ProjectAgentRouteActionResetAuth, form: agentFormProject, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
+	// See AgentRouteActionKeys above: same early-branch choke point
+	// (handleProjectAgentAction's authorizeAgentKeys call), no ops entry.
+	{id: ProjectAgentRouteActionKeys, form: agentFormProject, segs: []string{"keys"}},
 }
 
 // agentRoutePatternPrefix returns the catalog-style pattern prefix of a form.

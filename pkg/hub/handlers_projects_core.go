@@ -2109,6 +2109,7 @@ var projectAgentRouteActions = map[AgentSubRouteID]string{
 	ProjectAgentRouteActionMessageMode: api.AgentActionSetMessageMode,
 	ProjectAgentRouteActionReincarnate: api.AgentActionReincarnate,
 	ProjectAgentRouteActionResetAuth:   api.AgentActionResetAuth,
+	ProjectAgentRouteActionKeys:        api.AgentActionKeys,
 }
 
 // listProjectAgents lists agents within a specific project

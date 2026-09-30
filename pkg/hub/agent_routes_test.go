@@ -94,6 +94,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/set_message_mode", AgentRouteActionMessageMode, "", none),
 		byID(post, "/reincarnate", AgentRouteActionReincarnate, opAgentReincarnate, none),
 		byID(post, "/reset-auth", AgentRouteActionResetAuth, opAgentResetAuth, none),
+		byID(post, "/keys", AgentRouteActionKeys, "", none),
 
 		{get, "/api/v1/projects/" + p + "/agents", AgentSubRoute{RouteID: ProjectAgentRouteCollection, Method: get, ProjectID: p}},
 		{post, "/api/v1/projects/" + p + "/agents/", AgentSubRoute{RouteID: ProjectAgentRouteCollection, Method: post, ProjectID: p}},
@@ -118,6 +119,7 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
+		proj(post, "/keys", ProjectAgentRouteActionKeys, ""),
 	}
 }
 
@@ -214,6 +216,7 @@ func TestResolveAgentSubRoute_ClientPaths(t *testing.T) {
 		{http.MethodPost, byID + "/suspend", AgentRouteActionSuspend},
 		{http.MethodPost, byID + "/restart", AgentRouteActionRestart},
 		{http.MethodPost, byID + "/reset-auth", AgentRouteActionResetAuth},
+		{http.MethodPost, byID + "/keys", AgentRouteActionKeys},
 		{http.MethodPost, byID + "/restore", AgentRouteActionRestore},
 		{http.MethodPost, byID + "/message", AgentRouteActionMessage},
 		{http.MethodPost, byID + "/outbound-message", AgentRouteActionOutbound},
@@ -258,6 +261,7 @@ func TestResolveAgentSubRoute_ClientPaths(t *testing.T) {
 		{http.MethodPost, inProject + "/suspend", ProjectAgentRouteActionSuspend},
 		{http.MethodPost, inProject + "/restart", ProjectAgentRouteActionRestart},
 		{http.MethodPost, inProject + "/reset-auth", ProjectAgentRouteActionResetAuth},
+		{http.MethodPost, inProject + "/keys", ProjectAgentRouteActionKeys},
 		{http.MethodPost, inProject + "/restore", ProjectAgentRouteActionRestore},
 		{http.MethodPost, inProject + "/message", ProjectAgentRouteActionMessage},
 		{http.MethodPost, inProject + "/outbound-message", ProjectAgentRouteActionOutbound},
