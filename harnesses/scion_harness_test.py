@@ -575,18 +575,25 @@ class TestStripTomlSections(unittest.TestCase):
         self.assertNotIn("model", data)
         self.assertEqual(data["other"]["k"], 1)
 
-    def test_repro_3_header_shaped_line_in_multiline_string_not_fixed_by_strip_alone(self):
+    def test_repro_3_header_shaped_line_in_multiline_string_is_not_a_header(self):
         # Case 3: a header-shaped line inside a top-level multi-line string
-        # is a known, documented residual gap of the line-oriented
+        # was originally a documented residual gap of the line-oriented
         # strip_toml_sections (it isn't a full TOML tokenizer) — the file
-        # can come out invalid. This is caught by the tomllib backstop
-        # (toml_edit_preserves / write_toml_if_preserves), not by
-        # strip_toml_sections itself; see TestWriteTomlIfPreserves below
-        # for the end-to-end version that confirms the backstop rejects it.
+        # could come out invalid. ptone/scion#2427 review round 1 (R1) added
+        # multi-line-string tracking to toml_entering_array_depths, which
+        # closes this specific gap as a side effect: the fake `[cli]` inside
+        # the string is now correctly recognized as string content, not a
+        # header, so only the real `[cli]` after the string closes is
+        # stripped. See TestTomlEnteringArrayDepths for the unbalanced-
+        # bracket-in-a-multi-line-string regression that R1 was actually
+        # about, and TestWriteTomlIfPreserves for the narrower residual gap
+        # (an escaped closing delimiter) still caught by the tomllib
+        # backstop rather than by strip_toml_sections itself.
         content = 'note = """\n[cli]\nhello\n"""\n[cli]\nauto_update = true\n'
         result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
-        with self.assertRaises(tomllib.TOMLDecodeError):
-            tomllib.loads(result)
+        data = tomllib.loads(result)
+        self.assertEqual(data["note"], "[cli]\nhello\n")
+        self.assertNotIn("cli", data)
 
     def test_repro_4_header_whitespace_variant_is_recognized(self):
         # Case 4: legal header whitespace (`[ models ]`) must match a
@@ -631,6 +638,65 @@ class TestTomlEnteringArrayDepths(unittest.TestCase):
     def test_unbalanced_bracket_in_string_does_not_leak_depth(self):
         lines = ['hint = "press [ to go"', "[table]", "k = 1"]
         self.assertEqual(sh.toml_entering_array_depths(lines), [0, 0, 0])
+
+    # --- ptone/scion#2427 review round 1 (R1) ------------------------------
+    # An unbalanced bracket inside a *multi-line* ('\"\"\"'/"'''") string
+    # used to permanently corrupt the running depth for every later line in
+    # the file, since the per-line-only masking had no memory of being
+    # inside a string that opened on an earlier line.
+
+    def test_unbalanced_bracket_in_basic_multiline_string_does_not_leak_depth(self):
+        lines = [
+            'developer_instructions = """',
+            "Prefix tasks with [TODO or [WIP when unfinished.",
+            '"""',
+            "[cli]",
+            "auto_update = true",
+        ]
+        depths = sh.toml_entering_array_depths(lines)
+        # Lines 1-2 are inside the open string (entering depth is the
+        # in-string sentinel); line 3, the real header, must see depth 0
+        # again once the string has closed — not a residue of the
+        # unbalanced brackets in line 1's prose.
+        self.assertEqual(depths[0], 0)
+        self.assertEqual(depths[1], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[2], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[3], 0)
+        self.assertTrue(sh.is_toml_table_header(lines[3], depths[3]))
+
+    def test_unbalanced_bracket_in_literal_multiline_string_does_not_leak_depth(self):
+        lines = [
+            "developer_instructions = '''",
+            "Prefix tasks with [TODO or [WIP when unfinished.",
+            "'''",
+            "[cli]",
+            "auto_update = true",
+        ]
+        depths = sh.toml_entering_array_depths(lines)
+        self.assertEqual(depths[0], 0)
+        self.assertEqual(depths[1], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[2], sh._TOML_IN_MULTILINE_STRING)
+        self.assertEqual(depths[3], 0)
+        self.assertTrue(sh.is_toml_table_header(lines[3], depths[3]))
+
+    def test_strip_toml_sections_still_finds_header_after_unbalanced_multiline_string(self):
+        # End-to-end version: strip_toml_sections must still find and strip
+        # the real [cli] section after a multi-line string containing an
+        # unbalanced bracket, not silently stop stripping for the rest of
+        # the file.
+        content = (
+            'developer_instructions = """\n'
+            "Prefix tasks with [TODO or [WIP when unfinished.\n"
+            '"""\n'
+            "[cli]\n"
+            "auto_update = true\n"
+            "[other]\n"
+            "k = 1\n"
+        )
+        result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
+        data = tomllib.loads(result)
+        self.assertNotIn("cli", data)
+        self.assertEqual(data["other"]["k"], 1)
 
 
 class TestIsTomlTableHeader(unittest.TestCase):
@@ -791,6 +857,73 @@ class TestTomlEditPreserves(unittest.TestCase):
             )
         )
 
+    # --- Key-path managed keys (ptone/scion#2427 review round 1, "Consider") ---
+    # A bare top-level key like "model" lets a write silently delete an
+    # unrelated sibling sub-table (e.g. a user's own [model.custom]) if
+    # strip_toml_sections' section boundary ever miscounted. A key-path
+    # (a tuple) narrows the exemption to only the sub-table a write
+    # actually owns.
+
+    def test_key_path_allows_only_its_own_subtable_to_change(self):
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                '[model.a]\nx = 1\n',
+                '[model.a]\nx = 2\n',
+                {("model", "a")},
+            )
+        )
+
+    def test_key_path_rejects_change_to_sibling_subtable(self):
+        # The write only owns ("model", "a"); a sibling [model.custom]
+        # changing (or vanishing) must still be caught.
+        self.assertFalse(
+            sh.toml_edit_preserves(
+                '[model.a]\nx = 1\n[model.custom]\ny = 1\n',
+                '[model.a]\nx = 2\n[model.custom]\ny = 2\n',
+                {("model", "a")},
+            )
+        )
+
+    def test_key_path_rejects_sibling_subtable_removed_entirely(self):
+        self.assertFalse(
+            sh.toml_edit_preserves(
+                '[model.a]\nx = 1\n[model.custom]\ny = 1\n',
+                '[model.a]\nx = 2\n',
+                {("model", "a")},
+            )
+        )
+
+    def test_key_path_first_write_with_no_parent_table_yet(self):
+        # The very first write to a file with no top-level "model" table at
+        # all must not be rejected just because the managed sub-table now
+        # exists — an emptied-out parent (an artifact of dropping the one
+        # sub-table this write owns) must compare equal to "absent".
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                "",
+                '[model.a]\nx = 1\n',
+                {("model", "a")},
+            )
+        )
+
+    def test_key_path_sibling_subtable_survives_first_write(self):
+        # Same as above, but a sibling sub-table already exists under the
+        # shared parent table — it must be required to survive unchanged.
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                '[model.custom]\ny = 1\n',
+                '[model.custom]\ny = 1\n[model.a]\nx = 1\n',
+                {("model", "a")},
+            )
+        )
+        self.assertFalse(
+            sh.toml_edit_preserves(
+                '[model.custom]\ny = 1\n',
+                '[model.a]\nx = 1\n',
+                {("model", "a")},
+            )
+        )
+
 
 class TestWriteTomlIfPreserves(unittest.TestCase):
     def _ctx(self) -> tuple["sh.ProvisionContext", list[str]]:
@@ -831,13 +964,66 @@ class TestWriteTomlIfPreserves(unittest.TestCase):
             self.assertEqual(len(warnings), 1)
             self.assertIn(path, warnings[0])
 
-    def test_repro_3_end_to_end_multiline_string_rejected_not_corrupted(self):
-        # End-to-end version of the case-3 repro above: strip_toml_sections
-        # alone produces invalid TOML for a header-shaped line inside a
-        # multi-line string, but the write_toml_if_preserves backstop must
-        # catch that (via toml_edit_preserves failing to parse) and leave
-        # the original file on disk untouched rather than write garbage.
-        original = 'note = """\n[cli]\nhello\n"""\n[cli]\nauto_update = true\n'
+    def test_warning_names_the_what_label_and_managed_keys(self):
+        # ptone/scion#2427 review round 1 (R2): the warning on a rejected
+        # write must say *what* failed and *what it owned*, not just that
+        # some generic TOML edit was rejected — otherwise every call site's
+        # failure looks identical in the logs.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            original = 'other_key = "before"\n'
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(original)
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(
+                ctx,
+                path,
+                original,
+                'other_key = "corrupted"\nmodel = "x"\n',
+                managed_keys={"model", ("auth_provider", "vertex-grok")},
+                what="vertex-ai auth/model config",
+            )
+            self.assertFalse(wrote)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("vertex-ai auth/model config", warnings[0])
+            self.assertIn("model", warnings[0])
+            self.assertIn("auth_provider.vertex-grok", warnings[0])
+            self.assertIn("NOT applied", warnings[0])
+
+    def test_warning_has_a_sensible_default_when_what_is_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            original = 'other_key = "before"\n'
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(original)
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(
+                ctx, path, original, 'other_key = "corrupted"\nmodel = "x"\n', managed_keys={"model"}
+            )
+            self.assertFalse(wrote)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(path, warnings[0])
+
+    def test_repro_3_end_to_end_escaped_delimiter_rejected_not_corrupted(self):
+        # End-to-end version of the narrower residual gap that remains after
+        # ptone/scion#2427 review round 1 (R1): _toml_code_and_ml_state
+        # doesn't special-case an escaped closing-delimiter sequence inside
+        # a multi-line *basic* string, so the raw (unescaped-for-our-
+        # purposes) `"""` it contains closes the string early. That makes
+        # strip_toml_sections' output invalid TOML — the write_toml_if_preserves
+        # backstop must catch it (via toml_edit_preserves failing to parse)
+        # and leave the original file on disk untouched rather than write
+        # garbage.
+        original = (
+            'note = """\n'
+            'literal triple quote: \\"""\n'
+            "[cli]\n"
+            "more text\n"
+            '"""\n'
+            "[cli]\n"
+            "auto_update = true\n"
+        )
+        self.assertIsNotNone(tomllib.loads(original), "sanity: original must be valid TOML")
         content = sh.strip_toml_sections(original, lambda h: h == "[cli]")
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.toml")

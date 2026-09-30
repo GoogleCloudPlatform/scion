@@ -949,9 +949,10 @@ TOML_TABLE_HEADER_RE = re.compile(
 # Matches a single-line basic ("...") or literal ('...') string, or a
 # trailing comment, for masking before bracket-counting (see
 # toml_mask_strings_and_comments). Does not match triple-quoted
-# (multi-line) strings — that gap is closed separately by
-# toml_edit_preserves validating the finished file with tomllib rather than
-# trying to make the masking itself fully TOML-aware.
+# (multi-line) strings — toml_entering_array_depths tracks those itself
+# (see _toml_code_and_ml_state) rather than via this regex, since a
+# multi-line string's delimiter can open on one line and close many lines
+# later.
 _TOML_STR_OR_COMMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*')
 
 # Tokenizes a table header's inner content into alternating quoted/unquoted
@@ -971,8 +972,102 @@ def toml_mask_strings_and_comments(line: str) -> str:
     )
 
 
+def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | None]:
+    """Strip string literals and comments from `line` for bracket counting,
+    tracking a triple-quoted multi-line string ('\"\"\"' or "'''") that may
+    still be open entering this line (`in_ml`: the open delimiter, or
+    None), and may still be open leaving it.
+
+    Returns (code, exit_state): `code` is `line` with every string literal
+    and trailing comment removed outright (not replaced with a same-length
+    placeholder — unlike toml_mask_strings_and_comments, callers here only
+    ever `.count()` brackets in the result, so the placeholder doesn't
+    matter and dropping is simpler); `exit_state` is the delimiter still
+    open at the end of the line, or None.
+
+    This is a character scan rather than a regex because the multi-line
+    case requires carrying state *across* lines: a naive per-line regex
+    (as toml_mask_strings_and_comments uses) has no way to know a line is
+    the *body* of a string that opened on an earlier line, so literal `[`/
+    `]` characters in ordinary prose there would be miscounted as real
+    structure — exactly the bug this closes (ptone/scion#2427 review round
+    1 R1): an unbalanced bracket in multi-line prose (e.g. "Prefix tasks
+    with [TODO or [WIP when unfinished.") used to permanently corrupt
+    toml_entering_array_depths' running depth for every later line in the
+    file, since the old per-line masking had no memory of being inside a
+    string at all.
+
+    An unterminated *single*-line string (no closing quote before EOL) is
+    left unmasked from the opening quote onward, matching
+    toml_mask_strings_and_comments' single-line contract — that shape is
+    already invalid TOML the tomllib backstop (toml_edit_preserves) will
+    reject regardless, so there's no multi-line state to track for it. A
+    multi-line *basic* string that escapes its own closing-delimiter
+    sequence (backslash followed by three double quotes, to embed a
+    literal triple-quote in the string body) is not specially recognized —
+    the first raw occurrence of the delimiter closes the string — a
+    narrower, rarer residual gap than the one this closes, and one the
+    tomllib backstop still catches.
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    state = in_ml
+    while i < n:
+        if state is not None:
+            j = line.find(state, i)
+            if j == -1:
+                return "".join(out), state
+            i = j + 3
+            state = None
+            continue
+        ch = line[i]
+        if ch == "#":
+            break
+        if line[i:i + 3] in ('"""', "'''"):
+            delim = line[i:i + 3]
+            j = line.find(delim, i + 3)
+            if j == -1:
+                state = delim
+                break
+            i = j + 3
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and line[j] != '"':
+                if line[j] == "\\":
+                    j += 1
+                j += 1
+            if j >= n:
+                out.append(ch)
+                i += 1
+                continue
+            i = j + 1
+            continue
+        if ch == "'":
+            j = line.find("'", i + 1)
+            if j == -1:
+                out.append(ch)
+                i += 1
+                continue
+            i = j + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), state
+
+
+# A real bracket-nesting depth is always >= 0; toml_entering_array_depths
+# uses this sentinel for a line whose entering position is inside a
+# still-open multi-line string, so is_toml_table_header's `depth == 0`
+# check also (correctly) excludes it without needing a second signal.
+_TOML_IN_MULTILINE_STRING = -1
+
+
 def toml_entering_array_depths(lines: list[str]) -> list[int]:
-    """Per-line count of unmatched `[` brackets carried in from prior lines.
+    """Per-line array-bracket depth (unmatched `[` count carried in from
+    prior lines), or `_TOML_IN_MULTILINE_STRING` (-1) if the line's
+    entering position is inside a still-open multi-line ('\"\"\"' or
+    "'''") string.
 
     A line inside a multi-line array can itself be a bracketed value (e.g.
     a nested single-element array `["x"]`, syntactically indistinguishable
@@ -982,30 +1077,42 @@ def toml_entering_array_depths(lines: list[str]) -> list[int]:
     the ambiguity: a `[`-shaped line only means "table header" when depth
     is zero entering it, i.e. no multi-line array is still open.
 
-    Brackets are counted after masking out string literals and comments
-    (toml_mask_strings_and_comments), so a stray `[`/`]` inside either one
-    doesn't throw off the whole file's section tracking — an earlier
-    version of this function counted raw brackets and could silently
-    delete table-scoped keys (e.g. `[profiles.fast]`'s `model`) after a
-    single unbalanced bracket in an unrelated comment (ptone/scion#2365
-    review round 3). This is still line-oriented rather than a full
-    tokenizer, so it does not understand triple-quoted (multi-line)
-    strings; that residual gap is caught by toml_edit_preserves validating
-    the finished file with tomllib, not by making this counter fully
-    TOML-aware.
+    Brackets are counted after stripping string literals and comments
+    (_toml_code_and_ml_state), so a stray `[`/`]` inside either one doesn't
+    throw off the whole file's section tracking — an earlier version of
+    this function counted raw brackets and could silently delete
+    table-scoped keys (e.g. `[profiles.fast]`'s `model`) after a single
+    unbalanced bracket in an unrelated comment (ptone/scion#2365 review
+    round 3). The stripping is multi-line-string-aware (unlike the
+    single-line-only toml_mask_strings_and_comments), so the same applies
+    to a bracket anywhere in a `\"\"\"`/`'''` block's body, however many
+    lines it spans (ptone/scion#2427 review round 1): those lines are
+    reported with the -1 sentinel and contribute nothing to depth, rather
+    than corrupting it for the rest of the file. This also closes the
+    previously-documented gap where a header-shaped line *inside* such a
+    string (with balanced brackets, so it wouldn't have corrupted depth
+    either way) was mistaken for a real header — is_toml_table_header now
+    correctly excludes it via the same sentinel. The remaining gap is
+    narrower: an escaped triple-quote delimiter inside a multi-line basic
+    string is not specially recognized (see _toml_code_and_ml_state); that
+    is still caught by the tomllib backstop, toml_edit_preserves.
     """
-    depths = []
+    depths: list[int] = []
     depth = 0
+    in_ml: str | None = None
     for line in lines:
-        depths.append(depth)
-        code = toml_mask_strings_and_comments(line)
+        depths.append(_TOML_IN_MULTILINE_STRING if in_ml is not None else depth)
+        code, in_ml = _toml_code_and_ml_state(line, in_ml)
         depth = max(0, depth + code.count("[") - code.count("]"))
     return depths
 
 
 def is_toml_table_header(line: str, depth: int) -> bool:
     """True if `line` is a top-level table header, given the bracket-nesting
-    `depth` entering it (0 means no multi-line array is currently open)."""
+    `depth` entering it (0 means no multi-line array is currently open;
+    `_TOML_IN_MULTILINE_STRING` means the line is inside a still-open
+    multi-line string, so its raw text is prose/content, not TOML syntax,
+    regardless of what it looks like)."""
     return depth == 0 and TOML_TABLE_HEADER_RE.match(line) is not None
 
 
@@ -1043,14 +1150,19 @@ def strip_toml_sections(content: str, header_predicate: Any) -> str:
     Header detection tracks bracket-nesting depth (see
     toml_entering_array_depths), so a line that is really a nested-array
     element on its own line (e.g. `["a", "b"]` inside a still-open
-    multi-line array) is never mistaken for a table header.
+    multi-line array) is never mistaken for a table header, and it tracks
+    multi-line ('\"\"\"'/"'''") strings across lines, so a header-shaped
+    line — or an unbalanced bracket in ordinary prose — inside one of those
+    is correctly treated as string content, not TOML structure, however
+    many lines the string spans.
 
-    This is still line-oriented, not a full TOML tokenizer: a header-shaped
-    line inside a top-level multi-line string is not recognized as being
-    "inside a string" (see toml_mask_strings_and_comments' docstring).
-    Callers that write the result back to disk should validate it with
+    This is still line-oriented, not a full TOML tokenizer: an escaped
+    closing-delimiter sequence inside a multi-line *basic* string (see
+    _toml_code_and_ml_state) is not specially recognized. Callers that
+    write the result back to disk should validate it with
     toml_edit_preserves (or write_toml_if_preserves) before persisting, so
-    that residual gap is caught rather than silently corrupting the file.
+    that narrower residual gap is caught rather than silently corrupting
+    the file.
 
     Also consumes blank lines immediately preceding a removed header.
     """
@@ -1128,22 +1240,55 @@ def insert_toml_top_level_line(content: str, line: str) -> str:
     return "\n".join(lines)
 
 
-def toml_edit_preserves(original: str, content: str, managed_keys: Iterable[str] = ()) -> bool:
-    """True if `content` is a safe top-level edit of `original`.
+def _drop_toml_path(data: dict[str, Any], path: tuple[str, ...]) -> None:
+    """Remove the nested key at `path` from `data` in place, if present."""
+    node = data
+    for key in path[:-1]:
+        if not isinstance(node, dict) or key not in node:
+            return
+        node = node[key]
+    if isinstance(node, dict):
+        node.pop(path[-1], None)
 
-    "Safe" means: `content` parses as TOML, and every top-level key it
-    doesn't own (i.e. not in `managed_keys`) is unchanged from `original`.
+
+def toml_edit_preserves(
+    original: str,
+    content: str,
+    managed_keys: Iterable[str | tuple[str, ...]] = (),
+) -> bool:
+    """True if `content` is a safe edit of `original`.
+
+    "Safe" means: `content` parses as TOML, and everything not covered by
+    `managed_keys` is unchanged from `original`. Each entry in
+    `managed_keys` is either:
+
+      - a bare top-level key (a `str`) — the whole top-level table or
+        value is allowed to change freely; or
+      - a key-path (a `tuple[str, ...]`, e.g. `("model", "vertex-grok")`)
+        — only that specific nested subtree is allowed to change, and
+        every *other* entry under the same parent table(s) must stay the
+        same.
+
+    Use a key-path when a write only owns one sub-table of a larger,
+    potentially-shared top-level table — e.g. one `[model.<name>]` block
+    among several a user or another tool might add. A bare top-level key
+    for `"model"` would let that write silently delete an unrelated
+    `[model.custom]` sibling if strip_toml_sections' section-boundary
+    detection ever went wrong for that input; a `("model", "<name>")`
+    key-path can't be fooled that way, since only its own subtree is ever
+    excluded from the comparison (ptone/scion#2427 review round 1).
 
     This is the backstop for this module's line-oriented TOML editing
     (strip_toml_sections, strip_toml_top_level_key,
-    insert_toml_top_level_line), which — despite the string/comment masking
-    and bracket-depth tracking they use — are still not a full TOML
-    tokenizer. A header- or key-shaped line inside a top-level multi-line
-    string can get spliced into or deleted from that string's body while
-    the file stays valid TOML; comparing every top-level key the caller
-    doesn't own closes that whole class of edit, not just one shape.
-    Callers should leave the existing file untouched (logging a warning)
-    when this returns False — see write_toml_if_preserves.
+    insert_toml_top_level_line), which — despite the string/comment/
+    multi-line-string masking and bracket-depth tracking they use — are
+    still not a full TOML tokenizer. A header- or key-shaped line inside an
+    *escaped* multi-line string delimiter can still get spliced into or
+    deleted from that string's body while the file stays valid TOML;
+    comparing everything the caller doesn't own closes that whole class of
+    edit, not just one shape. Callers should leave the existing file
+    untouched (logging a warning) when this returns False — see
+    write_toml_if_preserves.
 
     If `original` doesn't parse (missing, empty, or already-invalid file),
     there's no baseline to diff against, so only "does `content` parse" is
@@ -1157,12 +1302,29 @@ def toml_edit_preserves(original: str, content: str, managed_keys: Iterable[str]
         before = tomllib.loads(original)
     except tomllib.TOMLDecodeError:
         return True
-    managed = set(managed_keys)
 
-    def _unmanaged(data: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in data.items() if k not in managed}
+    top_level = {k for k in managed_keys if isinstance(k, str)}
+    paths = [k for k in managed_keys if not isinstance(k, str) and k and k[0] not in top_level]
+    path_roots = {p[0] for p in paths}
 
-    return _unmanaged(before) == _unmanaged(after)
+    def _prepare(data: dict[str, Any]) -> dict[str, Any]:
+        data = {k: v for k, v in data.items() if k not in top_level}
+        for path in paths:
+            _drop_toml_path(data, path)
+        # A key-path drop can leave its root key pointing at an emptied-out
+        # dict (e.g. `{"model": {}}`) purely as an artifact of removing the
+        # one sub-table this write owns. Normalize that to "key absent" so
+        # a table that exists only because of that sub-table compares
+        # equal, on both sides of the diff, to one that never existed —
+        # otherwise the very first write to a file lacking the parent
+        # table entirely would be rejected as "changing" an unmanaged key
+        # that in fact never had any content of its own.
+        for root in path_roots:
+            if isinstance(data.get(root), dict) and not data[root]:
+                del data[root]
+        return data
+
+    return _prepare(before) == _prepare(after)
 
 
 def write_toml_if_preserves(
@@ -1170,20 +1332,32 @@ def write_toml_if_preserves(
     path: str,
     original: str,
     content: str,
-    managed_keys: Iterable[str] = (),
+    managed_keys: Iterable[str | tuple[str, ...]] = (),
     *,
+    what: str = "",
     mode: int | None = None,
 ) -> bool:
     """Validate `content` against `original` with toml_edit_preserves, and
     atomically write it to `path` only if it passes. On failure, leaves
-    `path` untouched and logs a warning via `ctx.warn`. Returns whether the
-    write happened.
+    `path` untouched and logs a warning via `ctx.warn` — naming `what` (a
+    short caller-supplied label for the change being attempted, e.g.
+    "vertex-ai auth/model config") and the managed keys, so the warning is
+    actionable rather than generic (ptone/scion#2427 review round 1, R2):
+    which step failed, and what it owned, is visible without reading the
+    caller's source. Returns whether the write happened — a change this
+    fatal to skip (e.g. vertex-ai routing) should have its caller check the
+    return value rather than assume success.
     """
     if not toml_edit_preserves(original, content, managed_keys):
+        managed_desc = ", ".join(
+            k if isinstance(k, str) else ".".join(k) for k in managed_keys
+        ) or "none"
+        label = f"{what}: " if what else ""
         ctx.warn(
-            f"generated TOML for {path} did not preserve existing unmanaged "
-            "content when round-tripped through tomllib; leaving the file "
-            "untouched"
+            f"{label}generated TOML for {path} did not preserve existing "
+            f"unmanaged content when round-tripped through tomllib "
+            f"(managed: [{managed_desc}]); leaving the file untouched — "
+            f"{what or 'this change'} NOT applied"
         )
         return False
     atomic_write_text(path, content, mode=mode)
