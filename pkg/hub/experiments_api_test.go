@@ -528,6 +528,70 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 	})
 }
 
+// TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution covers the
+// caller/now fallback in buildAdminExperimentsResponseAfterWrite directly,
+// without a race harness: the branch depends only on the cache state and the
+// revision argument, both of which this test controls.
+//
+// Every full-chain write test in this file calls buildAdminExperimentsResponseAfterWrite
+// with the exact revision Update() just produced, so they all take the
+// refreshed-snapshot branch. In production the fallback fires when something
+// else (a concurrent write on the same replica, or a subscription/poll
+// refresh) lands in the cache between Update()'s cache write and this
+// function's own ExperimentsSnapshot() call — a race no full-chain test can
+// force deterministically. Calling the function directly with a revision
+// that does not match the cache reproduces exactly that condition.
+func TestBuildAdminExperimentsResponseAfterWrite_FallbackAttribution(t *testing.T) {
+	srv, _ := testServerWithOps(t, nil)
+
+	// Establish a cached snapshot attributed to a different, distinguishable
+	// writer at a known revision, so the assertions below can tell the
+	// fallback's caller/now values apart from anything the snapshot holds.
+	put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
+		map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
+	if put.Code != http.StatusOK {
+		t.Fatalf("setup PUT expected 200, got %d: %s", put.Code, put.Body.String())
+	}
+	var putBody adminExperimentsResponse
+	if err := json.Unmarshal(put.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	cachedRevision := putBody.Revision // written by dev@localhost
+
+	t.Run("revision mismatch falls back to the caller and now", func(t *testing.T) {
+		before := time.Now()
+		resp := srv.buildAdminExperimentsResponseAfterWrite(map[string]bool{}, cachedRevision+1, "caller@example.com", srv.GetOperationalSettings())
+		after := time.Now()
+
+		if resp.Revision != cachedRevision+1 {
+			t.Errorf("expected revision=%d, got %d", cachedRevision+1, resp.Revision)
+		}
+		if resp.UpdatedBy == nil || *resp.UpdatedBy != "caller@example.com" {
+			t.Fatalf("expected updated_by=caller@example.com (the fallback), got %v (mutant: always uses the mismatched snapshot's writer, dev@localhost)", resp.UpdatedBy)
+		}
+		if resp.UpdatedAt == nil {
+			t.Fatal("expected a non-nil updated_at")
+		}
+		if resp.UpdatedAt.Before(before) || resp.UpdatedAt.After(after) {
+			t.Errorf("expected updated_at within [%v, %v] (the fallback's time.Now()), got %v (mutant: a zero time or the mismatched snapshot's timestamp)", before, after, *resp.UpdatedAt)
+		}
+	})
+
+	t.Run("no row also falls back to the caller and now", func(t *testing.T) {
+		emptySrv, _ := testServerWithOps(t, nil) // fresh server: no row, Present=false
+		before := time.Now()
+		resp := emptySrv.buildAdminExperimentsResponseAfterWrite(map[string]bool{}, 1, "caller@example.com", emptySrv.GetOperationalSettings())
+		after := time.Now()
+
+		if resp.UpdatedBy == nil || *resp.UpdatedBy != "caller@example.com" {
+			t.Errorf("expected updated_by=caller@example.com, got %v", resp.UpdatedBy)
+		}
+		if resp.UpdatedAt == nil || resp.UpdatedAt.Before(before) || resp.UpdatedAt.After(after) {
+			t.Errorf("expected updated_at within [%v, %v], got %v", before, after, resp.UpdatedAt)
+		}
+	})
+}
+
 func TestHandleAdminExperiments_StaleReplica(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
 	ctx := context.Background()
