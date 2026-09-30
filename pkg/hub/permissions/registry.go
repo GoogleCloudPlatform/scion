@@ -294,10 +294,11 @@ var Registry = []Permission{
 
 	// Material delivery and runtime-use permissions (ptone/scion#2129).
 	// *.deliver governs launch-time delivery of a secret, stored environment
-	// variable or stored skill reference to a target agent; it carries no
-	// AgentScopes. The intended rule is that it is admitted only under a
-	// hub-side delivery credential, never an agent JWT; that credential
-	// restriction is tracked separately and is not yet enforced here.
+	// variable or stored skill reference to a target agent. It carries no
+	// AgentScopes and is intended for the internal hub-delivery credential
+	// only (ptone/scion#2228), never an agent JWT. Holding *.deliver through a
+	// role never substitutes for the association, progeny or skill-default
+	// grant required for the selected item.
 	// secret.use governs an agent's own runtime retrieval and is admitted
 	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
 	// has no AgentScopes: the GCP token scope is per service account

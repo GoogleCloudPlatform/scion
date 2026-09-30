@@ -105,11 +105,12 @@ func TestMaterialPermissions_AgentScopeMappingExplicit(t *testing.T) {
 	}
 }
 
-// TestMaterialPermissions_NotInCuratedSeedRoles pins the §4.8 "adds none"
-// rule directly against the curated role builders: none of secret.deliver,
-// env_var.deliver, skill_injection.deliver or gcp_service_account.use is
-// ever included in the seeded hub-admin, hub-member or hub-viewer permission
-// sets. secret.use is excluded from this table because the OQ-3 mapping
+// TestMaterialPermissions_NotInCuratedSeedRoles pins the rule that none of
+// these permissions is added to a curated role directly against the curated
+// role builders: none of secret.deliver, env_var.deliver,
+// skill_injection.deliver or gcp_service_account.use is ever included in the
+// seeded hub-admin, hub-member or hub-viewer permission sets. secret.use is
+// excluded from this table because its explicit project:secret:read mapping
 // deliberately reaches agent JWTs through AgentScopes, not through any
 // curated role list.
 func TestMaterialPermissions_NotInCuratedSeedRoles(t *testing.T) {
@@ -160,7 +161,8 @@ func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 // TestSecretUse_ProjectSecretRequiresProjectSecretRead pins the raw-Decide
 // half of the two-permission composite for project-scope material: an
 // ordinary project owner's role holds project.secret_read (seeded), not
-// secret.use (held only by super-admin, through every registry permission).
+// secret.use (among the seeded user roles, held only by super-admin,
+// through every registry permission).
 // So a raw Decide call for secret.use on the project resource still denies
 // through the delegation ceiling -- checkUserHoldsPermission checks the
 // delegator against the exact requested permission, and an owner delegator
@@ -215,14 +217,16 @@ func TestSecretUse_ProjectSecretRequiresProjectSecretRead(t *testing.T) {
 }
 
 // TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead
-// pins the end-to-end §4.8 consequence: a root admitted at check 5 only
-// through secret.use system authority (a custom system role holding
-// secret.use, no project membership and no project.secret_read anywhere)
-// still cannot read a project secret. Check 7 always decides on
-// project.secret_read specifically, and this root's delegate (an agent with
-// an active delegation edge) is denied by the ceiling for that exact
-// permission, so the read reports not_found with no value, and the audited
-// item names project.secret_read as the permission it was decided on.
+// pins the end-to-end consequence of the two-permission composite: a root
+// admitted at check 5 only through secret.use system authority (a custom
+// system role holding secret.use, no project membership and no
+// project.secret_read anywhere) still cannot read a project secret once the
+// delegation-edge backfill has completed (the test sets the marker and
+// records an edge). Check 7 always decides on project.secret_read
+// specifically, and this root's delegate (an agent with an active
+// delegation edge) is denied by the ceiling for that exact permission, so
+// the read reports not_found with no value, and the audited item names
+// project.secret_read as the permission it was decided on.
 func TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectSecretRead(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
@@ -334,9 +338,9 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 // deliver decision would deny. The delivery-only assertion is skipped: the
 // internal hub_delivery credential kind and its restriction (denying
 // *.deliver for every other credential kind, including this one) are a
-// B-owned change tracked at ptone/scion#2228, not yet on this branch. Until
+// separate change tracked at ptone/scion#2228, not yet on this branch. Until
 // that restriction lands, ordinary role evaluation can still reach these
-// rows; no F.2b endpoint consumes them.
+// rows; no endpoint in this change consumes them.
 func TestMaterialPermissions_SuperAdminHoldsDeliverButNeedsAssociation(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -391,9 +395,10 @@ func TestAgentToken_CannotSatisfyDeliveryPermission(t *testing.T) {
 	}
 }
 
-// TestDispatchDelivery_UnreviewedClassDeniedBeforeMembership pins the A.1
-// ordering guarantee (ProjectAdmissionForClass validates class/permission
-// coherence before either the membership or the system-authority branch)
+// TestDispatchDelivery_UnreviewedClassDeniedBeforeMembership pins
+// ProjectAdmissionForClass's ordering guarantee (it validates
+// class/permission coherence before either the membership or the
+// system-authority branch)
 // against the newly registered material classes: a principal with real
 // project membership is still denied outright for an unreviewed ScopeKind.
 func TestDispatchDelivery_UnreviewedClassDeniedBeforeMembership(t *testing.T) {

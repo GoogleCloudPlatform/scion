@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -100,10 +101,10 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	// Check 5: root human live authority. Admission is built-in project
 	// membership (CheckEffectiveMembership) OR target-applicable system
 	// authority for the exact secret.use permission (SystemAuthorityProof).
-	// An unrelated custom project binding satisfies neither leg. This is an
-	// interim composition: it keeps this endpoint's existing behavior while
-	// the shared exact-permission ceiling is not yet enforced everywhere; F
-	// converges check 5 on ProjectAdmissionForClass once that lands.
+	// An unrelated custom project binding satisfies neither leg. This
+	// composition is deliberately narrower than ProjectAdmissionForClass,
+	// which counts any active project-scoped binding, while the
+	// exact-permission delegation ceiling is not yet enforced on every path.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -136,7 +137,7 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 			PrincipalContext{Kind: PrincipalKindUser, ID: root.ID},
 			rec.ProjectID,
 			"secret.use",
-			ProjectTargetClass{ResourceType: "secret", ScopeKind: store.ScopeProject},
+			ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject},
 		)
 		if err != nil {
 			return nil, ReasonBackendError, http.StatusInternalServerError
