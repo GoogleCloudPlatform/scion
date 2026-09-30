@@ -1930,6 +1930,65 @@ func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
 	}
 }
 
+// TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs proves setupHostUser
+// closes the numeric fail-open where SCION_HOST_UID/GID values at or past
+// 2^32 (or the 2^32-1 sentinel) pass every "uid > 0" (Go int) guard
+// downstream and only fail once cast to uint32 for syscall.Credential,
+// where they silently wrap around to 0 (root). setupHostUser routes both
+// through rootexec.ValidWorkloadID at the parse site, so they are refused
+// here instead of ever reaching adjustScionUser at all — the same "skip
+// user setup, continue as root-eligible for DecideExecAsRoot to gate"
+// outcome an unparseable value produces.
+//
+// MUTATION: widen setupHostUser's parse back to strconv.Atoi — this test's
+// overflow/sentinel cases go red (adjustScionUser gets called with the
+// wrapped-to-root value instead of being skipped).
+func TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs(t *testing.T) {
+	tests := []struct {
+		name           string
+		hostUID        string
+		hostGID        string
+		wantAdjustCall bool
+	}{
+		{"2^32 uid overflows uint32", "4294967296", "1000", false},
+		{"2^32 gid overflows uint32", "1000", "4294967296", false},
+		{"2^32-1 uid sentinel refused", "4294967295", "1000", false},
+		{"2^32-1 gid sentinel refused", "1000", "4294967295", false},
+		{"ordinary uid/gid pass", "1000", "1000", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", tt.hostUID)
+			t.Setenv("SCION_HOST_GID", tt.hostGID)
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := false
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called = true
+				return uid, gid, false
+			}
+
+			uid, gid, _ := setupHostUser(false)
+
+			if called != tt.wantAdjustCall {
+				t.Errorf("adjustScionUser called = %v, want %v", called, tt.wantAdjustCall)
+			}
+			if !tt.wantAdjustCall {
+				if uid != 0 || gid != 0 {
+					t.Errorf("setupHostUser = (%d, %d), want (0, 0): refused input must never reach a Credential as a wrapped uid/gid", uid, gid)
+				}
+			}
+		})
+	}
+}
+
 // TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop exercises the
 // DEFAULT runServicesStart body, which the RunInit threading test replaces
 // with a stub: with requirePrivilegeDrop
@@ -3366,4 +3425,65 @@ func TestInitRunOptions_ZeroValueForwardsTermSignal(t *testing.T) {
 	if (InitRunOptions{DisableTermSignalForwarding: true}).forwardsTermSignal() {
 		t.Error("DisableTermSignalForwarding: true must turn off forwarding")
 	}
+}
+
+// TestNewLifecycleManager_WiresEnforcedModeConsistently is the wiring test
+// for the switch that turns on every generic enforced-privilege-drop
+// behaviour at once: EnforcePrivilegeDrop, WorkloadUID/WorkloadGID, and the
+// hub token-file owner-check flag newLifecycleManager reports back for
+// RunInit to pass to hub.EnforceTokenFileOwnerChecks all derive from the
+// identical requirePrivilegeDrop input. A mutation that stops threading any
+// one of them through independently must fail here, not survive to be
+// caught only by a much larger, harder-to-diagnose end-to-end test.
+func TestNewLifecycleManager_WiresEnforcedModeConsistently(t *testing.T) {
+	tests := []struct {
+		name                 string
+		requirePrivilegeDrop bool
+		targetUID, targetGID int
+	}{
+		{"enforced with a real workload identity", true, 1000, 1000},
+		{"unenforced (docker/base parity)", false, 0, 0},
+		{"unenforced with a resolved identity anyway", false, 1000, 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentHome := "/home/scion"
+			lm, enforceTokenOwnerChecks := newLifecycleManager(agentHome, tt.targetUID, tt.targetGID, tt.requirePrivilegeDrop)
+
+			if lm.EnforcePrivilegeDrop != tt.requirePrivilegeDrop {
+				t.Errorf("EnforcePrivilegeDrop = %v, want %v", lm.EnforcePrivilegeDrop, tt.requirePrivilegeDrop)
+			}
+			if lm.WorkloadUID != tt.targetUID {
+				t.Errorf("WorkloadUID = %d, want %d", lm.WorkloadUID, tt.targetUID)
+			}
+			if lm.WorkloadGID != tt.targetGID {
+				t.Errorf("WorkloadGID = %d, want %d", lm.WorkloadGID, tt.targetGID)
+			}
+			if enforceTokenOwnerChecks != tt.requirePrivilegeDrop {
+				t.Errorf("enforceTokenOwnerChecks = %v, want %v (must track requirePrivilegeDrop exactly)", enforceTokenOwnerChecks, tt.requirePrivilegeDrop)
+			}
+
+			// HooksDirs ordering: the per-agent hooks directory must always
+			// be last (system-then-per-agent, per AddHooksDir's own doc
+			// comment), and EnforcedHooksDir must appear, before it, only
+			// when enforced.
+			wantDirs := defaultHooksDirsForTest()
+			if tt.requirePrivilegeDrop {
+				wantDirs = append(wantDirs, hooks.EnforcedHooksDir)
+			}
+			wantDirs = append(wantDirs, filepath.Join(agentHome, ".scion", "hooks"))
+			if !reflect.DeepEqual(lm.HooksDirs, wantDirs) {
+				t.Errorf("HooksDirs = %v, want %v", lm.HooksDirs, wantDirs)
+			}
+		})
+	}
+}
+
+// defaultHooksDirsForTest returns the default discovery list a fresh
+// hooks.NewLifecycleManager starts with, so
+// TestNewLifecycleManager_WiresEnforcedModeConsistently's expected HooksDirs
+// stays correct regardless of $SCION_HOOKS_DIR in the test environment,
+// without duplicating NewLifecycleManager's own resolution logic here.
+func defaultHooksDirsForTest() []string {
+	return hooks.NewLifecycleManager().HooksDirs
 }

@@ -286,6 +286,50 @@ func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, tar
 	}
 }
 
+// newLifecycleManager builds and wires the *hooks.LifecycleManager RunInit
+// uses, from its own resolved workload identity and options, and reports
+// the value the caller should pass to hub.EnforceTokenFileOwnerChecks —
+// both derive from the identical requirePrivilegeDrop input, returned
+// together so a test can assert every part of "turn on enforced mode" in
+// one place instead of trusting several independent call sites to agree.
+//
+// Privilege-drop-enforced mode (see InitRunOptions.RequirePrivilegeDrop)
+// makes hook script execution a function of each script's own fstat'd
+// ownership (DecideExecAsRoot) instead of always running as the calling
+// process's credentials. targetUID/targetGID are the same identity
+// setupHostUser resolved for the harness child process itself, and "scion"
+// is the same literal harnessSupervisorConfig passes as
+// supervisor.Config.Username.
+func newLifecycleManager(agentHome string, targetUID, targetGID int, requirePrivilegeDrop bool) (*hooks.LifecycleManager, bool) {
+	lifecycleManager := hooks.NewLifecycleManager()
+	lifecycleManager.AgentHome = agentHome
+	lifecycleManager.EnforcePrivilegeDrop = requirePrivilegeDrop
+	lifecycleManager.WorkloadUID = targetUID
+	lifecycleManager.WorkloadGID = targetGID
+	lifecycleManager.WorkloadUsername = "scion"
+	if requirePrivilegeDrop {
+		// The dedicated, root-owned directory broker-delivered hook content
+		// is redirected into instead of being chowned to the workload — see
+		// EnforcedHooksDir's own doc comment (pkg/sciontool/hooks).
+		// Registered before $HOME/.scion/hooks below so trusted,
+		// broker-delivered content still runs before anything staged
+		// per-agent, matching the system-then-per-agent ordering
+		// AddHooksDir's own doc comment describes.
+		lifecycleManager.AddHooksDir(hooks.EnforcedHooksDir)
+	}
+	// Register the per-agent hooks directory so container-script harnesses
+	// (whose pre-start wrapper is staged at $HOME/.scion/hooks/pre-start.d/)
+	// participate in the standard hook discovery alongside system hooks. In
+	// enforced mode this directory no longer carries broker-delivered
+	// content (redirected above), but stays registered and subject to the
+	// same ownership check: anything the workload itself later plants here
+	// (e.g. a session-end script) is workload-owned by construction — the
+	// home directory chown (supervisor.Supervisor.Run) — and so always
+	// runs dropped, never as root.
+	lifecycleManager.AddHooksDir(filepath.Join(agentHome, ".scion", "hooks"))
+	return lifecycleManager, requirePrivilegeDrop
+}
+
 // RunInit runs the sciontool init logic: it sets up the container user,
 // clones the workspace, runs lifecycle hooks, launches the child process
 // under supervision, and reports status/heartbeats to the Hub until the
@@ -300,14 +344,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// attribution (dispatch -> pod ready -> init -> harness). See the
 	// elapsed_ms log lines below.
 	initStart := time.Now()
-
-	// Gate the hub token file's owner check on the same generic flag, before
-	// any ReadTokenFile/ChownTokenFile call can happen: a caller that
-	// enforces RequirePrivilegeDrop always has a less-privileged workload
-	// user to defend the token file against. See
-	// EnforceTokenFileOwnerChecks's doc comment for why every other caller
-	// leaves this at its default.
-	hub.EnforceTokenFileOwnerChecks(opts.RequirePrivilegeDrop)
 
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
@@ -441,40 +477,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
-	// Initialize lifecycle hooks manager
-	lifecycleManager := hooks.NewLifecycleManager()
-	lifecycleManager.AgentHome = agentHome
-	// Privilege-drop-enforced mode (see
-	// InitRunOptions.RequirePrivilegeDrop) makes hook script execution a
-	// function of each script's own fstat'd ownership (DecideExecAsRoot)
-	// instead of always running as the calling process's credentials. This
-	// is the same targetUID/targetGID setupHostUser resolved for the
-	// harness child process itself, and "scion" is the same literal
-	// harnessSupervisorConfig passes as supervisor.Config.Username.
-	lifecycleManager.EnforcePrivilegeDrop = opts.RequirePrivilegeDrop
-	lifecycleManager.WorkloadUID = targetUID
-	lifecycleManager.WorkloadGID = targetGID
-	lifecycleManager.WorkloadUsername = "scion"
-	if opts.RequirePrivilegeDrop {
-		// The dedicated, root-owned directory broker-delivered hook content
-		// is redirected into instead of being chowned to the workload — see
-		// EnforcedHooksDir's own doc comment (pkg/sciontool/hooks).
-		// Registered before $HOME/.scion/hooks below so trusted,
-		// broker-delivered content still runs before anything staged
-		// per-agent, matching the system-then-per-agent ordering
-		// AddHooksDir's own doc comment describes.
-		lifecycleManager.AddHooksDir(hooks.EnforcedHooksDir)
-	}
-	// Register the per-agent hooks directory so container-script harnesses
-	// (whose pre-start wrapper is staged at $HOME/.scion/hooks/pre-start.d/)
-	// participate in the standard hook discovery alongside system hooks. In
-	// enforced mode this directory no longer carries broker-delivered
-	// content (redirected above), but stays registered and subject to the
-	// same ownership check: anything the workload itself later plants here
-	// (e.g. a session-end script) is workload-owned by construction — the
-	// home directory chown (supervisor.Supervisor.Run) — and so always
-	// runs dropped, never as root.
-	lifecycleManager.AddHooksDir(filepath.Join(agentHome, ".scion", "hooks"))
+	// Initialize lifecycle hooks manager. newLifecycleManager also reports
+	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —
+	// both come from the identical requirePrivilegeDrop input, bundled into
+	// one seam so a test can assert every part of "turn on enforced mode"
+	// together, rather than trusting two independent call sites to stay in
+	// sync. Still runs before any ReadTokenFile/ChownTokenFile call in the
+	// rest of RunInit — see EnforceTokenFileOwnerChecks's own doc comment
+	// for why every other caller leaves this at its default.
+	lifecycleManager, enforceTokenOwnerChecks := newLifecycleManager(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop)
+	hub.EnforceTokenFileOwnerChecks(enforceTokenOwnerChecks)
 
 	// Register status and logging handlers for lifecycle events
 	// These handlers update agent-info.json and agent.log on container lifecycle events
@@ -1881,16 +1893,17 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 		return 0, 0, false // Continue as root
 	}
 
-	uid, err := strconv.Atoi(hostUID)
+	validUID, err := rootexec.ValidWorkloadID(hostUID)
 	if err != nil {
 		log.Error("Invalid SCION_HOST_UID: %v", err)
 		return 0, 0, false
 	}
-	gid, err := strconv.Atoi(hostGID)
+	validGID, err := rootexec.ValidWorkloadID(hostGID)
 	if err != nil {
 		log.Error("Invalid SCION_HOST_GID: %v", err)
 		return 0, 0, false
 	}
+	uid, gid := int(validUID), int(validGID)
 
 	// Check if the runtime signaled a keep-id user namespace mapping via
 	// SCION_KEEPID_UID (e.g. --userns=keep-id:uid=1000,gid=1000). In this
