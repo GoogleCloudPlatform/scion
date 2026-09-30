@@ -511,16 +511,10 @@ describe('cycle with a non-cycle descendant (#2388 review round-3 F1)', () => {
 });
 
 describe('order-independence across multiple cycles (#2388 review round-4 T1)', () => {
-  // Two disjoint 2-cycles, each with its own tail: b<->c (tail a->b) and
-  // e<->f (tail d->f). Within a single cycle, F1 already proves the
-  // promoted member is order-independent (it's always the minimum id,
-  // regardless of which node's walk discovers the cycle). What this test
-  // guards is different: unvisitedAscending's own sort decides which
-  // cycle's promotion happens *first*, which decides the relative x-order
-  // the two promoted roots are appended to `roots` in — and therefore their
-  // relative position in the layout. Without that sort, two input orders
-  // producing the same (order-independent) topologySignature could still
-  // lay out differently: exactly the stale-layout-on-cache-hit hazard.
+  // Two disjoint cycles with tails: b<->c (tail a->b), e<->f (tail d->f).
+  // The unvisitedAscending sort fixes the order the two promoted roots are
+  // appended in, and so their relative position in the layout — not which
+  // member wins within each cycle (F1 already covers that).
   const a = agent('a', 'a', ['u', 'b']);
   const b = agent('b', 'b', ['u', 'c']);
   const c = agent('c', 'c', ['u', 'b']);
@@ -558,15 +552,11 @@ describe('order-independence across multiple cycles (#2388 review round-4 T1)', 
 });
 
 describe('cycle promotion pins the lowest id, not merely the first member met while walking (#2388 review round-4 optional)', () => {
-  // A 3-cycle p->q->r->p (parent pointers), with a tail attached to r — the
-  // highest-id cycle member, not the lowest. The tail's id ('a') sorts
-  // before p/q/r, so its walk is what discovers this cycle, entering at r
-  // (the tail's direct parent): r is the first cycle member *met*, but p is
-  // the *lowest id*. If promotion picked "the first cycle member met while
-  // walking" (equivalent to `cycle[0]`) instead of the documented "lowest
-  // id", it would promote r here — this is exactly the case the round-3
-  // x/y/c test (where the walk happened to meet the lowest-id member first)
-  // could not distinguish.
+  // 3-cycle p->q->r->p with a tail attached to r (the highest, not lowest,
+  // id). The tail's id sorts first, so its walk enters the cycle at r —
+  // the first member *met*, but not the *lowest id*. This distinguishes
+  // "promote the lowest id" from "promote cycle[0]", which the round-3
+  // x/y/c test could not (that walk met the lowest-id member first).
   const tail = agent('a', 'tail', ['u', 'r']);
   const p = agent('p', 'p', ['u', 'q']);
   const q = agent('q', 'q', ['u', 'r']);

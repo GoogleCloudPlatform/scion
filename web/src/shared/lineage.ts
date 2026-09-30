@@ -203,8 +203,9 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
   // lowest-id member and let `visit` walk back down through it: this reaches
   // every real descendant via its existing `children` entry, dropping no
   // edge except the one into the promoted member. Starting points are
-  // processed in id order (not input-array order) so which member wins a
-  // multi-cycle tie is deterministic across equal `topologySignature`s.
+  // processed in id order (not input order) so promoted roots are appended
+  // in a deterministic order, keeping the layout a pure function of
+  // topologySignature's inputs.
   const unvisitedAscending = [...byId.values()]
     .filter((n) => !visited.has(n.agent.id))
     .sort((a, b) => compareIds(a.agent.id, b.agent.id));
