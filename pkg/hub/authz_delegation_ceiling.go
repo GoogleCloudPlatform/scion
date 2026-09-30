@@ -209,9 +209,9 @@ func (a *AuthzService) walkDelegationChain(
 // DenyCause when cause is non-nil: DenyCauseCeilingOrphaned for a delegator
 // that does not resolve or is deleted and for a migration-provenance deny,
 // and DenyCauseCeilingDelegatorLacksPermission for a delegator that resolves
-// (including a suspended user) but does not hold the permission. A lookup
-// error is returned as an error and classified by the caller. Every other
-// deny leaves cause unchanged.
+// (including a user that is not active, for example suspended or invited)
+// but does not hold the permission. A lookup error is returned as an error
+// and classified by the caller. Every other deny leaves cause unchanged.
 func (a *AuthzService) walkDelegationChainWithCause(
 	ctx context.Context,
 	resource Resource,

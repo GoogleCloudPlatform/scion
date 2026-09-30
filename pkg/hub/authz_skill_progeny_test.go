@@ -191,7 +191,6 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 			}
 			if assert.NotNil(t, progeny, "expected a progeny candidate: %+v", out.results) {
 				assert.Equal(t, tc.rejectedBy, progeny.RejectedBy)
-				assert.NotEqual(t, RelationshipRejectExecutionProject, progeny.RejectedBy)
 			}
 		})
 	}

@@ -301,7 +301,8 @@ const (
 
 	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
 	// deny where the delegator exists but does not hold the permission
-	// being exercised, including a suspended user (super-admin or not).
+	// being exercised, including a user that is not active (for example
+	// suspended or invited), super-admin or not.
 	DenyCauseCeilingDelegatorLacksPermission DenyCause = "ceiling_delegator_lacks_permission"
 
 	// DenyCauseCeilingError marks a delegation-ceiling deny caused by a
