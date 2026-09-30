@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // This file holds the shared, fail-closed authorization guards for hub
@@ -42,9 +43,17 @@ func logAuthzDenial(r *http.Request, identity Identity, resource Resource, actio
 		principalID = identity.ID()
 	}
 	var path string
-	if r != nil && r.URL != nil {
-		path = r.URL.Path
+	ctx := context.Background()
+	if r != nil {
+		if r.URL != nil {
+			path = r.URL.Path
+		}
+		ctx = r.Context()
 	}
+	// E.2a (plan §3.1(5)): every one of this function's ~56 call sites now
+	// also carries the credential kind/ID and the request's correlation ID,
+	// through this single edit at the field-list boundary.
+	credential := GetCredentialContextFromContext(ctx)
 	slog.Warn("authorization denied",
 		"principal_type", principalType,
 		"principal_id", principalID,
@@ -53,6 +62,9 @@ func logAuthzDenial(r *http.Request, identity Identity, resource Resource, actio
 		"action", action,
 		"reason", reason,
 		"path", path,
+		"credential_kind", string(credential.Kind),
+		"credential_id", credential.ID,
+		"request_id", logging.RequestIDFromContext(ctx),
 	)
 }
 
