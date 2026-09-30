@@ -348,3 +348,189 @@ Add a **"Access Tokens"** page to the profile section:
 6. **UAT-creates-UAT prevention**: Enforced at the middleware level. Requests authenticated with `scion_pat_*` tokens are rejected on the token creation endpoint.
 
 7. **Scope granularity evolution**: Scopes remain coarse capability gates. The policy engine handles fine-grained decisions within those gates. Scopes can evolve as the authorization system matures.
+
+## Credential Decoration: Bounded Purpose and Labels (E.1, ptone/scion#2126)
+
+**Status:** Approved (part of the access-token-relationship-refactor tracker, execution area E).
+
+Simple compute automation (CI/CD, scheduled jobs) commonly reuses one human's
+UAT across several purposes. E.1 lets the issuer attach optional, bounded,
+purely descriptive metadata to a token at mint time, so that reused-by-the-
+same-human tokens are distinguishable in logs and audit records — without
+ever treating that metadata as a verified actor, ancestry, or authorization
+signal. The authenticated principal is always the human user; a label such
+as `nightly-cleanup` is a hint for a log reader, never an agent identity. A
+static guard test scans every production file in `pkg/hub` for the known
+ways decoration can be carried or read — the type itself, a field/embed/alias
+declaration naming it, or a call to one of its rendering functions — and
+fails if any of those appears outside the documented carriage and rendering
+points, so authorization code cannot branch on it without the guard catching
+the new reference (see `pkg/hub/credential_decoration_authz_guard_test.go`).
+
+### Fields
+
+- `purpose` (optional, string): a free-text description of what the token is
+  for, e.g. "nightly cleanup automation".
+- `labels` (optional, map of string to string): issuer-supplied key/value
+  annotations, e.g. `{"team": "platform", "env": "prod"}`.
+
+Both are set only at **issuance** (`POST /api/v1/auth/tokens`, `scion hub
+token create --purpose/--label`) and are **immutable afterward** — there is
+no update endpoint or CLI command. To change them, create a replacement
+token and revoke the old one. This is enforced at both the service layer
+(`ValidateCredentialMetadata` runs once, at mint) and the store layer (the
+`purpose`/`labels` ent fields are `Immutable()`, so no generated update
+setter exists for them).
+
+### Bounded schema
+
+| Item | Rule |
+|---|---|
+| `purpose` | optional; ≤ 128 bytes UTF-8 after trim; must be valid UTF-8; reject Unicode categories Cc (control), Cf (format, including bidi overrides and zero-width characters), Zl (line separator, U+2028) and Zp (paragraph separator, U+2029) — i.e. genuinely a single line |
+| label count | ≤ 8 labels per token |
+| label key | must be valid UTF-8; must match `^[a-z][a-z0-9_.-]{0,31}$` (≤ 32 bytes, lowercase ASCII, digits, `_`, `.`, `-`) |
+| label value | must be valid UTF-8; ≤ 64 bytes; charset `[A-Za-z0-9 _.:/@+=,-]`; no leading/trailing whitespace; empty value allowed |
+| token `name` (existing field) | **new tokens:** ≤ 128 bytes, must be valid UTF-8, reject Cc/Cf/Zl/Zp, reject text resembling a pasted secret. **Existing rows (minted before E.1):** accepted unchanged; sanitized at render time instead |
+| secret-looking text | any of `name`/`purpose`/a label key or value containing `scion_pat_` or `Bearer ` (case-insensitive) is rejected — a cheap, deliberately non-exhaustive check against accidentally pasting a token or an `Authorization` header value |
+
+**Reserved label keys** — rejected exactly or as a dotted prefix (e.g. `user`
+also rejects `user.name`), case-insensitively, with `-` normalized to `_`
+first (so `actor-binding` and `actor_binding` are both caught):
+
+```
+agent  agent_id  actor  actor_binding  principal  principal_id  principal_kind
+user  user_id  email  on_behalf_of  delegate  delegator  delegation  ancestry
+creator  created_by  owner  project_id  broker_id  credential  credential_id
+token  token_id  role  scope  scopes  permission  permissions  verified
+system  executor  initiator
+actor_agent_id  authorizing_user_id  source_grant_id  delegation_edge_id
+parent_grant_id  exchange_agent_credential_id  actor_kind
+```
+
+`actor_binding` and the seven `actor_agent_id`…`actor_kind` names are reserved
+for a future verified-agent-actor extension (execution area G); they are not
+themselves implemented by E.1. The seven are exact matches only — no
+`actor_`/`source_` prefix is reserved — and are the single canonical list a
+same-package test pins against G's structured audit-record field names.
+
+In addition, any label key starting with `scion.`, `hub.`, or `x-` (again
+case-insensitively) is rejected outright, reserving those namespaces for the
+platform and for future header-derived metadata.
+
+### Validation errors never echo the offending value
+
+A validation failure returns `400 validation_error` with a message naming
+the **field** and the **rule** that failed (e.g. "invalid labels: label key
+is reserved") — never the value that violated it. This keeps a rejected
+purpose or label out of error responses and logs, since that text is
+untrusted and unbounded until it passes validation.
+
+### Rendering (logs)
+
+Decoration renders as a `slog` group (`credential.*`): `kind`, `id`, `name`,
+`boundary.kind`, `boundary.project_id`, `purpose`, and labels nested under
+`credential.labels.*` with a constant `credential.labels_source="issuer"`
+marker — never promoted to top-level log attributes, so a label can never
+collide with (or be mistaken for) a real `agent_id`/`user_id`/`principal_kind`
+field. Rendering always re-sanitizes text (replacing Cc/Cf/Zl/Zp runes with
+U+FFFD and truncating with a `…` marker), because a row created before this
+validation existed cannot be assumed to already satisfy the bounded schema.
+The token's plaintext value, its SHA-256 hash, and its visible prefix are
+never part of the decoration and never logged this way.
+
+### Non-goals
+
+Purpose and labels never grant, narrow, or verify anything: they carry no
+permissions, do not affect `Decide`, `CanDelegate`, capabilities, or
+delegation-edge attribution, and are not a substitute for the agent-bound
+delegation extension (area G) that will add a separately verified actor
+binding. See `pkg/hub/credential_decoration_authz_guard_test.go` for the
+mechanical enforcement of "never read by authorization code."
+
+## Credential Attribution in Logs and Audit (E.2a, ptone/scion#2127)
+
+E.2a threads E.1's decoration through request logs, decision audit, and
+mutation audit, so the same human using two different tokens is
+distinguishable end to end — including in denied and rejected requests.
+
+### Request log
+
+- `RequestLogMiddleware` now wraps `UnifiedAuthMiddleware` instead of being
+  wrapped by it, so a request auth rejects outright (invalid, revoked, or
+  expired UAT; suspended user) is still request-logged, not silently dropped.
+  Auth records the outcome via `logging.SetRequestAuth` on the shared,
+  mutable `*RequestMeta` this middleware installs; `auth_type` and any
+  `user_id`/`principal_kind`/`credential` attributes are read back after the
+  handler chain returns, not before.
+- A rejected UAT produces one `"credential rejected"` line with `auth_type=uat`
+  and `reason` ∈ `{invalid, revoked, expired, user_suspended,
+  reserved_identity, lookup_error}`, at Warn level except `lookup_error`,
+  which logs at Error level: it means the token store or database call itself
+  failed, not that a client presented a bad credential, and it never carries
+  `credential.id`. `credential.id` is otherwise included only when the
+  presented value matched a stored token row (revoked/expired/suspended) — an
+  unknown or malformed bearer value never yields an asserted identity, not
+  even a rejected one. The presented token string is never logged, in either
+  case.
+
+### Decision and mutation audit
+
+- `AuthzService.Decide` is a thin wrapper around the kernel evaluation
+  (`decide`) that emits exactly one decision audit record per call, whichever
+  internal return path produced the result — including the UAT
+  project/credential-scope pre-kernel gate.
+- Decision audit records carry a `permission_id`: exactly the caller-supplied
+  `AuthzRequest.Permission`, and only when it is a canonical ID present in
+  the permissions registry — never derived from resource/action, and never
+  an unregistered string. Both decision and mutation audit records carry: a
+  bounded, sanitized snapshot of the credential's name/boundary/labels at
+  decision time (audit rows outlive tokens, which can be deleted); and a
+  `correlation_id` equal to the request's ID, so a decision audit row and the
+  mutation audit row(s) it authorized can be joined.
+- `executor_kind`/`executor_id` distinguish what is currently executing from
+  the initiating principal/credential above. They are empty for an ordinary
+  live request; deferred-execution entry points (scheduler, schedule
+  evaluator, broker dispatch — tracker E.2b) set them via
+  `hub.ContextWithExecutor`.
+- `AuthzRequest.AlwaysAudit` and its counterpart `Decision.AlwaysAudit`
+  (settable from inside `decide`'s body, for a branch that only learns
+  partway through evaluation that this decision must not be sampled away)
+  force an allow decision to be audited regardless of the configured
+  allow-sampling rate.
+- `hub.BuildDecisionAuditRecord(ctx, request, decision)` is exported so a
+  non-`Decide` decision-audit path can build a schema-consistent record
+  through the same field mapping, instead of hand-assembling one.
+
+### Retention
+
+Decision and mutation audit records have **no retention sweep** as of E.2a.
+`CleanupAuditRecords` exists but has no production caller, and
+`ServerConfig.AuditRetentionDays` is read nowhere. E.2a does not change this;
+wiring a sweep is tracked as a separate follow-up issue (rulings Q6).
+
+### How this differs from a future verified agent actor (G)
+
+E's decoration and audit snapshot are an unverified, issuer-supplied label on
+an ordinary human bearer token — never a verified actor identity. A later
+delegated-agent extension (area G) records a *separately verified* actor
+through its own columns (`actor_agent_id`, `authorizing_user_id`,
+`source_grant_id`, `delegation_edge_id`) and its own `CredentialKind`
+(`delegated_agent`), added to the same `store.DecisionAuditRecord` /
+`store.MutationAuditRecord` types in G's own migration, in G's own field
+block. G's fields are written only by G's code paths; E's writers leave them
+zero — `pkg/hub/e2a_no_g_column_test.go` runs E's decision- and
+mutation-audit writers with a decoration carrying every name in
+`gVerifiedActorFieldNames` (E.1's reserved label-key set, above) and asserts
+those fields stay zero (once they exist) and that the label values surface
+only inside the bounded `credential_labels` snapshot, never in a principal or
+credential ID field. A separate test pins the two lists together so they
+cannot silently drift apart. A decoration label such as
+`"nightly-cleanup-agent"` therefore always stays under `credential.labels.*`
+with `labels_source=issuer`, and cannot occupy where G's verified actor
+fields will live.
+
+`Decision.DeniedBy` (a typed denial-source string, owned by a parallel
+authorization-kernel change) is recorded verbatim in a `denied_by` audit
+column when set. G's aggregated per-list capability-filter record leaves
+`denied_by` empty by agreement, recording its own fine-grained code in its
+own audit block instead.

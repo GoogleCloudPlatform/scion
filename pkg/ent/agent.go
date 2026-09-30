@@ -105,6 +105,28 @@ type Agent struct {
 	ReincarnationState string `json:"reincarnation_state,omitempty"`
 	// ReincarnationUpdatedAt holds the value of the "reincarnation_updated_at" field.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnation_updated_at,omitempty"`
+	// LaunchAsyncOptIn holds the value of the "launch_async_opt_in" field.
+	LaunchAsyncOptIn bool `json:"launch_async_opt_in,omitempty"`
+	// LaunchID holds the value of the "launch_id" field.
+	LaunchID string `json:"launch_id,omitempty"`
+	// LaunchState holds the value of the "launch_state" field.
+	LaunchState string `json:"launch_state,omitempty"`
+	// LaunchEndReason holds the value of the "launch_end_reason" field.
+	LaunchEndReason string `json:"launch_end_reason,omitempty"`
+	// LaunchKind holds the value of the "launch_kind" field.
+	LaunchKind string `json:"launch_kind,omitempty"`
+	// LaunchDeadline holds the value of the "launch_deadline" field.
+	LaunchDeadline *time.Time `json:"launch_deadline,omitempty"`
+	// LaunchLastReportAt holds the value of the "launch_last_report_at" field.
+	LaunchLastReportAt *time.Time `json:"launch_last_report_at,omitempty"`
+	// LaunchOwner holds the value of the "launch_owner" field.
+	LaunchOwner string `json:"launch_owner,omitempty"`
+	// LaunchSeq holds the value of the "launch_seq" field.
+	LaunchSeq int64 `json:"launch_seq,omitempty"`
+	// LaunchStep holds the value of the "launch_step" field.
+	LaunchStep string `json:"launch_step,omitempty"`
+	// LaunchError holds the value of the "launch_error" field.
+	LaunchError string `json:"launch_error,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -162,13 +184,13 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry:
 			values[i] = new([]byte)
-		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled:
+		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
 			values[i] = new(sql.NullBool)
-		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration:
+		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldReincarnationState:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -461,6 +483,74 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				_m.ReincarnationUpdatedAt = new(time.Time)
 				*_m.ReincarnationUpdatedAt = value.Time
 			}
+		case agent.FieldLaunchAsyncOptIn:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_async_opt_in", values[i])
+			} else if value.Valid {
+				_m.LaunchAsyncOptIn = value.Bool
+			}
+		case agent.FieldLaunchID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_id", values[i])
+			} else if value.Valid {
+				_m.LaunchID = value.String
+			}
+		case agent.FieldLaunchState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_state", values[i])
+			} else if value.Valid {
+				_m.LaunchState = value.String
+			}
+		case agent.FieldLaunchEndReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_end_reason", values[i])
+			} else if value.Valid {
+				_m.LaunchEndReason = value.String
+			}
+		case agent.FieldLaunchKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_kind", values[i])
+			} else if value.Valid {
+				_m.LaunchKind = value.String
+			}
+		case agent.FieldLaunchDeadline:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_deadline", values[i])
+			} else if value.Valid {
+				_m.LaunchDeadline = new(time.Time)
+				*_m.LaunchDeadline = value.Time
+			}
+		case agent.FieldLaunchLastReportAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_last_report_at", values[i])
+			} else if value.Valid {
+				_m.LaunchLastReportAt = new(time.Time)
+				*_m.LaunchLastReportAt = value.Time
+			}
+		case agent.FieldLaunchOwner:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_owner", values[i])
+			} else if value.Valid {
+				_m.LaunchOwner = value.String
+			}
+		case agent.FieldLaunchSeq:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_seq", values[i])
+			} else if value.Valid {
+				_m.LaunchSeq = value.Int64
+			}
+		case agent.FieldLaunchStep:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_step", values[i])
+			} else if value.Valid {
+				_m.LaunchStep = value.String
+			}
+		case agent.FieldLaunchError:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_error", values[i])
+			} else if value.Valid {
+				_m.LaunchError = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -653,6 +743,43 @@ func (_m *Agent) String() string {
 		builder.WriteString("reincarnation_updated_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("launch_async_opt_in=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LaunchAsyncOptIn))
+	builder.WriteString(", ")
+	builder.WriteString("launch_id=")
+	builder.WriteString(_m.LaunchID)
+	builder.WriteString(", ")
+	builder.WriteString("launch_state=")
+	builder.WriteString(_m.LaunchState)
+	builder.WriteString(", ")
+	builder.WriteString("launch_end_reason=")
+	builder.WriteString(_m.LaunchEndReason)
+	builder.WriteString(", ")
+	builder.WriteString("launch_kind=")
+	builder.WriteString(_m.LaunchKind)
+	builder.WriteString(", ")
+	if v := _m.LaunchDeadline; v != nil {
+		builder.WriteString("launch_deadline=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LaunchLastReportAt; v != nil {
+		builder.WriteString("launch_last_report_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("launch_owner=")
+	builder.WriteString(_m.LaunchOwner)
+	builder.WriteString(", ")
+	builder.WriteString("launch_seq=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LaunchSeq))
+	builder.WriteString(", ")
+	builder.WriteString("launch_step=")
+	builder.WriteString(_m.LaunchStep)
+	builder.WriteString(", ")
+	builder.WriteString("launch_error=")
+	builder.WriteString(_m.LaunchError)
 	builder.WriteByte(')')
 	return builder.String()
 }

@@ -538,6 +538,10 @@ func TestBoundedGRPCAdapterStopKeepsLiveHandlerOwnership(t *testing.T) {
 }
 
 func TestPipelineStopLeavesActiveReceiverResourcesUntilHandlerReturns(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	p := NewWithConfig(&Config{Enabled: true, GRPCPort: 0, HTTPPort: 0})
 	if err := p.Start(context.Background()); err != nil {
 		t.Fatal(err)

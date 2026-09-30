@@ -14,6 +14,20 @@ const (
 	Label = "scheduled_event"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldInitiatorPrincipalKind holds the string denoting the initiator_principal_kind field in the database.
+	FieldInitiatorPrincipalKind = "initiator_principal_kind"
+	// FieldInitiatorPrincipalID holds the string denoting the initiator_principal_id field in the database.
+	FieldInitiatorPrincipalID = "initiator_principal_id"
+	// FieldInitiatorCredentialKind holds the string denoting the initiator_credential_kind field in the database.
+	FieldInitiatorCredentialKind = "initiator_credential_kind"
+	// FieldInitiatorCredentialID holds the string denoting the initiator_credential_id field in the database.
+	FieldInitiatorCredentialID = "initiator_credential_id"
+	// FieldInitiatorCredentialSnapshot holds the string denoting the initiator_credential_snapshot field in the database.
+	FieldInitiatorCredentialSnapshot = "initiator_credential_snapshot"
+	// FieldAttributionVersion holds the string denoting the attribution_version field in the database.
+	FieldAttributionVersion = "attribution_version"
+	// FieldAuthorizationRevision holds the string denoting the authorization_revision field in the database.
+	FieldAuthorizationRevision = "authorization_revision"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldEventType holds the string denoting the event_type field in the database.
@@ -41,6 +55,13 @@ const (
 // Columns holds all SQL columns for scheduledevent fields.
 var Columns = []string{
 	FieldID,
+	FieldInitiatorPrincipalKind,
+	FieldInitiatorPrincipalID,
+	FieldInitiatorCredentialKind,
+	FieldInitiatorCredentialID,
+	FieldInitiatorCredentialSnapshot,
+	FieldAttributionVersion,
+	FieldAuthorizationRevision,
 	FieldProjectID,
 	FieldEventType,
 	FieldFireAt,
@@ -82,6 +103,41 @@ type OrderOption func(*sql.Selector)
 // ByID orders the results by the id field.
 func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalKind orders the results by the initiator_principal_kind field.
+func ByInitiatorPrincipalKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalKind, opts...).ToFunc()
+}
+
+// ByInitiatorPrincipalID orders the results by the initiator_principal_id field.
+func ByInitiatorPrincipalID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorPrincipalID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialKind orders the results by the initiator_credential_kind field.
+func ByInitiatorCredentialKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialKind, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialID orders the results by the initiator_credential_id field.
+func ByInitiatorCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialID, opts...).ToFunc()
+}
+
+// ByInitiatorCredentialSnapshot orders the results by the initiator_credential_snapshot field.
+func ByInitiatorCredentialSnapshot(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInitiatorCredentialSnapshot, opts...).ToFunc()
+}
+
+// ByAttributionVersion orders the results by the attribution_version field.
+func ByAttributionVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributionVersion, opts...).ToFunc()
+}
+
+// ByAuthorizationRevision orders the results by the authorization_revision field.
+func ByAuthorizationRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorizationRevision, opts...).ToFunc()
 }
 
 // ByProjectID orders the results by the project_id field.

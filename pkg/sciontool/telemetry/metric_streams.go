@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
@@ -28,6 +29,21 @@ const hookMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hook
 // LifecycleMetricScope separates init lifecycle counters from hook subprocess
 // counters that may share a name and point labels but use a different writer.
 const LifecycleMetricScope = hookMetricScope + "/lifecycle"
+
+// usageMetricScope identifies the in-process UsageDeriver (design §3.2,
+// "Reserved counter handling"). It is accepted as a reserved-counter scope
+// alongside hookMetricScope, so scion.usage.tokens gets the same
+// collector-epoch and delta-to-cumulative treatment as hook counters, and
+// lands in a distinct Cloud series from any hook-sourced usage for the same
+// harness (D4 guarantees only one source is active at a time).
+const usageMetricScope = "github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry/usage"
+
+// isReservedCounterScope reports whether scopeName is one of the
+// instrumentation scopes whose reserved counters (agent.tool.calls,
+// gen_ai.api.calls, scion.usage.tokens, ...) get collector-epoch handling.
+func isReservedCounterScope(scopeName string) bool {
+	return scopeName == hookMetricScope || scopeName == usageMetricScope
+}
 
 type metricStreamKey struct {
 	resource, scope, attrs      string
@@ -255,6 +271,14 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(m.Name, "gen_ai.tokens.") {
 					return s.reject("unsupported normalized hook token name")
 				}
+				// scion.hook.tokens.* is retired (design §3.5 "Retired names"):
+				// the hook handler now emits scion.usage.tokens{token_type}
+				// instead, the same way gen_ai.tokens.* was retired above. An
+				// old hook binary talking to a new receiver can't happen,
+				// because they are the same binary in one image.
+				if sm.GetScope().GetName() == hookMetricScope && strings.HasPrefix(m.Name, "scion.hook.tokens.") {
+					return s.reject("retired hook token name")
+				}
 				if kind != "gauge" && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE && temporal != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA {
 					return s.reject("unsupported metric temporality")
 				}
@@ -262,7 +286,7 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 					return s.reject("nonmonotonic delta sum")
 				}
 				base := metricStreamKey{resource: rk, scope: sk, name: m.Name, unit: m.Unit, kind: kind, temporality: temporal, monotonic: monotonic}
-				reservedHook := sm.GetScope().GetName() == hookMetricScope && isHookCounter(m.Name)
+				reservedHook := isReservedCounterScope(sm.GetScope().GetName()) && isHookCounter(m.Name)
 				hook := reservedHook && kind == "sum" && monotonic && temporal == metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA
 				if s.gcp && reservedHook && (!hook || m.Unit != hookCounterUnit(m.Name)) {
 					return s.reject("unsupported normalized hook counter shape")
@@ -297,6 +321,13 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							}
 							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
+							}
+						} else {
+							if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
+								return s.reject(err.Error())
+							}
+							if err := checkUsageTokenTypeField(m.Name, point.Attributes); err != nil {
+								return s.reject(err.Error())
 							}
 						}
 						key, err := canonicalAttrs(point.Attributes)
@@ -341,6 +372,8 @@ func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 							if err := s.validateCloudIdentity(rm, sm, m, kind, temporal, monotonic, point.Attributes); err != nil {
 								return err
 							}
+						} else if err := rejectReservedIdentityPointLabel(point.Attributes); err != nil {
+							return s.reject(err.Error())
 						}
 						key, err := canonicalAttrs(point.Attributes)
 						if err != nil {
@@ -482,21 +515,32 @@ func (s *metricStreams) validateDescriptor(rm *metricpb.ResourceMetrics, sm *met
 				return err
 			}
 		}
+		if kv.Key == "scion.agent.slug" && kv.Value.GetStringValue() != "" {
+			if len(kv.Value.GetStringValue()) > 256 {
+				return s.reject("Cloud Monitoring identity label too long")
+			}
+			if err := add(gcpAgentSlugLabel); err != nil {
+				return err
+			}
+		}
 	}
 	for _, kv := range attrs {
 		normalized := cloudLabelKey(kv.Key)
-		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, "service_name", "service_namespace", "service_instance_id"} {
+		for _, reserved := range []string{gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel, "service_name", "service_namespace", "service_instance_id"} {
 			if normalized == reserved {
 				return s.reject("reserved Cloud Monitoring metric label")
 			}
 		}
 		switch kv.Key {
-		case gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel:
+		case gcpResourceIDLabel, gcpScopeIDLabel, gcpPointIDLabel, gcpAgentLabel, gcpProjectLabel, gcpAgentSlugLabel:
 			return s.reject("reserved Cloud Monitoring metric label")
 		}
 		if cloudPointFieldsFor(sm.GetScope().GetName(), m.Name)[kv.Key] {
 			if proto.Size(kv.Value) > 256 {
 				return s.reject("Cloud Monitoring point label too long")
+			}
+			if err := checkTokenTypeField(kv); err != nil {
+				return s.reject(err.Error())
 			}
 			if err := add(kv.Key); err != nil {
 				return err
@@ -564,7 +608,8 @@ func cloudLabelKey(key string) string {
 
 func isHookCounter(name string) bool {
 	switch name {
-	case "agent.tool.calls", "agent.session.count", "gen_ai.api.calls", "scion.hook.tokens.input", "scion.hook.tokens.output", "scion.hook.tokens.cached":
+	case "agent.tool.calls", telemetrycontract.MetricSessionCount, telemetrycontract.MetricAPICalls,
+		telemetrycontract.MetricUsageTokens:
 		return true
 	default:
 		return false

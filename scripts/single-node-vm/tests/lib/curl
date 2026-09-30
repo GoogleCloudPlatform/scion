@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# scripts/single-node-vm/tests/lib/curl — stub for curl calls deploy.sh's
+# own process makes directly. Put on PATH ahead of any real curl by
+# run.sh, the same way tests/lib/gcloud shadows gcloud.
+#
+# deploy.sh makes exactly two kinds of *local* curl call (i.e. calls its
+# own process executes, as opposed to the ones embedded in a `compute
+# ssh --command=...` string, which this suite's gcloud stub logs but
+# never actually executes -- see tests/lib/gcloud's "compute ssh" case):
+#
+#   1. The GitHub Releases API auto-detect (deploy.sh's "Release version"
+#      section, the `if [[ -z "$VERSION" ]]` block), used only when
+#      --version is omitted. No test in this suite exercises
+#      it today -- every test passes --version (see README.md) -- so an
+#      unhandled URL falls through to the real curl below rather than
+#      being silently wrong for a future test that does.
+#   2. The SHA256SUMS checksum preflight (deploy.sh, end of Phase 1, right
+#      before "Phase 2: GCP Resources"). Every test in this suite now
+#      depends on this succeeding by default, since none of them know this
+#      file exists.
+#
+# Env knobs:
+#   CURL_STUB_LOG              — if set, every invocation is appended to
+#                                 it (space-joined argv), one call per
+#                                 line, mirroring GCLOUD_STUB_LOG. Unset
+#                                 by default: tests that don't care about
+#                                 it pay no cost.
+#   CURL_STUB_SHA256SUMS_MISSING=true — any request whose URL basename is
+#                                 exactly SHA256SUMS fails the way a real
+#                                 404 does under `curl -f` (exit 22),
+#                                 simulating a release published before
+#                                 checksum publishing existed.
+#   CURL_STUB_SHA256SUMS_CONN_ERROR=true — same target, but fails the way
+#                                 curl fails when it never got an HTTP
+#                                 response at all (exit 6, "Couldn't
+#                                 resolve host"), simulating a DNS/network
+#                                 problem rather than a real 404. Takes
+#                                 priority over CURL_STUB_SHA256SUMS_MISSING
+#                                 if both are set.
+#   CURL_STUB_FIXTURE_DIR=DIR  — any `-o DEST` download is served from
+#                                 "DIR/$(basename URL)" when that file
+#                                 exists, regardless of host/scheme. Lets
+#                                 a test run deploy.sh's own generated
+#                                 download+verify command text against
+#                                 local fixtures (good tarball, mismatched
+#                                 tarball, a SHA256SUMS with no matching
+#                                 entry, ...) with no real network call.
+#                                 A URL whose basename has no matching
+#                                 fixture file fails like a 404.
+#
+# With neither env knob set, a SHA256SUMS request succeeds with an empty
+# body (an -I probe needs no body at all; a bare -o download gets an
+# empty placeholder file) -- equivalent to "the release publishes
+# checksums", which is what every pre-existing test needs.
+
+set -uo pipefail
+
+if [[ -n "${CURL_STUB_LOG:-}" ]]; then
+  printf '%s\n' "$*" >> "$CURL_STUB_LOG"
+fi
+
+args=("$@")
+url=""
+outfile=""
+head_only=false
+
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    http://*|https://*) url="${args[$i]}" ;;
+    -o) outfile="${args[$((i + 1))]}" ;;
+  esac
+done
+for a in "${args[@]}"; do
+  # -I may appear standalone or combined into a short-option cluster
+  # (deploy.sh's preflight uses -fsSLI). Good enough for this stub's own
+  # two call shapes; it never has to parse an arbitrary curl invocation.
+  case "$a" in
+    -*I*) head_only=true ;;
+  esac
+done
+
+real_curl() {
+  local candidate
+  for candidate in /usr/bin/curl /bin/curl; do
+    if [[ -x "$candidate" ]]; then
+      exec "$candidate" "${args[@]}"
+    fi
+  done
+  echo "curl-stub: no real curl found on PATH to fall back to" >&2
+  exit 1
+}
+
+if [[ -z "$url" ]]; then
+  real_curl
+fi
+
+base="$(basename -- "$url")"
+is_sha256sums=false
+[[ "$base" == "SHA256SUMS" ]] && is_sha256sums=true
+
+fixture=""
+if [[ -n "${CURL_STUB_FIXTURE_DIR:-}" ]]; then
+  candidate_fixture="${CURL_STUB_FIXTURE_DIR}/${base}"
+  [[ -f "$candidate_fixture" ]] && fixture="$candidate_fixture"
+fi
+
+if [[ "$is_sha256sums" != "true" && -z "$fixture" ]]; then
+  # Not a call this stub understands (e.g. the GitHub Releases API
+  # auto-detect) -- fall through to the real curl.
+  real_curl
+fi
+
+if [[ -n "${CURL_STUB_FIXTURE_DIR:-}" && -z "$fixture" ]]; then
+  # A fixture dir is configured but has nothing for this asset: a real
+  # release wouldn't either. Fail the way curl -f does for an HTTP 404.
+  echo "curl: (22) The requested URL returned error: 404" >&2
+  exit 22
+fi
+
+if [[ "$is_sha256sums" == "true" && "${CURL_STUB_SHA256SUMS_CONN_ERROR:-false}" == "true" ]]; then
+  echo "curl: (6) Could not resolve host: github.com" >&2
+  exit 6
+fi
+
+if [[ "$is_sha256sums" == "true" && "${CURL_STUB_SHA256SUMS_MISSING:-false}" == "true" ]]; then
+  echo "curl: (22) The requested URL returned error: 404" >&2
+  exit 22
+fi
+
+if [[ -n "$fixture" ]]; then
+  [[ -n "$outfile" ]] && cp "$fixture" "$outfile"
+  exit 0
+fi
+
+# is_sha256sums == true, no fixture dir configured, not simulating
+# "missing": default success (see module comment).
+if [[ "$head_only" != "true" && -n "$outfile" ]]; then
+  : > "$outfile"
+fi
+exit 0

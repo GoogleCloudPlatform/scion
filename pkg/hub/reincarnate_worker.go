@@ -372,7 +372,13 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // provisioning and starting as it goes — mirroring what the synchronous
 // stop/start handlers do, so a message sender or a status reader
 // mid-migration sees an accurate phase instead of a stale "running".
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string) {
+//
+// migrationStart is the exact instant handleReincarnateAgent claimed the
+// agent (before the record even existed), used verbatim as the preamble's
+// catch-up window start (design §3.7, Amendment A25 2a.3/R4, Nit p2a-r1
+// review) — it predates anything the gate in the three delivery paths could
+// have deferred, so it is a safe (if very slightly generous) lower bound.
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -443,7 +449,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// input (AC-3), delivered as the task argument to DispatchAgentStart below
 	// and also persisted onto AppliedConfig.Task for restart consistency.
 	toGeneration := agent.Generation + 1
-	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff)
+	preamble := s.buildReincarnationPreamble(agent, toGeneration, handoff, migrationStart)
 	fresh.Task = preamble
 	agent, err = s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateProvisioning,
@@ -737,8 +743,34 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 // as the new generation's first harness input (design §3.9). Phase 1 ships
 // the wording the design marks as "fine for P1" — the fuller agent-guidance
 // text (help output, --handoff-template, the self-mode blocked status) is
-// Phase 2.
-func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string) string {
+// Phase 2b.
+//
+// migrationStart is step 2's catch-up window start (design §3.7, Amendment
+// A25 2a.3/R4, p2a-r1 review): only the start is named, not an end. An end
+// timestamp would have to be the instant reincarnation_state clears, which
+// is not known until the completion write — long after this preamble is
+// built — so any value written here would be a lower bound on the true end,
+// silently mis-stating the window as narrower than it actually is (p2a-r1
+// review R4). "Since {start}" makes no claim about when the window closes.
+// The command given is runnable as written: `scion conversation catch-up`
+// takes a `--since <duration>` flag, not absolute timestamps, so step 2
+// asks the agent to choose a duration reaching back to the stated instant,
+// rather than naming one that would already be wrong by the time this task
+// actually runs (R4). O-b (p2a-r2 review): `scion conversation list`'s plain
+// text output truncates the ID to 12 runes with no `conv:` prefix, which
+// `catch-up` cannot accept (it only takes `conv:<full-uuid>`, `@name` or
+// `#name`). Step 2 therefore says `list --json` (full untruncated IDs) and
+// spells out the `conv:<id>` prefix explicitly.
+//
+// The redelivery-adjacent wording ("messages ... can be read with
+// catch-up") was dropped in Phase 1 (A11.4 item 4) because it was false
+// then — catch-up did not work inside agent containers (F4) and a message
+// sent during the gap was rejected or silently dropped, not saved. Phase
+// 2a's F4 fix (agent-mode hub-context detection) and migration gate (every
+// hub delivery path persists-and-defers instead of rejecting/dropping while
+// agents.reincarnation_state is non-terminal, p2a-r1 R3) make it true again,
+// so it comes back here.
+func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int, handoff string, migrationStart time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[SCION REINCARNATION] You are generation %d of agent %q (id %s).\n",
 		toGeneration, agent.Slug, agent.ID)
@@ -747,9 +779,11 @@ func (s *Server) buildReincarnationPreamble(agent *store.Agent, toGeneration int
 	// shared-workspace and hub-managed agents, whose git state is not "your
 	// branch" the way a clone-per-agent agent's is.
 	b.WriteString(" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n")
-	// Messages sent during the migration are rejected, not queued, so step 2
-	// must not promise that they are redelivered.
-	b.WriteString(" 2. Catch up on your conversations (`scion conversation catch-up`). If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n")
+	fmt.Fprintf(&b, " 2. Run `scion conversation list --json` and, for each conversation, "+
+		"`scion conversation catch-up conv:<id> --since <duration reaching back to %s>`. "+
+		"Messages sent to you since %s were saved to your conversations, not dropped. "+
+		"If that command is unavailable in this environment, rely on the handoff and on incoming messages.\n",
+		migrationStart.UTC().Format(time.RFC3339), migrationStart.UTC().Format(time.RFC3339))
 	b.WriteString(" 3. Message whoever requested this migration that the new generation is up, and state your next action.\n")
 	b.WriteString(" 4. Continue from the handoff below. Do not redo anything it says not to.\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")

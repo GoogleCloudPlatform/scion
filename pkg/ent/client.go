@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/launchreaperstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
@@ -144,6 +145,8 @@ type Client struct {
 	IntegrationUpdate *IntegrationUpdateClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LaunchReaperState is the client for interacting with the LaunchReaperState builders.
+	LaunchReaperState *LaunchReaperStateClient
 	// LifecycleHook is the client for interacting with the LifecycleHook builders.
 	LifecycleHook *LifecycleHookClient
 	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
@@ -247,6 +250,7 @@ func (c *Client) init() {
 	c.IntegrationConfig = NewIntegrationConfigClient(c.config)
 	c.IntegrationUpdate = NewIntegrationUpdateClient(c.config)
 	c.InviteCode = NewInviteCodeClient(c.config)
+	c.LaunchReaperState = NewLaunchReaperStateClient(c.config)
 	c.LifecycleHook = NewLifecycleHookClient(c.config)
 	c.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(c.config)
 	c.LimitDefinition = NewLimitDefinitionClient(c.config)
@@ -400,6 +404,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
 		LifecycleHook:            NewLifecycleHookClient(cfg),
 		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		LimitDefinition:          NewLimitDefinitionClient(cfg),
@@ -480,6 +485,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
 		LifecycleHook:            NewLifecycleHookClient(cfg),
 		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		LimitDefinition:          NewLimitDefinitionClient(cfg),
@@ -548,9 +554,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
 		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
 		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
@@ -573,9 +579,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
 		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
 		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
@@ -649,6 +655,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.IntegrationUpdate.mutate(ctx, m)
 	case *InviteCodeMutation:
 		return c.InviteCode.mutate(ctx, m)
+	case *LaunchReaperStateMutation:
+		return c.LaunchReaperState.mutate(ctx, m)
 	case *LifecycleHookMutation:
 		return c.LifecycleHook.mutate(ctx, m)
 	case *LifecycleHookAgentPhaseMutation:
@@ -4927,6 +4935,139 @@ func (c *InviteCodeClient) mutate(ctx context.Context, m *InviteCodeMutation) (V
 		return (&InviteCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown InviteCode mutation op: %q", m.Op())
+	}
+}
+
+// LaunchReaperStateClient is a client for the LaunchReaperState schema.
+type LaunchReaperStateClient struct {
+	config
+}
+
+// NewLaunchReaperStateClient returns a client for the LaunchReaperState from the given config.
+func NewLaunchReaperStateClient(c config) *LaunchReaperStateClient {
+	return &LaunchReaperStateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `launchreaperstate.Hooks(f(g(h())))`.
+func (c *LaunchReaperStateClient) Use(hooks ...Hook) {
+	c.hooks.LaunchReaperState = append(c.hooks.LaunchReaperState, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `launchreaperstate.Intercept(f(g(h())))`.
+func (c *LaunchReaperStateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.LaunchReaperState = append(c.inters.LaunchReaperState, interceptors...)
+}
+
+// Create returns a builder for creating a LaunchReaperState entity.
+func (c *LaunchReaperStateClient) Create() *LaunchReaperStateCreate {
+	mutation := newLaunchReaperStateMutation(c.config, OpCreate)
+	return &LaunchReaperStateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of LaunchReaperState entities.
+func (c *LaunchReaperStateClient) CreateBulk(builders ...*LaunchReaperStateCreate) *LaunchReaperStateCreateBulk {
+	return &LaunchReaperStateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *LaunchReaperStateClient) MapCreateBulk(slice any, setFunc func(*LaunchReaperStateCreate, int)) *LaunchReaperStateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &LaunchReaperStateCreateBulk{err: fmt.Errorf("calling to LaunchReaperStateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*LaunchReaperStateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &LaunchReaperStateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Update() *LaunchReaperStateUpdate {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdate)
+	return &LaunchReaperStateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *LaunchReaperStateClient) UpdateOne(_m *LaunchReaperState) *LaunchReaperStateUpdateOne {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdateOne, withLaunchReaperState(_m))
+	return &LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *LaunchReaperStateClient) UpdateOneID(id string) *LaunchReaperStateUpdateOne {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdateOne, withLaunchReaperStateID(id))
+	return &LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Delete() *LaunchReaperStateDelete {
+	mutation := newLaunchReaperStateMutation(c.config, OpDelete)
+	return &LaunchReaperStateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *LaunchReaperStateClient) DeleteOne(_m *LaunchReaperState) *LaunchReaperStateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *LaunchReaperStateClient) DeleteOneID(id string) *LaunchReaperStateDeleteOne {
+	builder := c.Delete().Where(launchreaperstate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &LaunchReaperStateDeleteOne{builder}
+}
+
+// Query returns a query builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Query() *LaunchReaperStateQuery {
+	return &LaunchReaperStateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeLaunchReaperState},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a LaunchReaperState entity by its id.
+func (c *LaunchReaperStateClient) Get(ctx context.Context, id string) (*LaunchReaperState, error) {
+	return c.Query().Where(launchreaperstate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *LaunchReaperStateClient) GetX(ctx context.Context, id string) *LaunchReaperState {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *LaunchReaperStateClient) Hooks() []Hook {
+	return c.hooks.LaunchReaperState
+}
+
+// Interceptors returns the client interceptors.
+func (c *LaunchReaperStateClient) Interceptors() []Interceptor {
+	return c.inters.LaunchReaperState
+}
+
+func (c *LaunchReaperStateClient) mutate(ctx context.Context, m *LaunchReaperStateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&LaunchReaperStateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&LaunchReaperStateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&LaunchReaperStateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown LaunchReaperState mutation op: %q", m.Op())
 	}
 }
 
@@ -9286,8 +9427,8 @@ type (
 		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
 		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
 		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
@@ -9302,8 +9443,8 @@ type (
 		ConversationParticipant, DecisionAudit, DelegationEdge, EntitlementBinding,
 		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
 		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,

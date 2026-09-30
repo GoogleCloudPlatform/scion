@@ -74,7 +74,8 @@ func TestScheduleCRUD(t *testing.T) {
 	// Update
 	got.Name = "weekly-standup"
 	got.CronExpr = "0 9 * * 1"
-	require.NoError(t, s.UpdateSchedule(ctx, got))
+	fields := store.ScheduleFieldMask{Name: true, CronExpr: true}
+	require.NoError(t, s.UpdateSchedule(ctx, got, fields, got.AuthorizationRevision, got.AuthorizationRevision != 0, nil))
 	updated, err := s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "weekly-standup", updated.Name)
@@ -107,7 +108,7 @@ func TestScheduleInvalidInput(t *testing.T) {
 func TestScheduleUpdateNotFound(t *testing.T) {
 	s := newTestScheduleStore(t)
 	sc := newTestSchedule(uuid.NewString(), "ghost")
-	err := s.UpdateSchedule(context.Background(), sc)
+	err := s.UpdateSchedule(context.Background(), sc, store.ScheduleFieldMask{Name: true}, 0, false, nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 

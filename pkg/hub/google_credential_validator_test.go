@@ -1646,10 +1646,10 @@ func TestGEExchange_ProvisioningRejectedByPolicy(t *testing.T) {
 	}
 }
 
-func TestGEExchange_ProvisioningAllowedForExistingUser(t *testing.T) {
-	// Even with a restrictive authChecker, existing users with email match
-	// should still succeed because the authChecker is only called for new
-	// user provisioning, not for existing user binding.
+func TestGEExchange_ExistingUserByEmail_SubjectToSignInPolicy(t *testing.T) {
+	// The live sign-in policy applies consistently to every sign-in path: an
+	// existing record resolved by email is subject to the same authChecker
+	// as new-user provisioning; it is not skipped for existing records.
 	neverAuthorized := func(_ context.Context, _ string) bool { return false }
 
 	identity := validGmailIdentity()
@@ -1668,19 +1668,19 @@ func TestGEExchange_ProvisioningAllowedForExistingUser(t *testing.T) {
 		},
 		validator,
 		tokenSvc,
-		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject provisioning, but existing user bypass
+		newTestResolver(userStore, newMemExtIDStore(), neverAuthorized, nil), // reject the sign-in policy for everyone
 		slog.Default(),
 	)
 
-	resp, status, err := svc.Exchange(t.Context(), &ExchangeRequest{
+	_, status, err := svc.Exchange(t.Context(), &ExchangeRequest{
 		Credential:     "token",
 		CredentialType: "id_token",
 	})
-	if err != nil {
-		t.Fatalf("expected success for existing user even with restrictive policy: %v (status=%d)", err, status)
+	if err == nil {
+		t.Fatal("expected denial for an existing-by-email record when the sign-in policy rejects it")
 	}
-	if resp.User.ID != "existing-user-1" {
-		t.Errorf("user ID = %q, want %q", resp.User.ID, "existing-user-1")
+	if status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", status)
 	}
 }
 

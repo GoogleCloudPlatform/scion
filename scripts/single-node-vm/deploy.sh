@@ -54,7 +54,10 @@
 #   disk_size_gb                 Boot disk size in GB.
 #   chat_plugins                 List of: telegram, discord, slack, teams.
 #   container_images.source      "registry" (pre-built images) or "build"
-#                                 (build on the VM).
+#                                 (build on the VM). "build" is refused
+#                                 when gke_target.name is set: GKE nodes
+#                                 cannot pull from the VM's local Docker
+#                                 store, which is what "build" uses.
 #   container_images.registry    Registry path; required when source is
 #                                 "registry" (e.g. us-docker.pkg.dev/PROJECT/scion).
 #   container_images.force_rebuild
@@ -66,6 +69,40 @@
 #                                 binary auto-update feature.
 #   release_channel              stable, preview, or nightly. Defaults to
 #                                 nightly if not specified.
+#   gke_target.name              Name of an existing GKE cluster to attach
+#                                 as a second, Kubernetes-based runtime
+#                                 (hybrid tier). Optional; when absent (the
+#                                 default), the hybrid tier is off. The
+#                                 cluster is a manual prerequisite: this
+#                                 script only ever attaches to it, never
+#                                 creates or deletes it.
+#   gke_target.location          Zone or region of the cluster. Required
+#                                 when gke_target.name is set.
+#   gke_target.project           Project the cluster lives in. Defaults to
+#                                 project_id. A cluster in a different
+#                                 project is not supported yet.
+#   gke_target.namespace         Kubernetes namespace for the shared-tree
+#                                 PersistentVolumeClaim. Defaults to
+#                                 scion-hub-<hub_name>. An existing
+#                                 namespace without this deployment's
+#                                 marker is used as-is, never adopted or
+#                                 relabeled, and never deleted on teardown.
+#   gke_target.pvc_name           Name of the PersistentVolumeClaim in that
+#                                 namespace. Defaults to
+#                                 scion-hub-<hub_name>-shared.
+#   user_access_mode             Hybrid tier only. The tier configures
+#                                 restricted user access: invite_only
+#                                 (the default when unset) or
+#                                 domain_restricted. "open" and an empty
+#                                 value are refused. admin_email must be
+#                                 set to a user account; it can always
+#                                 sign in and invites other users.
+#   authorized_domains           Hybrid tier only. Optional list of email
+#                                 domains ("example.com" or
+#                                 "*.example.com"); required for
+#                                 domain_restricted. Service account
+#                                 domains (gserviceaccount.com) are
+#                                 refused.
 
 set -euo pipefail
 
@@ -89,6 +126,15 @@ warn()    { echo -e "${YELLOW}WARNING:${RESET} $*" >&2; }
 err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 
+# print_gcloud_error TEXT -- prints TEXT (gcloud's captured stderr) to
+# stderr, each line indented by two spaces. Prints nothing when TEXT is
+# empty.
+print_gcloud_error() {
+  if [[ -n "$1" ]]; then
+    printf '%s\n' "$1" | sed 's/^/  /' >&2
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Retry / timing budgets
 # ---------------------------------------------------------------------------
@@ -105,7 +151,9 @@ readonly HEALTH_CHECK_MAX_ATTEMPTS=12
 readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
 readonly BUILD_POLL_INTERVAL_SECS=15
-readonly IAP_ENFORCEMENT_WAIT_SECS=60
+# Overridable via env so a test can drive this deploy without waiting
+# out the real wait for real IAP enforcement to activate.
+readonly IAP_ENFORCEMENT_WAIT_SECS="${IAP_ENFORCEMENT_WAIT_SECS:-60}"
 # The default VPC network's creation (triggered by enabling
 # compute.googleapis.com in an ordinary org) is asynchronous but usually
 # visible within a few seconds; ~60s total gives real propagation room to
@@ -272,6 +320,28 @@ if [[ -n "$CONFIG_FILE" ]]; then
   info "Using config file: $CONFIG_FILE"
 fi
 
+# Hybrid tier (optional GKE attach target): see hybrid-tier.sh. Sourced here,
+# after config_get/config_prompt/info/warn/err are defined, since it uses
+# all of them. HYBRID_ENABLED defaults to false until hybrid_read_config
+# runs below.
+HYBRID_ENABLED=false
+# shellcheck source=scripts/single-node-vm/hybrid-tier.sh
+source "${SCRIPT_DIR}/hybrid-tier.sh"
+
+# One EXIT trap, registered once, removes these three temp files on every
+# exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
+# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE. Other temp files are not
+# covered by this trap. The three start empty, and
+# `rm -f ""` is a harmless no-op, so setting the trap here before any
+# file exists is safe. `trap`
+# replaces rather than stacks, so a second, later `trap ... EXIT` call
+# would silently drop this one -- there must only ever be this single
+# registration.
+SSH_STDERR_FILE=""
+HYBRID_KUBECONFIG=""
+ALLUSERS_STDERR_FILE=""
+trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"' EXIT
+
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
 # ---------------------------------------------------------------------------
@@ -292,6 +362,10 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   HUB_NAME="$(config_get 'hub_name' '')"
   if [[ -z "$HUB_NAME" ]]; then
     config_prompt HUB_NAME "Hub name [my-hub]: " "my-hub"
+  fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    err "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
   fi
 
   REGION="$(config_get 'region' '')"
@@ -336,15 +410,109 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
   echo ""
+  echo "Checking hybrid-tier firewall rule ownership:"
+  if ! hybrid_teardown_preflight "$HUB_NAME" "$PROJECT_ID"; then
+    exit 1
+  fi
+  TEARDOWN_HAD_FAILURE=false
+
+  # Hybrid tier: the static internal IP reservation, checked the same
+  # way as the firewall rules -- unconditionally, even with the tier off
+  # in the current config, and aborting the whole teardown before any
+  # delete on an unmarked same-name match.
+  echo ""
+  echo "Checking hybrid-tier internal IP reservation ownership:"
+  hybrid_internal_ip_teardown_check "$HUB_NAME" "$PROJECT_ID" "$REGION"
+  if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" == "true" ]]; then
+    exit 1
+  fi
+
+  # Hybrid tier (Kubernetes objects): gke_target.name is read directly,
+  # never via the interactive hybrid_read_config, since a --delete run
+  # must never prompt to enable the tier. Absent gke_target.name means
+  # the tier was never configured for this hub's teardown, so none of
+  # the k8s objects are ever touched -- as inert as the tier-off create
+  # path. A cluster that's genuinely gone (a positive NOT_FOUND) means
+  # its k8s objects went with it, so this prints that and continues;
+  # any other describe failure -- unknown, not confirmed gone -- aborts
+  # before any delete, the same "uncertainty counts as not gone" rule
+  # used throughout this tier's other checks.
+  HYBRID_K8S_TEARDOWN_READY=false
+  K8S_GKE_NAME="$(config_get 'gke_target.name' '')"
+  if [[ -z "$K8S_GKE_NAME" && -z "$CONFIG_FILE" ]]; then
+    echo ""
+    warn "No --config given, so this teardown cannot tell whether a hybrid tier was ever configured for hub '${HUB_NAME}'. If it was, its Kubernetes objects (default names: namespace $(hybrid_k8s_default_namespace "$HUB_NAME"), PVC $(hybrid_k8s_default_pvc_name "$HUB_NAME"), PV $(hybrid_k8s_pv_name "$HUB_NAME") -- or whatever gke_target.namespace/pvc_name were customized to) will NOT be checked or deleted by this run. Re-run with --config pointing at the same config file used to deploy, to have them checked."
+  fi
+  if [[ -n "$K8S_GKE_NAME" ]]; then
+    GKE_LOCATION="$(config_get 'gke_target.location' '')"
+    GKE_PROJECT_RAW="$(config_get 'gke_target.project' '')"
+    GKE_NAMESPACE_RAW="$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$HUB_NAME")")"
+    GKE_PVC_NAME_RAW="$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$HUB_NAME")")"
+    GKE_NAME="$K8S_GKE_NAME"
+    GKE_PROJECT="${GKE_PROJECT_RAW:-$PROJECT_ID}"
+    # Same field-syntax and project-match validation the create path
+    # applies via hybrid_read_config -- a malformed or foreign-project
+    # gke_target must be refused here too, not just on create.
+    _hybrid_validate_target_fields "$GKE_NAME" "$GKE_LOCATION" "$GKE_PROJECT" "$GKE_NAMESPACE_RAW" "$GKE_PVC_NAME_RAW" "$PROJECT_ID"
+    GKE_NAMESPACE="$GKE_NAMESPACE_RAW"
+    GKE_PVC_NAME="$GKE_PVC_NAME_RAW"
+    echo ""
+    echo "Checking hybrid-tier Kubernetes object ownership:"
+    CLUSTER_DESCRIBE_ERR="$(mktemp)"
+    if gcloud container clusters describe "$GKE_NAME" --location="$GKE_LOCATION" \
+        --project="$GKE_PROJECT" --quiet >/dev/null 2>"${CLUSTER_DESCRIBE_ERR}"; then
+      hybrid_k8s_setup_kubeconfig
+      hybrid_k8s_teardown_check "$HUB_NAME"
+      if [[ "$HYBRID_K8S_TEARDOWN_FAILED" == "true" ]]; then
+        rm -f "${CLUSTER_DESCRIBE_ERR}"
+        exit 1
+      fi
+      HYBRID_K8S_TEARDOWN_READY=true
+    elif _hybrid_gcloud_not_found "$(cat "${CLUSTER_DESCRIBE_ERR}")"; then
+      echo "  GKE cluster ${GKE_NAME} not found; its Kubernetes objects went with it."
+    else
+      err "Could not confirm whether GKE cluster ${GKE_NAME} still exists:"
+      err "  $(cat "${CLUSTER_DESCRIBE_ERR}")"
+      rm -f "${CLUSTER_DESCRIBE_ERR}"
+      exit 1
+    fi
+    rm -f "${CLUSTER_DESCRIBE_ERR}"
+  fi
+
+  # _hybrid_k8s_display KIND — "kind/name" for the kind hybrid_k8s_
+  # teardown_check queued, using the names it resolved (HYBRID_K8S_PVC_
+  # NAME/HYBRID_K8S_PV_NAME/HYBRID_K8S_NAMESPACE), for both the
+  # will-delete list below and the final summary.
+  _hybrid_k8s_display() {
+    case "$1" in
+      pvc) echo "persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}" ;;
+      pv) echo "persistentvolume/${HYBRID_K8S_PV_NAME}" ;;
+      namespace) echo "namespace/${HYBRID_K8S_NAMESPACE}" ;;
+    esac
+  }
+
+  echo ""
   echo "The following resources will be deleted:"
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+      echo "  Kubernetes object: $(_hybrid_k8s_display "$k8s_kind") (hybrid tier)"
+    done
+  fi
   echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
   echo "  GCE VM:            ${INSTANCE_NAME} (zone: ${ZONE})"
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
+  echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
   echo "  Firewall rule:     ${FW_8080_RULE_NAME}"
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    echo "  Firewall rule:     ${name} (hybrid tier)"
+  done
+  if [[ "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" == "true" ]]; then
+    echo "  Internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (hybrid tier; deleted only after the VM is confirmed gone)"
+  fi
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -356,88 +524,383 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
   fi
 
-  info "Deleting Cloud Run IAP proxy service..."
-  if gcloud run services delete "${PROXY_SERVICE}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${PROXY_SERVICE}"
-  else
-    warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
+  K8S_TEARDOWN_OK=true
+  PROXY_SERVICE_DELETED=false
+  PROXY_SERVICE_NOT_FOUND=false
+  VM_DELETED=false
+  VM_NOT_FOUND=false
+  VM_GONE=false
+  NAT_DELETED=false
+  NAT_NOT_FOUND=false
+  ROUTER_DELETED=false
+  ROUTER_NOT_FOUND=false
+  SA_DELETED=false
+  SA_NOT_FOUND=false
+  PROXY_SA_DELETED=false
+  PROXY_SA_NOT_FOUND=false
+  FW_RULE_DELETED=false
+  FW_RULE_NOT_FOUND=false
+  FW_8080_RULE_DELETED=false
+  FW_8080_RULE_NOT_FOUND=false
+  HYBRID_TEARDOWN_DELETED=()
+  # Declared here, unconditionally, so the internal-IP delete gate below
+  # can check its count even on a run where hybrid_teardown_delete (the
+  # only place that normally populates it) never gets called at all --
+  # for example, no hybrid firewall rules were ever created for this hub
+  # but the internal IP reservation still was.
+  HYBRID_TEARDOWN_DELETE_FAILED=()
+  # Set whenever hybrid_teardown_delete is never even attempted for a
+  # queued rule (a k8s failure or an unconfirmed VM stop everything
+  # before it's reached), so the summary can tell "never attempted,
+  # here's why" apart from "attempted and failed" the same way the
+  # internal-IP reservation already does.
+  HYBRID_RULES_DELETE_SKIP_REASON=""
+
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    info "Deleting hybrid-tier Kubernetes objects..."
+    hybrid_k8s_teardown_delete
+    if [[ ${#HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+      TEARDOWN_HAD_FAILURE=true
+      K8S_TEARDOWN_OK=false
+      err "Stopping teardown here: a hybrid-tier Kubernetes object failed to delete. Cloud Run, the VM, and every other resource below are being kept untouched; re-run teardown once the failure above is resolved."
+    fi
   fi
 
-  info "Deleting GCE VM..."
-  if gcloud compute instances delete "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${INSTANCE_NAME}"
-  else
-    warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
-  fi
+  if [[ "$K8S_TEARDOWN_OK" == "true" ]]; then
+    info "Deleting Cloud Run IAP proxy service..."
+    PROXY_SERVICE_DELETE_ERR="$(mktemp)"
+    if gcloud run services delete "${PROXY_SERVICE}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${PROXY_SERVICE_DELETE_ERR}"; then
+      echo "  Deleted: ${PROXY_SERVICE}"
+      PROXY_SERVICE_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${PROXY_SERVICE_DELETE_ERR}")"; then
+      warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
+      PROXY_SERVICE_NOT_FOUND=true
+    else
+      # Not a confirmed not-found -- warn and continue, never fail the run
+      # over an ambiguous base-resource delete outcome.
+      warn "Cloud Run service ${PROXY_SERVICE} could not be deleted: $(cat "${PROXY_SERVICE_DELETE_ERR}")"
+    fi
+    rm -f "${PROXY_SERVICE_DELETE_ERR}"
 
-  info "Deleting Cloud NAT..."
-  if gcloud compute routers nats delete "${NAT_NAME}" \
-      --router="${ROUTER_NAME}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${NAT_NAME}"
-  else
-    warn "Cloud NAT ${NAT_NAME} not found or already deleted."
-  fi
+    # The hybrid firewall rules and the static internal IP
+    # reservation are only safe to delete once this VM is confirmed gone
+    # (the reservation is still attached to the VM's NIC until the VM
+    # itself is deleted, so deleting it earlier would fail anyway). With
+    # the tier off (nothing hybrid-tier queued), a VM delete failure
+    # warns and continues -- nothing downstream
+    # depends on the VM's fate. With the tier on, "gone" must be a
+    # positive, project-wide answer rather than inferred from a
+    # `describe` in a possibly-wrong zone (ZONE above falls back to a
+    # guess when its own discovery call fails): a non-zero exit from the
+    # check itself means unknown, and unknown is never treated as gone.
+    info "Deleting GCE VM..."
+    VM_DELETE_ERR="$(mktemp)"
+    if gcloud compute instances delete "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>"${VM_DELETE_ERR}"; then
+      echo "  Deleted: ${INSTANCE_NAME}"
+      VM_GONE=true
+      VM_DELETED=true
+    elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 && "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" != "true" ]]; then
+      # Tier off: warn and continue, never fail the run over this -- but
+      # reads the delete's own error text, as every other base resource
+      # does, instead of assuming "not found" from any failure. A
+      # permission or API error must be reported as kept, not as a false
+      # "not found" that could hide a still-existing VM.
+      if _hybrid_gcloud_not_found "$(cat "${VM_DELETE_ERR}")"; then
+        warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+        VM_GONE=true
+        VM_NOT_FOUND=true
+      else
+        warn "GCE VM ${INSTANCE_NAME} could not be confirmed deleted: $(cat "${VM_DELETE_ERR}")"
+      fi
+    else
+      VM_LIST_ERR_FILE="$(mktemp)"
+      # This list has no --zones, so it's a project-wide AggregatedList.
+      # The SDK's default compute/allow_partial_error=true downgrades an
+      # UNREACHABLE zone to a stderr warning and exit 0 with that zone's
+      # instances silently missing from the output -- which would read as
+      # "gone" even when the VM's own delete just failed because that
+      # same zone is down. Setting this to false makes a partial result
+      # raise instead, landing in the "could not confirm" branch below
+      # rather than being misread as "gone".
+      if VM_LIST_OUTPUT="$(CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false gcloud compute instances list --project="${PROJECT_ID}" \
+          --filter="name=${INSTANCE_NAME}" --format="value(name)" 2>"${VM_LIST_ERR_FILE}")"; then
+        if [[ -z "$VM_LIST_OUTPUT" ]]; then
+          warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+          VM_GONE=true
+          VM_NOT_FOUND=true
+        else
+          err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
+          TEARDOWN_HAD_FAILURE=true
+        fi
+      else
+        err "Failed to delete GCE VM ${INSTANCE_NAME}, and could not confirm whether it still exists:"
+        err "  $(cat "${VM_LIST_ERR_FILE}")"
+        TEARDOWN_HAD_FAILURE=true
+      fi
+      rm -f "${VM_LIST_ERR_FILE}"
+    fi
+    rm -f "${VM_DELETE_ERR}"
 
-  info "Deleting Cloud Router..."
-  if gcloud compute routers delete "${ROUTER_NAME}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${ROUTER_NAME}"
-  else
-    warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
-  fi
+    info "Deleting Cloud NAT..."
+    NAT_DELETE_ERR="$(mktemp)"
+    if gcloud compute routers nats delete "${NAT_NAME}" \
+        --router="${ROUTER_NAME}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${NAT_DELETE_ERR}"; then
+      echo "  Deleted: ${NAT_NAME}"
+      NAT_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${NAT_DELETE_ERR}")"; then
+      warn "Cloud NAT ${NAT_NAME} not found or already deleted."
+      NAT_NOT_FOUND=true
+    else
+      warn "Cloud NAT ${NAT_NAME} could not be deleted: $(cat "${NAT_DELETE_ERR}")"
+    fi
+    rm -f "${NAT_DELETE_ERR}"
 
-  info "Deleting service account..."
-  if gcloud iam service-accounts delete "${SA_EMAIL}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${SA_EMAIL}"
-  else
-    warn "Service account ${SA_EMAIL} not found or already deleted."
-  fi
+    info "Deleting Cloud Router..."
+    ROUTER_DELETE_ERR="$(mktemp)"
+    if gcloud compute routers delete "${ROUTER_NAME}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${ROUTER_DELETE_ERR}"; then
+      echo "  Deleted: ${ROUTER_NAME}"
+      ROUTER_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${ROUTER_DELETE_ERR}")"; then
+      warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
+      ROUTER_NOT_FOUND=true
+    else
+      warn "Cloud Router ${ROUTER_NAME} could not be deleted: $(cat "${ROUTER_DELETE_ERR}")"
+    fi
+    rm -f "${ROUTER_DELETE_ERR}"
 
-  info "Deleting proxy service account..."
-  if gcloud iam service-accounts delete "${PROXY_SA_EMAIL}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${PROXY_SA_EMAIL}"
-  else
-    warn "Proxy service account ${PROXY_SA_EMAIL} not found or already deleted."
-  fi
+    info "Deleting service account..."
+    SA_DELETE_ERR="$(mktemp)"
+    if gcloud iam service-accounts delete "${SA_EMAIL}" \
+        --project="${PROJECT_ID}" --quiet 2>"${SA_DELETE_ERR}"; then
+      echo "  Deleted: ${SA_EMAIL}"
+      SA_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${SA_DELETE_ERR}")"; then
+      warn "Service account ${SA_EMAIL} not found or already deleted."
+      SA_NOT_FOUND=true
+    else
+      warn "Service account ${SA_EMAIL} could not be deleted: $(cat "${SA_DELETE_ERR}")"
+    fi
+    rm -f "${SA_DELETE_ERR}"
 
-  # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
-  # the deployer. This role is bound to the operator (not a service account) and
-  # may be used for IAP SSH access to other VMs in the project. Revoking it here
-  # would silently break access to those other resources.
-  info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
+    info "Deleting proxy service account..."
+    PROXY_SA_DELETE_ERR="$(mktemp)"
+    if gcloud iam service-accounts delete "${PROXY_SA_EMAIL}" \
+        --project="${PROJECT_ID}" --quiet 2>"${PROXY_SA_DELETE_ERR}"; then
+      echo "  Deleted: ${PROXY_SA_EMAIL}"
+      PROXY_SA_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${PROXY_SA_DELETE_ERR}")"; then
+      warn "Proxy service account ${PROXY_SA_EMAIL} not found or already deleted."
+      PROXY_SA_NOT_FOUND=true
+    else
+      warn "Proxy service account ${PROXY_SA_EMAIL} could not be deleted: $(cat "${PROXY_SA_DELETE_ERR}")"
+    fi
+    rm -f "${PROXY_SA_DELETE_ERR}"
 
-  info "Deleting IAP SSH firewall rule..."
-  if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${FW_RULE_NAME}"
-  else
-    warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
-  fi
+    info "Deleting agent transport service account (if present)..."
+    PROXY_SERVICE_GONE=false
+    if [[ "$PROXY_SERVICE_DELETED" == "true" || "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
+      PROXY_SERVICE_GONE=true
+    fi
+    hybrid_teardown_transport_sa "${HUB_NAME}" "${PROJECT_ID}" "${PROXY_SERVICE}" "${REGION}" "${PROXY_SERVICE_GONE}"
+    if [[ "$HYBRID_TRANSPORT_SA_DELETE_FAILED" == "true" ]]; then
+      TEARDOWN_HAD_FAILURE=true
+    fi
 
-  info "Deleting proxy-to-VM firewall rule..."
-  if gcloud compute firewall-rules delete "${FW_8080_RULE_NAME}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${FW_8080_RULE_NAME}"
+    # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
+    # the deployer. This role is bound to the operator (not a service account) and
+    # may be used for IAP SSH access to other VMs in the project. Revoking it here
+    # would silently break access to those other resources.
+    info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
+
+    info "Deleting IAP SSH firewall rule..."
+    FW_RULE_DELETE_ERR="$(mktemp)"
+    if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
+        --project="${PROJECT_ID}" --quiet 2>"${FW_RULE_DELETE_ERR}"; then
+      echo "  Deleted: ${FW_RULE_NAME}"
+      FW_RULE_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${FW_RULE_DELETE_ERR}")"; then
+      warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
+      FW_RULE_NOT_FOUND=true
+    else
+      warn "Firewall rule ${FW_RULE_NAME} could not be deleted: $(cat "${FW_RULE_DELETE_ERR}")"
+    fi
+    rm -f "${FW_RULE_DELETE_ERR}"
+
+    info "Deleting proxy-to-VM firewall rule..."
+    FW_8080_RULE_DELETE_ERR="$(mktemp)"
+    if gcloud compute firewall-rules delete "${FW_8080_RULE_NAME}" \
+        --project="${PROJECT_ID}" --quiet 2>"${FW_8080_RULE_DELETE_ERR}"; then
+      echo "  Deleted: ${FW_8080_RULE_NAME}"
+      FW_8080_RULE_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${FW_8080_RULE_DELETE_ERR}")"; then
+      warn "Firewall rule ${FW_8080_RULE_NAME} not found or already deleted."
+      FW_8080_RULE_NOT_FOUND=true
+    else
+      warn "Firewall rule ${FW_8080_RULE_NAME} could not be deleted: $(cat "${FW_8080_RULE_DELETE_ERR}")"
+    fi
+    rm -f "${FW_8080_RULE_DELETE_ERR}"
+
+    if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
+      if [[ "$VM_GONE" == "true" ]]; then
+        info "Deleting hybrid-tier firewall rules..."
+        hybrid_teardown_delete "$PROJECT_ID"
+        if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+          TEARDOWN_HAD_FAILURE=true
+        fi
+      else
+        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; the pod-range deny and NFS access rules and the reserved address stay in place. Re-run teardown after the VM is deleted."
+        HYBRID_RULES_DELETE_SKIP_REASON="VM not confirmed gone"
+        TEARDOWN_HAD_FAILURE=true
+      fi
+    fi
+
+    if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" == "true" ]]; then
+      if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -eq 0 ]]; then
+        info "Deleting hybrid-tier internal IP reservation..."
+        hybrid_internal_ip_teardown_delete "$PROJECT_ID" "$REGION" "$VM_GONE"
+        if [[ "$HYBRID_INTERNAL_IP_DELETE_FAILED" == "true" ]]; then
+          TEARDOWN_HAD_FAILURE=true
+        fi
+      else
+        warn "Keeping internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}: a hybrid-tier firewall rule failed to delete; re-run teardown once that's resolved."
+        HYBRID_INTERNAL_IP_DELETED=false
+        HYBRID_INTERNAL_IP_DELETE_FAILED=true
+        HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="a hybrid-tier firewall rule failed to delete"
+        TEARDOWN_HAD_FAILURE=true
+      fi
+    fi
   else
-    warn "Firewall rule ${FW_8080_RULE_NAME} not found or already deleted."
+    # A hybrid-tier Kubernetes object failed to delete: nothing below
+    # this point ever ran, so any queued firewall rules and the internal
+    # IP reservation were never even attempted, not just kept after a
+    # failed attempt.
+    HYBRID_RULES_DELETE_SKIP_REASON="a hybrid-tier Kubernetes object failed to delete"
+    if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" == "true" ]]; then HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="a hybrid-tier Kubernetes object failed to delete"; fi
+    TEARDOWN_HAD_FAILURE=true
   fi
 
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
-  echo "  Deleted Cloud Run service: ${PROXY_SERVICE}"
-  echo "  Deleted GCE VM:            ${INSTANCE_NAME}"
-  echo "  Deleted Cloud NAT:         ${NAT_NAME}"
-  echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
-  echo "  Deleted service account:   ${SA_EMAIL}"
-  echo "  Deleted proxy SA:          ${PROXY_SA_EMAIL}"
-  echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
-  echo "  Deleted firewall rule:     ${FW_8080_RULE_NAME}"
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETED[@]+"${HYBRID_K8S_TEARDOWN_DELETED[@]}"}; do
+      echo "  Deleted Kubernetes object:  $(_hybrid_k8s_display "$k8s_kind")"
+    done
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]+"${HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]}"}; do
+      echo "  Kept Kubernetes object:     $(_hybrid_k8s_display "$k8s_kind") (delete failed or not attempted)"
+    done
+  fi
+  if [[ -n "$K8S_GKE_NAME" ]]; then
+    echo "  Kubernetes cluster:         ${K8S_GKE_NAME} -- never deleted (this tier never creates or deletes the cluster itself)"
+  fi
+  if [[ "$PROXY_SERVICE_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud Run service:  ${PROXY_SERVICE}"
+  elif [[ "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud Run service: ${PROXY_SERVICE}"
+  else
+    echo "  Kept Cloud Run service:     ${PROXY_SERVICE}"
+  fi
+  if [[ "$VM_DELETED" == "true" ]]; then
+    echo "  Deleted GCE VM:             ${INSTANCE_NAME}"
+  elif [[ "${VM_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found GCE VM:           ${INSTANCE_NAME}"
+  else
+    echo "  Kept GCE VM:                ${INSTANCE_NAME}"
+  fi
+  if [[ "$NAT_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud NAT:          ${NAT_NAME}"
+  elif [[ "${NAT_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud NAT:        ${NAT_NAME}"
+  else
+    echo "  Kept Cloud NAT:             ${NAT_NAME}"
+  fi
+  if [[ "$ROUTER_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud Router:       ${ROUTER_NAME}"
+  elif [[ "${ROUTER_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud Router:     ${ROUTER_NAME}"
+  else
+    echo "  Kept Cloud Router:          ${ROUTER_NAME}"
+  fi
+  if [[ "$SA_DELETED" == "true" ]]; then
+    echo "  Deleted service account:    ${SA_EMAIL}"
+  elif [[ "${SA_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found service account:  ${SA_EMAIL}"
+  else
+    echo "  Kept service account:       ${SA_EMAIL}"
+  fi
+  if [[ "$PROXY_SA_DELETED" == "true" ]]; then
+    echo "  Deleted proxy SA:           ${PROXY_SA_EMAIL}"
+  elif [[ "${PROXY_SA_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found proxy SA:         ${PROXY_SA_EMAIL}"
+  else
+    echo "  Kept proxy SA:              ${PROXY_SA_EMAIL}"
+  fi
+  if [[ -n "${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL:-}" ]]; then
+    if [[ "${HYBRID_TRANSPORT_SA_DELETED:-false}" == "true" ]]; then
+      echo "  Deleted transport SA:       ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    elif [[ "${HYBRID_TRANSPORT_SA_NOT_FOUND:-false}" == "true" ]]; then
+      echo "  Not found transport SA:     ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    else
+      echo "  Kept transport SA:          ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL} (${HYBRID_TRANSPORT_SA_KEPT_REASON:-not attempted})"
+    fi
+    case "${HYBRID_TRANSPORT_SA_BINDING_STATE:-not-attempted}" in
+      removed) echo "  Removed transport SA IAP access on: ${PROXY_SERVICE}" ;;
+      absent)  echo "  No transport SA IAP access left on: ${PROXY_SERVICE}" ;;
+      failed)  echo "  Kept transport SA IAP access on:    ${PROXY_SERVICE} (removal failed)" ;;
+    esac
+  fi
+  if [[ "$FW_RULE_DELETED" == "true" ]]; then
+    echo "  Deleted firewall rule:      ${FW_RULE_NAME}"
+  elif [[ "${FW_RULE_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found firewall rule:    ${FW_RULE_NAME}"
+  else
+    echo "  Kept firewall rule:         ${FW_RULE_NAME}"
+  fi
+  if [[ "$FW_8080_RULE_DELETED" == "true" ]]; then
+    echo "  Deleted firewall rule:      ${FW_8080_RULE_NAME}"
+  elif [[ "${FW_8080_RULE_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found firewall rule:    ${FW_8080_RULE_NAME}"
+  else
+    echo "  Kept firewall rule:         ${FW_8080_RULE_NAME}"
+  fi
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    HYBRID_RULE_WAS_DELETED=false
+    for hd in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
+      [[ "$hd" == "$name" ]] && HYBRID_RULE_WAS_DELETED=true
+    done
+    if [[ "$HYBRID_RULE_WAS_DELETED" == "true" ]]; then
+      echo "  Deleted firewall rule:      ${name}"
+      continue
+    fi
+    HYBRID_RULE_DELETE_FAILED=false
+    for hf in ${HYBRID_TEARDOWN_DELETE_FAILED[@]+"${HYBRID_TEARDOWN_DELETE_FAILED[@]}"}; do
+      [[ "$hf" == "$name" ]] && HYBRID_RULE_DELETE_FAILED=true
+    done
+    if [[ "$HYBRID_RULE_DELETE_FAILED" == "true" ]]; then
+      echo "  Kept firewall rule:         ${name} (delete failed, or not attempted after an earlier rule's delete failed)"
+    elif [[ -n "${HYBRID_RULES_DELETE_SKIP_REASON:-}" ]]; then
+      echo "  SKIPPED firewall rule:      ${name} (${HYBRID_RULES_DELETE_SKIP_REASON})"
+    else
+      echo "  Kept firewall rule:         ${name}"
+    fi
+  done
+  if [[ -n "${HYBRID_INTERNAL_IP_TEARDOWN_NAME:-}" ]]; then
+    if [[ "${HYBRID_INTERNAL_IP_DELETED:-false}" == "true" ]]; then
+      echo "  Deleted internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
+    elif [[ -n "${HYBRID_INTERNAL_IP_DELETE_SKIP_REASON:-}" ]]; then
+      echo "  SKIPPED internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (${HYBRID_INTERNAL_IP_DELETE_SKIP_REASON})"
+    elif [[ "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" == "true" ]]; then
+      echo "  Kept internal IP:          ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (delete failed: ${HYBRID_INTERNAL_IP_DELETE_ERR:-unknown error})"
+    fi
+  fi
+  if [[ "$TEARDOWN_HAD_FAILURE" == "true" ]]; then
+    err "Teardown completed with at least one failure reported above."
+    exit 1
+  fi
   exit 0
 fi
 
@@ -685,6 +1148,34 @@ else
   esac
 fi
 
+# --- Hybrid tier (optional GKE attach target) ---
+hybrid_read_config "$PROJECT_ID" "$HUB_NAME"
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  echo "  Hybrid tier: enabled (GKE cluster: ${GKE_NAME}, location: ${GKE_LOCATION})"
+  if [[ "$IMAGE_SOURCE" == "build" ]]; then
+    err "The hybrid tier is on, but container_images.source is 'build'. GKE nodes cannot pull images from the VM's local Docker store."
+    err "Set container_images.source to 'registry' and container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
+    exit 1
+  fi
+  if _hybrid_registry_is_loopback "$IMAGE_REGISTRY"; then
+    err "The hybrid tier is on, but container_images.registry ('${IMAGE_REGISTRY}') names this VM itself (a loopback address). GKE nodes cannot reach it there."
+    err "Set container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
+    exit 1
+  fi
+  # The hybrid tier configures restricted user access (invite-only by
+  # default): validated here, before any create, and spliced into both
+  # settings.yaml writes below as HYBRID_USER_ACCESS_YAML.
+  hybrid_resolve_user_access "$ADMIN_EMAIL"
+  echo "  User access:  ${HYBRID_USER_ACCESS_MODE}"
+else
+  # Empty when the tier is off, so both settings.yaml writes render
+  # exactly as they do without the tier.
+  HYBRID_USER_ACCESS_YAML=""
+  if hybrid_user_access_config_present; then
+    warn "user_access_mode / authorized_domains in the config file are applied only when the hybrid tier is on; ignoring them."
+  fi
+fi
+
 # Derived values
 info "Selecting zone in ${REGION}..."
 ZONE="$(gcloud compute zones list \
@@ -803,6 +1294,54 @@ if [[ -z "$ACCOUNT" ]]; then
 fi
 echo "  Authenticated as: ${ACCOUNT}"
 
+# --- Release checksum preflight ---
+# Phase 3 below downloads the scion binary and any chat plugins and verifies
+# each against a SHA256SUMS checksums asset published alongside the release
+# (see .github/workflows/build-release.yml) before installing it. Check here,
+# before any GCP resource is created, that the chosen release actually
+# publishes one -- a release built before checksum publishing existed would
+# otherwise fail deep into Phase 3, after a VM, network, and firewall rules
+# already exist. ALLOW_UNVERIFIED_RELEASE=true is an explicit, loud opt-out
+# for exactly that transition period; there is no silent fallback.
+RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+# Normalize to exactly "true" or "false": this value is interpolated into
+# single-quoted tests in the Phase 3 --command strings below (e.g.
+# [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]), so a value containing a
+# single quote would alter the remote command text. Operator-controlled
+# either way, not a privilege boundary, but VERSION gets the same strict
+# treatment a few lines up for the same reason -- keep the remote command
+# text predictable regardless of what the caller's environment set.
+if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
+  ALLOW_UNVERIFIED_RELEASE=true
+else
+  ALLOW_UNVERIFIED_RELEASE=false
+fi
+info "Checking that release ${VERSION} publishes checksums..."
+SHA256SUMS_PREFLIGHT_RC=0
+curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
+if [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
+  echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
+elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
+  # curl -f maps any HTTP error response to exit 22; anything else (DNS
+  # failure, TLS error, connection refused/timed out, ...) is a
+  # connectivity problem, not evidence the release lacks SHA256SUMS.
+  # Sending an operator to ALLOW_UNVERIFIED_RELEASE for a transient network
+  # blip would be actively wrong, so don't even mention it here.
+  err "Could not reach ${RELEASE_URL}/SHA256SUMS (curl exit ${SHA256SUMS_PREFLIGHT_RC})."
+  echo "  This looks like a network or GitHub-availability problem, not a release that lacks" >&2
+  echo "  checksums. Check connectivity and retry." >&2
+  exit 1
+elif [[ "$ALLOW_UNVERIFIED_RELEASE" == "true" ]]; then
+  warn "Release ${VERSION} does not publish a SHA256SUMS checksums asset."
+  warn "Proceeding WITHOUT checksum verification because ALLOW_UNVERIFIED_RELEASE=true."
+else
+  err "Release ${VERSION} does not publish a SHA256SUMS checksums asset, so its downloads cannot be verified."
+  echo "  This applies to any release published before checksum publishing was added." >&2
+  echo "  Choose a release that publishes SHA256SUMS, or set ALLOW_UNVERIFIED_RELEASE=true to install this" >&2
+  echo "  release anyway WITHOUT checksum verification (not recommended)." >&2
+  exit 1
+fi
+
 # ===================================================================
 # Phase 2: GCP Resources
 # ===================================================================
@@ -810,15 +1349,40 @@ section "Phase 2: GCP Resources"
 
 # --- Enable APIs ---
 info "Enabling required APIs..."
-gcloud services enable \
-  compute.googleapis.com \
-  run.googleapis.com \
-  iap.googleapis.com \
-  cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com \
-  aiplatform.googleapis.com \
-  iam.googleapis.com \
-  --project="${PROJECT_ID}" --quiet
+REQUIRED_APIS=(
+  compute.googleapis.com
+  run.googleapis.com
+  iap.googleapis.com
+  cloudbuild.googleapis.com
+  artifactregistry.googleapis.com
+  aiplatform.googleapis.com
+  iam.googleapis.com
+)
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  REQUIRED_APIS+=(container.googleapis.com)
+fi
+API_LIST_ERR_FILE="$(mktemp)"
+if ENABLED_APIS="$(gcloud services list --enabled --project="${PROJECT_ID}" \
+    --format="value(config.name)" 2>"${API_LIST_ERR_FILE}")"; then
+  rm -f "${API_LIST_ERR_FILE}"
+  MISSING_APIS=()
+  for api in "${REQUIRED_APIS[@]}"; do
+    if ! grep -qx "$api" <<< "$ENABLED_APIS"; then
+      MISSING_APIS+=("$api")
+    fi
+  done
+  if [[ ${#MISSING_APIS[@]} -gt 0 ]]; then
+    gcloud services enable "${MISSING_APIS[@]}" --project="${PROJECT_ID}" --quiet
+  fi
+elif [[ "$HYBRID_ENABLED" == "true" ]]; then
+  err "Could not list enabled APIs for project ${PROJECT_ID}, so it's unknown whether container.googleapis.com (needed for the hybrid tier) is already enabled. Refusing to guess: enabling it unconditionally would fail on a runner without serviceusage.services.enable if it's already on, and skipping it would fail later if it's not."
+  err "  $(cat "${API_LIST_ERR_FILE}")"
+  rm -f "${API_LIST_ERR_FILE}"
+  exit 1
+else
+  rm -f "${API_LIST_ERR_FILE}"
+  gcloud services enable "${REQUIRED_APIS[@]}" --project="${PROJECT_ID}" --quiet
+fi
 
 # --- IAP service agent identity (idempotent) ---
 # Ensures service-PROJECT_NUMBER@gcp-sa-iap.iam.gserviceaccount.com exists
@@ -903,6 +1467,23 @@ if [[ "$NETWORK_FOUND" != "true" ]]; then
   exit 1
 fi
 echo "  Default VPC network found."
+
+# --- Hybrid tier: discovery ---
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Discovering GKE cluster network and node tag..."
+  hybrid_discover "default"
+  echo "  Node network tag: ${GKE_NODE_TAG}"
+
+  # Everything about the hybrid tier's Kubernetes objects that doesn't
+  # depend on the VM's own IP address -- including the marker-refusal
+  # check for existing, differently-owned objects -- runs here,
+  # alongside discovery and before the VM, NFS export or firewall rules
+  # are created. See hybrid_k8s_preflight's own comment for exactly what
+  # it does and doesn't cover; the remaining, IP-dependent part of this
+  # check happens later, in Phase 4.
+  info "Checking hybrid-tier Kubernetes object ownership..."
+  hybrid_k8s_preflight "$HUB_NAME"
+fi
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
 # IAP's default (Google-managed) OAuth client only covers same-organization
@@ -1107,8 +1688,42 @@ if gcloud iam service-accounts describe "${SA_EMAIL}" \
 else
   gcloud iam service-accounts create "${SA_NAME}" \
     --display-name="Scion Hub VM (${HUB_NAME})" \
+    --description="scion-deployment=${HUB_NAME}" \
     --project="${PROJECT_ID}"
   echo "  Created service account: ${SA_EMAIL}"
+fi
+
+# --- Hybrid tier: agent transport auth setup ---
+# GKE agent pods reach the hub through its public IAP URL, authenticating
+# the transport hop with a Google OIDC ID token minted by impersonating a
+# dedicated service account -- gated on the hybrid tier, not on IAP being
+# on in general, because only GKE-dispatched agents ever leave the hub VM
+# to reach it; a Docker-dispatched agent on the VM itself never traverses
+# IAP. Runs here, right after the hub's own runtime SA exists (needed for
+# the grant below), and after the cross-organization IAP check above:
+# both the client-ID discovery and that check depend on IAP already
+# being configured for this project. The Cloud Run resource-level grant
+# (hybrid_grant_transport_sa_iap_access) happens later, in Phase 4,
+# since the Cloud Run service and its own IAP enablement don't exist
+# yet at this point.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Setting up agent transport auth..."
+  hybrid_discover_iap_client_id "${PROJECT_ID}"
+  hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
+  hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
+  # Rendered once, here, and spliced into both settings.yaml writes below
+  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
+  # and the Cloud Run accessor grant in Phase 4) can take on the order of
+  # a minute to propagate; the first agent dispatched immediately after
+  # this deploy finishes may see a transient 403 minting or using its
+  # transport token. deploy.sh has nothing that blocks on this
+  # propagation itself -- it never mints or uses a transport token -- so
+  # it's documented here and in the runbook rather than covered with a
+  # blind sleep.
+  HYBRID_AUTH_TRANSPORT_YAML="$(hybrid_settings_auth_transport_yaml "${HYBRID_IAP_CLIENT_ID}" "${HYBRID_TRANSPORT_SA_EMAIL}")"
+else
+  HYBRID_AUTH_TRANSPORT_YAML=""
 fi
 
 # Bind minimal IAM roles (idempotent)
@@ -1116,10 +1731,15 @@ fi
 # image directly to Artifact Registry (see Phase 4).
 info "Binding IAM roles..."
 for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  if ! BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
-    --quiet &>/dev/null
+    --condition=None \
+    --quiet 2>&1 >/dev/null)"; then
+    err "Failed to grant ${ROLE} to ${SA_EMAIL} on project ${PROJECT_ID}:"
+    print_gcloud_error "$BIND_ERR"
+    exit 1
+  fi
 done
 echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
 
@@ -1146,6 +1766,7 @@ if gcloud iam service-accounts describe "${PROXY_SA_EMAIL}" \
 else
   gcloud iam service-accounts create "${PROXY_SA_NAME}" \
     --display-name="Scion Hub IAP Proxy (${HUB_NAME})" \
+    --description="scion-deployment=${HUB_NAME}" \
     --project="${PROJECT_ID}"
   echo "  Created proxy service account: ${PROXY_SA_EMAIL}"
 fi
@@ -1162,13 +1783,15 @@ if [[ -n "$DEPLOYER_EMAIL" ]]; then
   else
     DEPLOYER_MEMBER="user:${DEPLOYER_EMAIL}"
   fi
-  if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  if TUNNEL_BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="${DEPLOYER_MEMBER}" \
     --role="roles/iap.tunnelResourceAccessor" \
-    --quiet >/dev/null 2>&1; then
+    --condition=None \
+    --quiet 2>&1 >/dev/null)"; then
     echo "  IAP tunnel access granted to: ${DEPLOYER_EMAIL}"
   else
-    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}."
+    warn "Failed to grant roles/iap.tunnelResourceAccessor to ${DEPLOYER_EMAIL}:"
+    print_gcloud_error "$TUNNEL_BIND_ERR"
     warn "SSH to the VM may fail if you do not have this role. Please ensure it is granted manually."
   fi
 else
@@ -1194,6 +1817,7 @@ else
       --region="${REGION}" \
       --project="${PROJECT_ID}" \
       --network=default \
+      --description="scion-deployment=${HUB_NAME}" \
       --quiet
     echo "  Created Cloud Router: ${ROUTER_NAME}"
   fi
@@ -1305,7 +1929,7 @@ else
     --rules=tcp:22 \
     --source-ranges=35.235.240.0/20 \
     --target-tags="${HUB_TAG}" \
-    --description="Allow SSH via IAP tunneling for Scion Hub" \
+    --description="Allow SSH via IAP tunneling for Scion Hub | scion-deployment=${HUB_NAME}" \
     --quiet
   echo "  Created firewall rule: ${FW_RULE_NAME} (target tags: ${HUB_TAG})"
 fi
@@ -1369,17 +1993,45 @@ else
     --rules=tcp:8080 \
     --source-ranges="${DEFAULT_SUBNET_CIDR}" \
     --target-tags="${HUB_TAG}" \
-    --description="Allow the Cloud Run IAP proxy (Direct VPC egress) to reach the Scion Hub VM on 8080" \
+    --description="Allow the Cloud Run IAP proxy (Direct VPC egress) to reach the Scion Hub VM on 8080 | scion-deployment=${HUB_NAME}" \
     --quiet
   echo "  Created firewall rule: ${FW_8080_RULE_NAME} (source: ${DEFAULT_SUBNET_CIDR}, target tags: ${HUB_TAG})"
 fi
 
+# --- Hybrid tier: firewall rules ---
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Creating hybrid-tier firewall rules (if needed)..."
+  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default" "$REGION"
+fi
+
 # --- Create VM ---
+# One --tags flag carries every network tag the VM is created with: the
+# hub tag the IAP SSH rule targets and, with the tier on, the hybrid-tier
+# tag the NFS rules target.
+VM_CREATE_TAGS="${HUB_TAG}"
+VM_EXTRA_CREATE_ARGS=()
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  VM_CREATE_TAGS="${VM_CREATE_TAGS},$(hybrid_vm_tag "$HUB_NAME")"
+fi
+
 info "Creating GCE VM (if needed)..."
 if gcloud compute instances describe "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
   echo "  VM already exists: ${INSTANCE_NAME}"
+  if [[ "$HYBRID_ENABLED" == "true" ]]; then
+    info "Ensuring hybrid-tier network tag on existing VM..."
+    hybrid_apply_vm_tag "${INSTANCE_NAME}" "${ZONE}" "${PROJECT_ID}" "${HUB_NAME}"
+    EXISTING_VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="get(networkInterfaces[0].networkIP)")"
+    hybrid_ensure_internal_ip_existing_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default" \
+      "${EXISTING_VM_IP}" "${INSTANCE_NAME}" "${ZONE}"
+  fi
 else
+  if [[ "$HYBRID_ENABLED" == "true" ]]; then
+    hybrid_ensure_internal_ip_new_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default"
+    VM_EXTRA_CREATE_ARGS+=(--private-network-ip="${HYBRID_INTERNAL_IP}")
+  fi
   gcloud compute instances create "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
@@ -1387,21 +2039,30 @@ else
     --no-address \
     --service-account="${SA_EMAIL}" \
     --scopes=cloud-platform \
-    --tags="${HUB_TAG}" \
+    --tags="${VM_CREATE_TAGS}" \
     --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --shielded-secure-boot \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
+    --labels="scion-deployment=${HUB_NAME}" \
+    ${VM_EXTRA_CREATE_ARGS[@]+"${VM_EXTRA_CREATE_ARGS[@]}"} \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
+fi
+
+# --- Internal IP guard (post-create half) ---
+# The shared NFS PV's server field needs the reserved internal IP to
+# actually match the VM. See hybrid_internal_ip_guard_verify's own
+# comment for what this does and doesn't cover.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  hybrid_internal_ip_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
 fi
 
 # --- Wait for SSH readiness (avoids race on initial boot) ---
 info "Waiting for SSH access to VM..."
 SSH_READY=false
 SSH_STDERR_FILE="$(mktemp)"
-trap 'rm -f "$SSH_STDERR_FILE"' EXIT
 for attempt in $(seq 1 "$SSH_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1454,12 +2115,106 @@ if [[ "$CLOUD_INIT_OK" != "true" ]]; then
 fi
 echo "  Cloud-init completed."
 
+# --- Get VM internal IP ---
+info "Getting VM internal IP..."
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  VM_IP="$HYBRID_INTERNAL_IP"
+else
+  VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="get(networkInterfaces[0].networkIP)")"
+fi
+if [[ -z "$VM_IP" ]]; then
+  err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
+  exit 1
+fi
+echo "  VM internal IP: ${VM_IP}"
+
+# --- Hybrid tier: settings.yaml default GCP identity mode ---
+# Spliced into both settings.yaml writes below, where it stands for the
+# default_gcp_identity_mode comment and key, and ends with a newline.
+# Empty when the tier is off, so both writes carry the comment and key
+# written in the heredocs.
+HYBRID_GCP_IDENTITY_YAML=""
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  HYBRID_GCP_IDENTITY_YAML='# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+# in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
+# With the hybrid tier enabled, the hub default GCP identity mode is block.
+# Configure a project-level mode ("assign" with a dedicated service account)
+# for projects that need GCP access; see docs/deploy/hybrid-tier.md.
+default_gcp_identity_mode: block'$'\n'
+fi
+
+# --- Hybrid tier: settings.yaml shared_dir_storage block ---
+# Rendered once, here, and spliced into both settings.yaml writes below
+# (dev mode in Phase 3, proxy mode in Phase 5) so they stay in sync.
+# Empty when the tier is off, so both writes render byte-identical to
+# before this existed.
+HYBRID_SHARED_DIR_STORAGE_YAML=""
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  # The third argument is a PersistentVolumeClaim name, not the
+  # PersistentVolume's own name: the Go side consumes shares[0].pv_name
+  # as the pod spec's claimName (see pkg/runtime/k8s_runtime.go), so
+  # GKE_PVC_NAME (the resolved PVC name, which may differ from the PV's
+  # name) is what belongs here.
+  HYBRID_SHARED_DIR_STORAGE_YAML="$(hybrid_settings_shared_dir_storage_yaml \
+    "$VM_IP" "$HYBRID_NFS_EXPORT_ROOT" "$GKE_PVC_NAME")"
+fi
+
+# --- Hybrid tier: NFS squash identity, server, and export ---
+# A tier-gated remote step, run here (once cloud-init has created the
+# "scion" user and group the squash identity's primary group and export
+# ownership depend on) rather than added to cloud-init.yaml itself, which
+# is shared with every deployment: this keeps the tier-off path
+# byte-for-byte unchanged. Always redone on every re-run, tier on: it's
+# cheap, and it's how the export stays in sync if the cluster's node
+# subnet CIDR ever changes.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Creating the NFS squash identity (if needed)..."
+  SQUASH_SSH_ERR="$(mktemp)"
+  if ! SQUASH_IDS=$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="$(hybrid_nfs_squash_identity_script "$HYBRID_NFS_SQUASH_USER")" \
+      2>"${SQUASH_SSH_ERR}"); then
+    err "Could not create or validate the NFS squash identity on ${INSTANCE_NAME}:"
+    err "  $(cat "${SQUASH_SSH_ERR}")"
+    rm -f "${SQUASH_SSH_ERR}"
+    exit 1
+  fi
+  rm -f "${SQUASH_SSH_ERR}"
+  # The remote script only ever prints this one line on success (see its
+  # own comment), but validate it here too rather than trust stdout
+  # blindly: a uid/gid pair is about to be embedded directly into the
+  # NFS export line's anonuid=/anongid=, and squashing to uid 0 would
+  # defeat the entire point of a dedicated, unprivileged squash identity.
+  if [[ ! "$SQUASH_IDS" =~ ^[0-9]+:[0-9]+$ ]]; then
+    err "Unexpected output from the NFS squash identity script on ${INSTANCE_NAME}: '${SQUASH_IDS}' (expected UID:GID)."
+    exit 1
+  fi
+  SQUASH_UID="${SQUASH_IDS%%:*}"
+  SQUASH_GID="${SQUASH_IDS##*:}"
+  if [[ "$SQUASH_UID" -eq 0 ]]; then
+    err "The NFS squash uid resolved to 0 on ${INSTANCE_NAME}; refusing to export with root as the anonymous uid."
+    exit 1
+  fi
+  echo "  Squash uid: ${SQUASH_UID} (scion group gid: ${SQUASH_GID})"
+
+  info "Installing the NFS server and export (if needed)..."
+  NFS_FSID="$(hybrid_nfs_fsid "$HUB_NAME")"
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="$(hybrid_nfs_export_script "$HYBRID_NFS_EXPORT_ROOT" "$GKE_NODE_SUBNET_CIDR" \
+      "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID" "$HUB_NAME" \
+      "$HYBRID_NFS_IMAGE_PATH" "$HYBRID_SHARED_DIR_IMAGE_SIZE_GB")"
+fi
+
 # ===================================================================
 # Phase 3: VM Setup
 # ===================================================================
 section "Phase 3: VM Setup"
 
-RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+# RELEASE_URL and ALLOW_UNVERIFIED_RELEASE are set by the checksum preflight
+# in Phase 1, before any GCP resource was created.
 
 # --- Detect VM architecture ---
 info "Detecting VM architecture..."
@@ -1487,17 +2242,49 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   " 2>/dev/null || true
 
 # --- Download and install scion binary ---
+# The release also publishes a SHA256SUMS checksums file (see
+# .github/workflows/build-release.yml). Download it alongside the binary and
+# verify with sha256sum -c before extracting. A missing tarball or a hash
+# mismatch always aborts, with no override. A missing checksums file or a
+# missing entry for this asset also aborts by default, unless
+# ALLOW_UNVERIFIED_RELEASE=true (set and warned about by the Phase 1
+# preflight) explicitly opts out for a release published before checksums
+# existed. The match is anchored and the archive name's dots are escaped so
+# an unrelated entry (e.g. a suffixed "...tar.gz.old" line) cannot be
+# mistaken for this asset's checksum. The single space between the hash and
+# the "[ *]" class accepts either sha256sum output mode: two spaces in text
+# mode (what build-release.yml's `sha256sum --` produces), or a space and an
+# asterisk in binary mode.
+SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
+SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
 info "Installing scion binary (${VERSION})..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/scion-linux-${ARCH_SUFFIX}.tar.gz' -o /tmp/scion.tar.gz
-    tar -xzf /tmp/scion.tar.gz -C /tmp
+    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
+    echo 'Downloading release checksums...'
+    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
+      if grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+        echo 'Verifying checksum...'
+        (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+      elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+        echo 'WARNING: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+      else
+        echo 'ERROR: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS -- refusing to install.' >&2
+        exit 1
+      fi
+    elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+      echo 'WARNING: could not download SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+    else
+      echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
+      exit 1
+    fi
+    tar -xzf /tmp/${SCION_ARCHIVE} -C /tmp
     sudo mv /tmp/scion /usr/local/bin/scion
     sudo chmod +x /usr/local/bin/scion
-    rm -f /tmp/scion.tar.gz
+    rm -f /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
   "
 
@@ -1507,6 +2294,7 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
   for PLUGIN in "${CHAT_PLUGINS[@]}"; do
     PLUGIN_BINARY="scion-plugin-${PLUGIN}"
     PLUGIN_ARCHIVE="${PLUGIN_BINARY}-linux-${ARCH_SUFFIX}.tar.gz"
+    PLUGIN_ARCHIVE_RE="${PLUGIN_ARCHIVE//./\\.}"
     info "  Installing ${PLUGIN_BINARY}..."
     gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1514,11 +2302,26 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
         set -euo pipefail
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
         curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
+        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
+          if grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+            (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+          elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+            echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+          else
+            echo 'ERROR: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS -- refusing to install.' >&2
+            exit 1
+          fi
+        elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
+          echo 'WARNING: could not download SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
+        else
+          echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
+          exit 1
+        fi
         tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
         sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -f /tmp/${PLUGIN_ARCHIVE}
+        rm -f /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done
@@ -1572,7 +2375,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
 # passthrough is honoured only on the hub's own embedded broker, which is what a
 # single-node VM always is, so agents inherit the VM service account (already
@@ -1580,7 +2383,7 @@ image_registry: \"${IMAGE_REGISTRY}\"
 # setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
 # API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
 default_gcp_identity_mode: passthrough
-server:
+"}server:
   hub:
     name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
@@ -1595,7 +2398,10 @@ ${ADMIN_EMAIL:+    admin_emails:
     backend: local
   auth:
     mode: dev
-  listen_port: 8080
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+}  listen_port: 8080
 SETTINGSEOF
   "
 
@@ -1911,16 +2717,11 @@ fi
 # ===================================================================
 section "Phase 4: IAP Proxy"
 
-# --- Get VM internal IP ---
-info "Getting VM internal IP..."
-VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
-  --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --format="get(networkInterfaces[0].networkIP)")"
-if [[ -z "$VM_IP" ]]; then
-  err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
-  exit 1
+# --- Hybrid tier: Kubernetes objects (PV, namespace, PVC) ---
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Ensuring hybrid-tier Kubernetes objects (if needed)..."
+  hybrid_k8s_ensure_objects "$HUB_NAME" "$VM_IP"
 fi
-echo "  VM internal IP: ${VM_IP}"
 
 # --- Build and deploy Cloud Run IAP proxy ---
 # We build the proxy image on the VM and deploy with --image instead of
@@ -1986,6 +2787,10 @@ info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
 
+PROXY_SERVICE_LABEL_ARGS=()
+PROXY_LABEL_ARG="$(hybrid_cloud_run_label_args "${PROXY_SERVICE}" "${PROJECT_ID}" "${REGION}" "${HUB_NAME}")"
+[[ -n "$PROXY_LABEL_ARG" ]] && PROXY_SERVICE_LABEL_ARGS=("$PROXY_LABEL_ARG")
+
 gcloud beta run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
@@ -1998,6 +2803,7 @@ gcloud beta run deploy "${PROXY_SERVICE}" \
   --no-allow-unauthenticated \
   --iap \
   --port=8080 \
+  ${PROXY_SERVICE_LABEL_ARGS[@]+"${PROXY_SERVICE_LABEL_ARGS[@]}"} \
   --quiet
 echo "  Cloud Run IAP proxy deployed with IAP enabled (no allUsers invoker binding was ever created)."
 
@@ -2058,15 +2864,10 @@ echo "  IAP service agent can invoke: ${PROXY_SERVICE}"
 # and if that also fails, stop the deploy rather than leave the service
 # reachable by anyone.
 info "Verifying no allUsers invoker binding remains..."
+# Also removed by the single EXIT trap registered near the top of this
+# script, so an interrupt while get-iam-policy runs does not leave it in
+# $TMPDIR.
 ALLUSERS_STDERR_FILE="$(mktemp)"
-# Re-set (not appended to) the EXIT trap set for SSH_STDERR_FILE earlier:
-# that file has always already removed itself via the explicit `rm -f`
-# calls on both of its own branches by the time this line runs, so
-# referencing it again here is a harmless no-op, not a double-cleanup.
-# Without this, a Ctrl-C or SIGTERM while get-iam-policy is running would
-# leave this one file behind in $TMPDIR (teardown never touches this
-# code path, so there is no other cleanup for it).
-trap 'rm -f "$SSH_STDERR_FILE" "${ALLUSERS_STDERR_FILE:-}"' EXIT
 if ALLUSERS_INVOKER="$(gcloud run services get-iam-policy "${PROXY_SERVICE}" \
     --project="${PROJECT_ID}" \
     --region="${REGION}" \
@@ -2124,25 +2925,39 @@ else
   fi
   # Use gcloud iap web add-iam-policy-binding (supports --resource-type=cloud-run)
   # Note: this is distinct from "gcloud iap web enable" which does NOT support cloud-run.
-  if gcloud iap web add-iam-policy-binding \
+  if SERVICE_IAP_BIND_ERR="$(gcloud iap web add-iam-policy-binding \
       --resource-type=cloud-run --service="${PROXY_SERVICE}" \
       --region="${REGION}" --project="${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet >/dev/null 2>&1; then
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
     echo "  IAP access granted to: ${OPERATOR_EMAIL} (service-level binding)"
   else
     warn "Service-level IAP binding failed; falling back to project-level binding."
-    if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    print_gcloud_error "$SERVICE_IAP_BIND_ERR"
+    if IAP_BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
       --member="${OPERATOR_MEMBER}" \
       --role=roles/iap.httpsResourceAccessor \
-      --quiet >/dev/null 2>&1; then
+      --condition=None \
+      --quiet 2>&1 >/dev/null)"; then
       echo "  IAP access granted to: ${OPERATOR_EMAIL} (project-level fallback)"
     else
       err "Failed to grant IAP access to ${OPERATOR_EMAIL} at both service and project levels."
+      err "Project-level binding error:"
+      print_gcloud_error "$IAP_BIND_ERR"
       err "You may not be able to access the Hub. Please grant roles/iap.httpsResourceAccessor manually."
     fi
   fi
+fi
+
+# --- Hybrid tier: grant agent transport SA IAP access ---
+# The Cloud Run service and its own IAP enablement now exist, so the
+# resource-level grant deferred from the transport-setup step in Phase 2
+# happens here, alongside the operator's own grant above.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Granting agent transport service account IAP access..."
+  hybrid_grant_transport_sa_iap_access "${HYBRID_TRANSPORT_SA_EMAIL}" "${PROXY_SERVICE}" "${REGION}" "${PROJECT_ID}"
 fi
 
 # --- Wait for IAP enforcement ---
@@ -2174,7 +2989,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
 image_registry: \"${IMAGE_REGISTRY}\"
-# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
+${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
 # passthrough is honoured only on the hub's own embedded broker, which is what a
 # single-node VM always is, so agents inherit the VM service account (already
@@ -2182,7 +2997,7 @@ image_registry: \"${IMAGE_REGISTRY}\"
 # setup. Change to \"block\" or \"assign\" via the admin UI or the server-config
 # API if that is not desired; see docs/deploy/agent-runbook-single-node-vm.md §6.3b.
 default_gcp_identity_mode: passthrough
-server:
+"}server:
   hub:
     name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
@@ -2201,7 +3016,10 @@ ${ADMIN_EMAIL:+    admin_emails:
       provider: iap
       iap:
         audience: \"${IAP_AUDIENCE}\"
-  listen_port: 8080
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+}  listen_port: 8080
 SETTINGSEOF
   "
 echo "  settings.yaml updated (auth mode: proxy, provider: iap)."
