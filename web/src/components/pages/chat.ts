@@ -68,7 +68,7 @@ import {
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import { ChatPaletteDataController, PaletteLoadError } from '../../client/chat-palette-data.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
-import { openTerminal, terminalHref } from '../../client/open-terminal.js';
+import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
 
@@ -3971,13 +3971,11 @@ export class ScionPageChat extends LitElement {
               <sl-icon-button
                 name="diagram-3"
                 label="Open in graph"
-                href=${`/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`}
+                href=${agentGraphHref(projectId, agentId)}
                 @click=${(e: MouseEvent) => {
                   if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
                   e.preventDefault();
-                  navigateTo(
-                    `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`
-                  );
+                  navigateTo(agentGraphHref(projectId, agentId));
                 }}
               ></sl-icon-button>
             </sl-tooltip>
@@ -4241,6 +4239,7 @@ export class ScionPageChat extends LitElement {
               currentUserId=${this.pageData?.user?.id || ''}
               ?canSend=${true}
               .members=${this.v2Members}
+              .agentMembers=${this.v2AgentMembers}
               .agents=${this.getAgentsFromMembers()}
               @default-agent-changed=${this.handleDefaultAgentChanged}
             ></scion-chat-thread>
