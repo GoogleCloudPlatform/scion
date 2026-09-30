@@ -6,30 +6,51 @@
 
 Moves `RunConfig.TrustedHubEndpoint`'s capture point in `pkg/agent/run.go`
 to the very top of `Start`, before any agent-level or template-level
-override can reach `opts.Env`; requires every tenant-derived egress host
-(git-clone remote, OTEL endpoints) to be covered by an operator's own
-`egress_allow` entry before it is added to an actor's `EgressPolicy`; and
-fixes a broker code path where a `*startContextError`'s underlying cause
-never reached the server's own log or span, only its curated client-facing
-message.
+override can reach `opts.Env`; restricts the broker-side value that feeds
+that capture to operator-derived sources only; requires every tenant-derived
+egress host (git-clone remote, OTEL endpoints) to be covered by an
+operator's own `egress_allow` entry before it is added to an actor's
+`EgressPolicy`; and fixes a broker code path where a `*startContextError`'s
+underlying cause never reached the server's own log or span, only its
+curated client-facing message.
 
 ## Trusted hub endpoint capture point
 
 `pkg/agent/run.go`'s `Start` now reads `opts.Env["SCION_HUB_ENDPOINT"]`
 into `callerHubEndpoint` as its first action, before project-settings
 resolution, before any inline `req.Config.Hub` override, and before a
-template's own environment can set the same key. `RunConfig.TrustedHubEndpoint`
-is `callerHubEndpoint` in broker mode; outside broker mode, it falls back to
-the project's configured hub endpoint only when the caller supplied none.
-An inline agent-level Hub config and a template's own environment value are
-both applied to the final process environment (so the agent still calls the
-endpoint it was configured to call) but never reach `TrustedHubEndpoint`,
-so neither can widen the actor's egress allowlist. In broker mode with no
-caller-supplied hub endpoint, no hub host is added to egress at all, and a
-warning names the gap. `substrateEgressHostnames` and the surrounding
-comments in `pkg/runtime/interface.go`, `pkg/runtime/substrate_egress.go`,
-and `run.go` itself describe this capture point and its guarantees
-directly, rather than by reference to any prior implementation.
+template's own environment can set the same key. Outside broker mode,
+`RunConfig.TrustedHubEndpoint` is `callerHubEndpoint`, falling back to the
+project's configured hub endpoint only when the caller supplied none. In
+broker mode, it is `opts.TrustedHubEndpoint` instead — see the next section
+for what feeds that field. An inline agent-level Hub config and a
+template's own environment value are both applied to the final process
+environment (so the agent still calls the endpoint it was configured to
+call) but never reach `TrustedHubEndpoint`, so neither can widen the
+actor's egress allowlist. With no operator-derived hub endpoint available,
+no hub host is added to egress at all, and a warning names the gap.
+`substrateEgressHostnames` and the surrounding comments in
+`pkg/runtime/interface.go`, `pkg/runtime/substrate_egress.go`, and
+`run.go` itself describe this capture point and its guarantees directly,
+rather than by reference to any prior implementation.
+
+## Egress trust restricted to operator-derived resolution tiers
+
+`api.StartOptions` adds `TrustedHubEndpoint`, populated in
+`runtimebroker.buildStartContext` from `resolveEffectiveHubEndpoint`'s own
+trust bit: true only when the resolved hub endpoint came from the request's
+`HubEndpoint` field, the hub connection endpoint, this broker's own
+configured `HubEndpoint`, or project settings — every one of these an
+operator-controlled source. It is false when the endpoint instead came from
+`ResolvedEnv` (the hub-resolved `AppliedConfig.Env`, which a project or
+template creator controls), even though that value is still delivered into
+the agent's own `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` env unchanged.
+`pkg/agent/run.go` reads `opts.TrustedHubEndpoint` for its broker-mode
+egress trust instead of re-reading `opts.Env`, so a creator-controlled
+value can never reach Substrate's egress allowlist even in the degenerate
+configuration where every operator tier is empty — that case now resolves
+to no trusted hub host at all, the same fail-closed behavior an empty
+caller-supplied value already had.
 
 ## Tenant-derived egress host coverage
 
@@ -54,6 +75,14 @@ to the tenant-controllable sources. `deploy/substrate/README.md`,
 `deploy/substrate/settings.example.yaml`, `deploy/substrate/OPERATIONS.md`,
 and `.design/kubernetes/substrate-runtime.md` describe the coverage
 requirement.
+
+## Bootstrap file-secret containment is documented
+
+`deploy/substrate/README.md`'s bootstrap-files section, alongside its
+existing note on symlink-traversal refusal, now also states that a
+file-secret or auth target must resolve under the agent home directory: an
+absolute path outside it, or a `..`-relative escape, is refused with HTTP
+422 (`bootstrap_path_outside_home`) before anything is written.
 
 ## Broker error diagnosability
 
