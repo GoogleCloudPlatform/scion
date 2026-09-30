@@ -414,7 +414,7 @@ func TestDispatchDelivery_UnreviewedClassDeniedBeforeMembership(t *testing.T) {
 	createDCUser(t, s, userID, "unreviewed-class@test.com", projectID, store.ProjectRoleOwner)
 
 	_, err := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "secret.deliver",
-		ProjectTargetClass{ResourceType: "secret", ScopeKind: "bogus-scope-kind"}, nil)
+		ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: "bogus-scope-kind"}, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unreviewed scope kind, even though the principal has real project membership")
 	}
@@ -434,7 +434,7 @@ func TestDispatchDelivery_UnreviewedPermissionDeniedBeforeMembership(t *testing.
 	createDCUser(t, s, userID, "unreviewed-perm@test.com", projectID, store.ProjectRoleOwner)
 
 	_, err := authz.ProjectAdmissionForClass(ctx, activeUserPrincipal(userID), projectID, "does.not.exist.in.registry",
-		ProjectTargetClass{ResourceType: "secret", ScopeKind: "project"}, nil)
+		ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject}, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unregistered permission ID, even though the principal has real project membership")
 	}
