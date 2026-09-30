@@ -75,7 +75,7 @@ var execSiteAllowlist = map[string]string{
 	"cmd/sciontool/commands/init.go:2005": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:2009": "runs as the workload uid via Credential whenever uid>0",
 	"cmd/sciontool/commands/init.go:2019": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2358": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2356": "runs as the workload uid via Credential whenever uid>0",
 
 	// The harness-provision subcommand's own subprocess: inherits the
 	// credentials of the pre-start hook that invoked it (root when init
@@ -460,14 +460,12 @@ func TestLiteralIsPathLike_BareAndRelativeNamesAreNotPathLike(t *testing.T) {
 // guarded-directory call site against hand-built exec.Command(...) calls,
 // without planting them in a real guarded file (which would trip the live
 // guard for real). It covers both a bare name ("sh") and a relative name
-// containing a slash ("bin/sh"): the latter is what distinguishes
-// filepath.IsAbs from the older strings.ContainsRune(v, '/') check this
-// package used — ContainsRune treats "bin/sh" as path-like purely because
-// it contains a slash, wrongly proving it safe, even though os/exec still
-// resolves a relative name against the process's current working
-// directory rather than treating it as a fixed location, exactly the
-// PATH-like redirection risk this guard exists to catch. filepath.IsAbs
-// correctly keeps flagging it.
+// containing a slash ("bin/sh"): a check that merely looks for a slash
+// would wrongly treat "bin/sh" as already resolved, even though os/exec
+// still resolves a relative name against the process's current working
+// directory rather than a fixed location, exactly the PATH-like
+// redirection risk this guard exists to catch. filepath.IsAbs correctly
+// keeps flagging it as unresolved.
 func TestGuardPipeline_BareOrRelativeCommandIsFlagged(t *testing.T) {
 	for _, name := range []string{"sh", "bin/sh", "./sh"} {
 		t.Run(name, func(t *testing.T) {

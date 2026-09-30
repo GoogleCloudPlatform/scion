@@ -2437,6 +2437,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	orig := os.Stderr
 	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
 	fn()
 	os.Stderr = orig
 	_ = w.Close()
@@ -2458,12 +2459,12 @@ func gitConfigGet(t *testing.T, path, key string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit is the required
-// regression test for the git invocation: with a planted "git" placed first
-// on $PATH, the real, trusted git must still run — rootexec.Resolve's fixed
+// TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit pins that the git
+// invocation never consults $PATH: with a planted "git" placed first on
+// $PATH, the real, trusted git must still run — rootexec.Resolve's fixed
 // search list, not $PATH, decides which binary this function execs — so the
-// planted one never runs, and the gitconfig content this function is
-// supposed to produce still appears.
+// planted one never runs, and the gitconfig content this function produces
+// still appears.
 func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	realPath := os.Getenv("PATH")
 	dir := t.TempDir()
@@ -2632,8 +2633,7 @@ func TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun(t *testing.T) {
 // symlinked $HOME/.gitconfig — the layout a dotfile manager (chezmoi, stow,
 // dotbot, ...) commonly produces — survives AS a symlink: git config --file
 // resolves and rewrites its target in place, the same as any other command
-// the workload could run against its own file, instead of being refused and
-// replaced with a fresh 3-key regular file.
+// the workload could run against its own file.
 func TestConfigureSharedWorkspaceGit_SymlinkPreservedAndWrittenThrough(t *testing.T) {
 	agentHome := t.TempDir()
 	store := filepath.Join(t.TempDir(), "dotfiles")
@@ -2674,10 +2674,9 @@ func TestConfigureSharedWorkspaceGit_SymlinkPreservedAndWrittenThrough(t *testin
 
 // TestConfigureSharedWorkspaceGit_SymlinkedHomeAncestorWorks proves a
 // symlinked ancestor directory above agentHome — not just the .gitconfig
-// leaf itself — does not make the install fail: plain path resolution (used
-// throughout this function now that there is no component-by-component
-// no-follow walk) follows it like any other directory a legitimate
-// deployment might reach through a symlinked mount.
+// leaf itself — does not make the install fail: plain path resolution
+// (used throughout this function) follows it like any other directory a
+// legitimate deployment might reach through a symlinked mount.
 func TestConfigureSharedWorkspaceGit_SymlinkedHomeAncestorWorks(t *testing.T) {
 	real := t.TempDir()
 	parent := t.TempDir()
@@ -2701,11 +2700,11 @@ func TestConfigureSharedWorkspaceGit_SymlinkedHomeAncestorWorks(t *testing.T) {
 }
 
 // TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable proves the
-// credential helper is configured with no dependency on /run/scion, or any
-// other private staging directory, existing at all: configureSharedWorkspaceGit
-// runs the git config calls directly against the real gitconfig path under
-// the workload's own identity, with no private staging copy, so a runtime
-// where /run/scion is entirely absent has no bearing here.
+// credential helper's configuration has no dependency on /run/scion, or any
+// other staging directory, existing at all: configureSharedWorkspaceGit runs
+// the git config calls directly against the real gitconfig path under the
+// workload's own identity, so a runtime where /run/scion is entirely absent
+// has no bearing here.
 func TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable(t *testing.T) {
 	if _, err := os.Stat("/run/scion"); err == nil {
 		t.Skip("/run/scion exists in this environment; this test wants to prove it is not needed, not that it is absent")
@@ -2775,13 +2774,27 @@ func TestConfigureSharedWorkspaceGit_AttackSymlinkToRootOwnedFileLeftByteIdentic
 // RequirePrivilegeDrop with no usable uid/gid refuses outright, with the
 // sentinel, before running git at all.
 func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.T) {
-	agentHome := t.TempDir()
-	err := configureSharedWorkspaceGit(agentHome, 0, 0, true)
-	if !errors.Is(err, errSharedWorkspaceGitPrivilegeDropRequired) {
-		t.Fatalf("err = %v, want errSharedWorkspaceGitPrivilegeDropRequired", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(agentHome, ".gitconfig")); statErr == nil {
-		t.Error("expected no .gitconfig to be installed when privilege drop is required but refused")
+	// The guard is uid > 0 && gid > 0: every case here has at least one of
+	// the two not usable, so all four must refuse the same way.
+	for _, tc := range []struct {
+		name     string
+		uid, gid int
+	}{
+		{"zero uid and gid", 0, 0},
+		{"usable uid, zero gid", 1000, 0},
+		{"zero uid, usable gid", 0, 1000},
+		{"negative uid and gid", -1, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agentHome := t.TempDir()
+			err := configureSharedWorkspaceGit(agentHome, tc.uid, tc.gid, true)
+			if !errors.Is(err, errSharedWorkspaceGitPrivilegeDropRequired) {
+				t.Fatalf("err = %v, want errSharedWorkspaceGitPrivilegeDropRequired", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(agentHome, ".gitconfig")); statErr == nil {
+				t.Error("expected no .gitconfig to be installed when privilege drop is required but refused")
+			}
+		})
 	}
 }
 

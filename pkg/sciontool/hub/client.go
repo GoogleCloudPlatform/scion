@@ -1273,7 +1273,8 @@ func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 // companion, scion-env) where that substitution means tampering worth
 // reporting, not a stale leaf to overwrite quietly. (Compare
 // dirfd.ReplaceLeaf, used for installs into a directory the workload owns
-// outright, e.g. gitconfig or agent-info.json, where the opposite is true.)
+// outright, e.g. agent-limits.json or agent-info.json, where the opposite
+// is true.)
 // dirfd itself does the actual parent-directory walk, temp-file creation,
 // write, fsync, and fd-based chmod/chown/rename — see its own doc comment
 // for the full safety argument.

@@ -139,8 +139,8 @@ const maxSymlinkHops = 20
 // A legitimate root-installed symlink chain (Debian's "iptables" ->
 // "/etc/alternatives/iptables" -> "xtables-nft-multi", a multi-call binary
 // that dispatches on argv[0]'s own basename) is followed and verified hop
-// by hop, never refused outright the way OpenNoFollowRootOwnedFile's single
-// O_NOFOLLOW open refuses any symlink at its own leaf. A caller that needs
+// by hop, never refused outright the way a single O_NOFOLLOW open would
+// refuse any symlink at its leaf. A caller that needs
 // a multi-call binary's dispatch to work needs candidate's OWN basename to
 // survive into argv[0], which only holds if it goes on to exec candidate
 // itself, not whatever this walk resolves it to — so this function never

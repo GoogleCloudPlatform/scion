@@ -126,9 +126,9 @@ func LoadEnvOverlay(path string, allowedRoots []string) (map[string]string, erro
 	// is then read back here — potentially by root, if a future caller
 	// moves overlay loading earlier. dirfd.ReadFileNoFollow refuses a
 	// symlink at any component, requires a single-link regular file, and
-	// bounds the read, instead of the previous separate os.Stat-then-
-	// os.ReadFile (itself a TOCTOU: the file could change between the two
-	// calls, and os.ReadFile follows symlinks unconditionally).
+	// bounds the read; a separate os.Stat-then-os.ReadFile would be a
+	// TOCTOU (the file could change between the two calls), and
+	// os.ReadFile follows symlinks unconditionally.
 	data, err := dirfd.ReadFileNoFollow(path, maxEnvOverlayBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -198,12 +198,10 @@ func resolveEnvValue(raw json.RawMessage, allowedRoots []string) (string, error)
 
 // readFromFileNoFollow reads a from_file referent through the same
 // fd-anchored, no-follow, bounded primitives used everywhere else in this
-// package, rather than the previous filepath.Abs + string-prefix
-// containment check followed by a separate os.Stat and os.ReadFile — a
-// TOCTOU pair that also trusted the path's textual form to prove
-// containment, which a symlink defeats: a symlink whose own name sits
-// inside an allowed root but whose target does not passes a string-prefix
-// check yet still gets read.
+// package. Containment is enforced by the fd walk, not by the path's
+// textual form, which a symlink defeats: a symlink whose own name sits
+// inside an allowed root but whose target does not would pass a
+// filepath.Abs + string-prefix check yet still resolve outside it.
 //
 // If allowedRoots is empty there is no containment policy to enforce —
 // matching pathInAnyRoot's historical "no roots configured" behaviour, used

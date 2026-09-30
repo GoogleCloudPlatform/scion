@@ -209,8 +209,8 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 // it fine — an accepted, documented cost of not being able to ask a
 // specific profile's own runtime without a live instance for it (see
 // pkg/runtimebroker's resolver and its own equivalent unknown-profile
-// cases): a profile that is silent on attach refuses, never assumes
-// supported.
+// cases): a silent profile on a broker whose broker-wide Capabilities.Attach
+// is false refuses.
 //
 // No broker ID on the agent record defaults to supported: there is nothing
 // to read in that case, unlike a broker that answered but had nothing to

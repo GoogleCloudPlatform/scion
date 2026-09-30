@@ -729,8 +729,7 @@ func TestReadUnderRootNoFollow_RefusesSymlinkLoop(t *testing.T) {
 // second time, the dup'd sentinel is what gets closed, and a subsequent
 // fcntl(F_GETFD) on that number reports EBADF instead of succeeding. This
 // test fails if the "owns the fd" tracking is not reset the instant the fd
-// is closed in the loop (i.e. it fails against the double-close and passes
-// once the close and the ownership reset happen together).
+// is closed in the loop.
 func TestReadUnderRootNoFollow_FailedSecondIntermediateDoesNotCloseItsFdNumberTwice(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "a"), 0o700); err != nil {

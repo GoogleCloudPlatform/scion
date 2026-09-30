@@ -783,7 +783,7 @@ func countLogDirFds(t *testing.T, logDir string) int {
 }
 
 // TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure is the core
-// regression test for the two fd-leak fixes: closing a service's own
+// regression test for the two fd-leak paths: closing a service's own
 // partial fds when its own log-open fails, and closing the fds of every
 // service that never gets a chance to start because an earlier one's
 // start() call failed. Neither path is exercised by
@@ -989,8 +989,8 @@ func TestSafeNameForLog_TruncatesAndEscapes(t *testing.T) {
 // TestManager_Start_DropsInvalidNamesButStartsOthers is the core
 // regression test: a table of invalid Names, each dropped without creating
 // anything outside logDir, alongside a normal Name that still starts and
-// opens its three logs normally. Mutation: removing ValidateServiceName's
-// call in Start makes the "../escape" case create a file outside logDir.
+// opens its three logs normally. Without ValidateServiceName's call in
+// Start, the "../escape" case would create a file outside logDir.
 func TestManager_Start_DropsInvalidNamesButStartsOthers(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()

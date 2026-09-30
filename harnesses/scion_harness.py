@@ -95,9 +95,8 @@ def _atomic_tmp_name(name: str) -> str:
     A separate, named function purely so a test can monkeypatch it to a
     fixed, predictable name: that is the only way to deterministically plant
     a symlink or a FIFO at the exact path this call will try to create, to
-    prove O_CREAT|O_EXCL|O_NOFOLLOW still refuses a pre-existing entry there
-    rather than following or truncating it, now that the real name is no
-    longer guessable from outside this process.
+    prove O_CREAT|O_EXCL|O_NOFOLLOW still refuses a pre-existing entry there,
+    since the real name is not predictable from outside this process.
     """
     return f".{name}.tmp-{os.getpid()}-{time.monotonic_ns()}-{next(_atomic_tmp_name_counter)}"
 
@@ -148,9 +147,7 @@ def atomic_write_json(path: str, payload: Any) -> None:
                 f.write("\n")
             # Inside the same try as the write: a failed replace (e.g. a
             # cross-device rename, or the destination directory vanishing)
-            # must clean up tmp_name exactly like a failed write does,
-            # instead of leaving it behind because it happened one
-            # statement too late to be covered.
+            # must clean up tmp_name exactly like a failed write does.
             os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
             try:

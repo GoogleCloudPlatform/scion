@@ -243,7 +243,6 @@ func TestEnv_NeverInheritsAmbientEnvironment(t *testing.T) {
 	}
 }
 
-
 // TestSelfExe_IsTheProcMagicSymlink proves SelfExe returns the fixed magic
 // path, never a resolved on-disk path — the whole point being that this
 // string is immune to the on-disk binary being replaced.

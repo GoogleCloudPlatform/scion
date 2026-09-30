@@ -335,9 +335,10 @@ func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *t
 }
 
 // TestAttachViaHub_PointGETForbidden_ListAlsoFails_ProceedsToDial covers a
-// UAT (non-hub-member) principal: neither the point-GET nor the LIST
-// fallback can produce the broker record (both 403), which is this client's
-// read access, not the runtime's own attach support. attachViaHub must
+// principal without broker-record read access (e.g. a UAT): neither the
+// point-GET nor the LIST fallback can produce the broker record (both 403),
+// which is this client's read access, not the runtime's own attach support.
+// attachViaHub must
 // treat that as unknown and proceed to dial rather than refuse client-side
 // — the broker's own dial-path gate stays authoritative for a runtime that
 // genuinely doesn't support attach.

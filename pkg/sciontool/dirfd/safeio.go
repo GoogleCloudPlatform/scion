@@ -171,12 +171,12 @@ const (
 	// refusing on sight.
 	//
 	// Use this for installing content into a location inside a directory
-	// the WORKLOAD owns outright (e.g. $HOME/.gitconfig, $HOME's
+	// the WORKLOAD owns outright (e.g. $HOME's agent-limits.json,
 	// agent-info.json): the workload can always recreate that same
 	// substitution the instant after a refusal would have run anyway, so
 	// refusing buys nothing, and a legitimate stale leaf (yesterday's
-	// gitconfig, yesterday's status file) is exactly what this call means to
-	// overwrite.
+	// agent-limits.json, yesterday's status file) is exactly what this call
+	// means to overwrite.
 	ReplaceLeaf
 
 	// RefuseSymlink checks path's leaf BEFORE doing any work — via

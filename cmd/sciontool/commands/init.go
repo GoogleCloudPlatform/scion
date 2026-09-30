@@ -2213,9 +2213,9 @@ var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 // workload had run `git config` itself: git writes through it in place, so
 // the symlink survives, and if it targets something the workload identity
 // cannot write (e.g. a root-owned file), the write fails with an ordinary
-// permission error, leaving that target untouched. There is no longer a
-// root-vs-workload boundary for a planted symlink to cross, so no private
-// staging copy or fd-based no-follow walk is needed to make that true.
+// permission error, leaving that target untouched. A planted symlink
+// therefore gives the workload nothing it could not do by running git
+// itself.
 //
 // When RequirePrivilegeDrop is set but uid/gid are not both usable, this
 // refuses outright (errSharedWorkspaceGitPrivilegeDropRequired) rather than
@@ -2224,18 +2224,16 @@ var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 // Otherwise (rootless, where PID 1 already IS the workload's own uid with
 // no separate root identity to protect against, or an unenforced runtime
 // with no host UID configured at all) there is no workload identity
-// distinct from the one already running this code, so this keeps the
-// pre-hardening behaviour: git config runs directly against gitconfigPath
-// under this process's own identity, no Credential override.
+// distinct from the one already running this code, so git config runs
+// directly against gitconfigPath under this process's own identity, no
+// Credential override.
 //
 // Independently of all three cases above, gitconfigPath is stat'd (never
 // opened) before every run: a FIFO planted there would make git's own open
 // block forever with no writer, hanging RunInit, and stat — unlike open —
-// never blocks on one. This is the one piece of the historical hardening
-// this function keeps unconditionally, since a hung startup is a concrete,
-// self-contained failure mode any of the three cases above can hit, not a
-// symlink-specific privilege question the uid separation above already
-// answers.
+// never blocks on one. A hung startup is a concrete, self-contained failure
+// mode any of the three cases above can hit, not a symlink-specific
+// privilege question the uid separation above already answers.
 func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop bool) error {
 	log.Info("Configuring git credentials for shared workspace")
 

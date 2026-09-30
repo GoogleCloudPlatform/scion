@@ -465,8 +465,8 @@ func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
 // TestChownRecursive_Enforced_SkipsHardlinkedRegularFile proves the
 // hard-link guard is enabled when requirePrivilegeDrop is true: a regular
 // file with more than one hard link is left unchowned, and the skip is
-// logged at the real WARN level (log.Warn), not Info with an inline "WARN:"
-// substring standing in for a level pkg/sciontool/log always had.
+// logged at the real WARN level (log.Warn), not an Info line carrying an
+// inline "WARN:" substring.
 func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
