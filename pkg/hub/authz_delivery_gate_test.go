@@ -48,7 +48,9 @@ func withDeliveryCredentialKinds(t *testing.T, kinds ...CredentialKind) {
 // deliveryCredentialKinds, and gains a row here with delivery set to true,
 // only together with the rest of the ptone/scion#2228 part 2 contract (see
 // authz_delivery_gate.go): the bound target agent, non-attestation and
-// non-substitution for the item grant.
+// non-substitution for the item grant, and the two binding preconditions
+// listed there: the kind is bound to the credential type, and the section
+// 4.6 deliver effect ceiling applies.
 var deliveryGateKindCases = []struct {
 	kind     CredentialKind
 	delivery bool
