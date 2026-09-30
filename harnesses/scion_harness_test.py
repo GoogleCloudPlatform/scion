@@ -1815,6 +1815,47 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"ok": True})
 
+    def test_fdopen_failure_closes_fd_without_leaking(self):
+        """If os.fdopen itself raises before wrapping fd in a file object,
+        nothing else owns that raw fd number yet, so atomic_write_json must
+        close it explicitly rather than leaking it.
+        """
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "out.json")
+
+        open_fds_before = set(os.listdir("/proc/self/fd"))
+        with mock.patch("os.fdopen", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                sh.atomic_write_json(path, {"a": 1})
+        open_fds_after = set(os.listdir("/proc/self/fd"))
+
+        self.assertEqual(
+            open_fds_before,
+            open_fds_after,
+            "atomic_write_json leaked a file descriptor when os.fdopen failed",
+        )
+        self.assertFalse(os.path.exists(path))
+
+    def test_replace_failure_cleans_up_temp_file(self):
+        """A failed os.replace (e.g. a cross-device rename, or the
+        destination directory vanishing) must clean up the temp file the
+        same way a failed write does — os.replace runs inside the same
+        try/except as the write, not after it, so its own failure is
+        covered by the identical cleanup-and-reraise path.
+        """
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "out.json")
+
+        with mock.patch("os.replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                sh.atomic_write_json(path, {"a": 1})
+
+        self.assertEqual(
+            os.listdir(directory),
+            [],
+            "a failed os.replace must not leave the temp file behind",
+        )
+
     def test_temp_name_is_unique_per_call(self):
         # Pins the property the two tests above depend on: two calls in a
         # row never reuse the same temp name, so the second call's own

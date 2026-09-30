@@ -136,16 +136,29 @@ def atomic_write_json(path: str, payload: Any) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         fd = os.open(tmp_name, flags, 0o666, dir_fd=dir_fd)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except BaseException:
+                # os.fdopen itself failed before wrapping fd in a file
+                # object, so nothing owns fd yet and nothing will close it
+                # unless this does.
+                os.close(fd)
+                raise
+            with f:
                 json.dump(payload, f, indent=2, sort_keys=True)
                 f.write("\n")
+            # Inside the same try as the write: a failed replace (e.g. a
+            # cross-device rename, or the destination directory vanishing)
+            # must clean up tmp_name exactly like a failed write does,
+            # instead of leaving it behind because it happened one
+            # statement too late to be covered.
+            os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
             try:
                 os.unlink(tmp_name, dir_fd=dir_fd)
             except OSError:
                 pass
             raise
-        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     finally:
         os.close(dir_fd)
 
