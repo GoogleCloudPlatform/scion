@@ -3,7 +3,7 @@
 PR: ptone/scion#2270, branch `scion/broker-settings-p1b`.
 Base (as of the round-2 fixes below): upstream `GoogleCloudPlatform/scion` main
 `1526431232616f0b50d21d42db499e27710ccf5d` (rebased twice during review to pick
-up GoogleCloudPlatform/scion#2101 and #2103; see "Review rounds" below for the
+up GoogleCloudPlatform/scion#2101 and GoogleCloudPlatform/scion#2103; see "Review rounds" below for the
 history of heads).
 Design: `/scion-volumes/scratchpad/projects/broker-settings/design.md` §4.4, 4.5, 4.7 (P1b), 4.8 (AC4, AC5).
 
@@ -135,7 +135,7 @@ GoogleCloudPlatform/scion#2103).
 **Round 1** (reviewer `broker-settings-rev-p1b-1`, head `b0e59348`, base upstream
 `e1f682ea`): REQUEST CHANGES. Findings F1-F5, all addressed at head
 `6e0a8017` (base rebased onto upstream `1526431232616f0b`, which brought in
-GoogleCloudPlatform/scion#2101 and #2103, both needed to unblock CI on
+GoogleCloudPlatform/scion#2101 and GoogleCloudPlatform/scion#2103, both needed to unblock CI on
 unrelated pre-existing breaks):
 
 - **F1 (required, data race).** `brokerQuotasEnforced()` read
