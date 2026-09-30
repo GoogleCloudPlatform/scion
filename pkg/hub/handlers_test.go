@@ -75,35 +75,35 @@ func testServer(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
-		// srv.Shutdown is a no-op here (it only tears down background
-		// services when srv.httpServer is set, i.e. after Start() — which
-		// unit tests calling handlers directly never do). Without this,
-		// every one of this helper's ~2200 call sites across pkg/hub leaks
-		// three chatLinkService.cleanupLoop goroutines (telegram/discord/
-		// teams, started unconditionally by New()) and one
-		// BrokerAuthService/NonceCache.cleanup goroutine (ptone/scion#2418:
-		// found via -race, where the accumulated leak from thousands of
-		// prior tests was enough to blow later tests' tight deadline
-		// budgets). Each Close()/Stop() below is sync.Once-guarded and safe
-		// to call even when the field is already stopped or was never used.
-		if srv.telegramLinkService != nil {
-			srv.telegramLinkService.Close()
-		}
-		if srv.discordLinkService != nil {
-			srv.discordLinkService.Close()
-		}
-		if srv.teamsLinkService != nil {
-			srv.teamsLinkService.Close()
-		}
-		if srv.brokerAuthService != nil {
-			srv.brokerAuthService.Close()
-		}
-		if srv.previewService != nil {
-			srv.previewService.Close()
-		}
+		closeTestServerBackground(srv)
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
 	return srv, s
+}
+
+// closeTestServerBackground stops the background goroutines New() starts on
+// every Server: three chatLinkService.cleanupLoop (telegram/discord/teams),
+// NonceCache.cleanup, and PreviewService.cleanupNonces. srv.Shutdown() never
+// closes these when srv.httpServer is nil, i.e. without Start(), which unit
+// tests never call. Each Close/Stop is idempotent, and these calls run
+// sequentially, so NonceCache.Stop's plain select/close (not sync.Once) is
+// safe here. Refs ptone/scion#2418 (possible contributor; not proven).
+func closeTestServerBackground(srv *Server) {
+	if srv.telegramLinkService != nil {
+		srv.telegramLinkService.Close()
+	}
+	if srv.discordLinkService != nil {
+		srv.discordLinkService.Close()
+	}
+	if srv.teamsLinkService != nil {
+		srv.teamsLinkService.Close()
+	}
+	if srv.brokerAuthService != nil {
+		srv.brokerAuthService.Close()
+	}
+	if srv.previewService != nil {
+		srv.previewService.Close()
+	}
 }
 
 // doRequest performs an HTTP request against the test server.
@@ -2157,23 +2157,7 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
 		_ = srv.Shutdown(context.Background())
-		// See testServer's cleanup above (ptone/scion#2418) for why this is
-		// needed in addition to Shutdown.
-		if srv.telegramLinkService != nil {
-			srv.telegramLinkService.Close()
-		}
-		if srv.discordLinkService != nil {
-			srv.discordLinkService.Close()
-		}
-		if srv.teamsLinkService != nil {
-			srv.teamsLinkService.Close()
-		}
-		if srv.brokerAuthService != nil {
-			srv.brokerAuthService.Close()
-		}
-		if srv.previewService != nil {
-			srv.previewService.Close()
-		}
+		closeTestServerBackground(srv)
 		_ = s.Close()
 	})
 	return srv, s
