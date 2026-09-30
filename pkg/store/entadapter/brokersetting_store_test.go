@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -223,4 +224,31 @@ func TestDeleteRuntimeBroker_NoSettingsRow(t *testing.T) {
 	require.NoError(t, projectStore.CreateRuntimeBroker(ctx, broker))
 
 	assert.NoError(t, projectStore.DeleteRuntimeBroker(ctx, broker.ID))
+}
+
+// TestDeleteRuntimeBroker_NonCanonicalID_DeletesBrokerSettings pins AC-P2-4
+// against a non-canonical delete path (review round 2, R3): deleting via an
+// uppercase form of the broker's ID must still delete the settings row,
+// which is always stored under the canonical (lowercase) ID.
+func TestDeleteRuntimeBroker_NonCanonicalID_DeletesBrokerSettings(t *testing.T) {
+	client := enttest.NewClient(t)
+	projectStore := NewProjectStore(client)
+	settingStore := NewBrokerSettingStore(client)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     "33333333-3333-3333-3333-333333333333",
+		Name:   "Broker Three",
+		Slug:   "broker-three",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, projectStore.CreateRuntimeBroker(ctx, broker))
+
+	_, err := settingStore.PutBrokerSettings(ctx, broker.ID, store.BrokerSettings{MaxAgents: int64ptr(5)}, 0, "admin@test.com")
+	require.NoError(t, err)
+
+	require.NoError(t, projectStore.DeleteRuntimeBroker(ctx, strings.ToUpper(broker.ID)))
+
+	_, err = settingStore.GetBrokerSettings(ctx, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "deleting via a non-canonical ID must still delete the canonical settings row")
 }

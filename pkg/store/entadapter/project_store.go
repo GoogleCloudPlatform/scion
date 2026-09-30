@@ -949,7 +949,13 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	if err := tx.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
 	}
-	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(id)).Exec(ctx); err != nil {
+	// Key off uid.String() (the canonical form), not the raw id parameter:
+	// PutBrokerSettings/GetBrokerSettings always store/read under the
+	// canonical broker ID (pkg/hub/broker_settings_handlers.go), so
+	// deleting by the raw, possibly non-canonical id here would silently
+	// miss the row for any caller that used an uppercase/braced/urn UUID
+	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
+	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

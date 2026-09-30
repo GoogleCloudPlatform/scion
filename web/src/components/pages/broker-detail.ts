@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, RuntimeBroker, Agent, BrokerSettingsResponse } from '../../shared/types.js';
+import type {
+  PageData,
+  RuntimeBroker,
+  Agent,
+  BrokerSettingsResponse,
+  InheritedSetting,
+} from '../../shared/types.js';
 import { getAgentDisplayStatus } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -804,6 +810,21 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
+  /** Renders the "default" radio's label from EffectiveSetting.inherited —
+   * what clearing the override would produce — rather than from the
+   * currently-active effective value/source, so it is correct in every
+   * state, including while an override is active (design.md §5.6, review
+   * round 2, R2): the admin sees the real inherited value at exactly the
+   * moment they're deciding whether to clear the override, named by its
+   * actual source (hub default vs. entitlement), with 0 shown as
+   * "unlimited" rather than the bare number. */
+  private inheritedRadioLabel(inherited: InheritedSetting): string {
+    if (inherited.value === null) return 'Use hub default';
+    const value = inherited.value === 0 ? 'unlimited' : String(inherited.value);
+    const sourceName = inherited.source === 'entitlement' ? 'entitlement default' : 'hub default';
+    return `Use ${sourceName} (${value})`;
+  }
+
   /** Syncs the radio/number-input form state from the loaded settings
    * document. Called after every successful load/save, not on every
    * re-render, so mid-edit user input isn't clobbered. */
@@ -882,18 +903,7 @@ export class ScionPageBrokerDetail extends LitElement {
     const settings = this.brokerSettings;
     const canEdit = settings._capabilities.update;
     const effective = settings.effective.maxAgents;
-    // The hub/entitlement default number is only known from this endpoint
-    // when the *stored* effective source is not "broker" — i.e. no override
-    // is currently in effect server-side. This must key off effective.source,
-    // not the local radio selection (brokerSettingsMode): while an override
-    // is active, flipping the radio to "default" before saving must not
-    // relabel it using the still-in-effect override's value (round 1 review,
-    // F4) — the label only updates once the save actually clears it and a
-    // fresh response comes back with a non-"broker" source.
-    const hubDefaultKnown = effective.source !== 'broker' && effective.value !== null;
-    const hubDefaultLabel = hubDefaultKnown
-      ? `Use hub default (${effective.value})`
-      : 'Use hub default';
+    const hubDefaultLabel = this.inheritedRadioLabel(effective.inherited);
 
     return html`
       <div class="section">

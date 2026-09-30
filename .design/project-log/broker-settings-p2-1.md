@@ -26,8 +26,13 @@ upstream at time of writing). Design: `/scion-volumes/scratchpad/projects/broker
   `quota.update` authzop catalog entries with a new `EntryPoint` each (`.design/authorization-operation-catalog.md`
   regenerated via `go test ./pkg/hub/authzop/...`). GET requires `broker.read` on the broker
   resource (so an owner can always see their own broker's settings, even read-only); PUT requires
-  `broker.read` as a precondition plus each present key's declared permission checked against
-  `Resource{quota, hub}` — for `maxAgents` that's `quota.update`, hub-admin only, matching P2-D3.
+  `broker.read` as a precondition, plus a stale-revision check *before* authorization (a caller's
+  `expectedRevision` must match the freshly-read current revision, or 409), plus the declared
+  permission of every key whose value actually *changes* between the stored document and the new
+  one — not just the keys present in the request, since PUT is a full replace and an omitted or
+  `null` key clears it. For `maxAgents` that's `quota.update` on `Resource{quota, hub}`, hub-admin
+  only, matching P2-D3. A no-op write (nothing changes) skips the store entirely: no revision bump,
+  no `updatedBy` rewrite, no audit event, no row created for a broker that never had one.
 - **One read model, shared by enforcement and every read path** (design.md §5.9, AC-P2-10):
   `effectiveBrokerLimit`/`brokerCapacity` (`pkg/hub/broker_capacity.go`) implement the P2-D2
   precedence — broker setting > entitlement binding > hub-wide default. `QuotaService` gained a
@@ -94,12 +99,16 @@ upstream at time of writing). Design: `/scion-volumes/scratchpad/projects/broker
 - **Postgres**: installed PostgreSQL 15 locally (`apt-get install postgresql`) since no external
   instance was provided, started it, and ran the `entadapter` package's `-tags integration` suite
   against it end to end (`SCION_TEST_POSTGRES_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-  go test -tags integration ./pkg/store/entadapter/...`), which provisions a fresh ephemeral
-  database and a schema-per-test — this is the same path `pkg/store/enttest` documents for CI-style
-  Postgres verification. All `BrokerSettingStore` tests (`TestGetBrokerSettings_*`,
-  `TestPutBrokerSettings_*`, `TestDeleteBrokerSettings_*`, `TestDeleteRuntimeBroker_*SettingsRow`) and
-  the full `entadapter` package passed against real Postgres, exercising the `SELECT ... FOR UPDATE`
-  CAS path that SQLite's single-writer lock never touches.
+  go test -tags integration -timeout 30m ./pkg/store/entadapter/...`), which provisions a fresh
+  ephemeral database and a schema-per-test — this is the same path `pkg/store/enttest` documents for
+  CI-style Postgres verification. All `BrokerSettingStore`/`DeleteRuntimeBroker` tests
+  (`TestGetBrokerSettings_*`, `TestPutBrokerSettings_*`, `TestDeleteBrokerSettings_*`,
+  `TestDeleteRuntimeBroker_*`) pass against real Postgres, exercising the `SELECT ... FOR UPDATE` CAS
+  path that SQLite's single-writer lock never touches. The full `entadapter` package run has 4
+  failures — `TestBackfillAgentIdentityKeys_{EarlierSlugBeatsLaterDisplayKey,LaterSlugSurvivesEarlierDisplayKey,DisplayVsDisplayKeepsFirst}`
+  and `TestUpsertConversationByExternalRef_FieldClassification` — confirmed (by an independent
+  reviewer, running in parallel against the same server) to fail identically on the unmodified base
+  `e8013da1`; they are pre-existing and unrelated to this change.
 - `npx tsc --noEmit` (web/) — clean.
 - `hack/check-authz-guards.sh` — no violations.
 - `go test ./pkg/hub/authzop/...` — regenerated and validated `.design/authorization-operation-catalog.md`.

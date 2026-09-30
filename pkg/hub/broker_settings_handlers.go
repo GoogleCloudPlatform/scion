@@ -48,6 +48,23 @@ type EffectiveSetting struct {
 	// detail page must render this rather than compute its own count from a
 	// visibility-filtered agent list.
 	Count *int64 `json:"count,omitempty"`
+	// Inherited is what Value/Source would be if this key's own broker
+	// setting were cleared — the entitlement-engine resolution (bindings,
+	// then the hub-wide default), skipping the broker-override precedence
+	// step. It is populated in every state, including while an override is
+	// currently active, so the UI can always label "Use hub default (N)"
+	// (or the entitlement value) correctly — not just after the override is
+	// cleared (design.md §5.6, review round 2, R2).
+	Inherited InheritedSetting `json:"inherited"`
+}
+
+// InheritedSetting is EffectiveSetting.Inherited's shape: a value/source pair
+// with no Count of its own (usage is about the currently active setting,
+// regardless of what clearing it would fall back to).
+type InheritedSetting struct {
+	// Value is nil only when resolution errors; Source is then "" too.
+	Value  *int64 `json:"value"`
+	Source string `json:"source"`
 }
 
 // BrokerSettingsEffective holds the effective value for every registered
@@ -208,18 +225,50 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	currentRev := int64(0)
 	var oldSettings store.BrokerSettings
 	if current != nil {
+		currentRev = current.Revision
 		oldSettings = current.Settings
+	}
+
+	// R1 (review round 2): the permission diff below is only a valid
+	// authorization decision for the document expectedRevision claims to
+	// replace. Reject a mismatch here, before authorization, rather than
+	// letting a caller declare a revision that doesn't match what was just
+	// read — otherwise the diff could be computed against a stale
+	// snapshot while a same-numbered concurrent write lands underneath,
+	// letting the write proceed against content it was never authorized
+	// against. The store's own CAS (below) still independently guards the
+	// narrower remaining window between this read and the actual write:
+	// if the revision has moved again by then, that write fails with a
+	// plain 409, never a bypass.
+	if req.ExpectedRevision != currentRev {
+		writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"error":   ErrCodeRevisionConflict,
+			"message": "Broker settings were modified concurrently. Refresh and retry.",
+			"current": s.buildBrokerSettingsResponse(r, brokerID, current),
+		})
+		return
 	}
 
 	// Authorize every key whose value actually changes (set, cleared, or
 	// changed to a different value) — a key a caller left untouched, or
 	// re-sent identical to its current value, needs no permission.
-	for _, def := range changedBrokerSettingsKeys(oldSettings, newSettings) {
+	changed := changedBrokerSettingsKeys(oldSettings, newSettings)
+	for _, def := range changed {
 		if !s.authorizeBrokerSettingWrite(w, r, def) {
 			return
 		}
+	}
+
+	// C1 (review round 2): nothing changed, so skip the write entirely —
+	// no revision bump, no updatedBy rewrite (which would misattribute an
+	// admin-set value to whoever merely re-sent it), no audit event, and
+	// no empty row created for a broker that never had one.
+	if len(changed) == 0 {
+		writeJSON(w, http.StatusOK, s.buildBrokerSettingsResponse(r, brokerID, current))
+		return
 	}
 
 	updatedBy := ""
@@ -344,6 +393,13 @@ func (s *Server) buildBrokerSettingsResponse(r *http.Request, brokerID string, r
 		}
 		resp.Effective.MaxAgents.Value = &value
 	}
+
+	if inheritedValue, inheritedSource, err := s.inheritedBrokerLimit(ctx, brokerID, limitDef); err == nil {
+		v := inheritedValue
+		resp.Effective.MaxAgents.Inherited = InheritedSetting{Value: &v, Source: inheritedSource}
+	}
+	// else: leave the zero value (Value nil, Source "") — resolution failed,
+	// same convention as the top-level Value/Source.
 
 	resp.Capabilities.Update = s.canWriteBrokerSettingKey(ctx, GetIdentityFromContext(ctx), brokersettings.MaxAgents)
 

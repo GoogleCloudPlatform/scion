@@ -819,6 +819,23 @@ export interface EffectiveSetting {
    * counts against (shared via brokerCapacity, AC-P2-9/AC-P2-10). Omitted
    * when resolution failed or the key isn't quota-backed. */
   count?: number;
+  /** What value/source would apply if this key's own broker override were
+   * cleared (the entitlement engine: bindings, then the hub-wide default).
+   * Populated in every state, including while an override is active, so the
+   * UI can label "Use hub default (N)" correctly at exactly the moment an
+   * admin is deciding whether to clear it. */
+  inherited: InheritedSetting;
+}
+
+/**
+ * EffectiveSetting.inherited's shape (design.md §5.6, review round 2 R2).
+ * Mirrors Go InheritedSetting (pkg/hub/broker_settings_handlers.go).
+ */
+export interface InheritedSetting {
+  /** null only when resolution errored; source is then "" too. */
+  value: number | null;
+  /** "entitlement" | "hub_default" | "unlimited" | "" */
+  source: string;
 }
 
 /**

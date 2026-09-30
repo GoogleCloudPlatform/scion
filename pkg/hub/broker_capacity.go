@@ -71,9 +71,25 @@ func (s *Server) effectiveBrokerLimit(ctx context.Context, brokerID string, limi
 		return overrideValue, BrokerLimitSourceBroker, nil
 	}
 
+	return s.inheritedBrokerLimit(ctx, brokerID, limitDef)
+}
+
+// inheritedBrokerLimit resolves what the effective limit and source would be
+// for brokerID if its own settings.maxAgents were unset — i.e. it skips step
+// 2 of the P2-D2 precedence (design.md §5.2) and goes straight to the
+// entitlement engine / hub-wide default. It is effectiveBrokerLimit's "else"
+// branch, factored out so the settings API can report it directly: the
+// broker detail page needs to know what "clear the override" would produce
+// even while an override is currently active, when effectiveBrokerLimit
+// itself is reporting "broker" (design.md §5.6, review round 2, R2).
+func (s *Server) inheritedBrokerLimit(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (value int64, source string, err error) {
+	if limitDef == nil || s.quotaService == nil {
+		return 0, BrokerLimitSourceUnlimited, nil
+	}
+
 	value, fromBinding, err := s.quotaService.resolveEffectiveLimitWithSource(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
 	if err != nil {
-		return 0, "", fmt.Errorf("effective broker limit: resolve: %w", err)
+		return 0, "", fmt.Errorf("inherited broker limit: resolve: %w", err)
 	}
 	if fromBinding {
 		return value, BrokerLimitSourceEntitlement, nil

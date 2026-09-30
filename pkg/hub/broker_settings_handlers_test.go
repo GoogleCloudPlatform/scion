@@ -213,6 +213,136 @@ func TestBrokerSettings_Put_OwnerCannotClearViaOmission(t *testing.T) {
 }
 
 // =============================================================================
+// PUT: expectedRevision must match the freshly-read current revision before
+// authorization runs, not just at the eventual CAS (review round 2, R1). A
+// caller declaring a revision that doesn't match what the handler just read
+// gets 409 immediately, so the diff-based permission decision is always made
+// against the exact document the write would replace.
+// =============================================================================
+
+// TestBrokerSettings_Put_ExpectedRevisionMismatchIsConflictNotBypass is R1's
+// simple case: an owner declares a revision one ahead of the true current
+// revision (as if speculating about a write that hasn't happened yet). This
+// must be a plain 409, not 200 (silently accepted) or 403 (which would imply
+// the handler evaluated permission against the wrong document).
+func TestBrokerSettings_Put_ExpectedRevisionMismatchIsConflictNotBypass(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newPlainUser(t, s, "revision-mismatch-owner")
+	broker := newBrokerSettingsTestBroker(t, s, "revision-mismatch", owner.ID)
+
+	adminRec := doRequest(t, srv, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 1},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{},
+		"expectedRevision": 2, // true current revision is 1
+	})
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetBrokerSettings(context.Background(), broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Settings.MaxAgents)
+	assert.EqualValues(t, 1, *got.Settings.MaxAgents, "a revision-mismatched request must never apply")
+	assert.EqualValues(t, 1, got.Revision)
+}
+
+// racingBrokerSettingsPutStore triggers racer exactly once, the first time
+// PutBrokerSettings is called, before delegating to the real store. Used to
+// simulate a concurrent admin write landing between the handler's
+// GetBrokerSettings snapshot read and its own PutBrokerSettings call — the
+// narrow window R1's fix leaves deliberately open, guarded instead by the
+// store's own CAS.
+type racingBrokerSettingsPutStore struct {
+	store.Store
+	racer func()
+	fired bool
+}
+
+func (r *racingBrokerSettingsPutStore) PutBrokerSettings(ctx context.Context, brokerID string, settings store.BrokerSettings, expectedRevision int64, updatedBy string) (*store.BrokerSettingsRecord, error) {
+	if !r.fired {
+		r.fired = true
+		r.racer()
+	}
+	return r.Store.PutBrokerSettings(ctx, brokerID, settings, expectedRevision, updatedBy)
+}
+
+// TestBrokerSettings_Put_ConcurrentWriteBetweenReadAndCASIsConflictNotBypass
+// is R1's deterministic race test for the narrow window the fix
+// deliberately leaves open: two *authorized* writers (C1 means an
+// unauthorized, no-op request never reaches the store at all, so it can no
+// longer race here — see TestBrokerSettings_Put_NoOpOnFreshBrokerCreatesNoRow
+// and the permission-diff tests instead). Between the handler's own
+// snapshot read and its PutBrokerSettings call, a concurrent admin write
+// changes the value and bumps the revision. The first writer's now-stale
+// CAS must fail with a plain 409 — never silently overwrite the concurrent
+// write.
+func TestBrokerSettings_Put_ConcurrentWriteBetweenReadAndCASIsConflictNotBypass(t *testing.T) {
+	srv, s := testServer(t)
+	broker := newBrokerSettingsTestBroker(t, s, "race", "")
+
+	adminRec := doRequest(t, srv, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 1},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+
+	srv.store = &racingBrokerSettingsPutStore{
+		Store: s,
+		racer: func() {
+			_, err := s.PutBrokerSettings(context.Background(), broker.ID,
+				store.BrokerSettings{MaxAgents: int64ptrForTest(5)}, 1, "admin-concurrent")
+			require.NoError(t, err)
+		},
+	}
+
+	// This request is itself authorized (dev/admin token) and really does
+	// change the value (1 -> 10), so it reaches the actual PutBrokerSettings
+	// call — where the injected concurrent write has already landed.
+	rec := doRequest(t, srv, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 10},
+		"expectedRevision": 1, // stale by the time the CAS actually runs
+	})
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetBrokerSettings(context.Background(), broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Settings.MaxAgents)
+	assert.EqualValues(t, 5, *got.Settings.MaxAgents, "the concurrent write must survive; the stale write must never apply")
+}
+
+func int64ptrForTest(v int64) *int64 { return &v }
+
+// =============================================================================
+// PUT: a no-op write (nothing changes) skips the store write entirely
+// (review round 2, C1) — no revision bump, no updatedBy rewrite, no audit
+// event, and critically no empty row created for a broker that never had
+// one, which would otherwise misattribute a settings row to whoever merely
+// re-sent an unset/empty document.
+// =============================================================================
+
+func TestBrokerSettings_Put_NoOpOnFreshBrokerCreatesNoRow(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newPlainUser(t, s, "noop-owner")
+	broker := newBrokerSettingsTestBroker(t, s, "noop-fresh", owner.ID)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp BrokerSettingsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, int64(0), resp.Revision, "a no-op PUT must not create a row")
+
+	_, err := s.GetBrokerSettings(context.Background(), broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a no-op PUT on a fresh broker must not create an empty row")
+}
+
+// =============================================================================
 // PUT: hub-admin -> 200
 // =============================================================================
 
@@ -414,10 +544,69 @@ func TestBrokerSettings_HeartbeatLeavesSettingsUnchanged(t *testing.T) {
 }
 
 // =============================================================================
+// AC-P2-8: clearing the override falls back to the global default, with
+// source hub_default, on both the settings GET and the providers response
+// (review round 2, R4 — this leg was lost when the end-to-end test below
+// grew a system-scoped binding for F6/AC-P2-2, which makes *its* "clear"
+// leg fall back to that binding instead). No binding here, so this is the
+// plain hub_default path.
+// =============================================================================
+
+func TestBrokerSettings_ClearOverrideFallsBackToHubDefault(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	setRec := doRequest(t, srv, http.MethodPut, settingsPath(brokerID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 1},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, setRec.Code, setRec.Body.String())
+
+	clearRec := doRequest(t, srv, http.MethodPut, settingsPath(brokerID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": nil},
+		"expectedRevision": 1,
+	})
+	require.Equal(t, http.StatusOK, clearRec.Code, clearRec.Body.String())
+
+	settingsRec := doRequest(t, srv, http.MethodGet, settingsPath(brokerID), nil)
+	require.Equal(t, http.StatusOK, settingsRec.Code, settingsRec.Body.String())
+	var settingsResp BrokerSettingsResponse
+	require.NoError(t, json.Unmarshal(settingsRec.Body.Bytes(), &settingsResp))
+	require.NotNil(t, settingsResp.Effective.MaxAgents.Value)
+	assert.EqualValues(t, def.DefaultValue, *settingsResp.Effective.MaxAgents.Value)
+	assert.Equal(t, BrokerLimitSourceHubDefault, settingsResp.Effective.MaxAgents.Source)
+
+	providersRec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/providers", nil)
+	require.Equal(t, http.StatusOK, providersRec.Code, providersRec.Body.String())
+	var providersResp struct {
+		Providers []providerCapacityView `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(providersRec.Body.Bytes(), &providersResp))
+	require.Len(t, providersResp.Providers, 1)
+	require.NotNil(t, providersResp.Providers[0].AgentLimit)
+	assert.EqualValues(t, def.DefaultValue, *providersResp.Providers[0].AgentLimit)
+	assert.Equal(t, BrokerLimitSourceHubDefault, providersResp.Providers[0].AgentLimitSource)
+
+	// The hub default (which the seeded default comfortably exceeds 1 of)
+	// admits another agent on the now-uncapped broker.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "clear-fallback-1", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// =============================================================================
 // End to end through HTTP (design.md §5.7): set maxAgents=1 -> the 2nd
-// create on that broker returns 429; clear it -> the hub default applies;
-// another broker is unaffected. The providers endpoint and settings GET
-// agree with what Reserve enforces (AC-P2-10).
+// create on that broker returns 429 even below a system-scoped entitlement
+// binding (AC-P2-2); clear it -> the entitlement binding applies (see
+// TestBrokerSettings_ClearOverrideFallsBackToHubDefault for the plain
+// hub_default fallback, with no binding in play); another broker is
+// unaffected. The providers endpoint and settings GET agree with what
+// Reserve enforces (AC-P2-10).
 // =============================================================================
 
 func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
