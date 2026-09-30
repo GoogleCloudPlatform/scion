@@ -872,7 +872,19 @@ export class ScionFileBrowser extends LitElement {
       // so checking only that field here would silently skip this reset,
       // and a subsequent A -> null while an A request is still in flight
       // would let that stale request land after the source was cleared).
-      if (this._requestedSource !== null || this._inFlightSource !== null) {
+      //
+      // Also reset when there's settled state to clear even with nothing
+      // requested or in flight: disconnect (which nulls _requestedSource)
+      // followed by clearing dataSource to null, after the previous load
+      // had already completed, would otherwise leave `files` populated
+      // with the old source's stale rows indefinitely.
+      if (
+        this._requestedSource !== null ||
+        this._inFlightSource !== null ||
+        this.files.length > 0 ||
+        this.loading ||
+        this.error !== null
+      ) {
         this._requestedSource = null;
         this._loadToken++;
         this.files = [];

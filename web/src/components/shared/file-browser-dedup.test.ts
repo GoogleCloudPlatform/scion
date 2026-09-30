@@ -456,4 +456,30 @@ describe('scion-file-browser — one initial listing per data source', () => {
 
     expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['fresh.txt']);
   });
+
+  it('clears stale settled files when disconnected then cleared to null, even with nothing requested or in flight', async () => {
+    // Upstream review (GoogleCloudPlatform/scion#2175): after a load has
+    // already completed (so _requestedSource and _inFlightSource are both
+    // effectively idle once disconnectedCallback() nulls _requestedSource),
+    // clearing dataSource to null must still clear the stale `files` — not
+    // just skip the reset because nothing was "requested" or "in flight".
+    const { source, listFiles } = makeImmediateSource('a', ['foo.txt']);
+
+    const el = new FileBrowserCtor();
+    el.dataSource = source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(listFiles).toHaveBeenCalledTimes(1);
+    expect((el as { files: FileEntry[] }).files.map((f) => f.path)).toEqual(['foo.txt']);
+
+    // Disconnect (the load already settled, so nothing is in flight; this
+    // nulls _requestedSource) ...
+    document.body.removeChild(el);
+    // ... then clear the data source to null while detached.
+    el.dataSource = null;
+    await el.updateComplete;
+
+    expect((el as { files: FileEntry[] }).files).toEqual([]);
+  });
 });
