@@ -185,15 +185,22 @@ SETTINGS_VERSION=$(echo "$SETTINGS_JSON" | jq -r '.items[] | select(.path=="sett
 
 **Revision and image, pinned to the serving revision's digest — not the tag.** Pick
 the revision from the traffic split (not `latestReadyRevisionName`), so a service with
-pinned, non-latest traffic is handled correctly too:
+pinned, non-latest traffic is handled correctly too. This is the same guard §4 repeats
+before passes 2, 3 and 4 — defined once here, as `ROLLOUT_OK_JQ`, and reused verbatim
+there so the two checks can't drift apart:
 
 ```bash
 REVISION=$(echo "$SVC" | jq -r '.status.traffic[] | select(.percent==100) | .revisionName')
-echo "$SVC" | jq -e --arg rev "$REVISION" '
-    .status.latestReadyRevisionName == $rev
+ROLLOUT_OK_JQ='
+    (.status.traffic | length == 1)
+    and .status.traffic[0].percent == 100
+    and .status.traffic[0].revisionName == $rev
+    and ((.status.traffic[0].tag // "") == "")
+    and .status.latestReadyRevisionName == $rev
     and .status.latestCreatedRevisionName == $rev
-    and .metadata.generation == .status.observedGeneration' >/dev/null \
-  || echo "STOP: traffic is pinned to a non-latest revision, or a deploy is in progress or failed; see §8 step 3 to resolve, then restart §2"
+    and .metadata.generation == .status.observedGeneration'
+echo "$SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
+  || echo "STOP: traffic is pinned to a non-latest revision, a deploy is in progress or failed, or a traffic tag exists; remove any tag (§4) or see §8 step 3, then restart §2"
 REV_JSON=$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" --format=json)
 IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 ```
@@ -201,16 +208,19 @@ IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 Every other discovered value above (`SA`, network/subnet/egress, `CONN`, `HUB_ID`, the
 DSN version, the settings version) comes from `$SVC.spec.template` — the newest
 revision's template — while `REVISION`/`IMG` come from whichever revision has 100% of
-traffic. Those are normally the same revision, but two cases can split them: a
-traffic-only rollback to an older revision (a revert is never just a traffic pin — this
-stops here; see §8 step 3 to resolve it), and a deploy whose new revision fails to
-become ready or hasn't finished rolling out yet (`latestCreatedRevisionName` differs
-from `latestReadyRevisionName`, or `metadata.generation` is ahead of
-`status.observedGeneration`). In both, `spec.template` belongs to a revision that isn't
-the one serving traffic, so the job would run one revision's binary against another
-revision's settings and DSN versions. The check above stops all of these cases before
-it reaches job creation; if it prints `STOP`, see §8 step 3 to resolve the rollout, then
-restart from the top of this section before continuing.
+traffic. Those are normally the same revision, but three things can split them: a
+traffic-only rollback to an older revision — including §8 step 2's, which is a
+temporary mitigation, not a completed revert, and stops here until §8 step 3 makes the
+latest revision serve 100% again — a deploy whose new revision fails to become ready
+or hasn't finished rolling out yet (`latestCreatedRevisionName` differs from
+`latestReadyRevisionName`, or `metadata.generation` is ahead of
+`status.observedGeneration`), and any traffic tag, on any revision: a tagged revision
+is a live legacy-name writer that `--delete-legacy` must rule out (see §4). In the
+first two, `spec.template` belongs to a revision that isn't the one serving traffic,
+so the job would run one revision's binary against another revision's settings and
+DSN versions. The check above stops all of these cases before it reaches job creation;
+if it prints `STOP`, remove any traffic tag (§4) or see §8 step 3 to resolve the
+rollout, then restart from the top of this section before continuing.
 
 `.status.imageDigest` on a v1 Revision is already the resolved **full reference**
 (`<registry>/<path>@sha256:<hex>`), not a bare `sha256:<hex>` — use it as-is for
@@ -311,21 +321,14 @@ tracked separately in
 [ptone/scion#2396](https://github.com/ptone/scion/issues/2396).)
 
 The **rollout check** below re-appears before passes 2, 3, and 4 — it always fetches
-live state, so it can't be fooled by a stale `$SVC` captured back in §2:
+live state, so it can't be fooled by a stale `$SVC` captured back in §2, and it reuses
+`$ROLLOUT_OK_JQ` from §2 verbatim, so this gate and that guard can't disagree:
 
 ```bash
 FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
-echo "$FRESH_SVC" \
-  | jq -e --arg rev "$REVISION" '
-      (.status.traffic | length == 1)
-      and .status.traffic[0].percent == 100
-      and .status.traffic[0].revisionName == $rev
-      and ((.status.traffic[0].tag // "") == "")
-      and .status.latestReadyRevisionName == $rev
-      and .status.latestCreatedRevisionName == $rev
-      and .metadata.generation == .status.observedGeneration' \
+echo "$FRESH_SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
   && echo "OK: 100% on $REVISION" \
-  || echo "STOP: rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists"
+  || echo "STOP: rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists; remove any traffic tag (see below), otherwise see §8 step 3"
 ```
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
@@ -596,20 +599,28 @@ runbook doesn't cover:
    exists, delete it and confirm it's gone (§6: `gcloud run jobs delete
    "${HUB}-migrate-names" --project "$PROJECT" --region "$REGION" --quiet`, then
    `gcloud run jobs list --project "$PROJECT" --region "$REGION"
-   --filter="metadata.name=${HUB}-migrate-names"` should return no rows). Then make
-   the latest ready revision serve 100% again, once the underlying blocker (org
-   policy, IAM, quota) is resolved: roll forward (`gcloud run services
-   update-traffic "$HUB" --project "$PROJECT" --region "$REGION" --to-latest`) if
-   the revision itself wasn't at fault; if the revision itself was the problem,
-   redeploy a fixed or known-good image as a new revision first, through the
-   module's normal Terraform apply, then shift traffic to it the same way. Either
-   route ends with `update-traffic … --to-latest` — the module declares no
-   `traffic` block, so the apply alone leaves step 2's pin in place; it doesn't
-   reset traffic to the new revision on its own. Only once traffic,
-   `latestReadyRevisionName` and `latestCreatedRevisionName` agree and
-   `metadata.generation` equals `status.observedGeneration`, restart the whole
-   procedure from §2, which creates a fresh job re-pinned to whatever revision is
-   now serving.
+   --filter="metadata.name=${HUB}-migrate-names"` should return no rows). Then clear
+   whatever caused the STOP:
+   - A **traffic pin from step 2**, or an unfinished rollout of an otherwise healthy
+     revision: roll forward — `gcloud run services update-traffic "$HUB" --project
+     "$PROJECT" --region "$REGION" --to-latest`.
+   - A **deploy still in progress** (`metadata.generation` ahead of
+     `status.observedGeneration`): wait for it to finish, then re-check — it then
+     resolves into the roll-forward case above.
+   - A **failed deploy** (`latestCreatedRevisionName` != `latestReadyRevisionName`):
+     `--to-latest` won't clear this, since traffic already sits on the latest
+     *ready* revision. Redeploy a known-good image as a new revision first, through
+     the module's normal Terraform apply, then roll forward as above.
+   - A **traffic tag**: remove it — `gcloud run services update-traffic "$HUB"
+     --project "$PROJECT" --region "$REGION" --remove-tags=<tag>`.
+
+   Resolve the underlying blocker (org policy, IAM, quota) first if that's what's
+   stopping the redeploy or roll-forward. The module declares no `traffic` block, so a
+   Terraform apply alone leaves step 2's pin in place — it doesn't reset traffic to
+   the new revision on its own, which is why `--to-latest` still follows it. Then
+   restart from §2 once its check prints no STOP (no traffic tags, latest ready
+   revision at 100%, generation == observedGeneration); §2 creates a fresh job
+   re-pinned to whatever revision is now serving.
 4. **Escalate** to the project owner if the job still cannot be created or run. No
    command in this procedure, and no ad hoc substitute for it, may read the DSN or
    the settings secret outside this job.
