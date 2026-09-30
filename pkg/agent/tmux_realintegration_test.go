@@ -195,8 +195,7 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	stripped = bytes.TrimSuffix(stripped, []byte("\x1b[201~"))
 
 	// The payload must land byte-for-byte, and exactly once: a double paste
-	// (the round-1 failure mode this test guards against) would reappear
-	// right after the first copy, not blend into it.
+	// would reappear right after the first copy, not blend into it.
 	if !bytes.HasPrefix(stripped, []byte(payload)) {
 		t.Fatalf("pane output did not start with the payload byte-for-byte: got %d bytes, want a prefix of length %d", len(stripped), len(payload))
 	}
@@ -209,7 +208,11 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	tail := stripped[len(payload):]
 	for _, c := range tail {
 		if c != '\n' {
-			t.Fatalf("pane output carried more than the payload plus trailing Enters: got %d extra byte(s) after the payload, starting %q", len(tail), tail)
+			prefixLen := len(tail)
+			if prefixLen > 200 {
+				prefixLen = 200
+			}
+			t.Fatalf("pane output carried more than the payload plus trailing Enters: got %d extra byte(s) after the payload, starting %q", len(tail), tail[:prefixLen])
 		}
 	}
 }
