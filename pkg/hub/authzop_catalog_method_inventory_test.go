@@ -44,7 +44,12 @@ type liveInventoryKey struct {
 // method + a real target must not 404/405". Each reason must be true and
 // specific. This check is skipped only when dispatching the declared method
 // for real would itself be the problem — a real external or host-level side
-// effect — never merely because a fixture would be inconvenient.
+// effect — never merely because a fixture would be inconvenient. Because the
+// side effect risk applies to any real dispatch of the declared method, not
+// just the un-suffixed one, the suffix check is also skipped for every key
+// here (logged with this same reason): both checks that send the declared
+// method are skipped, and only the control check (which never sends it)
+// still runs.
 // TestLiveInventoryExclusionsNotStale asserts every key here still names a
 // real, currently-declared catalog HTTP entry point.
 var positiveCheckExclusions = map[liveInventoryKey]string{
@@ -684,14 +689,16 @@ const bogusSegment = "live-inventory-bogus-suffix"
 //     falls through for any unrecognized suffix; extractID-based handlers
 //     truncate at the first '/' and discard the rest rather than folding
 //     it into the ID. This is a real, named limitation, not an oversight.
-//   - Full path correctness when the positive check's 2xx/4xx comes from a
-//     pre-dispatch condition unrelated to routing — most commonly a 5xx for
-//     a backend this test server does not configure (the secret backend,
-//     the metrics/telemetry project, Cloud Logging, GCP verification). For
-//     those entries this test still proves the method and the coarse
-//     path-length are right (both other checks still run), but the
-//     positive check's own status code does not additionally confirm the
-//     handler did real work with the substituted parameters.
+//   - Full path correctness when the positive check's non-404/405 status
+//     comes from a pre-dispatch condition unrelated to routing — most
+//     commonly a 5xx or 503 for a backend this test server does not
+//     configure (the secret backend, the metrics/telemetry project,
+//     attachment storage), or a body-validation 400 before the path ID is
+//     used. For those entries the positive check confirms only that the
+//     route and method exist. The control and suffix checks still run
+//     unless the entry is excluded from them — several of these are
+//     excluded from the suffix check, and gcp.identity.verify from the
+//     control check (see the maps above).
 func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -702,7 +709,7 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 	queryFor := queryOverrides(f)
 	bodyFor := bodyOverrides(f)
 
-	tested, controlChecked, suffixChecked := 0, 0, 0
+	tested, controlChecked, suffixChecked, suffixSkipped := 0, 0, 0, 0
 	for _, entry := range catalogHTTPEntryPoints() {
 		ep := entry.EntryPoint
 		key := liveInventoryKey{OperationID: entry.OperationID, Method: ep.Method, Pattern: ep.Pattern}
@@ -753,8 +760,16 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 		// "/api/v1/secrets/"), so an undeclared suffix on the static route
 		// can fall through to that other handler exactly the way a missing
 		// segment on a parameterised route would.
-		if reason, excluded := suffixCheckExclusions[key]; excluded {
+		if reason, excluded := positiveCheckExclusions[key]; excluded {
+			// A key excluded from the positive check is excluded here too:
+			// the side effect risk that rules out sending the declared
+			// method to the bare target applies just as much to sending it
+			// to the same target plus a bogus suffix.
 			t.Logf("suffix check skipped for %s %s (operation %s): %s", ep.Method, path, entry.OperationID, reason)
+			suffixSkipped++
+		} else if reason, excluded := suffixCheckExclusions[key]; excluded {
+			t.Logf("suffix check skipped for %s %s (operation %s): %s", ep.Method, path, entry.OperationID, reason)
+			suffixSkipped++
 		} else {
 			suffixPath := path
 			if q, ok := queryFor[ep.Pattern]; ok {
@@ -796,7 +811,7 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 		t.Fatal("no HTTP catalog entry points were exercised by the suffix check — this test is broken")
 	}
 	t.Logf("live method/path check: %d positive checks (%d excluded), %d control checks (%d excluded), %d suffix checks (%d excluded)",
-		tested, len(positiveCheckExclusions), controlChecked, len(controlCheckExclusions), suffixChecked, len(suffixCheckExclusions))
+		tested, len(positiveCheckExclusions), controlChecked, len(controlCheckExclusions), suffixChecked, suffixSkipped)
 }
 
 // TestLiveInventoryExclusionsNotStale asserts every entry in
