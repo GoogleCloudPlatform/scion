@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"sync"
 	"time"
@@ -178,6 +179,16 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
+	// experimentsOverrides is the "experiments" section's overrides, parsed
+	// once when cache["experiments"] is written (Refresh, Update) rather
+	// than per read. ExperimentsSnapshot is on a hot path (GET
+	// /api/v1/experiments runs on every page load, and requireExperiment
+	// runs per request), so it must not re-parse JSON on every call. Nil
+	// when the section is absent, malformed, or a valid document with no
+	// overrides field; always kept in step with cache["experiments"] under
+	// the same lock.
+	experimentsOverrides map[string]bool
+
 	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
 	events EventPublisher
 
@@ -271,6 +282,7 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 			Origin:    row.Origin,
 			Malformed: malformed,
 		}
+		o.setExperimentsCacheLocked(row.Section, row.Value, malformed)
 	}
 
 	// Detect deleted sections (in cache but not in DB).
@@ -278,10 +290,39 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		if !seen[name] {
 			changed = append(changed, name)
 			delete(o.cache, name)
+			if name == "experiments" {
+				o.experimentsOverrides = nil
+			}
 		}
 	}
 
 	return changed, nil
+}
+
+// setExperimentsCacheLocked keeps experimentsOverrides in step with
+// cache["experiments"]. Called with o.mu already held, from the same code
+// path that writes the cache entry (Refresh, Update), so the parsed
+// overrides never drifts from — or lags — the cached document. No-op for
+// any other section name.
+func (o *OperationalSettings) setExperimentsCacheLocked(section string, raw json.RawMessage, malformed bool) {
+	if section != "experiments" {
+		return
+	}
+	if malformed {
+		o.experimentsOverrides = nil
+		return
+	}
+	doc, docMalformed := opsettings.ParseExperimentsDoc(raw)
+	if docMalformed {
+		// The generic ingest check above already applies the same predicate
+		// (the "experiments" section's New() unmarshals into the same
+		// ExperimentsSettings shape ParseExperimentsDoc uses), so this
+		// cannot happen in practice. Fail closed rather than trust an
+		// inconsistent parse.
+		o.experimentsOverrides = nil
+		return
+	}
+	o.experimentsOverrides = doc.Overrides
 }
 
 // Snapshot returns an immutable merged Layer-1 view.
@@ -535,6 +576,7 @@ func (o *OperationalSettings) Update(
 		Origin:    result.Origin,
 		Malformed: malformed,
 	}
+	o.setExperimentsCacheLocked(section, result.Value, malformed)
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -1452,7 +1494,11 @@ type ExperimentsSnapshot struct {
 }
 
 // ExperimentsSnapshot returns one consistent view of the cached "experiments"
-// section. Read path. No logging here (Refresh logs once per ingest).
+// section. Read path: it never parses JSON. experimentsOverrides is parsed
+// once, when the cache entry is written (Refresh, Update); this only clones
+// that already-parsed map, so a caller mutating the returned map can never
+// affect another caller or a later snapshot. No logging here (Refresh logs
+// once per ingest).
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -1469,21 +1515,7 @@ func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 		UpdatedBy: state.UpdatedBy,
 		Present:   true,
 	}
-	if state.Malformed {
-		snap.Overrides = map[string]bool{}
-		return snap
-	}
-
-	doc, malformed := opsettings.ParseExperimentsDoc(state.Value)
-	if malformed {
-		// Should not happen: Refresh already validated via sec.New() using
-		// the same predicate. Fail closed rather than trust an inconsistent
-		// cache.
-		snap.Malformed = true
-		snap.Overrides = map[string]bool{}
-		return snap
-	}
-	snap.Overrides = doc.Overrides
+	snap.Overrides = maps.Clone(o.experimentsOverrides)
 	if snap.Overrides == nil {
 		snap.Overrides = map[string]bool{}
 	}

@@ -342,6 +342,31 @@ func TestExperimentsSnapshot(t *testing.T) {
 	}
 }
 
+// TestExperimentsSnapshot_MutatingResultDoesNotAffectNextCall proves
+// ExperimentsSnapshot hands out an independent copy of the cached overrides:
+// mutating one call's map must not change what the next call returns, and
+// must not change the resolved value of an untouched name.
+func TestExperimentsSnapshot_MutatingResultDoesNotAffectNextCall(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.test_gate":false}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	first := ops.ExperimentsSnapshot()
+	first.Overrides["hub.test_gate"] = true
+	first.Overrides["hub.injected"] = true
+
+	second := ops.ExperimentsSnapshot()
+	if v, ok := second.Overrides["hub.test_gate"]; !ok || v != false {
+		t.Errorf("second snapshot Overrides[hub.test_gate] = %v, %v; want false, true (unaffected by the first mutation)", v, ok)
+	}
+	if _, ok := second.Overrides["hub.injected"]; ok {
+		t.Error("second snapshot must not see a key injected into the first snapshot's map")
+	}
+}
+
 func TestReadAuthoritativeExperiments(t *testing.T) {
 	tests := []struct {
 		name          string
