@@ -11,19 +11,21 @@ The command opens the hub's own database directly from a DSN.
 **Scope:** this runbook is for Cloud Run hubs deployed with the hub-cloudrun
 Terraform module (one of the terraform-ha modules). Private-IP Cloud SQL, Direct VPC
 egress, and an explicit `hub_id` are prerequisites this module provides
-unconditionally: its Cloud SQL submodule hard-codes `ipv4_enabled = false`, so there
-is no public-IP variant of this module to support. The DSN is delivered as the
-`SCION_SERVER_DATABASE_URL` secret env var, and `settings.yaml` is mounted from a
-secret volume. No hub in this scope is ever operated from a workstation for this:
-this job is the only supported way to run `migrate-names` against it. Other Cloud
-Run layouts wired up by hand (not by this module) will need the discovery steps in
-§2 adapted to their own service definition.
+unconditionally: the terraform-ha Cloud SQL module (`cloudsql-instance`) hard-codes
+`ipv4_enabled = false`, so there is no public-IP variant of this module to support.
+The DSN is delivered as the `SCION_SERVER_DATABASE_URL` secret env var, and
+`settings.yaml` is mounted from a secret volume. No hub in this scope is ever
+operated from a workstation for this: this job is the only supported way to run
+`migrate-names` against it. Cloud Run hubs not deployed by this module — including
+ones wired up by hand — are not covered by this runbook; see
+[ptone/scion#2395](https://github.com/ptone/scion/issues/2395) for the tracked gap.
 
-Hubs deployed with the manual [Deploy on GCP](/scion/hosted/ha/setup-gcp/) guide are
-**not** covered by this runbook. That guide's hub uses a public-IP Cloud SQL
-instance with no Direct VPC egress, and keeps its DSN inside `settings.yaml` rather
-than a separate secret env var — none of which this runbook's discovery steps
-assume.
+Hubs deployed with the manual
+[Deploy on GCP](https://scion-ai.dev/scion/hosted/ha/setup-gcp/#7b-secret-name-migration)
+guide are **not** covered by this runbook. That guide's hub uses a public-IP Cloud
+SQL instance with no Direct VPC egress, and keeps its DSN inside `settings.yaml`
+rather than a separate secret env var — none of which this runbook's discovery
+steps assume.
 
 This runbook avoids handing the database credential to a human, and works around
 the lack of any network path from a workstation to the private-IP Cloud SQL
@@ -305,7 +307,8 @@ project for `hub secret ...` subcommands unless `--global` is passed, and this j
 container has none. `migrate-names` never uses a project path (it resolves everything
 through `--config`/`LoadGlobalConfig`), so `--global` is safe here. (Whether
 `hub secret` subcommands should be exempted from that requirement outright is
-tracked separately in ptone/scion#2396.)
+tracked separately in
+[ptone/scion#2396](https://github.com/ptone/scion/issues/2396).)
 
 The **rollout check** below re-appears before passes 2, 3, and 4 — it always fetches
 live state, so it can't be fooled by a stale `$SVC` captured back in §2:
@@ -334,10 +337,11 @@ revisions: a rollback with traffic pinned to an older revision, or a new deploy 
 failed to become ready or hasn't finished rolling out yet.
 
 The check also stops while **any** traffic tag is present on **any** revision, even
-the one serving 100% — the `length == 1` and empty-`tag` terms both require it. A
-tagged revision still serves requests at its own tag URL, so it's a live writer under
-the legacy naming scheme, which is exactly what `--delete-legacy` must rule out. Find
-a tag with `echo "$FRESH_SVC" | jq '.status.traffic'`, and remove it with
+the one serving 100% — the `length == 1` and empty-`tag` terms both require it. A tag
+on an older revision keeps it serving at its own tag URL — a live legacy-name writer,
+exactly what `--delete-legacy` must rule out. The check doesn't distinguish by
+revision, so a tag on the serving revision also stops it; remove either kind. Find a
+tag with `echo "$FRESH_SVC" | jq '.status.traffic'`, and remove it with
 `gcloud run services update-traffic "$HUB" --project "$PROJECT" --region "$REGION"
 --remove-tags=<tag>`, then re-run the check.
 
@@ -582,10 +586,22 @@ runbook doesn't cover:
    secret's contents from a workstation, a bastion, or anywhere outside this job.
 2. **Roll traffic back** to the prior revision if the currently-serving revision is
    implicated: `gcloud run services update-traffic "$HUB" --project "$PROJECT"
-   --region "$REGION" --to-revisions=<prior-revision>=100`.
-3. **Re-run the job** from §2 once the underlying blocker (org policy, IAM, quota) is
-   resolved — the job is deleted and recreated fresh, re-pinned to whatever revision
-   is serving at that point.
+   --region "$REGION" --to-revisions=<prior-revision>=100`. This pins traffic to a
+   non-latest revision on purpose, so §2's rollout guard will reject it by design
+   (the job's config and image would otherwise come from two different revisions) —
+   do not restart from §2 yet.
+3. **Resolve the rollout, then re-run from §2.** First delete any job left over from
+   the interrupted attempt and confirm it's gone (§6:
+   `gcloud run jobs delete "$JOB" --project "$PROJECT" --region "$REGION" --quiet`,
+   then `gcloud run jobs list --project "$PROJECT" --region "$REGION"
+   --filter="metadata.name=${JOB}"`). Then make the latest ready revision serve
+   100% again, once the underlying blocker (org policy, IAM, quota) is resolved:
+   either roll forward (`gcloud run services update-traffic "$HUB" --project
+   "$PROJECT" --region "$REGION" --to-latest`), or redeploy the known-good image
+   through the module's normal Terraform apply so it becomes the latest revision.
+   Only once traffic, `latestReadyRevisionName` and `latestCreatedRevisionName`
+   agree again, restart the whole procedure from §2, which creates a fresh job
+   re-pinned to whatever revision is now serving.
 4. **Escalate** to the project owner if the job still cannot be created or run. No
    command in this procedure, and no ad hoc substitute for it, may read the DSN or
    the settings secret outside this job.
