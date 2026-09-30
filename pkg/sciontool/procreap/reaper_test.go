@@ -27,7 +27,8 @@ func TestScanZombies_IncludesNameForZombie(t *testing.T) {
 	pid := cmd.Process.Pid
 	// Best-effort cleanup: an error here (e.g. procreap's own reaper won the
 	// race and already reaped this child) doesn't affect the assertions
-	// above, so it's intentionally ignored rather than failing the test.
+	// below, which all run before this deferred call, so it's intentionally
+	// ignored rather than failing the test.
 	defer func() { _ = cmd.Wait() }()
 
 	waitUntilZombie(t, pid)
@@ -123,7 +124,7 @@ func TestIsZombieStat(t *testing.T) {
 }
 
 func TestManagedPIDRegistry(t *testing.T) {
-	const pid = 999999 // arbitrary PID unlikely to be a real process
+	const pid = 999999 // fixed PID unlikely to be a real process
 	if isManagedPID(pid) {
 		t.Fatal("pid should not be managed before registration")
 	}
@@ -144,7 +145,7 @@ func TestManagedPIDRegistry(t *testing.T) {
 // happens when a PID is reused by a fresh process before the previous
 // owner's deferred Unregister call runs.
 func TestManagedPIDRegistry_StaleTokenDoesNotStealNewRegistration(t *testing.T) {
-	const pid = 999998 // arbitrary PID unlikely to be a real process
+	const pid = 999998 // fixed PID unlikely to be a real process
 
 	staleTok := RegisterManagedPID(pid)
 	UnregisterManagedPID(pid, staleTok) // pid is now unregistered
