@@ -5013,7 +5013,7 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
       expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-sender', 'agent-1'));
     });
 
-    it('hides both items when the message also carries no senderProjectId and the thread has no project either', async () => {
+    it('hides both items when no project can be resolved', async () => {
       const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
 
       rightClick(bubbles[0]);
@@ -5023,11 +5023,47 @@ describe('scion-chat-thread agent message context-menu actions (nc-msg-agent-act
       expect(labels.some((l) => l.includes('Open in graph'))).toBe(false);
     });
 
-    it('falls back to the thread\'s own project id for "Open in graph" in a project-scoped (non-DM) thread', async () => {
-      // Neither senderProjectId nor a roster entry is available (the author
-      // has left and the message predates #1913), but this is a
-      // project-scoped thread, so its own projectId is a correct, safe
-      // fallback — unlike a DM's projectId (see the next test).
+    it("prefers the message's own projectId over the thread's, for a cross-project departed author (agent-to-user rows never set senderProjectId)", async () => {
+      // No senderProjectId and no roster entry, but the message carries its
+      // own projectId (the author's project, as agent-to-user rows always
+      // do) which differs from the thread's project. The author's project
+      // must win — falling back to the thread's would point the graph at
+      // the wrong project.
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, projectId: 'proj-author' }],
+        [OTHER_AGENT]
+      );
+      el.projectId = 'proj-thread';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      const labels = menuItemLabels(el);
+      expect(labels.some((l) => l.includes('Open terminal'))).toBe(false);
+      expect(labels.some((l) => l.includes('Open in graph'))).toBe(true);
+
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+    });
+
+    it("prefers the message's own projectId over the thread's in a DM too", async () => {
+      const { el, bubbles } = await mountWithMessages(
+        [{ ...AGENT_MSG, projectId: 'proj-author' }],
+        [OTHER_AGENT]
+      );
+      el.isDM = true;
+      el.projectId = 'proj-inherited';
+
+      rightClick(bubbles[0]);
+      await el.updateComplete;
+      findMenuItem(el, 'Open in graph')!.click();
+      expect(navigateToMock).toHaveBeenCalledWith(agentGraphHref('proj-author', 'agent-1'));
+    });
+
+    it('falls back to the thread\'s own project id for "Open in graph" in a project-scoped (non-DM) thread, when the message carries no project of its own', async () => {
+      // Neither senderProjectId, a roster entry, nor the message's own
+      // projectId is available, but this is a project-scoped thread, so its
+      // own projectId is a correct, safe last resort — unlike a DM's
+      // projectId (see the next test).
       const { el, bubbles } = await mountWithMessages([AGENT_MSG], [OTHER_AGENT]);
       el.projectId = 'proj-thread';
 

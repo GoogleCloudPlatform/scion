@@ -3181,11 +3181,12 @@ export class ScionChatThread extends LitElement {
    * refuse.
    *
    * Graph does not require a roster entry: it's gated only on a resolvable
-   * project id, which `senderProjectId` (#1913) supplies even for a departed
-   * author — the graph page can still show that project and the agent's
-   * history. An empty `senderId` hides both regardless (see
-   * `resolveAgentActionProjectId`): `isSenderAgent` can classify a message as
-   * agent-authored by `type` alone, with no id to act on.
+   * project id, which `senderProjectId` (#1706, cross-project messaging)
+   * supplies even for a departed author — the graph page can still show that
+   * project and the agent's history. An empty `senderId` hides both
+   * regardless (see `resolveAgentActionProjectId`): `isSenderAgent` can
+   * classify a message as agent-authored by `type` alone, with no id to act
+   * on.
    */
   private renderAgentActionMenuItems(msg: Message): TemplateResult {
     if (!msg.senderId) return html``;
@@ -3215,26 +3216,38 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Project id for the author agent's graph/terminal actions. Prefers the
-   * server-derived `senderProjectId` (see #1913 — always set for agent
-   * senders, and the only signal that's correct when the author belongs to
-   * a different project than this conversation, or has since left the
-   * roster entirely), falling back to the roster's per-agent `projectId` for
-   * messages that predate that field. Empty when `senderId` is empty — there
-   * is no agent to focus the graph on.
+   * server-derived `senderProjectId` — the only signal that's correct when
+   * the author belongs to a different project than this conversation, or
+   * has since left the roster entirely — falling back to the roster's
+   * per-agent `projectId`. Empty when `senderId` is empty — there is no
+   * agent to focus the graph on.
    *
-   * If both of those are missing — a historical message from before #1913,
-   * whose author has since left the roster — a project-scoped (non-DM)
-   * thread's own `projectId` is still a correct, defensive fallback: unlike
-   * a DM's `projectId` (see `resolvePathLinkProjectId`, which is only
-   * `inheritedProjectId()` and unrelated to the conversation), a group
-   * thread's `projectId` is the project the conversation itself belongs to.
-   * Falling back to it here keeps "Open in graph" available and scoped
-   * correctly instead of hiding it outright.
+   * `senderProjectId` is not set on every agent-authored row: the
+   * agent-to-user outbound path never sets it (same gap
+   * `resolvePathLinkProjectId` documents), so this is current behaviour for
+   * those messages, not just history. Those rows do carry the message's own
+   * `projectId` — the sending agent's project — so it comes next in the
+   * chain, ahead of the thread fallback: it stays correct even for a
+   * departed, cross-project author.
+   *
+   * Only once all three are empty does a project-scoped (non-DM) thread's
+   * own `projectId` kick in, as a last resort: unlike a DM's `projectId`
+   * (see `resolvePathLinkProjectId`, which is only `inheritedProjectId()`
+   * and unrelated to the conversation), a group thread's `projectId` is the
+   * project the conversation itself belongs to. This keeps "Open in graph"
+   * available instead of hiding it outright, at the cost of being a best
+   * guess rather than a guarantee for the rare row with no project of its
+   * own.
    */
   private resolveAgentActionProjectId(msg: Message): string {
     if (!msg.senderId) return '';
     const member = this.agentMembers.find((m) => m.id === msg.senderId);
-    return msg.senderProjectId || member?.projectId || (!this.isDM ? this.projectId : '');
+    return (
+      msg.senderProjectId ||
+      member?.projectId ||
+      msg.projectId ||
+      (!this.isDM ? this.projectId : '')
+    );
   }
 
   /** Handle right-click on a message to show context menu. */
