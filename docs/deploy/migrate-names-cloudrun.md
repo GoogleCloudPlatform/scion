@@ -1,4 +1,4 @@
-# Runbook: Secret Name Migration on Cloud Run (Private SQL)
+# Runbook: Running migrate-names on Cloud Run Hubs
 
 Run `scion hub secret migrate-names` against a Cloud Run hub deployed with the
 hub-cloudrun Terraform module, using a one-off Cloud Run job.
@@ -9,24 +9,27 @@ legacy naming scheme to the hub-prefixed scheme (see
 The command opens the hub's own database directly from a DSN.
 
 **Scope:** this runbook is for Cloud Run hubs deployed with the hub-cloudrun
-Terraform module — private-IP Cloud SQL (reachable only from inside the VPC), Direct
-VPC egress, the DSN delivered as the `SCION_SERVER_DATABASE_URL` secret env var, and
-`settings.yaml` mounted from a secret volume. An operator's workstation has no
-network path to that database, so the CLI cannot be run from a laptop at all. Other
-Cloud Run layouts (including one wired up by hand rather than by that module) will
-need the discovery steps in §2 adapted to their own service definition — and if you
-can reach the database from your workstation (for example through the Cloud SQL Auth
-Proxy), run `scion hub secret migrate-names` with the CLI instead, with the same hub
-ID the server resolves (`--hub-id` or `server.hub.hub_id`) (`--help` for its flags).
+Terraform module, whether the module's Cloud SQL instance has a public or a private
+IP — the DSN delivered as the `SCION_SERVER_DATABASE_URL` secret env var and
+`settings.yaml` mounted from a secret volume are the same either way. Direct VPC
+egress (`--network`/`--subnet`/`--vpc-egress` in §3) is needed only for a private-IP
+instance, which is reachable only from inside the VPC; a public-IP instance needs
+none of that wiring, because the Cloud SQL Auth Proxy that Cloud Run manages via
+`--set-cloudsql-instances` reaches a public IP directly. No hub in this scope is ever
+operated from a workstation for this: this job is the only supported way to run
+`migrate-names` against it, regardless of the instance's IP type. Other Cloud Run
+layouts (including one wired up by hand rather than by that module) will need the
+discovery steps in §2 adapted to their own service definition.
 
-This runbook works around the no-network-path problem with a **one-off Cloud Run
-job**: an ephemeral job that borrows the running service's own identity, VPC wiring
-and Cloud SQL connection to reach the database, runs the migration, and is deleted
-afterward. It is **not** Terraform-managed — there is no `google_cloud_run_v2_job`
-resource for this. The job is created ad hoc with `gcloud`, used for the five
-migration passes below, and deleted. A permanent resource isn't worth it for a
-one-time migration that `--delete-legacy` (and a later removal of the legacy IAM
-grant) retires anyway.
+This runbook avoids handing the database credential to a human, and (for a
+private-IP instance) works around the lack of any network path from a workstation,
+with a **one-off Cloud Run job**: an ephemeral job that borrows the running service's
+own identity, VPC wiring (if any) and Cloud SQL connection to reach the database, runs
+the migration, and is deleted afterward. It is **not** Terraform-managed — there is no
+`google_cloud_run_v2_job` resource for this. The job is created ad hoc with `gcloud`,
+used for the five migration passes below, and deleted. A permanent resource isn't
+worth it for a one-time migration that `--delete-legacy` (and a later removal of the
+legacy IAM grant) retires anyway.
 
 No human ever sees the database credential: the DSN stays a Secret Manager reference
 passed to the job with `--set-secrets`, the same way it reaches the real service.
@@ -44,7 +47,7 @@ against `cmd/hub_secret_migrate_names.go`:
 | Service has it for... | migrate-names needs it? | Included in the job? |
 | :--- | :--- | :--- |
 | The service's runtime service account | Yes — it's the identity used for both Cloud SQL and Secret Manager access; no new IAM is created for the job. | Yes, `--service-account` |
-| Direct VPC egress (network/subnet, `PRIVATE_RANGES_ONLY`) | Yes — private-IP Cloud SQL is only reachable from inside the VPC. | Yes, `--network`/`--subnet`/`--vpc-egress` |
+| Direct VPC egress (network/subnet, `PRIVATE_RANGES_ONLY`) | Only for a private-IP instance — it's reachable only from inside the VPC. A public-IP instance needs none of this; `--set-cloudsql-instances` reaches it without any VPC wiring. | Yes, `--network`/`--subnet`/`--vpc-egress` — omit all three for a public-IP instance |
 | `/cloudsql` Cloud SQL volume | Yes — the DSN embeds `?host=/cloudsql/<connection name>`; without the volume the socket path doesn't exist and the connection fails. | Yes, `--set-cloudsql-instances` |
 | `SCION_SERVER_DATABASE_URL` secret env (the DSN) | Yes — this is the only way the command opens the database. | Yes, `--set-secrets` |
 | `settings.yaml` secret, mounted as a file | Yes, but only for one field: **`server.database.driver: postgres`**. Without the settings file (or `SCION_SERVER_DATABASE_DRIVER`), the driver resolves to sqlite — `openMigrateNamesStore`'s `switch` treats an empty/default driver as `"sqlite"` (the legacy loader's own default), so the job would silently try to open the Postgres DSN as a sqlite file. `--config` pointed at the mounted file is what makes the command see `driver: postgres`. Its `server.hub.hub_id` is not read when `--hub-id` is passed. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml` |
@@ -129,7 +132,10 @@ SA=$(echo "$SVC" | jq -r '.spec.template.spec.serviceAccountName')
 ```
 
 **Network, subnet, VPC egress** (Direct VPC egress is expressed as annotations on the
-revision template):
+revision template — present only for a private-IP instance; on a public-IP instance
+these annotations are absent, so skip this block, the corresponding
+`--network`/`--subnet`/`--vpc-egress` flags in §3, and `NETWORK`/`SUBNET`/`EGRESS` in
+the validation loop below):
 
 ```bash
 NET_JSON=$(echo "$SVC" | jq -r '.spec.template.metadata.annotations["run.googleapis.com/network-interfaces"]')
@@ -239,6 +245,10 @@ content to double-check it — that would require a human (or a script running a
 to read a secret value, which this whole procedure is designed to avoid.
 
 ## 3. Create the job
+
+Include `--network`/`--subnet`/`--vpc-egress` only if the discovery step found a
+private-IP instance with Direct VPC egress configured; drop all three flags for a
+public-IP instance, which `--set-cloudsql-instances` reaches on its own.
 
 ```bash
 gcloud run jobs create "${HUB}-migrate-names" \
