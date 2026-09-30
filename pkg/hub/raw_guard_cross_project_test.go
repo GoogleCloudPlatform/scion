@@ -222,3 +222,61 @@ func TestHandleAgentMessage_CrossProjectRaw_ZeroConversationRows_SecondCall(t *t
 
 	assertZeroMessagingSideEffects(t, s, ctx, dispatcher, spy, agentB, convCountBefore, len(subsBefore))
 }
+
+// nilAgentRecordStore returns (nil, nil) for GetAgent when queried with a
+// specific agent ID — some store implementations signal "not found" this
+// way instead of returning an error — delegating every other call, including
+// GetAgent for any other ID, to the embedded store.
+//
+// handleAgentMessage calls GetAgent for the sender's own ID twice before the
+// cross-project raw check under test here runs: once earlier, to resolve the
+// sender's slug for structured_message.sender (pre-existing code, unrelated
+// to this guard). Returning nil starting only on the second call targets the
+// cross-project check specifically, without also tripping that earlier,
+// unrelated call site.
+type nilAgentRecordStore struct {
+	store.Store
+	nilForID  string
+	callCount int
+}
+
+func (s *nilAgentRecordStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.nilForID {
+		s.callCount++
+		if s.callCount > 1 {
+			return nil, nil
+		}
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestHandleAgentMessage_RawGuard_CrossProjectCheck_NilSenderAgentRecord
+// proves the cross-project raw check in handlers_agent_messaging.go does not
+// panic when GetAgent returns a nil sender record with a nil error: it is
+// rejected with 500 instead, before any side effect
+// (GoogleCloudPlatform/scion#2125).
+func TestHandleAgentMessage_RawGuard_CrossProjectCheck_NilSenderAgentRecord(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	spy := &spyEventPublisher{}
+	srv.SetEventPublisher(spy)
+	srv.store = &nilAgentRecordStore{Store: s, nilForID: sender.ID}
+	ctx := context.Background()
+
+	convCountBefore := countStoreConversations(t, s, ctx)
+	subsBefore, err := s.GetNotificationSubscriptions(ctx, target.ID)
+	require.NoError(t, err)
+
+	sm := baseRawStructuredMessage(sender, target, "RAWGUARD-nil-sender-record")
+
+	var rr *httptest.ResponseRecorder
+	assert.NotPanics(t, func() {
+		rr = sendAgentDMWithMsg(t, srv, sender, target, sm, MessageRequest{})
+	})
+	require.NotNil(t, rr, "handler must return a response instead of panicking")
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeInternalError, errResp.Error.Code)
+
+	assertZeroMessagingSideEffects(t, s, ctx, dispatcher, spy, target, convCountBefore, len(subsBefore))
+}

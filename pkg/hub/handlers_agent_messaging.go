@@ -1706,6 +1706,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				writeErrorFromErr(w, senderErr, "")
 				return
 			}
+			if senderAgentRecord == nil {
+				s.messageLog.Error("raw guard: sender agent lookup returned nil record",
+					"sender_id", senderAgent.ID())
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"sender agent lookup failed due to an internal error", nil)
+				return
+			}
 			if crossProjectRawUnsupported(senderAgentRecord.ProjectID, agent.ProjectID) {
 				LogCrossProjectDecision(CrossProjectAuditEntry{
 					Timestamp:        time.Now(),
