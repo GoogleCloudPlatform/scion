@@ -89,7 +89,7 @@ func OpenParentNoFollowRootOwned(path string) (dirFd int, leaf string, err error
 
 	walked := string(filepath.Separator)
 	for _, name := range dirs {
-		child, oerr := syscall.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		child, oerr := unix.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		_ = syscall.Close(fd)
 		if oerr != nil {
 			return -1, "", fmt.Errorf("dirfd: open %s: %w", name, oerr)
@@ -127,6 +127,14 @@ func fstatRequireTrusted(fd int, displayPath string, selfUID uint32) error {
 // returned as an error. There is never a fallback to any other location;
 // callers that need one (e.g. an unhardened scratch directory) must not use
 // this function.
+//
+// mode is enforced on the leaf via an fd-based Fchmod every time this
+// returns successfully, not only when Mkdirat actually creates it: a
+// pre-existing directory at path — left over from an older version of
+// whatever created it, or created some other way entirely — keeps whatever
+// mode it already had otherwise, since mkdirat(2)'s own mode argument is
+// only ever applied at creation (and even then only after this process's
+// umask masks it), never retroactively.
 func EnsureDirNoFollowRootOwned(path string, mode os.FileMode) (*os.File, error) {
 	dirFd, leaf, err := OpenParentNoFollowRootOwned(path)
 	if err != nil {
@@ -134,7 +142,7 @@ func EnsureDirNoFollowRootOwned(path string, mode os.FileMode) (*os.File, error)
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
-	if err := syscall.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
+	if err := unix.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
 		return nil, fmt.Errorf("dirfd: mkdir %s: %w", path, err)
 	}
 
@@ -145,6 +153,10 @@ func EnsureDirNoFollowRootOwned(path string, mode os.FileMode) (*os.File, error)
 	if verr := fstatRequireTrusted(int(f.Fd()), path, uint32(os.Geteuid())); verr != nil {
 		_ = f.Close()
 		return nil, verr
+	}
+	if cerr := f.Chmod(mode); cerr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("dirfd: chmod %s: %w", path, cerr)
 	}
 	return f, nil
 }
@@ -174,7 +186,7 @@ func AmbientTempDirTrusted(path string) bool {
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
-	fd, err := syscall.Openat(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return false
 	}
@@ -233,7 +245,7 @@ func VerifyRootOwnedExecutable(candidate string) error {
 			return fmt.Errorf("dirfd: %s: %w", candidate, err)
 		}
 
-		fd, openErr := syscall.Openat(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		fd, openErr := unix.Openat(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 		if openErr == nil {
 			var st syscall.Stat_t
 			statErr := syscall.Fstat(fd, &st)

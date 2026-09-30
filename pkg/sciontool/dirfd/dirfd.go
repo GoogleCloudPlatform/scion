@@ -29,6 +29,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // OpenParentNoFollow resolves path's parent directory into an open,
@@ -62,7 +64,7 @@ func OpenParentNoFollow(path string) (dirFd int, leaf string, err error) {
 		return -1, "", fmt.Errorf("dirfd: open /: %w", err)
 	}
 	for _, name := range dirs {
-		child, oerr := syscall.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		child, oerr := unix.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		_ = syscall.Close(fd)
 		if oerr != nil {
 			return -1, "", fmt.Errorf("dirfd: open %s: %w", name, oerr)
@@ -77,7 +79,7 @@ func OpenParentNoFollow(path string) (dirFd int, leaf string, err error) {
 // at name is refused rather than truncated or followed. The returned fd is
 // close-on-exec (see OpenAt's doc comment for why that's forced here).
 func CreateExclAt(dirFd int, name string, mode os.FileMode) (*os.File, error) {
-	fd, err := syscall.Openat(dirFd, name,
+	fd, err := unix.Openat(dirFd, name,
 		syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, uint32(mode))
 	if err != nil {
 		return nil, err
@@ -99,7 +101,7 @@ func CreateExclAt(dirFd int, name string, mode os.FileMode) (*os.File, error) {
 // enforced privilege-drop runtime is the workload itself running with
 // dropped privileges.
 func OpenAt(dirFd int, name string, flags int, mode os.FileMode) (*os.File, error) {
-	fd, err := syscall.Openat(dirFd, name, flags|syscall.O_CLOEXEC, uint32(mode))
+	fd, err := unix.Openat(dirFd, name, flags|syscall.O_CLOEXEC, uint32(mode))
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +128,7 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
-	if err := syscall.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
+	if err := unix.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
 		return nil, fmt.Errorf("dirfd: mkdir %s: %w", path, err)
 	}
 
@@ -136,12 +138,12 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // RenameAt renames oldName to newName, both resolved relative to dirFd via
 // renameat(2). Both names live in the same directory in every caller today.
 func RenameAt(dirFd int, oldName, newName string) error {
-	return syscall.Renameat(dirFd, oldName, dirFd, newName)
+	return unix.Renameat(dirFd, oldName, dirFd, newName)
 }
 
 // UnlinkAt removes name relative to dirFd via unlinkat(2).
 func UnlinkAt(dirFd int, name string) error {
-	return syscall.Unlinkat(dirFd, name)
+	return unix.Unlinkat(dirFd, name, 0)
 }
 
 // RefuseSymlinkOrNonRegularAt reports an error if name already exists
@@ -154,7 +156,7 @@ func UnlinkAt(dirFd int, name string) error {
 // for the brief window it's open, in case another goroutine execs a child
 // concurrently.
 func RefuseSymlinkOrNonRegularAt(dirFd int, name string) error {
-	fd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

@@ -220,6 +220,36 @@ func TestEnsureDirNoFollowRootOwned_RefusesPreExistingBadModeLeaf(t *testing.T) 
 	}
 }
 
+// TestEnsureDirNoFollowRootOwned_ReChmodsPreExistingLooseModeLeaf proves mode
+// is enforced even on a leaf that already existed before this call: a
+// directory left at 0755 (not group/other-writable, so it passes the trust
+// check, but looser than the caller's requested mode) is tightened to
+// exactly the requested mode rather than left as whatever it already was.
+// mkdirat(2)'s own mode argument only ever applies at creation, so without
+// an explicit chmod a pre-existing leaf's mode would silently survive
+// unchanged forever.
+func TestEnsureDirNoFollowRootOwned_ReChmodsPreExistingLooseModeLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	target := filepath.Join(base, "leaf")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := EnsureDirNoFollowRootOwned(target, 0o700)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowRootOwned: %v", err)
+	}
+	_ = f.Close()
+
+	fi, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("mode = %#o, want 0700 (a pre-existing 0755 leaf must be tightened, not left as-is)", perm)
+	}
+}
+
 // TestOpenParentNoFollowRootOwned_RefusesSymlinkedAncestor proves an
 // ancestor component that is a symlink — even one that points at an
 // otherwise entirely trusted, self-owned directory — is refused by the

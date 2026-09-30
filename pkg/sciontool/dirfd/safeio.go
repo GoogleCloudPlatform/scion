@@ -429,7 +429,7 @@ func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {
 				return nil, rerr
 			}
 		} else {
-			child, operr := syscall.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+			child, operr := unix.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 			if operr == nil {
 				if ownsCur {
 					_ = syscall.Close(curFd)
