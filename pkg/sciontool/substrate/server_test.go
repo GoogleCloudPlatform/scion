@@ -521,7 +521,7 @@ func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.
 // far side, the upward walk lands on that real directory and the symlink is
 // never noticed. This must be rejected on the *current* mkdirAllTracked
 // (every existing component checked top-down), and would have been silently
-// accepted by the old upward-walk version.
+// accepted by a deepest-existing-ancestor upward-walk search.
 func TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyExists(t *testing.T) {
 	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
@@ -713,43 +713,6 @@ func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T)
 	}
 	if string(got) != "new-content" {
 		t.Errorf("content at %s = %q, want %q", targetPath, got, "new-content")
-	}
-}
-
-// TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget proves
-// mkdirAllTracked's every-component guard is not specific to paths under any
-// notion of "home" — it applies to every bootstrap Path, including
-// auth/secret targets that legitimately live outside home (e.g.
-// /etc/app/x). The broker never emits such a payload today, but serve must
-// not rely on that.
-func TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget(t *testing.T) {
-	root := realTempDir(t)
-	etcDir := filepath.Join(root, "etc")
-	volumeDir := filepath.Join(root, "volume")
-	if err := os.MkdirAll(etcDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// The remaining subpath already exists on the far side of the link.
-	if err := os.MkdirAll(filepath.Join(volumeDir, "sub"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	appLink := filepath.Join(etcDir, "app")
-	if err := os.Symlink(volumeDir, appLink); err != nil {
-		t.Fatal(err)
-	}
-
-	targetPath := filepath.Join(appLink, "sub", "x")
-	srv := NewServer(WithChownOwner(-1, -1))
-	err := srv.writeBootstrapFile(BootstrapFile{
-		Path:       targetPath,
-		Mode:       0o600,
-		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-in-volume")),
-	})
-	if err == nil {
-		t.Fatal("writeBootstrapFile through a symlink for an outside-home target: expected an error, got nil")
-	}
-	if _, statErr := os.Stat(filepath.Join(volumeDir, "sub", "x")); statErr == nil {
-		t.Error("the bootstrap file was written through the symlink into volumeDir/sub")
 	}
 }
 

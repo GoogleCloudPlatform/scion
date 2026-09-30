@@ -408,6 +408,11 @@ like `/var/run -> /run` — fails bootstrap with HTTP `422`
 (`bootstrap_path_symlink`). Use the resolved form of the target instead
 (`/run/secrets/...` rather than `/var/run/secrets/...`).
 
+**Targets must resolve under the agent home.** A file-secret or auth target
+that does not resolve under the agent home directory — an absolute path
+outside it, or a `..`-relative escape from it — fails bootstrap with HTTP
+`422` (`bootstrap_path_outside_home`), before anything is written.
+
 **Size cap.** Total decoded size across every file (home + auth + secrets,
 after dedup) is capped at 16 MiB (`maxBootstrapFilesTotalBytes`,
 `pkg/runtime/substrate_bootstrap.go`) — sized with headroom under the 64 MiB
