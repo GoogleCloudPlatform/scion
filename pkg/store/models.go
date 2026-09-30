@@ -2639,6 +2639,41 @@ type DecisionAuditRecord struct {
 	PolicyID       string
 	CorrelationID  string
 	Sampled        bool
+
+	// E.2a additive fields (ptone/scion#2127, plan §3.2). All optional,
+	// default "".
+
+	// PermissionID is the exact canonical permission ID AuthzService.decide
+	// was given and evaluated (AuthzRequest.Permission after the request's
+	// own permission resolution) — never independently re-derived from
+	// ResourceType/Permission here (ruling Q7). Left empty for decisions that
+	// fail before permission resolution (missing principal, unsupported
+	// principal kind).
+	PermissionID string
+	// CredentialName/CredentialBoundaryKind/CredentialBoundaryProjectID/
+	// CredentialLabels are E.1's descriptive credential decoration,
+	// snapshotted at decision time (audits outlive tokens — see
+	// useraccesstoken.go's delete). Empty for credentials E.1 does not
+	// decorate (non-UAT).
+	CredentialName              string
+	CredentialBoundaryKind      string
+	CredentialBoundaryProjectID string
+	CredentialLabels            string // bounded JSON object, "" when absent
+	// ExecutorKind/ExecutorID identify what is currently executing a
+	// deferred-execution decision, as distinct from the initiating
+	// principal/credential above (plan §3.5). Empty for an ordinary live
+	// request — E.2a defines the accessor pair; E.2b's async entry points
+	// are the ones that set it.
+	ExecutorKind string
+	ExecutorID   string
+	// DeniedBy is B.1/B.2's typed denial-source string, recorded verbatim
+	// when the deciding code sets it on the Decision (ruling: "Decision.DeniedBy
+	// is a typed string ... recorded verbatim in a denied_by column"). The
+	// aggregated list-filter record (G) leaves it empty by agreement. This
+	// column is additive and unpopulated as of E.2a: Decision.DeniedBy does
+	// not exist on this branch's Decision type yet (B.1 has not merged) — see
+	// the E.2a handoff note's follow-up.
+	DeniedBy string
 }
 
 // DecisionAuditFilter defines query parameters for listing decision audit records.
@@ -2676,6 +2711,23 @@ type MutationAuditRecord struct {
 	AfterSummary        string
 	CanDelegateResult   string
 	CanDelegateReason   string
+
+	// E.2a additive fields (ptone/scion#2127, plan §3.3). All optional,
+	// default "". See AuditActor/ApplyActor (audit_actor.go), which populate
+	// them for every mutation-audit writer.
+	CredentialName              string
+	CredentialBoundaryKind      string
+	CredentialBoundaryProjectID string
+	CredentialLabels            string // bounded JSON object, "" when absent
+	// CorrelationID is the request ID shared with the request log and
+	// decision audit for the same request (plan §3.2 "decision/mutation
+	// agreement").
+	CorrelationID string
+	// ExecutorKind/ExecutorID identify what is currently executing, as
+	// distinct from the initiating principal/credential above (plan §3.5).
+	// Empty for an ordinary live request.
+	ExecutorKind string
+	ExecutorID   string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -2686,6 +2738,7 @@ type MutationAuditFilter struct {
 	ActorCredentialID  string
 	TargetType         string
 	TargetID           string
+	CorrelationID      string
 	Since              time.Time
 	Until              time.Time
 	Limit              int

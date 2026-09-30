@@ -84,6 +84,16 @@ var decorationGuardAllowed = map[string]bool{
 	"credential_decoration.go:(CredentialDecoration).LogValue":   true,
 	"credential_decoration.go:(CredentialDecoration).clone":      true,
 	"credential_decoration.go:CredentialDecorationFromContext":   true,
+
+	// E.2a (ptone/scion#2127, plan §3.1-§3.3): these are rendering/audit
+	// builders, not authorization decisions — they read decoration to log or
+	// snapshot it, never to decide anything. See plan §2.1's rule: decoration
+	// carriage/rendering is allowed; branching on it in authorization code is
+	// not. None of these are methods, so they need no receiver qualification.
+	"identity.go:requestAuthAttrs":            true,
+	"audit_actor.go:auditActorFromContext":    true,
+	"audit_authz.go:BuildDecisionAuditRecord": true,
+	"audit.go:credentialLogAttr":              true,
 }
 
 // decorationHit is one reference to credential decoration found by
