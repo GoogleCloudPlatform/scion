@@ -96,6 +96,9 @@ type IntegrationUpdate func(*sql.Selector)
 // InviteCode is the predicate function for invitecode builders.
 type InviteCode func(*sql.Selector)
 
+// LaunchReaperState is the predicate function for launchreaperstate builders.
+type LaunchReaperState func(*sql.Selector)
+
 // LifecycleHook is the predicate function for lifecyclehook builders.
 type LifecycleHook func(*sql.Selector)
 

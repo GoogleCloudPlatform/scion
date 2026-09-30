@@ -144,6 +144,14 @@ filesystem or reinstall with `--force`.
 
 The `config.yaml` file at the root of a harness-config bundle defines its runtime parameters. Beyond basic fields like `image`, `harness` type, and `model_aliases`, it includes capabilities and launch configurations.
 
+`image` and `image_pull_policy` (the latter is Kubernetes-only; values `Always`, `IfNotPresent`,
+`Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
+settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
+explicit `image` or `kubernetes.imagePullPolicy` in a template or agent config still outranks the
+Hub setting, which in turn outranks this file's own default. See [Settings
+Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
+for the full chain.
+
 ### Command Execution (`command`)
 
 The `command` block defines how the agent's primary LLM tool is invoked.

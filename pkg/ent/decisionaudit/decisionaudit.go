@@ -46,6 +46,22 @@ const (
 	FieldCorrelationID = "correlation_id"
 	// FieldSampled holds the string denoting the sampled field in the database.
 	FieldSampled = "sampled"
+	// FieldPermissionID holds the string denoting the permission_id field in the database.
+	FieldPermissionID = "permission_id"
+	// FieldCredentialName holds the string denoting the credential_name field in the database.
+	FieldCredentialName = "credential_name"
+	// FieldCredentialBoundaryKind holds the string denoting the credential_boundary_kind field in the database.
+	FieldCredentialBoundaryKind = "credential_boundary_kind"
+	// FieldCredentialBoundaryProjectID holds the string denoting the credential_boundary_project_id field in the database.
+	FieldCredentialBoundaryProjectID = "credential_boundary_project_id"
+	// FieldCredentialLabels holds the string denoting the credential_labels field in the database.
+	FieldCredentialLabels = "credential_labels"
+	// FieldExecutorKind holds the string denoting the executor_kind field in the database.
+	FieldExecutorKind = "executor_kind"
+	// FieldExecutorID holds the string denoting the executor_id field in the database.
+	FieldExecutorID = "executor_id"
+	// FieldDeniedBy holds the string denoting the denied_by field in the database.
+	FieldDeniedBy = "denied_by"
 	// Table holds the table name of the decisionaudit in the database.
 	Table = "decision_audits"
 )
@@ -69,6 +85,14 @@ var Columns = []string{
 	FieldPolicyID,
 	FieldCorrelationID,
 	FieldSampled,
+	FieldPermissionID,
+	FieldCredentialName,
+	FieldCredentialBoundaryKind,
+	FieldCredentialBoundaryProjectID,
+	FieldCredentialLabels,
+	FieldExecutorKind,
+	FieldExecutorID,
+	FieldDeniedBy,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -188,4 +212,44 @@ func ByCorrelationID(opts ...sql.OrderTermOption) OrderOption {
 // BySampled orders the results by the sampled field.
 func BySampled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSampled, opts...).ToFunc()
+}
+
+// ByPermissionID orders the results by the permission_id field.
+func ByPermissionID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPermissionID, opts...).ToFunc()
+}
+
+// ByCredentialName orders the results by the credential_name field.
+func ByCredentialName(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialName, opts...).ToFunc()
+}
+
+// ByCredentialBoundaryKind orders the results by the credential_boundary_kind field.
+func ByCredentialBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialBoundaryKind, opts...).ToFunc()
+}
+
+// ByCredentialBoundaryProjectID orders the results by the credential_boundary_project_id field.
+func ByCredentialBoundaryProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialBoundaryProjectID, opts...).ToFunc()
+}
+
+// ByCredentialLabels orders the results by the credential_labels field.
+func ByCredentialLabels(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialLabels, opts...).ToFunc()
+}
+
+// ByExecutorKind orders the results by the executor_kind field.
+func ByExecutorKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExecutorKind, opts...).ToFunc()
+}
+
+// ByExecutorID orders the results by the executor_id field.
+func ByExecutorID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExecutorID, opts...).ToFunc()
+}
+
+// ByDeniedBy orders the results by the denied_by field.
+func ByDeniedBy(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeniedBy, opts...).ToFunc()
 }

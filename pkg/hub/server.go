@@ -969,6 +969,10 @@ type Server struct {
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
 
+	// Per-pair sliding-window limiter for agent @mention fan-out loop/storm
+	// protection. Set once in New and read without the lock; nil-safe.
+	mentionPairLimiter *mentionPairLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1264,6 +1268,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Per-sender chat send rate limiter (#1054).
 	srv.chatSendLimiter = newChatSendLimiter()
 	srv.chatIdempotency = NewChatIdempotencyCache()
+
+	// Per-pair agent mention loop/storm protection.
+	srv.mentionPairLimiter = newMentionPairLimiter()
 
 	ctx := context.Background()
 
@@ -1763,6 +1770,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Give the resolver's existing-record-by-email branch the same
+	// account-state handling (invited activation, role re-evaluation,
+	// super-admin binding, grant sync, audit) that provisionUser's
+	// existing-record branch uses — see signInPolicyDeps / SetSignInPolicyDeps.
+	googleResolver.SetSignInPolicyDeps(srv.signInPolicyDeps())
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
 	// base validator. The exchange endpoint below is
@@ -2311,6 +2323,29 @@ func (s *Server) waitForEmbeddedBroker(ctx context.Context) embeddedBrokerState 
 		case <-ctx.Done():
 		}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return embeddedBrokerState{
+		id:      s.embeddedBrokerID,
+		regErr:  s.embeddedBrokerRegErr,
+		pending: s.embeddedBrokerPending != nil,
+	}
+}
+
+// embeddedBrokerSnapshot returns the current embedded broker state without
+// waiting for a pending co-located registration to resolve. GetHealthInfo
+// (/healthz and the admin health summary) calls this instead of
+// waitForEmbeddedBroker: it is polled frequently (and often with short
+// client-side timeouts), so blocking up to embeddedBrokerWaitTimeout on
+// every call would make a probe hitting the process during the startup race
+// look like a timeout instead of the deliberate "not registered yet" status
+// it should report. /readyz does not call this and is intentionally
+// unaffected — see checkColocatedBrokerHealth in handlers_health.go for why
+// /healthz degrades on this instead. A pending state self-corrects on the
+// next poll once SetEmbeddedBrokerID or EmbeddedBrokerRegistrationFailed
+// runs; a failure does not self-correct at all (no retry), so it persists
+// until the broker configuration is fixed and the process is restarted.
+func (s *Server) embeddedBrokerSnapshot() embeddedBrokerState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return embeddedBrokerState{
@@ -3494,6 +3529,20 @@ func (s *Server) messageEventHandler() EventHandler {
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
 			return authErr
+		}
+
+		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
+		// O-a (p2a-r2 review): checked AFTER authorization, not before —
+		// same invariant deliverToAgent states explicitly: a denied creator
+		// must learn nothing about the recipient's migration state. Scheduled
+		// messages are not deferred (there is no sender to persist a "saved
+		// to history" row for, and no request to answer 202 to) — a
+		// scheduled message firing mid-`scion reincarnate` fails loudly
+		// instead of dispatching into a stopped or absent container and
+		// silently succeeding. The event records this as a failure so the
+		// blocked-wait pairing agents rely on is not silently lost.
+		if reincarnationInFlight(agent) {
+			return fmt.Errorf("target agent is reincarnating")
 		}
 
 		dispatcher := s.GetDispatcher()
@@ -4947,11 +4996,6 @@ func (s *Server) registerRoutes() {
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.recoveryMiddleware(h)
-	if s.requestLogger != nil {
-		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
-	} else {
-		h = s.loggingMiddleware(h)
-	}
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
@@ -4975,6 +5019,19 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// The request logger wraps UnifiedAuthMiddleware, so it is the request
+	// logger's own next.ServeHTTP call that invokes auth: every request is
+	// logged with its final response status, whether auth allows it through
+	// or rejects it outright. auth_type and principal/credential attributes
+	// come from logging.SetRequestAuth on the shared *RequestMeta this
+	// middleware installs (see RequestLogMiddleware), reachable from every
+	// context derived from it.
+	if s.requestLogger != nil {
+		h = logging.RequestLogMiddleware(s.requestLogger, "hub", logging.HubPathPatterns(), s.config.SlowRequestThreshold)(h)
+	} else {
+		h = s.loggingMiddleware(h)
+	}
 
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)

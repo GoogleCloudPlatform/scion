@@ -560,6 +560,160 @@ func (_c *AgentCreate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentCre
 	return _c
 }
 
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (_c *AgentCreate) SetLaunchAsyncOptIn(v bool) *AgentCreate {
+	_c.mutation.SetLaunchAsyncOptIn(v)
+	return _c
+}
+
+// SetNillableLaunchAsyncOptIn sets the "launch_async_opt_in" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchAsyncOptIn(v *bool) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchAsyncOptIn(*v)
+	}
+	return _c
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (_c *AgentCreate) SetLaunchID(v string) *AgentCreate {
+	_c.mutation.SetLaunchID(v)
+	return _c
+}
+
+// SetNillableLaunchID sets the "launch_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchID(*v)
+	}
+	return _c
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
+	_c.mutation.SetLaunchState(v)
+	return _c
+}
+
+// SetNillableLaunchState sets the "launch_state" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchState(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchState(*v)
+	}
+	return _c
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (_c *AgentCreate) SetLaunchEndReason(v string) *AgentCreate {
+	_c.mutation.SetLaunchEndReason(v)
+	return _c
+}
+
+// SetNillableLaunchEndReason sets the "launch_end_reason" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchEndReason(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchEndReason(*v)
+	}
+	return _c
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (_c *AgentCreate) SetLaunchKind(v string) *AgentCreate {
+	_c.mutation.SetLaunchKind(v)
+	return _c
+}
+
+// SetNillableLaunchKind sets the "launch_kind" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchKind(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchKind(*v)
+	}
+	return _c
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (_c *AgentCreate) SetLaunchDeadline(v time.Time) *AgentCreate {
+	_c.mutation.SetLaunchDeadline(v)
+	return _c
+}
+
+// SetNillableLaunchDeadline sets the "launch_deadline" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchDeadline(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchDeadline(*v)
+	}
+	return _c
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (_c *AgentCreate) SetLaunchLastReportAt(v time.Time) *AgentCreate {
+	_c.mutation.SetLaunchLastReportAt(v)
+	return _c
+}
+
+// SetNillableLaunchLastReportAt sets the "launch_last_report_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchLastReportAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchLastReportAt(*v)
+	}
+	return _c
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (_c *AgentCreate) SetLaunchOwner(v string) *AgentCreate {
+	_c.mutation.SetLaunchOwner(v)
+	return _c
+}
+
+// SetNillableLaunchOwner sets the "launch_owner" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchOwner(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchOwner(*v)
+	}
+	return _c
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (_c *AgentCreate) SetLaunchSeq(v int64) *AgentCreate {
+	_c.mutation.SetLaunchSeq(v)
+	return _c
+}
+
+// SetNillableLaunchSeq sets the "launch_seq" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchSeq(v *int64) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchSeq(*v)
+	}
+	return _c
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (_c *AgentCreate) SetLaunchStep(v string) *AgentCreate {
+	_c.mutation.SetLaunchStep(v)
+	return _c
+}
+
+// SetNillableLaunchStep sets the "launch_step" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchStep(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchStep(*v)
+	}
+	return _c
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (_c *AgentCreate) SetLaunchError(v string) *AgentCreate {
+	_c.mutation.SetLaunchError(v)
+	return _c
+}
+
+// SetNillableLaunchError sets the "launch_error" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchError(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchError(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -692,6 +846,42 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultReincarnationState
 		_c.mutation.SetReincarnationState(v)
 	}
+	if _, ok := _c.mutation.LaunchAsyncOptIn(); !ok {
+		v := agent.DefaultLaunchAsyncOptIn
+		_c.mutation.SetLaunchAsyncOptIn(v)
+	}
+	if _, ok := _c.mutation.LaunchID(); !ok {
+		v := agent.DefaultLaunchID
+		_c.mutation.SetLaunchID(v)
+	}
+	if _, ok := _c.mutation.LaunchState(); !ok {
+		v := agent.DefaultLaunchState
+		_c.mutation.SetLaunchState(v)
+	}
+	if _, ok := _c.mutation.LaunchEndReason(); !ok {
+		v := agent.DefaultLaunchEndReason
+		_c.mutation.SetLaunchEndReason(v)
+	}
+	if _, ok := _c.mutation.LaunchKind(); !ok {
+		v := agent.DefaultLaunchKind
+		_c.mutation.SetLaunchKind(v)
+	}
+	if _, ok := _c.mutation.LaunchOwner(); !ok {
+		v := agent.DefaultLaunchOwner
+		_c.mutation.SetLaunchOwner(v)
+	}
+	if _, ok := _c.mutation.LaunchSeq(); !ok {
+		v := agent.DefaultLaunchSeq
+		_c.mutation.SetLaunchSeq(v)
+	}
+	if _, ok := _c.mutation.LaunchStep(); !ok {
+		v := agent.DefaultLaunchStep
+		_c.mutation.SetLaunchStep(v)
+	}
+	if _, ok := _c.mutation.LaunchError(); !ok {
+		v := agent.DefaultLaunchError
+		_c.mutation.SetLaunchError(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := agent.DefaultID()
 		_c.mutation.SetID(v)
@@ -761,6 +951,12 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.Generation(); !ok {
 		return &ValidationError{Name: "generation", err: errors.New(`ent: missing required field "Agent.generation"`)}
+	}
+	if _, ok := _c.mutation.LaunchAsyncOptIn(); !ok {
+		return &ValidationError{Name: "launch_async_opt_in", err: errors.New(`ent: missing required field "Agent.launch_async_opt_in"`)}
+	}
+	if _, ok := _c.mutation.LaunchSeq(); !ok {
+		return &ValidationError{Name: "launch_seq", err: errors.New(`ent: missing required field "Agent.launch_seq"`)}
 	}
 	if len(_c.mutation.ProjectIDs()) == 0 {
 		return &ValidationError{Name: "project", err: errors.New(`ent: missing required edge "Agent.project"`)}
@@ -964,6 +1160,50 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ReincarnationUpdatedAt(); ok {
 		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
 		_node.ReincarnationUpdatedAt = &value
+	}
+	if value, ok := _c.mutation.LaunchAsyncOptIn(); ok {
+		_spec.SetField(agent.FieldLaunchAsyncOptIn, field.TypeBool, value)
+		_node.LaunchAsyncOptIn = value
+	}
+	if value, ok := _c.mutation.LaunchID(); ok {
+		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
+		_node.LaunchID = value
+	}
+	if value, ok := _c.mutation.LaunchState(); ok {
+		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
+		_node.LaunchState = value
+	}
+	if value, ok := _c.mutation.LaunchEndReason(); ok {
+		_spec.SetField(agent.FieldLaunchEndReason, field.TypeString, value)
+		_node.LaunchEndReason = value
+	}
+	if value, ok := _c.mutation.LaunchKind(); ok {
+		_spec.SetField(agent.FieldLaunchKind, field.TypeString, value)
+		_node.LaunchKind = value
+	}
+	if value, ok := _c.mutation.LaunchDeadline(); ok {
+		_spec.SetField(agent.FieldLaunchDeadline, field.TypeTime, value)
+		_node.LaunchDeadline = &value
+	}
+	if value, ok := _c.mutation.LaunchLastReportAt(); ok {
+		_spec.SetField(agent.FieldLaunchLastReportAt, field.TypeTime, value)
+		_node.LaunchLastReportAt = &value
+	}
+	if value, ok := _c.mutation.LaunchOwner(); ok {
+		_spec.SetField(agent.FieldLaunchOwner, field.TypeString, value)
+		_node.LaunchOwner = value
+	}
+	if value, ok := _c.mutation.LaunchSeq(); ok {
+		_spec.SetField(agent.FieldLaunchSeq, field.TypeInt64, value)
+		_node.LaunchSeq = value
+	}
+	if value, ok := _c.mutation.LaunchStep(); ok {
+		_spec.SetField(agent.FieldLaunchStep, field.TypeString, value)
+		_node.LaunchStep = value
+	}
+	if value, ok := _c.mutation.LaunchError(); ok {
+		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
+		_node.LaunchError = value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -1753,6 +1993,198 @@ func (u *AgentUpsert) UpdateReincarnationUpdatedAt() *AgentUpsert {
 // ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
 func (u *AgentUpsert) ClearReincarnationUpdatedAt() *AgentUpsert {
 	u.SetNull(agent.FieldReincarnationUpdatedAt)
+	return u
+}
+
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (u *AgentUpsert) SetLaunchAsyncOptIn(v bool) *AgentUpsert {
+	u.Set(agent.FieldLaunchAsyncOptIn, v)
+	return u
+}
+
+// UpdateLaunchAsyncOptIn sets the "launch_async_opt_in" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchAsyncOptIn() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchAsyncOptIn)
+	return u
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (u *AgentUpsert) SetLaunchID(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchID, v)
+	return u
+}
+
+// UpdateLaunchID sets the "launch_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchID() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchID)
+	return u
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (u *AgentUpsert) ClearLaunchID() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchID)
+	return u
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (u *AgentUpsert) SetLaunchState(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchState, v)
+	return u
+}
+
+// UpdateLaunchState sets the "launch_state" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchState() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchState)
+	return u
+}
+
+// ClearLaunchState clears the value of the "launch_state" field.
+func (u *AgentUpsert) ClearLaunchState() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchState)
+	return u
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (u *AgentUpsert) SetLaunchEndReason(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchEndReason, v)
+	return u
+}
+
+// UpdateLaunchEndReason sets the "launch_end_reason" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchEndReason() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchEndReason)
+	return u
+}
+
+// ClearLaunchEndReason clears the value of the "launch_end_reason" field.
+func (u *AgentUpsert) ClearLaunchEndReason() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchEndReason)
+	return u
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (u *AgentUpsert) SetLaunchKind(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchKind, v)
+	return u
+}
+
+// UpdateLaunchKind sets the "launch_kind" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchKind() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchKind)
+	return u
+}
+
+// ClearLaunchKind clears the value of the "launch_kind" field.
+func (u *AgentUpsert) ClearLaunchKind() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchKind)
+	return u
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (u *AgentUpsert) SetLaunchDeadline(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLaunchDeadline, v)
+	return u
+}
+
+// UpdateLaunchDeadline sets the "launch_deadline" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchDeadline() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchDeadline)
+	return u
+}
+
+// ClearLaunchDeadline clears the value of the "launch_deadline" field.
+func (u *AgentUpsert) ClearLaunchDeadline() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchDeadline)
+	return u
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (u *AgentUpsert) SetLaunchLastReportAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLaunchLastReportAt, v)
+	return u
+}
+
+// UpdateLaunchLastReportAt sets the "launch_last_report_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchLastReportAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchLastReportAt)
+	return u
+}
+
+// ClearLaunchLastReportAt clears the value of the "launch_last_report_at" field.
+func (u *AgentUpsert) ClearLaunchLastReportAt() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchLastReportAt)
+	return u
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (u *AgentUpsert) SetLaunchOwner(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchOwner, v)
+	return u
+}
+
+// UpdateLaunchOwner sets the "launch_owner" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchOwner() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchOwner)
+	return u
+}
+
+// ClearLaunchOwner clears the value of the "launch_owner" field.
+func (u *AgentUpsert) ClearLaunchOwner() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchOwner)
+	return u
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (u *AgentUpsert) SetLaunchSeq(v int64) *AgentUpsert {
+	u.Set(agent.FieldLaunchSeq, v)
+	return u
+}
+
+// UpdateLaunchSeq sets the "launch_seq" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchSeq() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchSeq)
+	return u
+}
+
+// AddLaunchSeq adds v to the "launch_seq" field.
+func (u *AgentUpsert) AddLaunchSeq(v int64) *AgentUpsert {
+	u.Add(agent.FieldLaunchSeq, v)
+	return u
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (u *AgentUpsert) SetLaunchStep(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchStep, v)
+	return u
+}
+
+// UpdateLaunchStep sets the "launch_step" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchStep() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchStep)
+	return u
+}
+
+// ClearLaunchStep clears the value of the "launch_step" field.
+func (u *AgentUpsert) ClearLaunchStep() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchStep)
+	return u
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (u *AgentUpsert) SetLaunchError(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchError, v)
+	return u
+}
+
+// UpdateLaunchError sets the "launch_error" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchError() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchError)
+	return u
+}
+
+// ClearLaunchError clears the value of the "launch_error" field.
+func (u *AgentUpsert) ClearLaunchError() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchError)
 	return u
 }
 
@@ -2609,6 +3041,230 @@ func (u *AgentUpsertOne) UpdateReincarnationUpdatedAt() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearReincarnationUpdatedAt() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearReincarnationUpdatedAt()
+	})
+}
+
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (u *AgentUpsertOne) SetLaunchAsyncOptIn(v bool) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchAsyncOptIn(v)
+	})
+}
+
+// UpdateLaunchAsyncOptIn sets the "launch_async_opt_in" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchAsyncOptIn() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchAsyncOptIn()
+	})
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (u *AgentUpsertOne) SetLaunchID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchID(v)
+	})
+}
+
+// UpdateLaunchID sets the "launch_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchID()
+	})
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (u *AgentUpsertOne) ClearLaunchID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchID()
+	})
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (u *AgentUpsertOne) SetLaunchState(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchState(v)
+	})
+}
+
+// UpdateLaunchState sets the "launch_state" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchState()
+	})
+}
+
+// ClearLaunchState clears the value of the "launch_state" field.
+func (u *AgentUpsertOne) ClearLaunchState() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchState()
+	})
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (u *AgentUpsertOne) SetLaunchEndReason(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchEndReason(v)
+	})
+}
+
+// UpdateLaunchEndReason sets the "launch_end_reason" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchEndReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchEndReason()
+	})
+}
+
+// ClearLaunchEndReason clears the value of the "launch_end_reason" field.
+func (u *AgentUpsertOne) ClearLaunchEndReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchEndReason()
+	})
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (u *AgentUpsertOne) SetLaunchKind(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchKind(v)
+	})
+}
+
+// UpdateLaunchKind sets the "launch_kind" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchKind()
+	})
+}
+
+// ClearLaunchKind clears the value of the "launch_kind" field.
+func (u *AgentUpsertOne) ClearLaunchKind() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchKind()
+	})
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (u *AgentUpsertOne) SetLaunchDeadline(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchDeadline(v)
+	})
+}
+
+// UpdateLaunchDeadline sets the "launch_deadline" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchDeadline() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchDeadline()
+	})
+}
+
+// ClearLaunchDeadline clears the value of the "launch_deadline" field.
+func (u *AgentUpsertOne) ClearLaunchDeadline() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchDeadline()
+	})
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (u *AgentUpsertOne) SetLaunchLastReportAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchLastReportAt(v)
+	})
+}
+
+// UpdateLaunchLastReportAt sets the "launch_last_report_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchLastReportAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchLastReportAt()
+	})
+}
+
+// ClearLaunchLastReportAt clears the value of the "launch_last_report_at" field.
+func (u *AgentUpsertOne) ClearLaunchLastReportAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchLastReportAt()
+	})
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (u *AgentUpsertOne) SetLaunchOwner(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchOwner(v)
+	})
+}
+
+// UpdateLaunchOwner sets the "launch_owner" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchOwner()
+	})
+}
+
+// ClearLaunchOwner clears the value of the "launch_owner" field.
+func (u *AgentUpsertOne) ClearLaunchOwner() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchOwner()
+	})
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (u *AgentUpsertOne) SetLaunchSeq(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchSeq(v)
+	})
+}
+
+// AddLaunchSeq adds v to the "launch_seq" field.
+func (u *AgentUpsertOne) AddLaunchSeq(v int64) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddLaunchSeq(v)
+	})
+}
+
+// UpdateLaunchSeq sets the "launch_seq" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchSeq() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchSeq()
+	})
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (u *AgentUpsertOne) SetLaunchStep(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchStep(v)
+	})
+}
+
+// UpdateLaunchStep sets the "launch_step" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchStep() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchStep()
+	})
+}
+
+// ClearLaunchStep clears the value of the "launch_step" field.
+func (u *AgentUpsertOne) ClearLaunchStep() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchStep()
+	})
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (u *AgentUpsertOne) SetLaunchError(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchError(v)
+	})
+}
+
+// UpdateLaunchError sets the "launch_error" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchError() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchError()
+	})
+}
+
+// ClearLaunchError clears the value of the "launch_error" field.
+func (u *AgentUpsertOne) ClearLaunchError() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchError()
 	})
 }
 
@@ -3632,6 +4288,230 @@ func (u *AgentUpsertBulk) UpdateReincarnationUpdatedAt() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearReincarnationUpdatedAt() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearReincarnationUpdatedAt()
+	})
+}
+
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (u *AgentUpsertBulk) SetLaunchAsyncOptIn(v bool) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchAsyncOptIn(v)
+	})
+}
+
+// UpdateLaunchAsyncOptIn sets the "launch_async_opt_in" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchAsyncOptIn() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchAsyncOptIn()
+	})
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (u *AgentUpsertBulk) SetLaunchID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchID(v)
+	})
+}
+
+// UpdateLaunchID sets the "launch_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchID()
+	})
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (u *AgentUpsertBulk) ClearLaunchID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchID()
+	})
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (u *AgentUpsertBulk) SetLaunchState(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchState(v)
+	})
+}
+
+// UpdateLaunchState sets the "launch_state" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchState()
+	})
+}
+
+// ClearLaunchState clears the value of the "launch_state" field.
+func (u *AgentUpsertBulk) ClearLaunchState() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchState()
+	})
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (u *AgentUpsertBulk) SetLaunchEndReason(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchEndReason(v)
+	})
+}
+
+// UpdateLaunchEndReason sets the "launch_end_reason" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchEndReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchEndReason()
+	})
+}
+
+// ClearLaunchEndReason clears the value of the "launch_end_reason" field.
+func (u *AgentUpsertBulk) ClearLaunchEndReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchEndReason()
+	})
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (u *AgentUpsertBulk) SetLaunchKind(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchKind(v)
+	})
+}
+
+// UpdateLaunchKind sets the "launch_kind" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchKind()
+	})
+}
+
+// ClearLaunchKind clears the value of the "launch_kind" field.
+func (u *AgentUpsertBulk) ClearLaunchKind() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchKind()
+	})
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (u *AgentUpsertBulk) SetLaunchDeadline(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchDeadline(v)
+	})
+}
+
+// UpdateLaunchDeadline sets the "launch_deadline" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchDeadline() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchDeadline()
+	})
+}
+
+// ClearLaunchDeadline clears the value of the "launch_deadline" field.
+func (u *AgentUpsertBulk) ClearLaunchDeadline() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchDeadline()
+	})
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (u *AgentUpsertBulk) SetLaunchLastReportAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchLastReportAt(v)
+	})
+}
+
+// UpdateLaunchLastReportAt sets the "launch_last_report_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchLastReportAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchLastReportAt()
+	})
+}
+
+// ClearLaunchLastReportAt clears the value of the "launch_last_report_at" field.
+func (u *AgentUpsertBulk) ClearLaunchLastReportAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchLastReportAt()
+	})
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (u *AgentUpsertBulk) SetLaunchOwner(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchOwner(v)
+	})
+}
+
+// UpdateLaunchOwner sets the "launch_owner" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchOwner()
+	})
+}
+
+// ClearLaunchOwner clears the value of the "launch_owner" field.
+func (u *AgentUpsertBulk) ClearLaunchOwner() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchOwner()
+	})
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (u *AgentUpsertBulk) SetLaunchSeq(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchSeq(v)
+	})
+}
+
+// AddLaunchSeq adds v to the "launch_seq" field.
+func (u *AgentUpsertBulk) AddLaunchSeq(v int64) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.AddLaunchSeq(v)
+	})
+}
+
+// UpdateLaunchSeq sets the "launch_seq" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchSeq() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchSeq()
+	})
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (u *AgentUpsertBulk) SetLaunchStep(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchStep(v)
+	})
+}
+
+// UpdateLaunchStep sets the "launch_step" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchStep() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchStep()
+	})
+}
+
+// ClearLaunchStep clears the value of the "launch_step" field.
+func (u *AgentUpsertBulk) ClearLaunchStep() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchStep()
+	})
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (u *AgentUpsertBulk) SetLaunchError(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchError(v)
+	})
+}
+
+// UpdateLaunchError sets the "launch_error" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchError() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchError()
+	})
+}
+
+// ClearLaunchError clears the value of the "launch_error" field.
+func (u *AgentUpsertBulk) ClearLaunchError() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchError()
 	})
 }
 

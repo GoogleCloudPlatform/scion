@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: add broker.create (ptone/scion#2138) — explicit hub-member grant for broker registration
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -143,21 +143,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: attach/port_access → agent.lifecycle (miller79/scion#88)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: remove agent.message (policy alignment with agent.attach)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -214,9 +214,12 @@ func hubMemberPermissionIDs() []string {
 		// Harness config catalog (read-only)
 		"harness_config.read",
 		"harness_config.list",
-		// Broker catalog (read-only)
+		// Broker catalog (read-only), plus registration (ptone/scion#2138):
+		// merely being an authenticated user is not enough to register a
+		// broker — it requires this explicit hub-member grant.
 		"broker.read",
 		"broker.list",
+		"broker.create",
 		// GCP service account catalog (read-only)
 		"gcp_service_account.read",
 		"gcp_service_account.list",
@@ -297,6 +300,13 @@ func projectOwnerPermissionIDs() []string {
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// owner assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management
 		"harness_config.create",
 		"harness_config.delete",
@@ -360,6 +370,13 @@ func projectAdminPermissionIDs() []string {
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// admin assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management (no delete)
 		"harness_config.create",
 		"harness_config.list",
@@ -409,6 +426,13 @@ func projectMemberCuratedPermissionIDs() []string {
 		"agent.create",
 		"agent.list",
 		"agent.read",
+		// GCP service account management (project-scoped). Lets a project
+		// member assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config (create, read, list)
 		"harness_config.create",
 		"harness_config.list",
