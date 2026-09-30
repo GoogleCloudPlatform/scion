@@ -124,10 +124,22 @@ func TestRouteAuthz_U7_NonPartyKeyPeer_ZToBRow_FlagOff403ThroughLiveLookupOfA(t 
 }
 
 // U7 route level, r4 #1: an A -> Z row inside K(A<->B): the sender (A) IS
-// the key peer, so peerProjectFromRow's sender branch fires and uses A's own
-// SenderProjectID stamp directly (no live lookup needed) — still 403,
-// cross-project, flag off.
-func TestRouteAuthz_U7_NonPartyKeyPeer_AToZRow_FlagOff403ViaStamp(t *testing.T) {
+// the key peer, so peerProjectFromRow's sender branch is the one designed to
+// fire here, using A's own SenderProjectID stamp directly with no live
+// lookup needed.
+//
+// r2 finding 3: in this test, that design intent is not what actually runs.
+// The ent-backed test store never persists SenderProjectID/RecipientProjectID
+// (ptone/scion#2282), so s.CreateMessage followed by the handler's
+// s.store.GetMessage round-trip silently drops the stamp set above — the
+// message peerProjectFromRow sees has a nil SenderProjectID, so
+// enforceCrossProjectReadGate actually falls through to the live lookup of
+// A's current project, not the stamp branch. The assertion (403, flag off)
+// still holds either way, so this test remains valid coverage of the
+// outcome, but its name and comment must not claim the stamp path was
+// exercised. See TestOffload_I10_StampSurvivesDeletion_WhenStorePersistsIt
+// for the in-memory-store variant that does exercise the stamp branch.
+func TestRouteAuthz_U7_NonPartyKeyPeer_AToZRow_FlagOff403ThroughLiveLookup(t *testing.T) {
 	srv, s, conv, agentA, agentB, agentZ := routeAuthzSetup(t)
 	ctx := context.Background()
 

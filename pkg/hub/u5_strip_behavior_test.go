@@ -20,8 +20,20 @@ package hub
 // Impl review r1, finding 2 (U5(a)-(c), design auto-offload-large-dm §12):
 // behavioral strip tests, one per §4.2 item 1 site. TestReservedKeyStripCoverage
 // (reserved_metadata_strip_test.go) is U5(d): it only checks that every site
-// is CLASSIFIED. These tests check that a listed site actually STRIPS —
-// deleting any one of the strip lines below must fail the matching test here.
+// is CLASSIFIED. These tests check that a listed site actually STRIPS.
+//
+// For most sites below, deleting the strip line at that site fails the
+// matching test here. Two sites are the exception (impl review r2, finding
+// 1): TestU5a_ChatV2SendAgentRouted_StripsReservedMetadata and
+// TestU5a_ProcessMentions_StripsReservedMetadata pin the AC9 *outcome* —
+// no reserved key reaches the dispatched output — but a mutation that
+// deletes their strip call does NOT fail them, because a different,
+// pre-existing mechanism at that same site independently removes the same
+// keys: chat v2's allowedClientMetadataKeys allowlist (only "RE-to" passes
+// client metadata through at all) and messages.NewMention's fresh-metadata
+// construction (mention_source/mention_position only, never copied from
+// originalMsg). Both are called out inline at their own test. The strip
+// calls at those two sites remain defence in depth, not the only barrier.
 //
 // (b) (hub values override client values on an offload) and (c) (other
 // client metadata passes through) are properties of the shared
@@ -30,7 +42,8 @@ package hub
 // pkg/messaging/offload_test.go (TestStripReservedMetadata_NewMapWhenReservedPresent,
 // TestOffloadForDelivery_StubContentAndBounds) and exercised end-to-end once
 // in TestOffload_ClientSuppliedReservedMetadataAlwaysStripped (offload_integration_test.go).
-// This file's job is (a): per-site coverage, so a deleted strip line is caught.
+// This file's job is (a): per-site coverage, so a deleted strip line is caught
+// (except the two documented exceptions above).
 // ---------------------------------------------------------------------------
 
 import (
@@ -63,8 +76,15 @@ func spoofedReservedMetadata() map[string]string {
 	}
 }
 
-func assertReservedStripped(t *testing.T, md map[string]string) {
+// assertReservedStripped checks both that the reserved keys are absent from
+// msg's Metadata map and that their spoofed values never reached either
+// rendering of the message (r2 finding 2): checking only the metadata map
+// would miss a bug where a render call was moved ahead of the strip call,
+// since the map check would still pass while the rendered text leaked the
+// spoofed values.
+func assertReservedStripped(t *testing.T, msg *messages.StructuredMessage) {
 	t.Helper()
+	md := msg.Metadata
 	_, hasOffloaded := md[messaging.MetaBodyOffloaded]
 	_, hasChars := md[messaging.MetaBodyChars]
 	_, hasSHA := md[messaging.MetaBodySHA256]
@@ -72,6 +92,18 @@ func assertReservedStripped(t *testing.T, md map[string]string) {
 	assert.False(t, hasChars, "client-supplied body_chars must be stripped")
 	assert.False(t, hasSHA, "client-supplied body_sha256 must be stripped")
 	assert.Equal(t, "kept", md["harmless"], "non-reserved client metadata is unaffected")
+
+	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
+	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
+
+	// deliveryMetadataAllowlist (pkg/messages/format.go) deliberately lets
+	// body_* through the switch-OFF (legacy) renderer so it can show a real
+	// offload marker — which means a failed strip would leak the spoofed
+	// values here too. Render the already-captured message through the
+	// legacy path directly to cover that renderer as well.
+	legacy := messages.FormatForDelivery(msg)
+	assert.NotContains(t, legacy, "deadbeef", "spoofed body_sha256 value must not reach the switch-OFF (legacy) rendering")
+	assert.NotContains(t, legacy, "999999", "spoofed body_chars value must not reach the switch-OFF (legacy) rendering")
 }
 
 // U5(a): handleGroupMessage. The recipient's dispatched copy aliases msg's
@@ -113,11 +145,11 @@ func TestU5a_HandleGroupMessage_StripsReservedMetadata(t *testing.T) {
 
 	callsA := dispatchesTo(dispatcher, agentA.ID)
 	require.Len(t, callsA, 1)
-	assertReservedStripped(t, callsA[0].StructuredMessage.Metadata)
+	assertReservedStripped(t, callsA[0].StructuredMessage)
 
 	callsB := dispatchesTo(dispatcher, agentB.ID)
 	require.Len(t, callsB, 1)
-	assertReservedStripped(t, callsB[0].StructuredMessage.Metadata)
+	assertReservedStripped(t, callsB[0].StructuredMessage)
 }
 
 // U5(a): broadcastDirect. Same aliasing pattern as handleGroupMessage.
@@ -160,7 +192,7 @@ func TestU5a_BroadcastDirect_StripsReservedMetadata(t *testing.T) {
 
 	calls := dispatchesTo(dispatcher, agent.ID)
 	require.Len(t, calls, 1)
-	assertReservedStripped(t, calls[0].StructuredMessage.Metadata)
+	assertReservedStripped(t, calls[0].StructuredMessage)
 }
 
 // U5(a): handleBrokerInbound. Plugin-relayed messages carry plugin-supplied
@@ -211,7 +243,7 @@ func TestU5a_HandleBrokerInbound_StripsReservedMetadata(t *testing.T) {
 
 	calls := dispatchesTo(dispatcher, target.ID)
 	require.Len(t, calls, 1)
-	assertReservedStripped(t, calls[0].StructuredMessage.Metadata)
+	assertReservedStripped(t, calls[0].StructuredMessage)
 }
 
 // U5(a): dispatchRoutedRecipient. The existing hub-owned-key exclusion
@@ -235,12 +267,15 @@ func TestU5a_DispatchRoutedRecipient_StripsReservedMetadata(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	calls := env.dispatcher.getCalls()
-	require.NotEmpty(t, calls)
+	// r2 finding 4: require at least one call to the expected agent with a
+	// non-nil StructuredMessage, rather than only requiring the overall call
+	// list be non-empty — the previous form could pass vacuously if every
+	// call had a nil StructuredMessage.
+	calls := dispatchesTo(env.dispatcher, env.agent1.ID)
+	require.NotEmpty(t, calls, "expected at least one dispatch to the routed default agent (alpha)")
 	for _, c := range calls {
-		if c.StructuredMessage != nil {
-			assertReservedStripped(t, c.StructuredMessage.Metadata)
-		}
+		require.NotNil(t, c.StructuredMessage)
+		assertReservedStripped(t, c.StructuredMessage)
 	}
 }
 
@@ -278,7 +313,7 @@ func TestU5a_DeliverToAgent_StripsReservedMetadata(t *testing.T) {
 
 	calls := dispatchesTo(dispatcher, agent.ID)
 	require.Len(t, calls, 1)
-	assertReservedStripped(t, calls[0].StructuredMessage.Metadata)
+	assertReservedStripped(t, calls[0].StructuredMessage)
 
 	// The original event-bus msg pointer must not have been mutated in
 	// place (r1 FYI: messagebroker.go always copies before touching it).
@@ -324,13 +359,22 @@ func TestU5a_ChatV2SendAgentRouted_StripsReservedMetadata(t *testing.T) {
 	// own pre-existing, unrelated behavior, not something this PR changes.
 	// The property this test actually pins is AC9's outcome: no reserved key
 	// reaches the dispatched output.
-	md := calls[0].StructuredMessage.Metadata
+	msg := calls[0].StructuredMessage
+	md := msg.Metadata
 	_, hasOffloaded := md[messaging.MetaBodyOffloaded]
 	_, hasChars := md[messaging.MetaBodyChars]
 	_, hasSHA := md[messaging.MetaBodySHA256]
 	assert.False(t, hasOffloaded, "client-supplied body_offloaded must be stripped")
 	assert.False(t, hasChars, "client-supplied body_chars must be stripped")
 	assert.False(t, hasSHA, "client-supplied body_sha256 must be stripped")
+
+	// r2 finding 2: also check the rendered output, not just the metadata
+	// map (see assertReservedStripped's doc comment for why).
+	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
+	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
+	legacy := messages.FormatForDelivery(msg)
+	assert.NotContains(t, legacy, "deadbeef", "spoofed body_sha256 value must not reach the switch-OFF (legacy) rendering")
+	assert.NotContains(t, legacy, "999999", "spoofed body_chars value must not reach the switch-OFF (legacy) rendering")
 }
 
 // U5(a): processMentions. messages.NewMention builds each mention's own
@@ -377,7 +421,8 @@ func TestU5a_ProcessMentions_StripsReservedMetadata(t *testing.T) {
 	// either, which is expected and unrelated to this PR. The property
 	// pinned here is AC9's outcome: no reserved key reaches the mention
 	// recipient, and the mention's metadata is exactly the two mention keys.
-	md := calls[0].StructuredMessage.Metadata
+	msg := calls[0].StructuredMessage
+	md := msg.Metadata
 	_, hasOffloaded := md[messaging.MetaBodyOffloaded]
 	_, hasChars := md[messaging.MetaBodyChars]
 	_, hasSHA := md[messaging.MetaBodySHA256]
@@ -386,6 +431,14 @@ func TestU5a_ProcessMentions_StripsReservedMetadata(t *testing.T) {
 	assert.False(t, hasSHA, "client-supplied body_sha256 must be stripped")
 	assert.Equal(t, map[string]string{"mention_source": "agent:" + primary.Slug, "mention_position": "body"}, md,
 		"a mention's metadata must be exactly NewMention's own two keys, never anything from originalMsg")
+
+	// r2 finding 2: also check the rendered output, not just the metadata
+	// map (see assertReservedStripped's doc comment for why).
+	assert.NotContains(t, msg.DeliveryText, "deadbeef", "spoofed body_sha256 value must not reach the rendered (switch-ON) envelope")
+	assert.NotContains(t, msg.DeliveryText, "999999", "spoofed body_chars value must not reach the rendered (switch-ON) envelope")
+	legacy := messages.FormatForDelivery(msg)
+	assert.NotContains(t, legacy, "deadbeef", "spoofed body_sha256 value must not reach the switch-OFF (legacy) rendering")
+	assert.NotContains(t, legacy, "999999", "spoofed body_chars value must not reach the switch-OFF (legacy) rendering")
 }
 
 // U5(a) coverage note — outbound and #2083 fan-out: both route through
