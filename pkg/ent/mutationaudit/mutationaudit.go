@@ -38,6 +38,20 @@ const (
 	FieldCanDelegateResult = "can_delegate_result"
 	// FieldCanDelegateReason holds the string denoting the can_delegate_reason field in the database.
 	FieldCanDelegateReason = "can_delegate_reason"
+	// FieldCredentialName holds the string denoting the credential_name field in the database.
+	FieldCredentialName = "credential_name"
+	// FieldCredentialBoundaryKind holds the string denoting the credential_boundary_kind field in the database.
+	FieldCredentialBoundaryKind = "credential_boundary_kind"
+	// FieldCredentialBoundaryProjectID holds the string denoting the credential_boundary_project_id field in the database.
+	FieldCredentialBoundaryProjectID = "credential_boundary_project_id"
+	// FieldCredentialLabels holds the string denoting the credential_labels field in the database.
+	FieldCredentialLabels = "credential_labels"
+	// FieldCorrelationID holds the string denoting the correlation_id field in the database.
+	FieldCorrelationID = "correlation_id"
+	// FieldExecutorKind holds the string denoting the executor_kind field in the database.
+	FieldExecutorKind = "executor_kind"
+	// FieldExecutorID holds the string denoting the executor_id field in the database.
+	FieldExecutorID = "executor_id"
 	// Table holds the table name of the mutationaudit in the database.
 	Table = "mutation_audits"
 )
@@ -57,6 +71,13 @@ var Columns = []string{
 	FieldAfterSummary,
 	FieldCanDelegateResult,
 	FieldCanDelegateReason,
+	FieldCredentialName,
+	FieldCredentialBoundaryKind,
+	FieldCredentialBoundaryProjectID,
+	FieldCredentialLabels,
+	FieldCorrelationID,
+	FieldExecutorKind,
+	FieldExecutorID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -152,4 +173,39 @@ func ByCanDelegateResult(opts ...sql.OrderTermOption) OrderOption {
 // ByCanDelegateReason orders the results by the can_delegate_reason field.
 func ByCanDelegateReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCanDelegateReason, opts...).ToFunc()
+}
+
+// ByCredentialName orders the results by the credential_name field.
+func ByCredentialName(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialName, opts...).ToFunc()
+}
+
+// ByCredentialBoundaryKind orders the results by the credential_boundary_kind field.
+func ByCredentialBoundaryKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialBoundaryKind, opts...).ToFunc()
+}
+
+// ByCredentialBoundaryProjectID orders the results by the credential_boundary_project_id field.
+func ByCredentialBoundaryProjectID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialBoundaryProjectID, opts...).ToFunc()
+}
+
+// ByCredentialLabels orders the results by the credential_labels field.
+func ByCredentialLabels(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCredentialLabels, opts...).ToFunc()
+}
+
+// ByCorrelationID orders the results by the correlation_id field.
+func ByCorrelationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCorrelationID, opts...).ToFunc()
+}
+
+// ByExecutorKind orders the results by the executor_kind field.
+func ByExecutorKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExecutorKind, opts...).ToFunc()
+}
+
+// ByExecutorID orders the results by the executor_id field.
+func ByExecutorID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExecutorID, opts...).ToFunc()
 }
