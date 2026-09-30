@@ -758,13 +758,19 @@ func TestBrokerSettings_EndToEndEnforcement(t *testing.T) {
 // =============================================================================
 
 // TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly covers
-// effectiveBrokerLimit directly across all three precedence steps (broker
-// override, entitlement binding, hub default): with the switch off, the
-// value is unchanged but the source becomes not_enforced in every case, and
-// flipping the switch back on restores the real source with no other change
-// (AC-P2-6's "switch on: sources unchanged" leg). inheritedBrokerLimit (the
-// "clear the override" preview) must keep reporting its real step throughout
-// — Amendment A1 explicitly carves it out.
+// effectiveBrokerLimit directly across all four precedence outcomes (broker
+// override, entitlement binding, hub default, and a resolved-zero/unlimited
+// cap): with the switch off, the value is unchanged but the source becomes
+// not_enforced in every case — including brokerCapacity itself reporting
+// Limit == nil for the zero/unlimited case, exactly as it would if the
+// source were "unlimited" — and flipping the switch back on restores the
+// real source with no other change (AC-P2-6's "switch on: sources
+// unchanged" leg). inheritedBrokerLimit (the "clear the override" preview)
+// must keep reporting its real step throughout — Amendment A1 explicitly
+// carves it out. (Review round 1, R1: the switch-off block previously only
+// exercised the broker-override and hub_default cases even though this
+// comment already claimed full coverage; entitlement and resolved-zero were
+// silently untested.)
 func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -774,18 +780,35 @@ func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing
 	require.NoError(t, err)
 	setBrokerAgentCeiling(t, s, 16)
 	// Scoped to broker specifically (not system-wide), so it doesn't also
-	// apply to hubDefaultBroker below — this test only needs one clean
-	// example of each precedence step, unlike TestEffectiveBrokerLimit_Precedence
-	// which deliberately uses a system-scoped binding to prove a broker
-	// override beats even that (AC-P2-2).
+	// apply to hubDefaultBroker/entitlementBroker below — this test only
+	// needs one clean example of each precedence step, unlike
+	// TestEffectiveBrokerLimit_Precedence, which deliberately uses a
+	// system-scoped binding to prove a broker override beats even that
+	// (AC-P2-2).
 	seedBinding(t, s, def.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeBroker, broker.ID, 30)
 	def, err = s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 
-	// hub_default step's source becomes not_enforced once the entitlement
-	// binding is superseded — a broker with neither a binding nor an override
-	// checks the hub_default leg on its own.
+	// A broker with neither a binding nor an override resolves through to
+	// the hub_default step on its own.
 	hubDefaultBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-hubdefault", "")
+
+	// A separate broker carries only the entitlement binding (30), with no
+	// override, so it stays on the entitlement step even after `broker`
+	// above is given a maxAgents override (R1: `broker` itself cannot be
+	// used to check the entitlement step under the switch-off section,
+	// since by then it has already been overridden to 3).
+	entitlementBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-entitlement", "")
+	seedBinding(t, s, def.ID, store.EntitlementSubjectSystemDefault, "", store.QuotaScopeBroker, entitlementBroker.ID, 30)
+
+	// A broker overridden to 0 resolves to a value of 0 (unlimited) via the
+	// broker-override step (R1: the resolved-zero/unlimited case).
+	zeroBroker := newBrokerSettingsTestBroker(t, s, "not-enforced-zero", "")
+	zeroRec := doRequest(t, srv, http.MethodPut, settingsPath(zeroBroker.ID), map[string]interface{}{
+		"settings":         map[string]interface{}{"maxAgents": 0},
+		"expectedRevision": 0,
+	})
+	require.Equal(t, http.StatusOK, zeroRec.Code, zeroRec.Body.String())
 
 	// --- Switch on (default): every step reports its real source. ---
 	require.Nil(t, srv.config.EnforceBrokerQuotas, "switch must default to unset (enforced)")
@@ -794,6 +817,16 @@ func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing
 	require.NoError(t, err)
 	assert.EqualValues(t, 16, value)
 	assert.Equal(t, BrokerLimitSourceHubDefault, source)
+
+	value, source, err = srv.effectiveBrokerLimit(ctx, entitlementBroker.ID, def)
+	require.NoError(t, err)
+	assert.EqualValues(t, 30, value)
+	assert.Equal(t, BrokerLimitSourceEntitlement, source)
+
+	value, source, err = srv.effectiveBrokerLimit(ctx, zeroBroker.ID, def)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, value)
+	assert.Equal(t, BrokerLimitSourceBroker, source)
 
 	value, source, err = srv.effectiveBrokerLimit(ctx, broker.ID, def)
 	require.NoError(t, err)
@@ -825,10 +858,27 @@ func TestEffectiveBrokerLimit_NotEnforced_KeepsValueChangesSourceOnly(t *testing
 	assert.EqualValues(t, 16, value, "hub_default value must be unchanged while off")
 	assert.Equal(t, BrokerLimitSourceNotEnforced, source)
 
+	value, source, err = srv.effectiveBrokerLimit(ctx, entitlementBroker.ID, def)
+	require.NoError(t, err)
+	assert.EqualValues(t, 30, value, "entitlement value must be unchanged while off")
+	assert.Equal(t, BrokerLimitSourceNotEnforced, source)
+
 	value, source, err = srv.effectiveBrokerLimit(ctx, broker.ID, def)
 	require.NoError(t, err)
 	assert.EqualValues(t, 3, value, "broker-override value must be unchanged while off")
 	assert.Equal(t, BrokerLimitSourceNotEnforced, source)
+
+	value, source, err = srv.effectiveBrokerLimit(ctx, zeroBroker.ID, def)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, value, "a resolved-zero (unlimited) cap must still be reported as not_enforced, not silently promoted to plain unlimited")
+	assert.Equal(t, BrokerLimitSourceNotEnforced, source)
+
+	// brokerCapacity must still treat the resolved value of 0 as unlimited
+	// (Limit == nil) while reporting the not_enforced source — the same
+	// convention it uses when the real step is "unlimited".
+	zeroCapacity := srv.brokerCapacity(ctx, zeroBroker.ID, def)
+	assert.Nil(t, zeroCapacity.Limit, "a resolved value of 0 must still mean unlimited (nil Limit) in the read model")
+	assert.Equal(t, BrokerLimitSourceNotEnforced, zeroCapacity.Source)
 
 	// The inherited preview is unaffected by the switch (Amendment A1: "keeps
 	// reporting its real step, not not_enforced").

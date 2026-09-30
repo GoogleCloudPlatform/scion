@@ -628,8 +628,13 @@ func TestFormatProviderCapacity(t *testing.T) {
 			want: "5 (not enforced)",
 		},
 		{
-			name: "enforced (empty source): no suffix",
+			name: "enforced (source=broker): no suffix",
 			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: "broker"},
+			want: "12/12",
+		},
+		{
+			name: "enforced (empty source, e.g. an older hub): no suffix",
+			p:    hubclient.ProjectProvider{AgentCount: i64(12), AgentLimit: i64(12), AgentLimitSource: ""},
 			want: "12/12",
 		},
 	}

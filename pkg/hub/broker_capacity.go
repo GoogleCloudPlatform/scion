@@ -96,9 +96,10 @@ func (s *Server) effectiveBrokerLimit(ctx context.Context, brokerID string, limi
 }
 
 // inheritedBrokerLimit resolves what the effective limit and source would be
-// for brokerID if its own settings.maxAgents were unset — i.e. it skips step
-// 2 of the P2-D2 precedence (design.md §5.2) and goes straight to the
-// entitlement engine / hub-wide default. It is effectiveBrokerLimit's "else"
+// for brokerID if its own settings.maxAgents were unset — i.e. it skips the
+// broker-override step of the P2-D2 precedence (design.md §5.2, step 1 in
+// effectiveBrokerLimit's doc above) and goes straight to the entitlement
+// engine / hub-wide default. It is effectiveBrokerLimit's "else"
 // branch, factored out so the settings API can report it directly: the
 // broker detail page needs to know what "clear the override" would produce
 // even while an override is currently active, when effectiveBrokerLimit
