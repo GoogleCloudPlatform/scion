@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -270,10 +271,20 @@ func (s *BrokerDispatchStore) MarkMessageFailed(ctx context.Context, id string, 
 }
 
 // CountStuckPendingMessages returns the number of messages still in
-// dispatch_state='pending' whose created timestamp is before the given cutoff.
+// dispatch_state='pending' whose created timestamp is before the given
+// cutoff. Scoped to agent recipients only (message.RecipientHasPrefix
+// "agent:") — only a message addressed to an agent is actually dispatched
+// through the broker/runtime, so only that row can be genuinely "stuck".
+// A "user:" recipient row reaching this state is always a bug in the writer
+// (e.g. nc-promote-busy), not a stalled dispatch, and must not be counted or
+// expired here.
 func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error) {
 	n, err := s.client.Message.Query().
-		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
 		Count(ctx)
 	if err != nil {
 		return 0, mapError(err)
@@ -282,10 +293,15 @@ func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, bef
 }
 
 // ExpireStuckPendingMessages transitions messages stuck in pending state past
-// the given cutoff to failed, recording the reason. Returns the number expired.
+// the given cutoff to failed, recording the reason. Returns the number
+// expired. Scoped to agent recipients only — see CountStuckPendingMessages.
 func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error) {
 	affected, err := s.client.Message.Update().
-		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
 		SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)
@@ -358,6 +374,100 @@ func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx contex
 		return 0, mapError(err)
 	}
 	return affected, nil
+}
+
+// backfillPageSize bounds how many rows BackfillNonAgentDispatchState repairs
+// per transaction, so a large legacy population commits in chunks instead of
+// one fsync per row. A var (not const) so tests can shrink it to exercise
+// multi-page pagination without seeding hundreds of rows.
+var backfillPageSize = 500
+
+// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
+// "pending", or "failed" with dispatch_failure_reason == expiredReason, by
+// the pre-fix nc-promote-busy bug (any writer that built a storeMsg without
+// stamping DispatchState). The exact complement of the R1 agent-only
+// allow-list: only an agent-addressed row is ever legitimately pending or
+// genuinely failed (see ExpireStuckPendingMessages/PurgeFailedMessages), so
+// any other row in either state is this writer bug. Sets dispatch_state
+// "dispatched", clears the failure reason, and backdates dispatched_at to
+// the row's own created time when unset. Returns the number of rows
+// repaired; see nc-promote-busy's investigation note for the full rationale.
+func (s *BrokerDispatchStore) BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error) {
+	eligible := message.And(
+		message.Not(message.RecipientHasPrefix("agent:")),
+		message.Or(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.And(
+				message.DispatchStateEQ(store.MessageDispatchFailed),
+				message.DispatchFailureReasonEQ(expiredReason),
+			),
+		),
+	)
+
+	total := 0
+	for {
+		repaired, err := s.backfillNonAgentDispatchStatePage(ctx, eligible)
+		if err != nil {
+			return total, err
+		}
+		total += repaired
+		if repaired < backfillPageSize {
+			return total, nil
+		}
+	}
+}
+
+// backfillNonAgentDispatchStatePage repairs up to backfillPageSize eligible
+// rows in a single transaction. Repaired rows drop out of eligible (their
+// dispatch_state is no longer pending/failed-with-reason), so each call
+// naturally fetches the next page — no offset or cursor bookkeeping needed.
+func (s *BrokerDispatchStore) backfillNonAgentDispatchStatePage(ctx context.Context, eligible predicate.Message) (int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	page, err := tx.Message.Query().
+		Where(eligible).
+		Limit(backfillPageSize).
+		Select(message.FieldID, message.FieldCreated, message.FieldDispatchedAt).
+		All(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if len(page) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]uuid.UUID, len(page))
+	for i, m := range page {
+		ids[i] = m.ID
+	}
+	if _, err := tx.Message.Update().
+		Where(message.IDIn(ids...)).
+		SetDispatchState(store.MessageDispatchDispatched).
+		ClearDispatchFailureReason().
+		Save(ctx); err != nil {
+		return 0, mapError(err)
+	}
+
+	// dispatched_at is per-row (backdated to each row's own created time),
+	// so it cannot join the bulk update above; only touch rows where it is
+	// still unset.
+	for _, m := range page {
+		if m.DispatchedAt != nil {
+			continue
+		}
+		if err := tx.Message.UpdateOneID(m.ID).SetDispatchedAt(m.Created).Exec(ctx); err != nil {
+			return 0, mapError(err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, mapError(err)
+	}
+	return len(page), nil
 }
 
 // ListPendingMessages returns messages still pending delivery whose target agent

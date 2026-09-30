@@ -255,6 +255,46 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("image resolution: starting, harnessConfigName=%s", harnessConfigName)
 
+	// Resolve the template chain unconditionally: it drives both the
+	// harness-config-dir search below and the explicit-image detection
+	// further down. Prefer opts.Template when it is an absolute path (e.g.
+	// hydrated template cache path from the broker). The display name stored
+	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
+	// project, but the original opts.Template path points to the actual
+	// template directory containing harness-configs/.
+	templateName := ""
+	if opts.Template != "" && filepath.IsAbs(opts.Template) {
+		templateName = opts.Template
+	}
+	if templateName == "" {
+		if finalScionCfg != nil && finalScionCfg.Info != nil {
+			templateName = finalScionCfg.Info.Template
+		}
+	}
+	if templateName == "" {
+		templateName = opts.Template
+	}
+	var templateChain []*config.Template
+	var templatePaths []string
+	// templateUnresolvable is true only when a named template could not be
+	// found at all (renamed or deleted since the agent was created) — not
+	// when there is simply no template name to resolve. It gates the
+	// recorded-image/pull-policy fallback below, so a restart of an agent
+	// whose template disappeared doesn't silently drop to Hub settings or
+	// the file default the way an empty templateChain otherwise would.
+	templateUnresolvable := false
+	if templateName != "" {
+		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
+			templateChain = chain
+			for _, tpl := range chain {
+				templatePaths = append(templatePaths, tpl.Path)
+			}
+		} else {
+			templateUnresolvable = true
+			util.Debugf("image resolution: template %q could not be resolved: %v", templateName, err)
+		}
+	}
+
 	// Load on-disk harness-config for the container user and image (base layer).
 	// The settings map may not define harness_configs, but the on-disk
 	// config.yaml (seeded from harness embeds) always has the user field.
@@ -263,36 +303,19 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// resolvedHarnessConfigAuth captures the auth metadata from the resolved
 	// on-disk harness config for use by the auth pipeline later.
 	var resolvedHarnessConfigAuth *config.HarnessAuthMetadata
+	// resolvedPullPolicy is the Kubernetes-only image pull policy, resolved
+	// with the same three lower tiers as image (file default, then Hub
+	// settings); the explicit-override tier is computed further down
+	// alongside image's.
+	resolvedPullPolicy := ""
 	if harnessConfigName != "" {
-		var templatePaths []string
-		// Prefer opts.Template when it is an absolute path (e.g. hydrated
-		// template cache path from the broker). The display name stored in
-		// finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in
-		// the project, but the original opts.Template path points to the
-		// actual template directory containing harness-configs/.
-		templateName := ""
-		if opts.Template != "" && filepath.IsAbs(opts.Template) {
-			templateName = opts.Template
-		}
-		if templateName == "" {
-			if finalScionCfg != nil && finalScionCfg.Info != nil {
-				templateName = finalScionCfg.Info.Template
-			}
-		}
-		if templateName == "" {
-			templateName = opts.Template
-		}
-		if templateName != "" {
-			if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
-				for _, tpl := range chain {
-					templatePaths = append(templatePaths, tpl.Path)
-				}
-			}
-		}
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.Image != "" {
 				resolvedImage = hcDir.Config.Image
 				util.Debugf("image resolution: from on-disk harness-config image=%s path=%s", resolvedImage, hcDir.Path)
+			}
+			if hcDir.Config.ImagePullPolicy != "" {
+				resolvedPullPolicy = hcDir.Config.ImagePullPolicy
 			}
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
@@ -306,11 +329,24 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	if settings != nil && harnessConfigName != "" {
-		hConfig, err := settings.ResolveHarnessConfig(opts.Profile, harnessConfigName)
+		// A local restart (no --profile) has no request-level profile to
+		// resolve settings against; fall back to the profile the agent was
+		// actually created with (finalScionCfg.Info.Profile, already loaded —
+		// the same value agent.GetSavedProfile would read from
+		// agent-info.json), matching the broker's own restart-dispatch
+		// behavior (runtimebroker/handlers.go's GetSavedProfile calls).
+		settingsProfile := opts.Profile
+		if settingsProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			settingsProfile = finalScionCfg.Info.Profile
+		}
+		hConfig, err := settings.ResolveHarnessConfig(settingsProfile, harnessConfigName)
 		if err == nil {
 			if hConfig.Image != "" {
 				resolvedImage = hConfig.Image
 				util.Debugf("image resolution: from settings harness-config image=%s", resolvedImage)
+			}
+			if hConfig.ImagePullPolicy != "" {
+				resolvedPullPolicy = hConfig.ImagePullPolicy
 			}
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
@@ -353,16 +389,99 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	var warnings []string
 
-	if finalScionCfg != nil && finalScionCfg.Image != "" {
-		resolvedImage = finalScionCfg.Image
-		util.Debugf("image resolution: from agent/template config image=%s", resolvedImage)
+	// The explicit tier, per field: the live template chain (later template
+	// wins) as a base, then the CURRENT request's own inline config
+	// (opts.InlineConfig — not startInlineConfig, which a bare --harness-auth
+	// also makes non-nil with no image of its own) if it sets that field,
+	// else the value ProvisionAgent recorded at creation time from the
+	// inline config that agent was created with. The persisted value is
+	// inline-only, never template-derived, so it never outranks the live
+	// template chain the way a template snapshot would. Falling back per
+	// field (not "any current inline config present") is what keeps a
+	// create-time image pin alive across a restart that passes --harness-auth
+	// or an unrelated --config field, e.g. --model. See
+	// settings-precedence.md's "Container image and Kubernetes image pull
+	// policy" section.
+	explicitImage, explicitPullPolicy := "", ""
+	for _, tpl := range templateChain {
+		tplCfg, err := tpl.LoadConfig()
+		if err != nil {
+			continue
+		}
+		if tplCfg.Image != "" {
+			explicitImage = tplCfg.Image
+		}
+		if tplCfg.Kubernetes != nil && tplCfg.Kubernetes.ImagePullPolicy != "" {
+			explicitPullPolicy = tplCfg.Kubernetes.ImagePullPolicy
+		}
+	}
+	// imageFromSnapshot/pullPolicyFromSnapshot track whether the
+	// templateUnresolvable fallback below is what actually ends up supplying
+	// resolvedImage/resolvedPullPolicy, as opposed to being overridden by a
+	// higher-priority source afterward (a current or recorded inline value,
+	// or — for image — an explicit dispatch --image). The warning at the end
+	// of this section only fires when a flag is still true, so it never
+	// claims the recorded snapshot was used when it wasn't.
+	imageFromSnapshot, pullPolicyFromSnapshot := false, false
+	if templateUnresolvable {
+		// The named template itself is gone (renamed or deleted since this
+		// agent was created) — not merely "no template pin". Fall back to
+		// the full config ProvisionAgent persisted at creation (not just the
+		// inline-only Info.ExplicitImage*), which already reflects whatever
+		// that template contributed at the time, so a restart doesn't
+		// silently drop to Hub settings or the file default just because
+		// the template disappeared. An inline override, live or recorded,
+		// still wins below, same as it would over a live template.
+		if finalScionCfg != nil && finalScionCfg.Image != "" {
+			explicitImage = finalScionCfg.Image
+			imageFromSnapshot = true
+		}
+		if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.ImagePullPolicy != "" {
+			explicitPullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
+			pullPolicyFromSnapshot = true
+		}
+	}
+	if opts.InlineConfig != nil && opts.InlineConfig.Image != "" {
+		explicitImage = opts.InlineConfig.Image
+		imageFromSnapshot = false
+	} else if finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.ExplicitImage != "" {
+		explicitImage = finalScionCfg.Info.ExplicitImage
+		imageFromSnapshot = false
+	}
+	if opts.InlineConfig != nil && opts.InlineConfig.Kubernetes != nil && opts.InlineConfig.Kubernetes.ImagePullPolicy != "" {
+		explicitPullPolicy = opts.InlineConfig.Kubernetes.ImagePullPolicy
+		pullPolicyFromSnapshot = false
+	} else if finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.ExplicitImagePullPolicy != "" {
+		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
+		pullPolicyFromSnapshot = false
+	}
+	if explicitImage != "" {
+		resolvedImage = explicitImage
+		util.Debugf("image resolution: from explicit template/inline-config image=%s", resolvedImage)
+	}
+	if explicitPullPolicy != "" {
+		resolvedPullPolicy = explicitPullPolicy
 	}
 
 	// Apply CLI/dispatch image override before registry rewrite so the
 	// rewrite applies last regardless of the image source.
 	if opts.Image != "" {
 		resolvedImage = opts.Image
+		imageFromSnapshot = false
 		util.Debugf("image resolution: from CLI/dispatch --image flag image=%s", resolvedImage)
+	}
+
+	if imageFromSnapshot || pullPolicyFromSnapshot {
+		var fields []string
+		if imageFromSnapshot {
+			fields = append(fields, "image")
+		}
+		if pullPolicyFromSnapshot {
+			fields = append(fields, "pull policy")
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"template %q could not be found; using the %s recorded at an earlier provision instead of the current template",
+			templateName, strings.Join(fields, " and ")))
 	}
 
 	// Two-phase image resolution: for short-form (bare) images, prefer a
@@ -1207,10 +1326,28 @@ authDone:
 			return nil
 		}(),
 		Kubernetes: func() *api.KubernetesConfig {
-			if finalScionCfg != nil {
-				return finalScionCfg.Kubernetes
+			// Start from the template/agent config's Kubernetes settings
+			// (namespace, resources, node selector, etc.), then ALWAYS
+			// assign the separately-resolved ImagePullPolicy on top — never
+			// only when it's non-empty. resolvedPullPolicy already covers
+			// every legitimate tier (live template, current inline,
+			// recorded inline, settings, file default), so it is
+			// authoritative the same way resolvedImage is: a guarded
+			// assignment would let finalScionCfg.Kubernetes.ImagePullPolicy
+			// (a value ProvisionAgent persisted at an earlier provision)
+			// survive as a stale fallback when every current tier resolves
+			// to empty — e.g. after an operator removes a settings or
+			// template pull-policy pin — exactly the staleness this
+			// package's Image handling was written to avoid.
+			if finalScionCfg == nil || finalScionCfg.Kubernetes == nil {
+				if resolvedPullPolicy == "" {
+					return nil
+				}
+				return &api.KubernetesConfig{ImagePullPolicy: resolvedPullPolicy}
 			}
-			return nil
+			k8sCfg := *finalScionCfg.Kubernetes
+			k8sCfg.ImagePullPolicy = resolvedPullPolicy
+			return &k8sCfg
 		}(),
 		GitClone:         opts.GitClone,
 		SharedDirs:       effectiveSharedDirs,

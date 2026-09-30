@@ -18,12 +18,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s/api/v1alpha1"
+	"golang.org/x/oauth2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +36,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 func TestClient_ListSandboxClaims(t *testing.T) {
@@ -336,6 +340,74 @@ func TestNewClientWithContext_DoesNotFallBackWhenContextExplicit(t *testing.T) {
 
 	if inClusterCalled {
 		t.Fatal("expected in-cluster fallback to be skipped when context is explicit")
+	}
+}
+
+// TestFallbackToGCEAuth_RequestsExpectedScopesAndAuth exercises the real
+// fallbackToGCEAuth call path (not just the gceFallbackAuthScopes literal):
+// it stubs defaultTokenSource to record the scopes it was called with, then
+// drives an actual request through the resulting client to confirm the
+// token is presented as a bearer credential and the exec plugin is cleared.
+func TestFallbackToGCEAuth_RequestsExpectedScopesAndAuth(t *testing.T) {
+	var gotScopes []string
+	var gotAuthHeader string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	origTokenSource := defaultTokenSource
+	t.Cleanup(func() { defaultTokenSource = origTokenSource })
+	defaultTokenSource = func(_ context.Context, scope ...string) (oauth2.TokenSource, error) {
+		gotScopes = scope
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}), nil
+	}
+
+	cfg := &rest.Config{Host: srv.URL}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatalf("failed to build clientset: %v", err)
+	}
+	// Set ExecProvider after building the clientset: kubernetes.NewForConfig
+	// validates it eagerly (apiVersion/command), and the only thing this test
+	// needs from it is a non-nil value that fallbackToGCEAuth must clear.
+	cfg.ExecProvider = &clientcmdapi.ExecConfig{
+		APIVersion: "client.authentication.k8s.io/v1beta1",
+		Command:    "gke-gcloud-auth-plugin",
+	}
+
+	client := &Client{Config: cfg, Clientset: clientset}
+
+	if err := client.fallbackToGCEAuth(); err != nil {
+		t.Fatalf("fallbackToGCEAuth failed: %v", err)
+	}
+
+	wantScopes := map[string]bool{
+		"https://www.googleapis.com/auth/cloud-platform": true,
+		"https://www.googleapis.com/auth/userinfo.email": true,
+	}
+	if len(gotScopes) != len(wantScopes) {
+		t.Fatalf("expected %d scopes passed to defaultTokenSource, got %d: %v", len(wantScopes), len(gotScopes), gotScopes)
+	}
+	for _, scope := range gotScopes {
+		if !wantScopes[scope] {
+			t.Errorf("unexpected scope passed to defaultTokenSource: %q", scope)
+		}
+		delete(wantScopes, scope)
+	}
+	for missing := range wantScopes {
+		t.Errorf("missing expected scope passed to defaultTokenSource: %q", missing)
+	}
+
+	if gotAuthHeader != "Bearer test-token" {
+		t.Errorf("expected server to see 'Bearer test-token', got %q", gotAuthHeader)
+	}
+
+	if client.Config.ExecProvider != nil {
+		t.Error("expected ExecProvider to be cleared after falling back to token-source auth")
 	}
 }
 

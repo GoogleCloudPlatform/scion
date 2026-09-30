@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // AuthConfig holds authentication configuration.
@@ -189,33 +190,42 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
-						// Step 1a: Validate against persistent credential state (Phase 1H)
+						// Step 1a: Agent-token authentication requires a successful
+						// credential-status evaluation (Phase 1H). See
+						// evaluateAgentCredentialStatus for the possible outcomes.
 						if cfg.CredentialStore != nil && claims.ID != "" {
-							jtiHash := hashJTI(claims.ID)
-							cred, credErr := cfg.CredentialStore.GetAgentCredentialByJTIHash(ctx, jtiHash)
-							if credErr == nil {
-								// Credential found — check revocation status
-								if cred.RevokedAt != nil {
-									writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-										"token has been revoked", nil)
-									return
-								}
-								// Store credential ID in context for downstream use
+							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
+							switch {
+							case errors.Is(credErr, errAgentCredentialRevoked):
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"token has been revoked", nil)
+								return
+							case credErr != nil:
+								// Any store error other than "not found" must not fall
+								// back to authenticating the request: it means the
+								// credential's status could not actually be determined,
+								// so treat it as a retryable failure.
+								log.Error("Agent credential status lookup failed",
+									"agent_id", claims.Subject, "error", credErr)
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
+							case isLegacy:
+								// Legacy compatibility path: tokens issued before the
+								// credential table existed have no credential record.
+								// Retained pending a product decision; do not close or
+								// widen this branch.
+								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
+									"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
+								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
+							default:
+								// Credential found and active.
 								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
 								// Update last_seen_at (fire-and-forget)
 								go func() {
 									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
 										context.Background(), cred.ID, time.Now())
 								}()
-							} else if errors.Is(credErr, store.ErrNotFound) {
-								// Compatibility window: accept pre-table tokens with a warning
-								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-									"agent_id", claims.Subject, "jti_hash", jtiHash[:8])
-								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-							} else {
-								// Store error — log and accept (fail open for availability)
-								log.Warn("Credential store lookup failed, accepting token",
-									"agent_id", claims.Subject, "error", credErr)
 							}
 						}
 
@@ -409,6 +419,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				scopedUser, err := cfg.UATSvc.ValidateToken(ctx, token)
 				if err != nil {
+					logUATRejection(log, ctx, err)
 					if errors.Is(err, ErrUserSuspended) {
 						writeError(w, http.StatusForbidden, "user_suspended",
 							"access denied: user account is suspended", nil)
@@ -422,6 +433,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// point checks this too, including a PAT issued under a
 				// reserved-identity user row.
 				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return
@@ -542,6 +554,49 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// logUATRejection logs a single "credential rejected" line for a UAT that
+// failed ValidateToken (plan §3.1(3)). It classifies the reason from the
+// returned error's *UATRejection, when present. Any other error shape means
+// ValidateToken itself could not complete — a store or database failure, not
+// a client-presented bad credential — so it is logged distinctly (reason
+// "lookup_error", at Error level), never folded into the client-facing
+// "invalid" reason: an operator must be able to tell an outage from a wave
+// of bad tokens.
+func logUATRejection(log *slog.Logger, ctx context.Context, err error) {
+	var rej *UATRejection
+	if errors.As(err, &rej) {
+		logCredentialRejected(log, ctx, rej.Reason, rej.Found, rej.TokenID)
+		return
+	}
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelError, "lookup_error", false, "")
+}
+
+// logCredentialRejected logs the standard "credential rejected" warning line.
+// The token ID is included only when found is true, i.e. the presented value
+// matched a server-verified stored record — this marks the record as
+// rejected, never as an authenticated principal (rulings, plan correction
+// (b)). The presented token string itself is never logged (ruling Q3).
+func logCredentialRejected(log *slog.Logger, ctx context.Context, reason string, found bool, tokenID string) {
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelWarn, reason, found, tokenID)
+}
+
+// logCredentialRejectedAtLevel is logCredentialRejected's implementation,
+// parameterized on level so an internal lookup failure (logUATRejection's
+// fallback) can be distinguished from an ordinary client-side rejection.
+func logCredentialRejectedAtLevel(log *slog.Logger, ctx context.Context, level slog.Level, reason string, found bool, tokenID string) {
+	attrs := []any{
+		slog.String("auth_type", AuthTypeUAT),
+		slog.String("reason", reason),
+	}
+	if found && tokenID != "" {
+		attrs = append(attrs, slog.String("credential.id", tokenID))
+	}
+	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
+		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
+	}
+	log.Log(ctx, level, "credential rejected", attrs...)
 }
 
 // detectTokenType identifies the type of token.

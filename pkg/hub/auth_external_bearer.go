@@ -466,8 +466,8 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 	} else if len(trust.AllowedDomains) > 0 {
 		// A user principal (never a service account, which took the branch
 		// above): reject before Resolve if the verified email's domain isn't
-		// listed. The Hub sign-in policy inside Resolve still runs
-		// afterwards for every user, listed domain or not — this check
+		// listed. The Hub sign-in policy inside Resolve runs afterwards for
+		// every user on every issuance, listed domain or not — this check
 		// only narrows which domains reach that policy at all.
 		domain, ok := domainOf(id.Email)
 		if !ok || !containsFold(trust.AllowedDomains, domain) {

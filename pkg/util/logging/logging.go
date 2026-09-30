@@ -102,6 +102,22 @@ func Logger(ctx context.Context) *slog.Logger {
 	return l
 }
 
+// RequestIDFromContext returns the request ID recorded on the request's
+// RequestMeta (installed by RequestLogMiddleware), or "" when none is set —
+// for example, code running outside an HTTP request, or a test that never
+// installed request metadata. E.2a (ptone/scion#2127) uses this as the
+// correlation ID shared by request logs, decision audit, and mutation audit
+// for a single request.
+func RequestIDFromContext(ctx context.Context) string {
+	meta := RequestMetaFromContext(ctx)
+	if meta == nil {
+		return ""
+	}
+	meta.mu.Lock()
+	defer meta.mu.Unlock()
+	return meta.RequestID
+}
+
 // Subsystem returns a child logger with the given subsystem attribute.
 // The returned logger inherits the root component attribute and adds
 // a "subsystem" field for finer-grained log filtering.

@@ -173,6 +173,7 @@ type conversationByKeyConfig struct {
 	surface        string
 	parentRef      string
 	defaultAgentID *string
+	participants   ParticipantEnsurer
 }
 
 // ConversationByKeyOption is a functional option for ResolveOrCreateConversationByKey.
@@ -181,6 +182,18 @@ type ConversationByKeyOption func(*conversationByKeyConfig)
 // WithKeyTopicLookup injects a TopicConversationLookup into the resolve step.
 func WithKeyTopicLookup(tl TopicConversationLookup) ConversationByKeyOption {
 	return func(c *conversationByKeyConfig) { c.topicLookup = tl }
+}
+
+// WithParticipants injects a ParticipantEnsurer so that, when the resolved
+// conversation is kind=="direct" (a dm: external_ref), both principals named
+// in the key are registered as participants (A25.6 F1/F3). This is the
+// generic counterpart of ResolveOrCreateDMConversation's participant
+// registration, for the many call sites that resolve a DM through the
+// derive-key/by-key path instead. A nil (or omitted) ensurer is a no-op —
+// callers that do not need listing support (or cannot supply one) are
+// unaffected.
+func WithParticipants(pe ParticipantEnsurer) ConversationByKeyOption {
+	return func(c *conversationByKeyConfig) { c.participants = pe }
 }
 
 // WithSurface overrides the default surface ("native").
@@ -284,6 +297,23 @@ func ResolveOrCreateConversationByKey(
 		return nil, fmt.Errorf("conversation upsert failed (external_ref=%q, kind=%q): %w", extRef, kind, err)
 	}
 
+	// A25.6 F1/F3: a direct (dm:) conversation resolved through this sink
+	// must have both principals registered as participants, the same as
+	// ResolveOrCreateDMConversation already does for its own callers.
+	// Without this, `conversation list` can never discover the conversation
+	// (report-7-gteam-2a F1/F3): the preamble's advertised catch-up flow
+	// (`conversation list --json` -> `catch-up conv:<id>`) depends on it.
+	//
+	// The two principals are recovered by parsing the CANONICAL external_ref
+	// read back from the DB (result.ExternalRef), not the input extRef or
+	// anything from the request payload — the dm: key already encodes
+	// exactly the sender/recipient pair that DeriveConversationKey validated
+	// (B5: identity comes from the authenticated sender and the resolved
+	// recipient, never from the payload).
+	if kind == "direct" && cfg.participants != nil {
+		ensureConversationParticipants(ctx, cfg.participants, log, result.ID, result.ExternalRef)
+	}
+
 	return &ConversationResult{
 		ConversationID: result.ID,
 		ExternalRef:    result.ExternalRef,
@@ -291,4 +321,43 @@ func ResolveOrCreateConversationByKey(
 		Surface:        result.Surface,
 		DisplayName:    result.DisplayName,
 	}, nil
+}
+
+// ensureConversationParticipants registers both principals named in a
+// canonical dm: external_ref as participants of conversationID. Failure is
+// G2 non-fatal (same exception as ResolveOrCreateDMConversation): a listing
+// gap is logged as a WARN and self-repairs on the next resolve, it must
+// never deny or unwind the send.
+func ensureConversationParticipants(ctx context.Context, pe ParticipantEnsurer, log *slog.Logger, conversationID, externalRef string) {
+	// Callers are expected to skip this helper when no ParticipantEnsurer is
+	// configured; fail safe (no-op) rather than panic if one does not.
+	if pe == nil {
+		return
+	}
+	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(externalRef)
+	if parseErr != nil {
+		// Should not happen: DeriveConversationKey already validated (case 1)
+		// or constructed (case 3) this external_ref as a canonical dm: key.
+		// Non-fatal, matching the rest of this function's failure semantics.
+		log.Warn("skipping participant registration: direct conversation external_ref did not parse as a dm key",
+			"conversation_id", conversationID, "external_ref", externalRef, "error", parseErr)
+		return
+	}
+	for _, pp := range []struct{ kind, id string }{
+		{kindA, idA},
+		{kindB, idB},
+	} {
+		if ensureErr := pe.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: conversationID,
+			PrincipalKind:  pp.kind,
+			PrincipalID:    pp.id,
+			Role:           "member",
+		}); ensureErr != nil {
+			log.Warn("participant registration failed (listing gap, not access)",
+				"conversation_id", conversationID,
+				"principal_kind", pp.kind,
+				"principal_id", pp.id,
+				"error", ensureErr)
+		}
+	}
 }

@@ -4626,6 +4626,13 @@ func (m *mockSecretBackend) Resolve(ctx context.Context, userID, projectID, brok
 	return m.secrets, nil
 }
 func (m *mockSecretBackend) HubID() string { return "test-hub" }
+func (m *mockSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
 
 func TestBuildCreateRequest_NoAuth_SkipsSecrets(t *testing.T) {
 	ctx := context.Background()

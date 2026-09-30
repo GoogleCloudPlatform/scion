@@ -141,6 +141,17 @@ var (
 		{Name: "generation", Type: field.TypeInt, Default: 1},
 		{Name: "reincarnation_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "reincarnation_updated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_async_opt_in", Type: field.TypeBool, Default: false},
+		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_deadline", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_last_report_at", Type: field.TypeTime, Nullable: true},
+		{Name: "launch_owner", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -151,7 +162,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[42]},
+				Columns:    []*schema.Column{AgentsColumns[53]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -160,7 +171,20 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[42]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[53]},
+			},
+			{
+				Name:    "agent_launch_deadline",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[47]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "launch_state = 'active'",
+				},
+			},
+			{
+				Name:    "agent_launch_id",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[43]},
 			},
 		},
 	}
@@ -541,6 +565,14 @@ var (
 		{Name: "policy_id", Type: field.TypeString, Nullable: true},
 		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
 		{Name: "sampled", Type: field.TypeBool, Default: false},
+		{Name: "permission_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
+		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "executor_id", Type: field.TypeString, Nullable: true},
+		{Name: "denied_by", Type: field.TypeString, Nullable: true},
 	}
 	// DecisionAuditsTable holds the schema information for the "decision_audits" table.
 	DecisionAuditsTable = &schema.Table{
@@ -582,6 +614,11 @@ var (
 				Name:    "decisionaudit_correlation_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAuditsColumns[15]},
+			},
+			{
+				Name:    "decisionaudit_denied_by",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAuditsColumns[24]},
 			},
 		},
 	}
@@ -1052,6 +1089,18 @@ var (
 			},
 		},
 	}
+	// LaunchReaperStatesColumns holds the columns for the "launch_reaper_states" table.
+	LaunchReaperStatesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "ok_at", Type: field.TypeTime, Nullable: true},
+		{Name: "armed_since", Type: field.TypeTime, Nullable: true},
+	}
+	// LaunchReaperStatesTable holds the schema information for the "launch_reaper_states" table.
+	LaunchReaperStatesTable = &schema.Table{
+		Name:       "launch_reaper_states",
+		Columns:    LaunchReaperStatesColumns,
+		PrimaryKey: []*schema.Column{LaunchReaperStatesColumns[0]},
+	}
 	// LifecycleHooksColumns holds the columns for the "lifecycle_hooks" table.
 	LifecycleHooksColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1283,6 +1332,13 @@ var (
 		{Name: "after_summary", Type: field.TypeString, Nullable: true},
 		{Name: "can_delegate_result", Type: field.TypeString, Nullable: true},
 		{Name: "can_delegate_reason", Type: field.TypeString, Nullable: true},
+		{Name: "credential_name", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
+		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
+		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
+		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
+		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
+		{Name: "executor_id", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{
@@ -1314,6 +1370,11 @@ var (
 				Name:    "mutationaudit_target_type_target_id",
 				Unique:  false,
 				Columns: []*schema.Column{MutationAuditsColumns[7], MutationAuditsColumns[8]},
+			},
+			{
+				Name:    "mutationaudit_correlation_id",
+				Unique:  false,
+				Columns: []*schema.Column{MutationAuditsColumns[17]},
 			},
 		},
 	}
@@ -2104,6 +2165,8 @@ var (
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_used", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "purpose", Type: field.TypeString, Nullable: true},
+		{Name: "labels", Type: field.TypeString, Nullable: true},
 	}
 	// UserAccessTokensTable holds the schema information for the "user_access_tokens" table.
 	UserAccessTokensTable = &schema.Table{
@@ -2180,6 +2243,7 @@ var (
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
 		InviteCodesTable,
+		LaunchReaperStatesTable,
 		LifecycleHooksTable,
 		LifecycleHookAgentPhasesTable,
 		LimitDefinitionsTable,

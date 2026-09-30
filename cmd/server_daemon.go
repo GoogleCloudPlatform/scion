@@ -449,6 +449,57 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// healthProbeResponse covers both shapes /healthz can return, so a single
+// probe/parse works whether the Hub answers directly (standalone, port 9810:
+// pkg/hub.HealthResponse, checks at the top level) or the web server answers
+// on its behalf (combined workstation mode, the default: port 8080,
+// pkg/hub.CompositeHealthResponse — the top-level checks are always empty,
+// and the Hub's own status/checks are nested under "hub". See
+// WebServer.handleHealthz in pkg/hub/web.go). Declared locally (rather than
+// importing pkg/hub) to keep this CLI-side probe decoupled from the Hub's
+// response type.
+type healthProbeResponse struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
+	// Hub is set only on the composite (combined-mode) response; nil on a
+	// standalone Hub's direct response, which has no "hub" key at all.
+	Hub *struct {
+		Status string            `json:"status"`
+		Checks map[string]string `json:"checks"`
+	} `json:"hub,omitempty"`
+}
+
+// colocatedBrokerReason extracts an actionable reason from a health probe
+// when the composite status is degraded specifically because of the
+// co-located broker check (ptone/scion#2154), so callers can name the check
+// instead of printing a bare "not ready"/"not detected". Returns "" when the
+// health response has no colocated_broker key (a purely distributed Hub, or
+// an unreachable/unparsed response) or it reports healthy. Checks the
+// top-level checks first (standalone Hub, port 9810), then falls back to the
+// nested "hub" object (combined mode behind the web server, port 8080 — the
+// default workstation setup, and the case this exists for).
+func colocatedBrokerReason(health healthProbeResponse) string {
+	if reason := colocatedBrokerReasonFromChecks(health.Status, health.Checks); reason != "" {
+		return reason
+	}
+	if health.Hub != nil {
+		return colocatedBrokerReasonFromChecks(health.Hub.Status, health.Hub.Checks)
+	}
+	return ""
+}
+
+// colocatedBrokerReasonFromChecks is the single-level lookup colocatedBrokerReason
+// applies to both the top-level and the nested "hub" object.
+func colocatedBrokerReasonFromChecks(status string, checks map[string]string) string {
+	if status == "healthy" || status == "" {
+		return ""
+	}
+	if reason, ok := checks["colocated_broker"]; ok && reason != "healthy" {
+		return reason
+	}
+	return ""
+}
+
 type serverStatusInfo struct {
 	DaemonRunning bool   `json:"daemonRunning"`
 	DaemonPID     int    `json:"daemonPid,omitempty"`
@@ -457,6 +508,109 @@ type serverStatusInfo struct {
 	HubRunning    bool   `json:"hubRunning,omitempty"`
 	BrokerRunning bool   `json:"brokerRunning,omitempty"`
 	WebRunning    bool   `json:"webRunning,omitempty"`
+	// HubDegradedReason is set when either probe (the combined web+hub probe
+	// on 8080, or the standalone Hub probe on 9810) responded but its status
+	// was not "healthy" because of the colocated_broker check — e.g. a
+	// configured co-located broker that failed to register
+	// (ptone/scion#2154). Empty when the Hub is healthy, unreachable, or
+	// degraded for some other reason. HubRunning/WebRunning keep their
+	// existing exact-"healthy" meaning for backward compatibility with
+	// --json consumers; this is additive detail for the human-readable
+	// output so it can name the check instead of a bare "not detected".
+	HubDegradedReason string `json:"hubDegradedReason,omitempty"`
+	// WebDegradedReason is set only when the 8080 (combined web+hub) probe
+	// itself reported the colocated_broker reason — i.e. the process
+	// actually serving the Web Frontend is the degraded one. Kept separate
+	// from HubDegradedReason so a standalone Hub-only deployment (port 9810,
+	// no web server running at all) does not get an incorrect
+	// "Web Frontend: degraded" line just because the Hub is degraded.
+	WebDegradedReason string `json:"webDegradedReason,omitempty"`
+}
+
+// probeServerStatus probes the web, hub, and broker health endpoints at the
+// given base URLs (no trailing slash, e.g. "http://127.0.0.1:8080") and
+// returns the resulting component-status fields of serverStatusInfo. Split
+// out from runServerStatus, and parameterized on the base URLs rather than
+// hardcoding the default ports, so tests can point it at httptest.Server
+// instances instead of real listeners on 127.0.0.1.
+//
+// Parses JSON responses to verify composite health rather than relying
+// solely on HTTP 200 (the web server returns 200 even when degraded).
+func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseURL string) serverStatusInfo {
+	var status serverStatusInfo
+
+	// webPortHasHub tracks whether the combined web port returned the scion
+	// combined composite body (healthy or degraded) — i.e. health.Hub != nil,
+	// which CompositeHealthResponse always populates when a Hub provider is
+	// registered (see WebServer.handleHealthz, pkg/hub/web.go:915-917) — as
+	// opposed to status.HubRunning, which is only set on "healthy". Combined
+	// mode (--enable-web) never starts the standalone Hub listener (port
+	// 9810), so once the web port has answered with that composite body, a
+	// follow-up probe to the standalone hub port is redundant, not just when
+	// the web port reported healthy. This must not key off "any parseable
+	// 200 JSON body": an unrelated service on 8080 (a common dev port) can
+	// answer 200 with an unrelated JSON object, and health.Hub == nil then,
+	// so the standalone hub still gets probed.
+	var webPortHasHub bool
+
+	// Check web/hub on the combined web port. In combined mode this is the
+	// only listener (see colocatedBrokerReason for the nested-hub JSON shape
+	// it returns).
+	if resp, err := client.Get(webBaseURL + "/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health healthProbeResponse
+			if json.Unmarshal(body, &health) == nil {
+				webPortHasHub = health.Hub != nil
+				if health.Status == "healthy" {
+					status.WebRunning = true
+					status.HubRunning = true
+				} else if reason := colocatedBrokerReason(health); reason != "" {
+					status.HubDegradedReason = reason
+					status.WebDegradedReason = reason
+				}
+			}
+		}
+	}
+
+	// Check standalone hub port if not already found on the web port. This
+	// probe intentionally leaves WebDegradedReason unset: a standalone Hub
+	// (no web server) must not print "Web Frontend: degraded" just because
+	// the Hub itself is degraded.
+	if !status.HubRunning && !webPortHasHub {
+		if resp, err := client.Get(hubBaseURL + "/healthz"); err == nil {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && readErr == nil {
+				var health healthProbeResponse
+				if json.Unmarshal(body, &health) == nil {
+					status.HubRunning = true
+					if status.HubDegradedReason == "" {
+						if reason := colocatedBrokerReason(health); reason != "" {
+							status.HubDegradedReason = reason
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check broker on the default broker port.
+	if resp, err := client.Get(brokerBaseURL + "/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(body, &health) == nil {
+				status.BrokerRunning = true
+			}
+		}
+	}
+
+	return status
 }
 
 func runServerStatus(cmd *cobra.Command, args []string) error {
@@ -476,55 +630,13 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 		status.PIDFile = daemon.GetPIDPathComponent(serverDaemonComponent, globalDir)
 	}
 
-	// Probe health endpoints to check component status.
-	// Parse JSON responses to verify composite health rather than relying
-	// solely on HTTP 200 (the web server returns 200 even when degraded).
 	client := &http.Client{Timeout: 2 * time.Second}
-
-	// Check web/hub on default web port (8080)
-	if resp, err := client.Get("http://127.0.0.1:8080/healthz"); err == nil {
-		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
-				status.WebRunning = true
-				status.HubRunning = true
-			}
-		}
-	}
-
-	// Check standalone hub on default hub port (9810) if not found on web port
-	if !status.HubRunning {
-		if resp, err := client.Get("http://127.0.0.1:9810/healthz"); err == nil {
-			body, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && readErr == nil {
-				var health struct {
-					Status string `json:"status"`
-				}
-				if json.Unmarshal(body, &health) == nil {
-					status.HubRunning = true
-				}
-			}
-		}
-	}
-
-	// Check broker on default broker port (9800)
-	if resp, err := client.Get("http://127.0.0.1:9800/healthz"); err == nil {
-		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
-			if json.Unmarshal(body, &health) == nil {
-				status.BrokerRunning = true
-			}
-		}
-	}
+	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", "http://127.0.0.1:9800")
+	status.HubRunning = probed.HubRunning
+	status.BrokerRunning = probed.BrokerRunning
+	status.WebRunning = probed.WebRunning
+	status.HubDegradedReason = probed.HubDegradedReason
+	status.WebDegradedReason = probed.WebDegradedReason
 
 	if serverStatusJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -543,23 +655,60 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Println("Components:")
-	if status.HubRunning {
-		fmt.Println("  Hub API:         running")
-	} else {
-		fmt.Println("  Hub API:         not detected")
-	}
-	if status.BrokerRunning {
-		fmt.Println("  Runtime Broker:  running")
-	} else {
-		fmt.Println("  Runtime Broker:  not detected")
-	}
-	if status.WebRunning {
-		fmt.Println("  Web Frontend:    running")
-	} else {
-		fmt.Println("  Web Frontend:    not detected")
+	for _, line := range formatServerStatusComponents(status) {
+		fmt.Println(line)
 	}
 
 	return nil
+}
+
+// formatServerStatusComponents renders the "Components:" lines of
+// `scion server status` from an already-populated serverStatusInfo. Split
+// out from runServerStatus so the formatting — in particular, naming the
+// colocated_broker check instead of a bare "not detected" (ptone/scion#2154)
+// — can be unit tested without spinning up HTTP servers.
+func formatServerStatusComponents(status serverStatusInfo) []string {
+	var lines []string
+
+	switch {
+	case status.HubRunning && status.HubDegradedReason != "":
+		// Loose standalone-hub-port probe (see probeServerStatus): HubRunning
+		// can be true without status=="healthy", so surface the reason even
+		// then. This is the line a standalone (no web server) operator
+		// actually sees, so it needs the same recovery hint as the other
+		// degraded lines below.
+		lines = append(lines, fmt.Sprintf("  Hub API:         running, degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.HubDegradedReason))
+	case status.HubRunning:
+		lines = append(lines, "  Hub API:         running")
+	case status.HubDegradedReason != "":
+		// The process answered /healthz but reported non-"healthy" because of
+		// the co-located broker (ptone/scion#2154): it is up and serving, not
+		// actually absent, so name the check instead of "not detected". No
+		// retry — see server log; fix the broker config and restart.
+		lines = append(lines, fmt.Sprintf("  Hub API:         degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.HubDegradedReason))
+	default:
+		lines = append(lines, "  Hub API:         not detected")
+	}
+
+	if status.BrokerRunning {
+		lines = append(lines, "  Runtime Broker:  running")
+	} else {
+		lines = append(lines, "  Runtime Broker:  not detected")
+	}
+
+	switch {
+	case status.WebRunning:
+		lines = append(lines, "  Web Frontend:    running")
+	case status.WebDegradedReason != "":
+		// WebDegradedReason (not HubDegradedReason): a standalone Hub-only
+		// deployment with no web server at all must not print "Web Frontend:
+		// degraded" just because the Hub is degraded.
+		lines = append(lines, fmt.Sprintf("  Web Frontend:    degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.WebDegradedReason))
+	default:
+		lines = append(lines, "  Web Frontend:    not detected")
+	}
+
+	return lines
 }
 
 // waitForServerReady polls the server's /healthz endpoint until it returns 200
@@ -568,7 +717,13 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 // status that reflects hub and broker readiness. On first start the hub
 // database may still be migrating when the HTTP listener begins accepting
 // connections, so we parse the JSON body to confirm all components are ready.
-func waitForServerReady(host string, port int, timeout time.Duration) bool {
+//
+// It also returns the last health response it observed (zero value if the
+// endpoint was never reachable), so a caller that times out can name the
+// specific check that kept the composite status from going healthy — e.g.
+// colocated_broker (ptone/scion#2154) — instead of printing a bare
+// "not ready" for a process that is in fact up and serving.
+func waitForServerReady(host string, port int, timeout time.Duration) (ready bool, lastHealth healthProbeResponse) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
 	deadline := time.Now().Add(timeout)
@@ -578,17 +733,18 @@ func waitForServerReady(host string, port int, timeout time.Duration) bool {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && readErr == nil {
-				var health struct {
-					Status string `json:"status"`
-				}
-				if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
-					return true
+				var health healthProbeResponse
+				if json.Unmarshal(body, &health) == nil {
+					lastHealth = health
+					if health.Status == "healthy" {
+						return true, lastHealth
+					}
 				}
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return false
+	return false, lastHealth
 }
 
 // printWorkstationQuickstart prints the first-run quickstart information
@@ -626,8 +782,13 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 
 		// Auto-open the browser in interactive terminals once the server is ready.
 		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			if waitForServerReady(displayHost, wPort, 20*time.Second) {
+			if ready, lastHealth := waitForServerReady(displayHost, wPort, 20*time.Second); ready {
 				_ = util.OpenBrowser(url)
+			} else if reason := colocatedBrokerReason(lastHealth); reason != "" {
+				// The process is up and answering /healthz; it is degraded,
+				// not absent. No retry — see server log; the broker
+				// configuration needs to be fixed and the server restarted.
+				fmt.Printf("  (server is up but degraded: colocated_broker: %s — open the URL manually; see server log)\n", reason)
 			} else {
 				fmt.Println("  (server not yet ready — open the URL manually once it starts)")
 			}

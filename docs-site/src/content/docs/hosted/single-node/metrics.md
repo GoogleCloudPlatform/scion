@@ -243,12 +243,20 @@ are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
 is.
 
 A hook-sourced harness's dialect can populate all five `token_type` values on
-`scion.usage.tokens`, not just three: a Go dialect, or a bundled
-`dialect.yaml`'s `fields` mapping, sets `input_tokens`, `output_tokens`,
-`cached_tokens` (→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
-`reasoning_tokens` (→ `reasoning`, informational — already included in
-`output`, never added again) on the hook event data. A point is emitted only
-for a token type whose field was actually populated (a positive value); a
+`scion.usage.tokens`, not just three. A Go dialect sets the `EventData`
+fields `InputTokens`, `OutputTokens`, `CachedTokens`, `CacheWriteTokens` and
+`ReasoningTokens`; a `dialect.yaml` `fields` mapping uses the YAML keys
+`input_tokens` (→ `input`), `output_tokens` (→ `output`), `cached_tokens`
+(→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
+`reasoning_tokens` (→ `reasoning`, informational, already included in
+`output` and never added again). `output_tokens`/`OutputTokens` must be the
+*total* output including reasoning (canonical usage contract,
+`.design/hosted/usage-telemetry.md` §3.2): a `dialect.yaml` `fields`
+mapping is a pure path copy with no arithmetic, so a harness that reports
+output and reasoning as exclusive values needs a Go dialect or bridge-side
+summing to produce a combined `output_tokens` — the YAML mapping alone
+cannot add them together. A point is emitted only for a token type
+whose field was actually populated (a positive value); a
 dialect that never maps a given field simply never emits that `token_type`.
 
 #### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`
@@ -262,11 +270,15 @@ The Hub dashboard reads exactly two usage metrics, regardless of source:
 
 `token_type` is a closed enum: `input` (non-cached prompt tokens), `output` (generated tokens, including reasoning), `cache_read`, `cache_write`, and `reasoning` (an informational subset of `output`, already counted there — never add it to a total alongside `output`). `scion.usage.tokens` is the only token metric either source writes; the retired `scion.hook.tokens.*` family is rejected at admission (see above). A harness's native events and its hooks can in principle both populate it, but never both at once for the same harness (see "Usage source" below).
 
-Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP log events (for example Claude's `api_request`/`api_error`), so no hook needs to carry usage at all. Claude declares `SCION_USAGE_SOURCE=native`.
+Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP log events (for example Claude's `api_request`/`api_error`, or Codex's `codex.sse_event` with `event.kind=response.completed`), so no hook needs to carry usage at all. Claude and Codex declare `SCION_USAGE_SOURCE=native`; on the GCP provider, Codex's native metrics stay off (they would be rejected at admission today), while its logs — the source of this derivation — stay on.
 
-An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for that harness (design D10, the vetting gate) — an unvetted guess is worse than a visible gap. A harness publishes hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks`, behind a PR that checks in a captured fixture proving the mapping. As of this phase, no harness has opted in that way; declaring `hooks` for a given harness's `provision.py` is tracked per-harness follow-up work (for example opencode and antigravity). Tool, session, turn and every other hook metric, span and log is unaffected by `SCION_USAGE_SOURCE` in every case (design D4, narrow).
+An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for that harness (design D10, the vetting gate) — an unvetted guess is worse than a visible gap. A harness publishes hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks`, behind a PR that checks in a captured fixture proving the mapping. opencode and antigravity have both opted in this way (phase 3b and this phase, respectively — see below for each). Tool, session, turn and every other hook metric, span and log is unaffected by `SCION_USAGE_SOURCE` in every case (design D4, narrow).
 
-**Known gap: codex.** Codex's `model-end` hook already carries calls and tokens (`dialects/codex.go`), and today it is the harness's only usage source. With `SCION_USAGE_SOURCE` unset, codex's hook usage stops appearing once this gate lands and `scion-base` is rebuilt, and stays at zero until design phase 3c lands `SCION_USAGE_SOURCE=native` for codex (deriving usage from its own OTLP events instead). Until phase 3c, codex shows no calls or tokens on the dashboard. gemini-cli (deferred, D6), antigravity and muse-code have the same unset-by-default gap, each awaiting its own fixture-backed `provision.py` PR; codex is called out separately here because it otherwise reads as fully supported.
+**opencode (phase 3b).** `harnesses/opencode/provision.py` declares `SCION_USAGE_SOURCE=hooks`. `harnesses/opencode/dialect.yaml` maps one model-end per completed LLM step: OpenCode's own event bus emits a `step-finish` part per provider response, delivered to the harness only through OpenCode's generic `event` plugin hook (not through same-named keyed hooks, which never fire for these event types) and routed by `harnesses/opencode/home/.config/opencode/plugins/scion-bridge.js`. The bridge dedupes on `(sessionID, messageID, part.id)` and excludes replayed parts from a forked session by tracking which assistant messages it observed live. Tokens are exclusive in OpenCode's own accounting, so the bridge sums `reasoning` into `output` before emitting (`output_tokens`), matching the canonical contract. Known undercount: a model call that produces no `step-finish` part (a failed or retried attempt, an abort, title generation, or agent generation) is not counted, consistent with the contract's "completed model responses" meaning.
+
+**Antigravity: calls-only.** Antigravity's `PreInvocation`/`PostInvocation` hooks (`model-start`/`model-end`) carry no usage or token field at all, in either direction, regardless of whether the underlying model response had one — confirmed against a real captured fixture (real `agy` 1.2.12 binary, mock model backend: `pkg/sciontool/hooks/dialects/testdata/antigravity/`). So `gen_ai.api.calls` is populated (one per main-loop model request — `PostInvocation` fires per request, not per turn) and `scion.usage.tokens` never gets a point from this harness. This is a deliberate, vetted outcome, not a gap: publishing a guessed token value would be worse than publishing none (D10's own principle). Known undercount: `agy`'s own auxiliary calls (for example conversation title generation) fire no Invocation hook at all, and failed or retried attempts were not captured, so their `PostInvocation`/`status` behavior is uncharacterized. The `model` label comes from the agent's configured `SCION_MODEL`, not the per-invocation payload — see the harness README for why.
+
+**Known gap: gemini-cli, muse-code.** With `SCION_USAGE_SOURCE` unset, these harnesses publish no usage at all until each lands its own fixture-backed `provision.py` PR (gemini-cli's native rule is deferred, D6). Codex, opencode and antigravity are no longer in this list: codex declares `SCION_USAGE_SOURCE=native`, deriving its calls and tokens from its own OTLP log events once `scion-base` is rebuilt; opencode declares `SCION_USAGE_SOURCE=hooks` (phase 3b, above); antigravity declares `SCION_USAGE_SOURCE=hooks` and publishes calls only (see above — it has no token source to report).
 
 All of this — the deriver, the hook vetting gate, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
 
@@ -284,8 +296,7 @@ metric names select the hook counter behavior, so local producers using those
 reserved names also opt into it. This does not authenticate the producer.
 Session-end totals do not add a second copy of model-end usage. Short-lived
 hook processes normally cannot pair start and end events, so duration
-histograms are not guaranteed. This does not establish native Codex token
-emission.
+histograms are not guaranteed.
 
 `agent.session.count` has two distinct sources: harness `session-end` hooks and
 the `sciontool init` lifecycle `session-end` event. They keep the same metric

@@ -1789,7 +1789,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/diagnostics/logs` |
-| http_route | GET | `/api/v1/admin/diagnostics/logs/stream` |
+| sse | GET | `/api/v1/admin/diagnostics/logs/stream` |
 | http_route | GET | `/api/v1/admin/messaging/divergence` |
 
 **Principals:** `user`
@@ -2213,7 +2213,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| websocket | GET | `/api/v1/agents/{id}/attach` |
+| websocket | GET | `/api/v1/agents/{id}/pty` |
 
 **Principals:** `user`, `agent`
 
@@ -2244,10 +2244,15 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}/ports` |
+| http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | POST | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | PUT | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | DELETE | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy/{subpath}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `agent.port_access`
 

@@ -131,7 +131,17 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     has_token = False
     is_adc = False
-    env_overlay: dict[str, str] = {}
+    # Antigravity has no native OTel integration (config.yaml's
+    # capabilities.telemetry.native_emitter is "no"), so hooks are the only
+    # possible usage source, regardless of auth method. This is the D10
+    # opt-in: the fixture-backed mapping proving PreInvocation/PostInvocation
+    # granularity and confirming tokens are absent
+    # (pkg/sciontool/hooks/dialects/testdata/antigravity/) is what makes
+    # publishing hook usage for this harness allowed at all (design §9,
+    # ptone/scion#2053 phase 3d). Antigravity's PostInvocation carries no
+    # usage/token fields, so this declares calls-only; tokens are a
+    # follow-up if agy ever adds them to the hook payload.
+    env_overlay: dict[str, str] = {"SCION_USAGE_SOURCE": "hooks"}
 
     if method == "vertex-ai":
         # vertex-ai is now the ADC path: validate version and wire ADC environment.
