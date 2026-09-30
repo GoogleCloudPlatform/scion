@@ -590,6 +590,21 @@ type AgentInfo struct {
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	Warnings   []string          `json:"warnings,omitempty"`
 
+	// ExplicitImage and ExplicitImagePullPolicy record the image /
+	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
+	// template, explicitly set at provision time — deliberately not a
+	// template's contribution, since a template is re-read live on every
+	// Start and so needs no persisted copy; only the inline config, which
+	// has no live source to re-derive from on a later restart, does. A
+	// restart whose own request supplies no inline image/pull-policy of its
+	// own — including one that passes --harness-auth or an unrelated
+	// --config field — falls back to these fields, so a value pinned via
+	// --config at create time is not silently replaced by a Hub settings or
+	// file-default value that was only ever meant to apply when nothing more
+	// specific was set (ptone/scion#2156).
+	ExplicitImage           string `json:"explicitImage,omitempty"`
+	ExplicitImagePullPolicy string `json:"explicitImagePullPolicy,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created,omitempty"`           // When the agent was created
 	Updated           time.Time `json:"updated,omitempty"`           // Last modification timestamp

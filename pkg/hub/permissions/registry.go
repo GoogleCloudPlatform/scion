@@ -178,7 +178,17 @@ var Registry = []Permission{
 	{ID: "policy.delete", Resource: ResourcePolicy, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete policies", Enforcement: []string{"pkg/hub/handlers_policies.go", "pkg/hub/route_metadata.go:requireAdmin"}},
 	{ID: "policy.list", Resource: ResourcePolicy, Action: ActionList, CapabilityKind: CapabilityScope, Description: "List policies", Enforcement: []string{"pkg/hub/handlers_policies.go", "pkg/hub/route_metadata.go:requireAdmin"}},
 
-	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
+	// broker.create is a hub-level permission: registration is gated by an
+	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
+	// mere authentication. The agreed cross-workstream UAT selector name for
+	// this permission is "broker:create" (ptone/scion#2104, ptone/scion#2107),
+	// but it has no UATScope yet: today's UATs are project-bound, and
+	// enforceUATConstraints already rejects any project-scoped UAT against
+	// this hub-level resource. ptone/scion#2123 introduces hub-bound UAT
+	// boundaries; only then does a broker:create selector become
+	// mintable/usable, and this entry gains UATScope: "broker:create" at that
+	// point.
+	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
@@ -378,23 +388,6 @@ func uatScopesForResource(resource string) []string {
 	return out
 }
 
-// LegacyUATScopeImplications maps a UAT scope to additional scopes it
-// implicitly carries for tokens minted before a permission split. Before
-// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
-// through agent.attach, and agent:manage expanded (at mint time) to include
-// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
-// so that existing CI tokens continue to work (miller79/scion#88).
-//
-// NOTE: this map is NOT honored on the Decide path today
-// (enforceUATConstraints uses exact HasScope) — only inconsistently through
-// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
-// attach does not imply lifecycle. Any future alignment must narrow
-// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
-// match CanDelegate.
-var LegacyUATScopeImplications = map[string][]string{
-	"agent:attach": {"agent:lifecycle"},
-}
-
 // BoundaryKind identifies the credential-side boundary a UAT is issued
 // under: confined to one project, or spanning the hub (including
 // cross-project use, subject to the holder's live authority on each
@@ -424,13 +417,12 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it is the replacement for useraccesstoken.go's
-// scopeToPermissionIDs, which reconstructs "resource:action" and would
-// silently collapse two permissions sharing a resource/action pair (e.g.
+// selector vocabulary: a resource:action reconstruction would silently
+// collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable. A.2 owns wiring the
-// mint/runtime call sites to this table; A.1 owns the table and its
-// build/validate logic.
+// selector once either becomes UAT-selectable. Mint resolves selectors
+// through this table, and runtime authorization and delegation enforce the
+// ceiling persisted from that resolution.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string
@@ -510,8 +502,13 @@ func buildSelectorRegistry() map[string]SelectorMapping {
 
 // intersectAllowedBoundaries returns the intersection of
 // SelectorAllowedBoundaries across every ID in ids. ok is false if any ID
-// lacks a reviewed entry.
+// lacks a reviewed entry. An empty ids yields no boundaries and ok=false:
+// there is nothing to intersect, so the function has no basis for allowing
+// any boundary.
 func intersectAllowedBoundaries(ids []string) (boundaries []BoundaryKind, ok bool) {
+	if len(ids) == 0 {
+		return nil, false
+	}
 	counts := make(map[BoundaryKind]int)
 	for _, id := range ids {
 		kinds, reviewed := SelectorAllowedBoundaries(id)

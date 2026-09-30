@@ -111,6 +111,64 @@ type Agent struct {
 	// A6.6) keys on this instead of Updated. Nil means no reincarnation has
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
+
+	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// These are the persisted launch_* columns. They are internal bookkeeping,
+	// not the client-facing shape — untagged (json:"-") so they never leak
+	// directly onto the wire. The client-facing computed view (AgentLaunch /
+	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	//
+	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
+	// caller's struct: they are absent from its Ent builder chain entirely.
+	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
+	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
+	// launch_error / end an active launch" rule inside UpdateAgent and
+	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	LaunchAsyncOptIn   bool      `json:"-"`
+	LaunchID           string    `json:"-"`
+	LaunchState        string    `json:"-"` // "" | "active" | "ended"
+	LaunchEndReason    string    `json:"-"`
+	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"
+	LaunchDeadline     time.Time `json:"-"`
+	LaunchLastReportAt time.Time `json:"-"`
+	LaunchOwner        string    `json:"-"`
+	LaunchSeq          int64     `json:"-"`
+	LaunchStep         string    `json:"-"`
+	LaunchError        string    `json:"-"`
+}
+
+// InFlightPhases are the agent phases considered "in flight" for a launch
+// (design §3.3 in-flight predicate). Used by the store-side predicates
+// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
+// P1a-ii scope.
+var InFlightPhases = map[string]bool{
+	"created":      true,
+	"provisioning": true,
+	"cloning":      true,
+	"starting":     true,
+}
+
+// IsInFlight reports whether a matches the in-flight predicate (design
+// §3.3): a launch is currently occupying the agent's pre-running phases.
+func (a *Agent) IsInFlight() bool {
+	return a.LaunchState == "active" && InFlightPhases[a.Phase] && a.DeletedAt.IsZero()
+}
+
+// IsIncompleteCreate reports whether a matches the incomplete-create
+// predicate (design §3.3, §0c Option R): a create launch that ended (or is
+// winding down) leaving the agent on a phase where it never ran. Only
+// applicable when LaunchKind == "create" — start/restart launches (P6) are
+// out of scope for P1a and never set this predicate true.
+func (a *Agent) IsIncompleteCreate() bool {
+	if a.LaunchKind != "create" || !a.DeletedAt.IsZero() {
+		return false
+	}
+	switch a.Phase {
+	case "suspended", "stopping", "stopped", "error":
+	default:
+		return false
+	}
+	return a.LaunchState == "active" || a.LaunchError != ""
 }
 
 // ReincarnationState values for Agent.ReincarnationState.
@@ -1083,6 +1141,21 @@ type BrokerDispatch struct {
 	CreatedAt  time.Time  `json:"createdAt"`
 	UpdatedAt  time.Time  `json:"updatedAt"`
 	DeadlineAt *time.Time `json:"deadlineAt,omitempty"`
+
+	// Initiator attribution (E.2b, path F). Set once at insert
+	// (deferredDataOpResult / deferredLifecycle) from the request context
+	// that originated the cross-node op; never updated afterward. This is a
+	// separate, smaller field set from InitiatorAttribution (no snapshot, no
+	// version, no revision): a broker dispatch is a transport retry of an
+	// already-authorized operation, not a re-evaluated authoring point.
+	InitiatorPrincipalKind  string `json:"initiatorPrincipalKind,omitempty"`
+	InitiatorPrincipalID    string `json:"initiatorPrincipalId,omitempty"`
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialID   string `json:"initiatorCredentialId,omitempty"`
+	// CorrelationID ties this dispatch row back to the originating request's
+	// log/audit trail (the same request ID plumbed through decision/mutation
+	// audit).
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // BrokerDispatch.State values.
@@ -1098,7 +1171,31 @@ const (
 	MessageDispatchPending    = "pending"
 	MessageDispatchDispatched = "dispatched"
 	MessageDispatchFailed     = "failed"
+	// MessageDispatchDeferred marks a row persisted while the recipient was
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7, migration
+	// gate): the message is saved to history for catch-up but was
+	// deliberately never handed to a dispatcher. Distinct from "failed"
+	// (dispatch was attempted and rejected) and "pending" (dispatch is
+	// still outstanding) — deferred means dispatch was never attempted.
+	MessageDispatchDeferred = "deferred"
 )
+
+// MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
+// stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
+// when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
+// non-agent dispatch_state backfill (cmd/boot_non_agent_dispatch_state_backfill.go)
+// matches this exact string to identify rows the sweep mislabeled rather than
+// a genuine, differently-reasoned delivery failure. Both sites must use this
+// single constant — two independent literals can drift, silently breaking
+// the backfill's ability to find and repair swept rows.
+//
+// Do not change this value. Production messages.dispatch_failure_reason rows
+// already carry this exact string, written before this constant existed;
+// changing it would silently strand those rows outside the backfill's exact-
+// match predicate. Pinned by TestMessageExpiredStuckPendingReason_Value in
+// pkg/store/models_test.go — if this literal ever needs to change, that
+// change must ship together with a data migration for existing rows.
+const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
 
 // =============================================================================
 // Notifications (Agent Status Notification System)
@@ -1575,11 +1672,57 @@ type UserAccessToken struct {
 	ProjectID string   `json:"projectId"` // Required: project this token is scoped to
 	Scopes    []string `json:"scopes"`    // Action scopes (resource:action pairs)
 
+	// CeilingVersion and CeilingPermissionIDs hold the normalized, frozen
+	// permission ceiling. CeilingVersionUnspecified (zero value) with
+	// CeilingPermissionIDs == nil means no ceiling has been persisted for
+	// this row yet: NormalizedCeiling recomputes it from Scopes via the
+	// frozen legacy snapshot rather than trusting a zero value that could
+	// equally mean "persisted, and resolves to nothing." Once
+	// CeilingPermissionIDs is non-nil — backfilled, or set at mint for any
+	// CeilingVersionV1+ row — it is the authoritative, already-resolved
+	// value and Scopes is retained only for display/audit, never re-derived.
+	// Excluded from JSON: the HTTP token response is a separate type, and
+	// omitempty would collapse the nil-vs-empty-list distinction on a round
+	// trip.
+	CeilingVersion       permissions.CeilingVersion `json:"-"`
+	CeilingPermissionIDs []string                   `json:"-"`
+
 	// Lifecycle
 	Revoked   bool       `json:"revoked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"` // Required for UATs
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+
+	// E.1 descriptive credential metadata. Immutable after issuance: there
+	// is no update path. nil/empty means no metadata was supplied (always
+	// true for tokens created before E.1).
+	Purpose *string           `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// NormalizedCeiling returns t's FrozenPermissionCeiling. A row that has never
+// been normalized — CeilingVersion is CeilingVersionUnspecified and
+// CeilingPermissionIDs is nil, meaning no value has been persisted, not even
+// an explicit empty one — is normalized on the fly from the raw stored Scopes
+// via permissions.NormalizeLegacyUATScopes, the frozen legacy snapshot. This
+// never calls the live, mutable permissions.ResolveSelector, so a later
+// Registry or alias change cannot retroactively change what an existing
+// token means. Once CeilingPermissionIDs has been persisted
+// (by the migration backfill, or because the token was minted under
+// CeilingVersionV1+), that value is authoritative and is returned as-is,
+// including when it is an explicit empty list — which denies, not
+// "unrestricted."
+func (t *UserAccessToken) NormalizedCeiling() permissions.FrozenPermissionCeiling {
+	if t.CeilingVersion == permissions.CeilingVersionUnspecified && t.CeilingPermissionIDs == nil {
+		return permissions.FrozenPermissionCeiling{
+			Version:       permissions.CeilingVersionUnspecified,
+			PermissionIDs: permissions.NormalizeLegacyUATScopes(t.Scopes),
+		}
+	}
+	return permissions.FrozenPermissionCeiling{
+		Version:       t.CeilingVersion,
+		PermissionIDs: t.CeilingPermissionIDs,
+	}
 }
 
 // UATPrefix is the token prefix that distinguishes UATs from other token types.
@@ -1861,6 +2004,70 @@ type ConversationFilter struct {
 }
 
 // =============================================================================
+// Initiator attribution (async work; tracker E.2b, ptone/scion#2127)
+// =============================================================================
+
+// InitiatorAttribution records the initiating principal/credential of an
+// asynchronously authored or executed row. It is embedded identically in
+// both ScheduledEvent and Schedule, via one ent mixin
+// (pkg/ent/schema/mixin_initiator_attribution.go), so a recurring fire is a
+// single struct assignment (event.InitiatorAttribution =
+// schedule.InitiatorAttribution) and B.3 reads the same shape from either
+// row (rulings "E.2b field names", "B.3 adoption" — names are committed and
+// adopted verbatim; do not rename).
+//
+// A row written before E.2b (AttributionVersion NULL/0) reads with every
+// field its zero value. Callers MUST treat that as legacy_unknown — never as
+// an interactive credential (plan correction (c); use the scheduledInitiator
+// read helper in pkg/hub rather than reading these fields directly).
+//
+// Attribution is not authority (cutover rule): E.2b records and exposes the
+// initiator; it does not change who is authorized at fire time. B.3 owns the
+// fire-time authority decision and its own ceiling column(s) on the same
+// rows, updated in the same transaction as an attribution replacement.
+type InitiatorAttribution struct {
+	InitiatorPrincipalKind      string `json:"initiatorPrincipalKind,omitempty"`
+	InitiatorPrincipalID        string `json:"initiatorPrincipalId,omitempty"`
+	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialID       string `json:"initiatorCredentialId,omitempty"`
+	InitiatorCredentialSnapshot string `json:"initiatorCredentialSnapshot,omitempty"` // bounded JSON: name, boundary, purpose, labels
+	AttributionVersion          int    `json:"attributionVersion,omitempty"`          // 0/absent = legacy_unknown; 1 = written by E.2b
+	// AuthorizationRevision is bumped atomically with each attribution
+	// replacement (ruling Q2): a fully reauthorized mutation that changes
+	// future dispatch replaces the attribution and this revision together.
+	// Schedules own the counter; events copy the schedule's current value at
+	// materialization and keep it unchanged afterward (already-materialized
+	// events keep their revision snapshot). B.3's delegation edge reads it
+	// back as a typed SourceAuthorizationRevision.
+	AuthorizationRevision int `json:"authorizationRevision,omitempty"`
+}
+
+// InitiatorCredentialKind* are the values InitiatorAttribution.InitiatorCredentialKind
+// may hold. This is a deliberately smaller, committed domain than
+// hub.CredentialKind: async attribution only ever records one of these four
+// values (rulings "E.2b field names").
+const (
+	InitiatorCredentialKindSession       = "session"
+	InitiatorCredentialKindUAT           = "uat"
+	InitiatorCredentialKindAgent         = "agent"
+	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
+)
+
+// ScheduleFieldMask marks which of Schedule's mutable metadata fields
+// UpdateSchedule should write from the struct passed to it. A field left
+// false is not referenced at all by the write — no Set, no Clear — so a
+// struct built from a possibly-stale read can never revert a column the
+// caller did not intend to change in this call.
+type ScheduleFieldMask struct {
+	Name      bool
+	CronExpr  bool
+	EventType bool
+	Payload   bool
+	Status    bool
+	NextRunAt bool
+}
+
+// =============================================================================
 // Scheduled Events (One-Shot Timers)
 // =============================================================================
 
@@ -1877,6 +2084,15 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+
+	// InitiatorAttribution is set at authoring time (one-shot create) or
+	// copied from the parent schedule at each recurrence (E.2b). See the
+	// type doc above. json:"-": nothing in the brief or plan asks for wire
+	// exposure, and a token's descriptive metadata (name, purpose, labels,
+	// boundary) is otherwise shown only to its owner. Callers that need it
+	// read the row from the store; B.3 and E.2b's own tests read the
+	// embedded struct field directly.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -1918,6 +2134,13 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+
+	// InitiatorAttribution is set at authoring time and replaced atomically
+	// (together with AuthorizationRevision) whenever a fully reauthorized
+	// mutation changes future dispatch (E.2b, ruling Q2). CreatedBy is never
+	// overwritten by a re-attribution. See the type doc above. json:"-": see
+	// ScheduledEvent's field doc above for why.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduleStatus constants
@@ -2551,6 +2774,41 @@ type DecisionAuditRecord struct {
 	PolicyID       string
 	CorrelationID  string
 	Sampled        bool
+
+	// E.2a additive fields (ptone/scion#2127, plan §3.2). All optional,
+	// default "".
+
+	// PermissionID is the exact canonical permission ID AuthzService.decide
+	// was given and evaluated (AuthzRequest.Permission after the request's
+	// own permission resolution) — never independently re-derived from
+	// ResourceType/Permission here (ruling Q7). Left empty for decisions that
+	// fail before permission resolution (missing principal, unsupported
+	// principal kind).
+	PermissionID string
+	// CredentialName/CredentialBoundaryKind/CredentialBoundaryProjectID/
+	// CredentialLabels are E.1's descriptive credential decoration,
+	// snapshotted at decision time (audits outlive tokens — see
+	// useraccesstoken.go's delete). Empty for credentials E.1 does not
+	// decorate (non-UAT).
+	CredentialName              string
+	CredentialBoundaryKind      string
+	CredentialBoundaryProjectID string
+	CredentialLabels            string // bounded JSON object, "" when absent
+	// ExecutorKind/ExecutorID identify what is currently executing a
+	// deferred-execution decision, as distinct from the initiating
+	// principal/credential above (plan §3.5). Empty for an ordinary live
+	// request — E.2a defines the accessor pair; E.2b's async entry points
+	// are the ones that set it.
+	ExecutorKind string
+	ExecutorID   string
+	// DeniedBy is B.1/B.2's typed denial-source string, recorded verbatim
+	// when the deciding code sets it on the Decision (ruling: "Decision.DeniedBy
+	// is a typed string ... recorded verbatim in a denied_by column"). The
+	// aggregated list-filter record (G) leaves it empty by agreement. This
+	// column is additive and unpopulated as of E.2a: Decision.DeniedBy does
+	// not exist on this branch's Decision type yet (B.1 has not merged) — see
+	// the E.2a handoff note's follow-up.
+	DeniedBy string
 }
 
 // DecisionAuditFilter defines query parameters for listing decision audit records.
@@ -2588,6 +2846,23 @@ type MutationAuditRecord struct {
 	AfterSummary        string
 	CanDelegateResult   string
 	CanDelegateReason   string
+
+	// E.2a additive fields (ptone/scion#2127, plan §3.3). All optional,
+	// default "". See AuditActor/ApplyActor (audit_actor.go), which populate
+	// them for every mutation-audit writer.
+	CredentialName              string
+	CredentialBoundaryKind      string
+	CredentialBoundaryProjectID string
+	CredentialLabels            string // bounded JSON object, "" when absent
+	// CorrelationID is the request ID shared with the request log and
+	// decision audit for the same request (plan §3.2 "decision/mutation
+	// agreement").
+	CorrelationID string
+	// ExecutorKind/ExecutorID identify what is currently executing, as
+	// distinct from the initiating principal/credential above (plan §3.5).
+	// Empty for an ordinary live request.
+	ExecutorKind string
+	ExecutorID   string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -2598,6 +2873,7 @@ type MutationAuditFilter struct {
 	ActorCredentialID  string
 	TargetType         string
 	TargetID           string
+	CorrelationID      string
 	Since              time.Time
 	Until              time.Time
 	Limit              int

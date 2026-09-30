@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -383,7 +384,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	}
 
 	if config.HomeDir != "" {
-		destHome := fmt.Sprintf("/home/%s", config.UnixUsername)
+		destHome := util.GetHomeDir(config.UnixUsername)
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		err = r.syncWithRetry(ctx, func() error {
@@ -1050,7 +1051,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 				case "file":
-					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
 					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 						Name:      "secrets-store",
 						MountPath: target,
@@ -1095,7 +1096,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "file" {
-					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
+					target := expandTildeTarget(s.Target, util.GetHomeDir(config.UnixUsername))
 					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 						Name:      "agent-secrets",
 						MountPath: target,
@@ -1106,10 +1107,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			}
 
 			if hasVariableSecrets {
-				scionDir := fmt.Sprintf("/home/%s/.scion", config.UnixUsername)
+				secretsJSONPath := filepath.Join(util.GetHomeDir(config.UnixUsername), ".scion", "secrets.json")
 				extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
 					Name:      "agent-secrets",
-					MountPath: scionDir + "/secrets.json",
+					MountPath: secretsJSONPath,
 					SubPath:   "secrets.json",
 					ReadOnly:  true,
 				})
@@ -1117,13 +1118,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	containerHome := util.GetHomeDir(config.UnixUsername)
+
 	// ResolvedAuth is always applied when present (composes with ResolvedSecrets).
 	// Auth files are injected via a K8s Secret rather than hostPath for portability.
 	if config.ResolvedAuth != nil {
 		for k, v := range config.ResolvedAuth.EnvVars {
 			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
 		}
-		containerHome := fmt.Sprintf("/home/%s", config.UnixUsername)
 		if len(config.ResolvedAuth.Files) > 0 {
 			volName := "auth-files"
 			extraVolumes = append(extraVolumes, corev1.Volume{
@@ -1151,11 +1153,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// Inject GCP telemetry credential path if the well-known secret is present
-	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, fmt.Sprintf("/home/%s", config.UnixUsername)); credPath != "" {
+	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: telemetryGCPCredentialsEnvVar, Value: credPath})
 	}
-
-	containerHome := fmt.Sprintf("/home/%s", config.UnixUsername)
 
 	// Pass host user UID/GID for container user synchronization
 	envVars = append(envVars, corev1.EnvVar{Name: "SCION_HOST_UID", Value: fmt.Sprintf("%d", os.Getuid())})
@@ -2406,7 +2406,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 			return err
 		}
 		if homeDir != "" && username != "" {
-			destHome := fmt.Sprintf("/home/%s", username)
+			destHome := util.GetHomeDir(username)
 			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
 			if err := r.syncWithRetry(ctx, func() error {
 				return r.syncFromPod(ctx, namespace, agent.ContainerID, destHome, homeDir)
@@ -2424,7 +2424,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		return err
 	}
 	if homeDir != "" && username != "" {
-		destHome := fmt.Sprintf("/home/%s", username)
+		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, agent.ContainerID, homeDir, destHome)

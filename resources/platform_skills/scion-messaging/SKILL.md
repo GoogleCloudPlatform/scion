@@ -103,7 +103,7 @@ The `scion message` command provides the following flags:
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
 **Capabilities that exist as separate commands:**
-- **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal.
+- **Raw keystrokes**: Use `scion keys <agent> <keystrokes>` to send literal keystrokes to an agent's tmux terminal, with no envelope and no automatic Enter. Works for both local and Hub-managed agents. As an agent, you can only target agents in your own project — cross-project targets are refused.
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes.
 

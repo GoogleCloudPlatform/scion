@@ -837,14 +837,16 @@ func TestEnforceUATConstraints_NewResourceTypes(t *testing.T) {
 	for _, tc := range newResources {
 		t.Run(tc.name+"_scope_present_passes", func(t *testing.T) {
 			scoped := makeScopedIdentity(testUserID, projectID, []string{tc.scope})
-			permissionID := derivePermissionID(tc.resource.Type, tc.action)
+			permissionID, err := resolveResourcePermission(tc.resource.Type, tc.action)
+			require.NoError(t, err)
 			result := authz.enforceUATConstraints(ctx, principal, scoped, tc.resource, tc.action, permissionID)
 			assert.Nil(t, result, "enforceUATConstraints should pass (return nil) when scope %s is present", tc.scope)
 		})
 
 		t.Run(tc.name+"_scope_absent_denies", func(t *testing.T) {
 			scoped := makeScopedIdentity(testUserID, projectID, []string{"unrelated:scope"})
-			permissionID := derivePermissionID(tc.resource.Type, tc.action)
+			permissionID, err := resolveResourcePermission(tc.resource.Type, tc.action)
+			require.NoError(t, err)
 			result := authz.enforceUATConstraints(ctx, principal, scoped, tc.resource, tc.action, permissionID)
 			require.NotNil(t, result, "enforceUATConstraints should deny when scope %s is absent", tc.scope)
 			assert.False(t, result.Allowed)

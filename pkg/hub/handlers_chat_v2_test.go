@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -915,10 +916,361 @@ func TestChatV2_ConversationRead(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
+	// The watermark must name a real, persisted message — "msg-42" would
+	// now be rejected as not found.
+	msg := &store.Message{ID: tid("read-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-read", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-read", CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-read/read",
-		map[string]string{"messageId": "msg-42"})
+		map[string]string{"messageId": msg.ID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handleConversationRead: watermark validation
+// ---------------------------------------------------------------------------
+
+// TestChatV2_ConversationRead_RejectsUnknownMessageID: a client that POSTs
+// an optimistic send's temporary idempotency-key ID (never persisted) as the
+// read watermark must be rejected, not silently accepted as if it were a
+// real message. Also covers a malformed (non-UUID) ID, which takes the same
+// store.ErrNotFound path via entadapter.parseGetID.
+func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
+	srv, _, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-reject", ProjectID: proj.ID, Name: "reject", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	// Same shape as chat-thread.ts's optimistic-send idempotency key
+	// (crypto.randomUUID()) — a well-formed UUID that was never persisted.
+	optimisticTempID := tid("never-persisted-optimistic-id")
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-reject/read",
+		map[string]string{"messageId": optimisticTempID})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unpersisted message ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-reject")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written for a rejected ID, got %+v", rs)
+	}
+
+	// A malformed (non-UUID) ID must also be rejected as 400, not 500:
+	// entadapter.parseGetID returns store.ErrNotFound for anything that
+	// doesn't parse as a UUID, which the handler treats the same as a
+	// genuinely missing message.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-reject/read",
+		map[string]string{"messageId": "not-a-uuid"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a malformed (non-UUID) message ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err = wcs.GetReadState(ctx, DevUserID, "topic-reject")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written for a malformed ID, got %+v", rs)
+	}
+}
+
+// TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID:
+// the watermark guard checks existence only, not same-conversation
+// membership by ThreadID. A real, persisted message with a ConversationID
+// set but a ThreadID that doesn't match `key` (e.g. an agent API call with
+// an explicit conversation_id and an unrelated/absent thread_id) must still
+// be usable as a read watermark — rejecting it would make the guard
+// stricter than handleConversationHistory's ConversationID-based filter.
+func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-a", ProjectID: proj.ID, Name: "topic-a", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	msg := &store.Message{ID: tid("mismatched-thread-real-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
+		ThreadID: "some-other-thread", ConversationID: tid("conv-topic-a"), CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-a/read",
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a real message with a mismatched ThreadID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-a")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != msg.ID {
+		t.Errorf("watermark not advanced: got %+v, want LastReadMessageID = %q", rs, msg.ID)
+	}
+}
+
+// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed: native agent replies
+// can persist with ThreadID == "" and only ConversationID set (see
+// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The existence-only
+// guard must not reject such a message as a read watermark.
+func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-envelope", ProjectID: proj.ID, Name: "envelope", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	envelopeMsg := &store.Message{ID: tid("envelope-reply"), ProjectID: proj.ID, Sender: "agent:bot", SenderID: tid("bot"),
+		Recipient: "user:dev@localhost", RecipientID: DevUserID,
+		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: tid("conv-envelope"),
+		CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, envelopeMsg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-envelope/read",
+		map[string]string{"messageId": envelopeMsg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for an envelope-only reply (empty ThreadID), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatV2_ConversationRead_Monotonic: a stale /read POST for an older
+// message must not roll the watermark backward once a newer one has already
+// been recorded (e.g. by autoAdvanceSenderReadState on send, or a later
+// user-triggered advance).
+func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-mono", ProjectID: proj.ID, Name: "mono", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	base := time.Now().UTC().Add(-time.Minute)
+	older := &store.Message{ID: tid("mono-older"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-mono", Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base}
+	newer := &store.Message{ID: tid("mono-newer"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-mono", Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base.Add(time.Second)}
+	if err := s.CreateMessage(ctx, older); err != nil {
+		t.Fatalf("CreateMessage(older): %v", err)
+	}
+	if err := s.CreateMessage(ctx, newer); err != nil {
+		t.Fatalf("CreateMessage(newer): %v", err)
+	}
+
+	// Advance straight to the newer message first (simulates
+	// autoAdvanceSenderReadState already having run on send).
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-mono/read",
+		map[string]string{"messageId": newer.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to newer: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A stale POST for the older message — e.g. an in-flight request from
+	// before the send — must be a no-op, not a rollback.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-mono/read",
+		map[string]string{"messageId": older.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stale advance to older: expected 200 (ignored, not an error), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-mono")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != newer.ID {
+		t.Errorf("watermark rolled back: got %+v, want LastReadMessageID = %q", rs, newer.ID)
+	}
+}
+
+// TestChatV2_ConversationRead_MonotonicTieBreaksByID: two messages with an
+// identical CreatedAt must resolve the tie the same way ListMessages does
+// (ByCreated, ByID, entadapter/message_store.go) — the higher-ID row, which
+// sorts later in the history listing, counts as newer, and the lower-ID row
+// never counts as newer than it once it is the watermark.
+func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-tie", ProjectID: proj.ID, Name: "tie", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	tied := time.Now().UTC()
+	a := &store.Message{ID: tid("tie-msg-a"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-tie", Msg: "a", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+	b := &store.Message{ID: tid("tie-msg-b"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-tie", Msg: "b", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+	if err := s.CreateMessage(ctx, a); err != nil {
+		t.Fatalf("CreateMessage(a): %v", err)
+	}
+	if err := s.CreateMessage(ctx, b); err != nil {
+		t.Fatalf("CreateMessage(b): %v", err)
+	}
+
+	// Determine which of the two sorts later (higher ID) without assuming
+	// tid()'s output order — the test must hold regardless.
+	lo, hi := a, b
+	if lo.ID > hi.ID {
+		lo, hi = b, a
+	}
+	if lo.ID >= hi.ID {
+		t.Fatalf("test fixture invariant broken: lo.ID (%q) must be < hi.ID (%q)", lo.ID, hi.ID)
+	}
+
+	// Advance to the lower-ID row first.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": lo.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to lo: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A same-timestamp POST for the higher-ID row — the one that sorts later
+	// in the history listing — must be accepted as newer via the ID
+	// tie-break, not skipped as "not strictly After": neither timestamp is
+	// After the other.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": hi.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to hi (tie-break): expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-tie")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != hi.ID {
+		t.Errorf("tie-break resolved wrong way: got %+v, want LastReadMessageID = %q (the higher ID)", rs, hi.ID)
+	}
+
+	// The reverse direction must also hold: a same-timestamp POST for the
+	// lower-ID row, now that hi is the watermark, must be a no-op, not a
+	// second "tie counts as newer" win. Without the ID comparison (treating
+	// every tie as newer), this POST would incorrectly roll the watermark
+	// back to lo.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": lo.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-advance to lo (stale tie): expected 200 (ignored, not an error), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err = wcs.GetReadState(ctx, DevUserID, "topic-tie")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != hi.ID {
+		t.Errorf("tie-break rolled back: got %+v, want LastReadMessageID to remain %q (the higher ID)", rs, hi.ID)
+	}
+}
+
+// getMessageErrStore wraps a store.Store and forces GetMessage to return a
+// caller-supplied error for one specific ID (any other ID falls through to
+// the real store). Used to distinguish "message not found" from "the store
+// itself failed" in handleConversationRead.
+type getMessageErrStore struct {
+	store.Store
+	failID string
+	err    error
+}
+
+func (f *getMessageErrStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
+	if id == f.failID {
+		return nil, f.err
+	}
+	return f.Store.GetMessage(ctx, id)
+}
+
+// TestChatV2_ConversationRead_StoreErrorReturns500: a genuine store failure
+// (e.g. a dropped DB connection) while looking up the watermark candidate
+// must surface as 500, not be folded into the 400 "unknown message" path
+// used for a not-found/malformed ID.
+func TestChatV2_ConversationRead_StoreErrorReturns500(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-store-err", ProjectID: proj.ID, Name: "store-err", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	failID := tid("store-err-msg")
+	srv.store = &getMessageErrStore{Store: s, failID: failID, err: errors.New("connection reset by peer")}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-store-err/read",
+		map[string]string{"messageId": failID})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a genuine store error (not not-found), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-store-err")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written after a store error, got %+v", rs)
+	}
+}
+
+// TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent: re-posting
+// the conversation's current watermark must short-circuit before any message
+// lookup or write — proven here by swapping in a store whose GetMessage
+// always errors for that ID after the watermark is already set.
+func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-noop", ProjectID: proj.ID, Name: "noop", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	msg := &store.Message{ID: tid("noop-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-noop", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-noop", CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// Establish the watermark first — this call legitimately hits GetMessage.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-noop/read",
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial advance: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Any further GetMessage call for this ID now fails loudly, so a 200
+	// here can only mean the fast path skipped the lookup entirely.
+	srv.store = &getMessageErrStore{Store: s, failID: msg.ID, err: errors.New("GetMessage should not have been called")}
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-noop/read",
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-posting the current watermark: expected 200 (fast-path no-op), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -4792,6 +5144,157 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 	// --- Nil webChatStore: should not panic.
 	s2 := &Server{}
 	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
+}
+
+// readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
+// snapshots both halves of the unread computation for the message's
+// conversation at the moment of the call — i.e. what a client would see if
+// it reacted to the SSE event the instant it arrives. `hasUnread` is
+// computed exactly the way the rollup endpoints do it
+// (handlers_chat_v2.go ~L155, ~L384, ~L3439: LastMessageID != LastReadMessageID),
+// so this pins the actual user-visible invariant, not just one of its two
+// inputs. Used to pin down that the sender's read watermark *and* the
+// conversation's last-message watermark are both advanced before the
+// message is published, not after, closing the self-unread flash race
+// rather than narrowing it.
+type readStateAtPublishSpy struct {
+	noopEventPublisher
+	wcs WebChatStore
+
+	called                 bool
+	messageID              string
+	readStateAtPublish     *WebChatReadState
+	lastMessageIDAtPublish string
+	hasUnreadAtPublish     bool
+}
+
+func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef) {
+	p.called = true
+	p.messageID = msg.ID
+	p.readStateAtPublish, _ = p.wcs.GetReadState(ctx, msg.SenderID, msg.ThreadID)
+
+	if strings.HasPrefix(msg.ThreadID, "dm:") {
+		dms, _ := p.wcs.ListDMs(ctx, msg.SenderID)
+		for _, dm := range dms {
+			if dm.ConversationKey == msg.ThreadID {
+				p.lastMessageIDAtPublish = dm.LastMessageID
+				break
+			}
+		}
+	} else if topic, _ := p.wcs.GetTopic(ctx, msg.ThreadID); topic != nil {
+		p.lastMessageIDAtPublish = topic.LastMessageID
+	}
+
+	lastRead := ""
+	if p.readStateAtPublish != nil {
+		lastRead = p.readStateAtPublish.LastReadMessageID
+	}
+	p.hasUnreadAtPublish = p.lastMessageIDAtPublish != "" && p.lastMessageIDAtPublish != lastRead
+}
+
+// TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish is a
+// regression test for the self-unread flash: sendHumanToHuman used to call
+// touchConversationActivity/autoAdvanceSenderReadState *after*
+// PublishUserMessage, so a client reacting to its own echoed SSE message
+// could re-fetch unread state in the gap and briefly see itself as unread.
+func TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-h2h-watermark")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "human-only-watermark",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	spy := &readStateAtPublishSpy{wcs: wcs}
+	srv.SetEventPublisher(spy)
+
+	body := map[string]string{"content": "just chatting"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !spy.called {
+		t.Fatal("PublishUserMessage was never called")
+	}
+	if spy.readStateAtPublish == nil {
+		t.Fatal("sender read state was not set by the time the message was published — self-send would flash unread")
+	}
+	if spy.readStateAtPublish.LastReadMessageID != spy.messageID {
+		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
+			"self-send would flash unread until the read state catches up",
+			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+	if spy.lastMessageIDAtPublish != spy.messageID {
+		t.Errorf("topic last-message watermark at publish time = %q, want %q (the sent message)",
+			spy.lastMessageIDAtPublish, spy.messageID)
+	}
+	if spy.hasUnreadAtPublish {
+		t.Error("computed hasUnread at publish time = true, want false — self-send would flash unread")
+	}
+}
+
+// TestChatV2_Send_AgentRouted_ReadWatermarkAdvancedBeforePublish mirrors
+// TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish for the
+// agent-routed send path (sendAgentRouted), where the same
+// touchConversationActivity/autoAdvanceSenderReadState calls previously ran
+// after PublishUserMessage — and after agent dispatch, widening the race
+// window even further.
+func TestChatV2_Send_AgentRouted_ReadWatermarkAdvancedBeforePublish(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        tid("agent-watermark-route"),
+		ProjectID: proj.ID,
+		Name:      "Watermark Router",
+		Slug:      "watermark-router",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
+
+	spy := &readStateAtPublishSpy{wcs: wcs}
+	srv.SetEventPublisher(spy)
+
+	body := map[string]string{"content": "hello agent, help me please"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !spy.called {
+		t.Fatal("PublishUserMessage was never called")
+	}
+	if spy.readStateAtPublish == nil {
+		t.Fatal("sender read state was not set by the time the message was published — self-send would flash unread")
+	}
+	if spy.readStateAtPublish.LastReadMessageID != spy.messageID {
+		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
+			"self-send would flash unread until the read state catches up",
+			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+	if spy.lastMessageIDAtPublish != spy.messageID {
+		t.Errorf("DM last-message watermark at publish time = %q, want %q (the sent message)",
+			spy.lastMessageIDAtPublish, spy.messageID)
+	}
+	if spy.hasUnreadAtPublish {
+		t.Error("computed hasUnread at publish time = true, want false — self-send would flash unread")
+	}
 }
 
 // ---------------------------------------------------------------------------

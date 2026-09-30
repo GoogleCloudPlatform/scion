@@ -307,6 +307,11 @@
           "type": "string",
           "description": "Container image URI."
         },
+        "image_pull_policy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes-runtime-only default image pull policy. Ignored by non-Kubernetes runtimes. An explicit template/agent-config kubernetes.imagePullPolicy still outranks this."
+        },
         "user": {
           "type": "string",
           "description": "Unix user inside the container."
@@ -715,6 +720,11 @@
       "type": "object",
       "properties": {
         "image": { "type": "string" },
+        "image_pull_policy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes-runtime-only default image pull policy for this profile. Overrides harness_configs.<name>.image_pull_policy."
+        },
         "user": { "type": "string" },
         "env": {
           "type": "object",

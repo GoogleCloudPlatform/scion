@@ -59,6 +59,11 @@ type CreateTokenRequest struct {
 	ProjectID string     `json:"projectId"`
 	Scopes    []string   `json:"scopes"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+
+	// E.1 descriptive credential metadata: optional, bounded, immutable
+	// after issuance (there is no update endpoint).
+	Purpose string            `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // CreateTokenResponse is the response from creating a user access token.
@@ -78,6 +83,11 @@ type TokenInfo struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+
+	// E.1 descriptive credential metadata: empty for tokens created before
+	// E.1 or without metadata supplied at issuance.
+	Purpose string            `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // ListTokensResponse is the response from listing user access tokens.

@@ -145,10 +145,12 @@ func doRequestRaw(t *testing.T, srv *Server, method, path string, body []byte, c
 
 // grantDevUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
 // permissions and binds it to the dev user. This is needed because the
-// inline authz checks in getRuntimeBroker, handleBrokerHeartbeat, and
-// handleBrokerSecretByKey use Resource{Type: "runtime_broker"} which does not
-// match the canonical "broker.*" permissions in the registry. The dev user's
-// super-admin role only includes registry permissions.
+// inline authz checks in handleBrokerHeartbeat and handleBrokerSecretByKey
+// use Resource{Type: "runtime_broker"} which does not match the canonical
+// "broker.*" permissions in the registry (getRuntimeBroker and
+// getBrokerProjects have already been aligned to the canonical type; these
+// two remain to be aligned separately). The dev user's super-admin role only
+// includes registry permissions.
 func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -172,39 +174,6 @@ func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)
-}
-
-// grantUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
-// permissions and binds it to the specified user.
-func grantUserRuntimeBrokerAccess(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	// Re-use existing definition if already created in this store instance.
-	rd, err := s.GetRoleDefinitionByName(ctx, "runtime-broker-compat", store.RoleScopeSystem)
-	if err != nil {
-		rd, err = s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-			Name:      "runtime-broker-compat",
-			ScopeType: store.RoleScopeSystem,
-			Permissions: []string{
-				"runtime_broker.read",
-				"runtime_broker.update",
-				"runtime_broker.delete",
-				"runtime_broker.list",
-			},
-		})
-		require.NoError(t, err)
-	}
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create runtime-broker-compat role binding: %v", err)
-	}
 }
 
 // grantSuperAdminRole binds the seeded super-admin role definition to the

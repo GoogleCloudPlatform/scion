@@ -151,24 +151,17 @@ func ResolveOrCreateDMConversation(
 	// Race note: concurrent ResolveOrCreateDMConversation calls may both
 	// attempt EnsureParticipant. This is benign: EnsureParticipant is
 	// idempotent and race-safe (unique constraint violations are mapped to nil).
-	for _, pp := range []struct{ kind, id string }{
-		{senderKind, senderID},
-		{recipientKind, recipientID},
-	} {
-		ensureErr := pe.EnsureParticipant(ctx, &store.ConversationParticipant{
-			ConversationID: result.ID,
-			PrincipalKind:  pp.kind,
-			PrincipalID:    pp.id,
-			Role:           "member",
-		})
-		if ensureErr != nil {
-			log.Warn("participant registration failed (listing gap, not access)",
-				"conversation_id", result.ID,
-				"principal_kind", pp.kind,
-				"principal_id", pp.id,
-				"error", ensureErr)
-		}
-	}
+	//
+	// O4 (A25.7): the actual ensure-both-even-on-failure loop and its WARN
+	// wording are owned by ensureConversationParticipants (derive_key.go) —
+	// the same helper ResolveOrCreateConversationByKey uses — so there is a
+	// single place that implements this G2 exception. The two principals are
+	// parsed back out of the DB-returned result.ExternalRef rather than
+	// passed positionally; for a real upsert this is always the canonical
+	// key built from senderKind/senderID/recipientKind/recipientID above; it
+	// only differs in this function's own unit tests that stub a
+	// non-canonical mock ExternalRef unrelated to participant registration.
+	ensureConversationParticipants(ctx, pe, log, result.ID, result.ExternalRef)
 
 	return &ConversationResult{
 		ConversationID: result.ID,
@@ -283,13 +276,17 @@ func ResolveOrCreateThreadConversation(
 	if cfg.surface != "" {
 		keyOpts = append(keyOpts, WithSurface(cfg.surface))
 	}
+	if cfg.participants != nil {
+		keyOpts = append(keyOpts, WithParticipants(cfg.participants))
+	}
 	return ResolveOrCreateConversationByKey(ctx, cs, log, extRef, kind, projID, keyOpts...)
 }
 
 // threadConversationConfig holds optional parameters for ResolveOrCreateThreadConversation.
 type threadConversationConfig struct {
-	topicLookup TopicConversationLookup
-	surface     string // override for the conversation surface; empty keeps the default ("native")
+	topicLookup  TopicConversationLookup
+	surface      string // override for the conversation surface; empty keeps the default ("native")
+	participants ParticipantEnsurer
 }
 
 // ThreadConversationOption is a functional option for ResolveOrCreateThreadConversation.
@@ -301,6 +298,18 @@ type ThreadConversationOption func(*threadConversationConfig)
 func WithTopicLookup(tl TopicConversationLookup) ThreadConversationOption {
 	return func(c *threadConversationConfig) {
 		c.topicLookup = tl
+	}
+}
+
+// WithThreadParticipants forwards a ParticipantEnsurer to the shared
+// ResolveOrCreateConversationByKey sink (A25.6 F1/F3). threadID may carry a
+// "dm:" prefix (DeriveConversationKey case 1), in which case the resolved
+// conversation is kind=="direct" and both principals in the key get
+// registered as participants. For an ordinary (non-dm:) thread key this is a
+// no-op: the sink only registers participants for kind=="direct".
+func WithThreadParticipants(pe ParticipantEnsurer) ThreadConversationOption {
+	return func(c *threadConversationConfig) {
+		c.participants = pe
 	}
 }
 

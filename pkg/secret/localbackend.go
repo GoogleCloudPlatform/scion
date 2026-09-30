@@ -62,6 +62,55 @@ func (b *LocalBackend) Get(ctx context.Context, name, scope, scopeID string) (*S
 	return b.decryptStoreSecret(s)
 }
 
+// FetchValues returns values for exactly the given metadata records, matched
+// by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed by each
+// record's ID in the returned map. There is no name-based fallback: a record
+// that is no longer in the store, or whose current ID, Version, AllowProgeny,
+// CreatedBy or SecretType no longer matches the recorded metadata, is
+// reported as store.ErrNotFound for that item. A decrypt failure is also
+// reported as a per-item error, never as an empty value delivered in place
+// of an error. A record whose current SecretType is internal is refused with
+// store.ErrNotFound, since internal secrets are never candidates for
+// delivery. The returned outer error reports only a failure of the whole
+// call, not a per-item failure.
+//
+// store.SecretStore has no primary-key lookup, so each record is located by
+// its Name/Scope/ScopeID triple — the same composite key GetSecret uses —
+// and then verified against the recorded metadata before its value is
+// decrypted (see recordGenerationChanged). Name/Scope/ScopeID are immutable
+// for the life of a record (UpdateSecretMeta never changes them); a secret
+// that was deleted and recreated under the same triple gets a new ID
+// (toStoreSecret assigns api.NewUUID() on every create), so this
+// verification rejects the new record exactly as a primary-key lookup would.
+// The additional AllowProgeny/CreatedBy/SecretType comparison catches a
+// same-Version metadata race that ID+Version alone would miss (see
+// recordGenerationChanged's doc comment).
+func (b *LocalBackend) FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error) {
+	results := make(map[string]FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = b.fetchValue(ctx, meta)
+	}
+	return results, nil
+}
+
+func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResult {
+	s, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	if recordGenerationChanged(s, meta) {
+		// The record has been replaced, rotated or reclassified since the
+		// caller's metadata was recorded; treat it the same as not found
+		// rather than returning a value for a different record generation.
+		return FetchResult{Err: store.ErrNotFound}
+	}
+	sv, err := b.decryptStoreSecret(s)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	return FetchResult{Value: sv.Value}
+}
+
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	s := toStoreSecret(input)
 
@@ -238,8 +287,11 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 
 			meta := fromStoreSecretMeta(&s)
 
-			// Verify access via policy engine if checker is provided
-			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+			// Verify access via the policy engine. With no checker configured,
+			// a progeny secret is excluded rather than included by default:
+			// the caller must supply an explicit policy decision before any
+			// progeny value is read.
+			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
 			}
 
@@ -380,11 +432,11 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 }
 
 // decryptRawValue decrypts a raw encrypted value string. If decryption fails
-// (e.g. corrupted ciphertext or key mismatch after rotation), an empty string
-// is returned and a warning is logged. Returning "" ensures agents never
-// receive an encrypted blob as a secret value; a missing value is safer than
-// indistinguishable garbage. This is used in Resolve where individual
-// decryption failures should not abort the entire resolution.
+// (e.g. corrupted ciphertext or key mismatch after rotation), an error is
+// returned and the value is always empty: a failure is reported to the
+// caller instead of being delivered as an indistinguishable empty value.
+// This is used in Resolve, where the caller skips the affected secret on a
+// non-nil error rather than aborting the entire resolution.
 func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	if b.encryptionKey == nil {
 		if strings.HasPrefix(raw, EncryptedPrefix) {
@@ -396,9 +448,7 @@ func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
 	}
 	plaintext, _, err := DecryptValue(raw, b.encryptionKey)
 	if err != nil {
-		slog.Warn("failed to decrypt secret value, returning empty",
-			"error", err)
-		return "", nil
+		return "", fmt.Errorf("decrypting secret value: %w", err)
 	}
 	return plaintext, nil
 }

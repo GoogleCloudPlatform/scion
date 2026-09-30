@@ -920,9 +920,9 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // permission lists cannot silently reintroduce cross-member attach/port_access.
 func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  3,
-		store.ProjectRoleAdmin:  3,
-		store.ProjectRoleMember: 3,
+		store.ProjectRoleOwner:  4,
+		store.ProjectRoleAdmin:  4,
+		store.ProjectRoleMember: 4,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {

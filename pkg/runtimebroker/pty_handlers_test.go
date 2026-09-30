@@ -87,8 +87,14 @@ func TestHandleAgentAttach_RuntimeListUnavailable(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeUnavailable {
 		t.Errorf("expected code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
 	}
-	if !strings.Contains(resp.Error.Message, "retry") && !strings.Contains(resp.Error.Message, "temporarily") {
-		t.Errorf("expected an actionable, retry-oriented message, got %q", resp.Error.Message)
+	// PTY attach passes the "the attach" retrySuffix to AgentLookupUnavailable
+	// so the message reads "please retry the attach in a moment" rather than
+	// the plain "please retry in a moment" that stop/restart/exec/reset_auth
+	// use. Pinning the exact text (not just "contains retry") catches a call
+	// site that silently drops or swaps the retrySuffix argument.
+	wantMessage := `Unable to look up agent "some-agent": the container runtime is temporarily unavailable. Please retry the attach in a moment.`
+	if resp.Error.Message != wantMessage {
+		t.Errorf("message = %q, want %q", resp.Error.Message, wantMessage)
 	}
 	// The message must not just be "Agent not found" — the whole point is
 	// distinguishing a transient runtime failure from a real not-found.

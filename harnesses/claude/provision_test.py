@@ -259,6 +259,64 @@ class ModelResolutionTest(unittest.TestCase):
 
         self.assertEqual(warnings, [])
 
+    def test_opus_5_5_falls_back_to_opus_4_8_on_old_claude_code(self) -> None:
+        """Claude Code < 2.1.280 rejects claude-opus-5-5* and opus with 400."""
+        for requested in ("claude-opus-5-5", "claude-opus-5-5@default", "opus", None):
+            with self.subTest(requested=requested):
+                warnings: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp)
+                    ctx.warn = warnings.append  # type: ignore[method-assign]
+                    with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                        env: dict[str, str] = {}
+                        model = provision._apply_model(ctx, env, claude_version="2.1.270")
+
+                self.assertEqual(model, "claude-opus-4-8")
+                self.assertEqual(env["ANTHROPIC_MODEL"], "claude-opus-4-8")
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("2.1.280", warnings[0])
+                self.assertIn("claude_code_version_too_old", warnings[0])
+
+    def test_opus_5_5_passes_through_on_claude_code_2_1_280_or_newer(self) -> None:
+        for version in ("2.1.280", "2.1.295", "2.2.0"):
+            for requested in ("claude-opus-5-5@default", "opus"):
+                with self.subTest(version=version, requested=requested):
+                    warnings: list[str] = []
+                    with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                        ctx = make_ctx(tmp)
+                        ctx.warn = warnings.append  # type: ignore[method-assign]
+                        with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                            env: dict[str, str] = {}
+                            model = provision._apply_model(ctx, env, claude_version=version)
+
+                    self.assertEqual(model, requested)
+                    self.assertEqual(env["ANTHROPIC_MODEL"], requested)
+                    self.assertEqual(warnings, [])
+
+    def test_non_opus_5_5_models_unaffected_by_old_claude_code(self) -> None:
+        for requested in ("claude-opus-4-8", "claude-sonnet-4-5", "haiku"):
+            with self.subTest(requested=requested):
+                warnings: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp)
+                    ctx.warn = warnings.append  # type: ignore[method-assign]
+                    with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                        env: dict[str, str] = {}
+                        model = provision._apply_model(ctx, env, claude_version="2.1.270")
+
+                self.assertEqual(model, requested)
+                self.assertEqual(env["ANTHROPIC_MODEL"], requested)
+                self.assertEqual(warnings, [])
+
+    def test_build_env_overlay_disables_autoupdater(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            auth = scion_harness.ResolvedAuth(method="api-key", env_key="ANTHROPIC_API_KEY")
+            env = provision._build_env_overlay(ctx, auth)
+
+        self.assertEqual(env.get("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"), "1")
+        self.assertEqual(env.get("DISABLE_AUTOUPDATER"), "1")
+
 
 class ConfigYamlTest(unittest.TestCase):
     def test_config_yaml_does_not_pin_anthropic_model(self) -> None:

@@ -106,6 +106,16 @@ func (p *Pipeline) Diagnostics() map[string]DeliverySnapshot {
 	}
 }
 
+// UsageDiagnostics returns the usage deriver's fixed-cardinality counters
+// (design §3.3 "Diagnostics"). Safe to call before Start or when usage
+// derivation is inactive: it returns a zero value.
+func (p *Pipeline) UsageDiagnostics() UsageDiagnostics {
+	if p == nil {
+		return UsageDiagnostics{}
+	}
+	return p.usageDeriver.Load().Diagnostics()
+}
+
 // Snapshots use the local logger only. They are fixed-cardinality and do not
 // traverse the telemetry exporter whose failure they describe.
 func (p *Pipeline) logDeliverySnapshot(force bool) {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
@@ -190,6 +191,78 @@ func (Agent) Fields() []ent.Field {
 		field.Time("reincarnation_updated_at").
 			Optional().
 			Nillable(),
+
+		// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+		// launch_async_opt_in records whether the client that created (or is
+		// finalizing) this agent opted into non-blocking launch. The Hub flag
+		// hub.asyncAgentLaunch is the kill switch; this is the per-request
+		// half of the gate.
+		field.Bool("launch_async_opt_in").
+			Default(false),
+		// launch_id is the current or most recent launch's identity. It is
+		// kept after the launch ends, so a late report can recognize a
+		// superseded launch and every reader has a stable ID to correlate
+		// against, even once launch_state has moved to "ended".
+		field.String("launch_id").
+			Optional().
+			Default(""),
+		// launch_state is "active" while a launch is in flight, "ended" once
+		// it has reached a terminal outcome, or "" for an agent that has
+		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
+		// async on).
+		field.String("launch_state").
+			Optional().
+			Default(""),
+		// launch_end_reason records why the most recent launch ended:
+		// succeeded, running_observed, failed, timed_out, lost,
+		// not_launched, or superseded.
+		field.String("launch_end_reason").
+			Optional().
+			Default(""),
+		// launch_kind is "create", "start" or "restart". Only "create" is
+		// writable in P1a (BeginLaunch is restricted to phase in
+		// {created, provisioning}); start/restart land in P6.
+		field.String("launch_kind").
+			Optional().
+			Default(""),
+		// launch_deadline is storeNow + the launch's timeout, set by
+		// BeginLaunch. Present only while a launch is active in spirit, but
+		// the column is never cleared on end — it is simply not read once
+		// launch_state != "active". Covered by a partial index (below) so the
+		// reaper's deadline scan stays cheap.
+		field.Time("launch_deadline").
+			Optional().
+			Nillable(),
+		// launch_last_report_at is bumped by every accepted report
+		// (including keepalives) and is the input to the reaper's staleness
+		// selection.
+		field.Time("launch_last_report_at").
+			Optional().
+			Nillable(),
+		// launch_owner is the broker instance ID (LaunchInstanceID) that
+		// claimed this launch. Empty until the first non-terminal report is
+		// accepted from some instance.
+		field.String("launch_owner").
+			Optional().
+			Default(""),
+		// launch_seq orders progress/checkpoint/claim reports for the current
+		// launch so a replayed or reordered report can be recognized as a
+		// duplicate. Terminal reports bypass it.
+		field.Int64("launch_seq").
+			Default(0),
+		// launch_step is the most recent human-readable step name reported
+		// for the current launch, surfaced on AgentLaunch.Step.
+		field.String("launch_step").
+			Optional().
+			Default(""),
+		// launch_error is the failure code of the current or most recent
+		// launch (e.g. launch_timeout, broker_lost, launch_stopped,
+		// agent_error). Cleared whenever phase becomes "running" (T3): an
+		// agent that has ever run is never treated as an incomplete create
+		// again, whatever happens to it later.
+		field.String("launch_error").
+			Optional().
+			Default(""),
 	}
 }
 
@@ -213,5 +286,15 @@ func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug", "project_id").
 			Unique(),
+		// Partial index backing the T1 launch reaper's deadline scan (design
+		// §3.3): a range scan on launch_deadline restricted to in-flight
+		// launches, so it stays cheap regardless of table size. Same shape as
+		// pkg/ent/schema/conversation.go's partial unique index and
+		// usagereservation.go's partial indexes.
+		index.Fields("launch_deadline").
+			Annotations(
+				entsql.IndexWhere("launch_state = 'active'"),
+			),
+		index.Fields("launch_id"),
 	}
 }

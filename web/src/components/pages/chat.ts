@@ -51,7 +51,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
+import { customElement, property, state, query } from 'lit/decorators.js';
 
 import type { PageData, Capabilities, Agent } from '../../shared/types.js';
 import { canMessageAgent } from '../../shared/types.js';
@@ -60,7 +60,13 @@ import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
-import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import {
+  isFeatureEnabled,
+  NATIVE_CHAT_V2_FLAG,
+  NATIVE_CHAT_PALETTE_FLAG,
+} from '../../utils/feature-flags.js';
+import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
+import { ChatPaletteDataController, PaletteLoadError } from '../../client/chat-palette-data.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref } from '../../client/open-terminal.js';
 import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
@@ -81,6 +87,14 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
 const loadChatSwitcher = () => import('../shared/chat/chat-switcher.js');
+
+/**
+ * How long a successfully-loaded palette group stays fresh across a
+ * close/reopen before it is refetched.
+ */
+const PALETTE_GROUP_CACHE_MS = 30_000;
+/** Debounce window for refreshing dirty palette groups while the palette is open. */
+const PALETTE_REFRESH_DEBOUNCE_MS = 500;
 
 /**
  * Slow fallback poll for the members sidebar.
@@ -214,6 +228,14 @@ export class ScionPageChat extends LitElement {
 
   // ---- Shared state ----
   private isV2 = isFeatureEnabled(NATIVE_CHAT_V2_FLAG);
+  /**
+   * Temporary rollout flag (native chat quick command palette, phases 1-3):
+   * routes the single Cmd/Ctrl+K shortcut to the new grouped palette instead
+   * of the legacy flat switcher. Only meaningful when `isV2` is also true.
+   * Captured once at construction, like `isV2` — this page instance uses
+   * exactly one presentation for its whole lifetime.
+   */
+  private isPaletteEnabled = isFeatureEnabled(NATIVE_CHAT_PALETTE_FLAG);
 
   /** Layout density: 'dense' is the compact default, 'comfy' bumps font sizes ~20-25%. */
   @property({ type: String, attribute: 'data-density', reflect: true })
@@ -274,12 +296,108 @@ export class ScionPageChat extends LitElement {
   @state() private v2UnreadFromIds: string[] = [];
   /** Whether the quick-switcher modal is visible (Cmd/Ctrl+K). */
   @state() private v2SwitcherOpen = false;
-  /** Whether the quick-switcher component has been lazy-loaded. */
-  private v2SwitcherLoaded = false;
+  /**
+   * Whether the quick-switcher component has been lazy-loaded. `@state`
+   * (not a plain field) so togglePalette's `await this.updateComplete` after
+   * setting it actually waits for a real, separate render: mount
+   * `<scion-chat-switcher>` with open=false first, so the following
+   * `v2PaletteOpen = true` is a genuine false->true transition on an
+   * existing element rather than both happening in the same render pass
+   * (which is indistinguishable from "born open" to Shoelace's dialog — see
+   * togglePalette's comment).
+   */
+  @state() private v2SwitcherLoaded = false;
   /** Cached conversation list for the switcher. */
   @state()
   private v2SwitcherConversations: import('../shared/chat/chat-switcher.js').SwitcherConversation[] =
     [];
+  /** Whether the grouped palette (native_chat_palette) is open. Only meaningful when `isPaletteEnabled`. */
+  @state() private v2PaletteOpen = false;
+  /**
+   * True while an open is in flight but hasn't set `v2PaletteOpen` yet —
+   * synchronous (set before the first `await`, unlike `v2PaletteOpen`) so a
+   * second Ctrl+K press arriving during the first-open lazy import
+   * (`loadChatSwitcher()`) can be detected before that import resolves.
+   * Without this, that second press would re-enter `togglePalette` while
+   * `v2PaletteOpen` is still false and would either open a second time or
+   * re-capture the invoker focus.
+   */
+  private _palettePendingOpen = false;
+  /** Per-group palette load state for Agents, Threads and People. */
+  @state()
+  private v2PaletteGroups: Partial<Record<PaletteGroup, GroupState>> = {
+    agents: { status: 'loading', candidates: [] },
+  };
+  /** Agents/DM data controller for the palette: pagination, DM join, cancellation. */
+  private _paletteDataController = new ChatPaletteDataController();
+  /** Epoch ms a group last finished loading successfully — the basis for the 30s per-group cache. */
+  private _paletteGroupCacheAt: Partial<Record<PaletteGroup, number>> = {};
+  /** Groups invalidated by an SSE event since their last successful load — forces a refetch even inside the 30s cache window. */
+  private _paletteGroupDirty: Partial<Record<PaletteGroup, boolean>> = {};
+  /**
+   * Bumped by {@link _markPaletteGroupsDirty} for each named group. A loader
+   * snapshots this at load start and only clears `_paletteGroupDirty` on
+   * success if the epoch is still unchanged when the load finishes. This
+   * guarantees that an invalidation arriving *during* an in-flight load is
+   * never silently lost: if the epoch changed mid-load, `dirty` and the
+   * cache timestamp are left untouched, so the debounced refresh that
+   * invalidation already scheduled still reloads the group with current
+   * data shortly after, instead of the load in flight publishing/caching a
+   * possibly-stale snapshot for a full 30s.
+   */
+  private _paletteGroupInvalidationEpoch: Partial<Record<PaletteGroup, number>> = {};
+  /**
+   * Identifies the current People load across its identity-resolution phase
+   * (`_resolveSelfUserId`'s `/auth/me` fetch, which carries no abort signal
+   * of its own and so is not covered by `_paletteDataController.cancel()`).
+   * `_loadPalettePeople` captures this counter's value at its own start and
+   * bumps it again on every new call, so a load whose identity resolution is
+   * still pending when a *later* People load starts (a reopen, a refresh, or
+   * simply calling it twice) is superseded the moment that later call begins
+   * — before either load's identity has even resolved yet.
+   * `_closePaletteAndCancelLoad` also bumps it, so a load left pending when
+   * the palette closes (and is never reopened) is superseded too. This must
+   * be keyed to which load is current, not to `v2PaletteOpen`: a reopen sets
+   * `v2PaletteOpen` back to `true`, so an open-state check alone cannot tell
+   * a stale load's identity resolution apart from a newer one, and a stale
+   * resolution completing after the reopen could overwrite a newer,
+   * already-`ready` People state.
+   */
+  private _peopleLoadSeq = 0;
+  /** Debounce timer coalescing SSE-driven dirty-group refreshes while the palette is open. */
+  private _paletteRefreshDebounce: ReturnType<typeof setTimeout> | null = null;
+  /** The deep-active element (and, for a textarea or text input, its selection) captured just before the palette opened. */
+  private _paletteInvoker: HTMLElement | null = null;
+  private _paletteInvokerSelection: {
+    start: number | null;
+    end: number | null;
+    direction: 'forward' | 'backward' | 'none' | null;
+  } | null = null;
+  /**
+   * True when the palette is closing because of a committed selection rather
+   * than escape/backdrop/toggle — the `sl-after-hide` handler uses this to
+   * decide whether to focus the new conversation's composer instead of
+   * restoring the old invoker (never restore focus into the old composer
+   * afterward).
+   */
+  private _paletteClosedBySelection = false;
+  /**
+   * True when the palette is being closed programmatically (route change
+   * hiding chat, or another modal opening) rather than by the user — focus
+   * must not be restored into a hidden page in that case (close it without
+   * restoring focus into hidden chat).
+   */
+  private _paletteSkipFocusRestore = false;
+  /** Bounded-poll watchdog closing the palette if the route/visibility guards stop passing while it's open (see `_startPaletteVisibilityWatchdog`). */
+  private _paletteVisibilityWatchdog: ReturnType<typeof setInterval> | null = null;
+  /** Bound handler for `sl-after-hide` bubbling up from the palette's internal sl-dialog. */
+  private _onPaletteAfterHide = this._handlePaletteAfterHide.bind(this);
+  /** Bound handler: close the open palette if some other dialog/drawer opens while it's open. */
+  private _onDocumentModalShow = this._handleDocumentModalShow.bind(this);
+  /** Bound handler: close the open palette if a route change navigates away from /chat. */
+  private _onPopState = this._handlePopStateForPalette.bind(this);
+  /** The mounted switcher/palette element, if any — excluded from the modal guard's live query. */
+  @query('scion-chat-switcher') private _switcherEl?: Element;
   /** Whether the search panel is visible. */
   @state() private v2SearchActive = false;
   /** Whether the search component has been lazy-loaded. */
@@ -844,6 +962,13 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
+    // Reactive half of the modal/route interaction: if another modal opens
+    // or route hides chat while the palette is open, close it without
+    // restoring focus into hidden chat. The guard itself
+    // (_isUnrelatedModalActive) queries live DOM state at keydown time, not
+    // these events — see its doc comment for why.
+    document.addEventListener('sl-show', this._onDocumentModalShow);
+    window.addEventListener('popstate', this._onPopState);
 
     if (this.isV2) {
       void this.initV2();
@@ -864,6 +989,20 @@ export class ScionPageChat extends LitElement {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     document.removeEventListener('keydown', this._onKeydown);
+    document.removeEventListener('sl-show', this._onDocumentModalShow);
+    window.removeEventListener('popstate', this._onPopState);
+    this._paletteDataController.cancel();
+    this._stopPaletteVisibilityWatchdog();
+    this._stopPaletteDebouncedRefresh();
+    // Without this, a disconnect landing while a first-open lazy import is
+    // still in flight would leave `_palettePendingOpen` stuck true on the
+    // detached page — the suspended togglePalette call would resume anyway
+    // (nothing observes disconnection), setting v2PaletteOpen and issuing
+    // the agents/DM GETs on a page no longer in the document. The
+    // visibility watchdog would still close it shortly after
+    // (off-route/invisible once detached), so nothing gets permanently
+    // stuck, but this work should be aborted on controller disposal.
+    this._palettePendingOpen = false;
     if (this.isV2) {
       stateManager.removeEventListener('chat-message-received', this._onChatMessage);
       stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
@@ -1565,6 +1704,9 @@ export class ScionPageChat extends LitElement {
   }
 
   private _handleAgentsUpdated(): void {
+    // Messageability/capabilities/status can change viability for the
+    // palette's Agents group, so this invalidation marks it stale.
+    this._markPaletteGroupsDirty('agents');
     // Only adopt agents belonging to the current view: the open conversation's
     // project, or every space the user can see in the base view.
     const scopeProjectId = this.v2Conversation?.projectId || '';
@@ -1649,6 +1791,7 @@ export class ScionPageChat extends LitElement {
    * re-creation (or ID reuse) isn't permanently suppressed.
    */
   private _handleAgentCreated(e: Event): void {
+    this._markPaletteGroupsDirty('agents');
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const agentId = eventData?.agentId as string | undefined;
@@ -1691,6 +1834,12 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatMessage(e: Event): void {
+    // A message can move any group's recency ranking — a DM message affects
+    // Agents/People, a thread message affects Threads — and the event detail
+    // doesn't cheaply distinguish which without parsing the full envelope
+    // this handler otherwise ignores, so mark all three stale.
+    this._markPaletteGroupsDirty('agents', 'people', 'threads');
+
     // The sender is done typing once their message arrives — clear the avatar
     // overlay immediately instead of letting the 6s expiry run out.
     const detail = (e as CustomEvent).detail as { data?: { senderId?: string } } | undefined;
@@ -1712,6 +1861,7 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatTopic(e: Event): void {
+    this._markPaletteGroupsDirty('threads');
     const eventDetail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     // Unwrap the notifyWithData envelope: { state, data: { action, topic: {...} } }
     const eventData = (eventDetail?.data ?? eventDetail) as Record<string, unknown> | undefined;
@@ -1753,6 +1903,9 @@ export class ScionPageChat extends LitElement {
    * from the switcher cache.
    */
   private handleDMPromoted(e: Event): void {
+    // A promoted DM disappears from Agents/People recency and appears as a
+    // new Threads row, so mark all three groups stale.
+    this._markPaletteGroupsDirty('agents', 'people', 'threads');
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
@@ -1794,14 +1947,35 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleThreadSelect(e: CustomEvent): void {
-    const detail = e.detail as {
-      conversationKey: string;
-      projectId: string;
-      projectSlug?: string;
-      threadName: string;
-      defaultAgent?: string;
-    };
+    this.navigateToThread(
+      e.detail as {
+        conversationKey: string;
+        projectId: string;
+        projectSlug?: string;
+        threadName: string;
+        defaultAgent?: string;
+      }
+    );
+  }
 
+  /**
+   * In-page thread navigation shared by the space rail's `thread-select`
+   * event and the palette's Threads group selection
+   * (`_handlePaletteSelect`) — the one routine both callers share, so they
+   * route identically. Prefers
+   * `detail.projectSlug` (the target's own known slug) over a locally cached
+   * one for the same project ID, then falls back to the `_projectIdToSlug`
+   * map; when neither exists, routes by project ID rather than guessing
+   * another project's slug — `_slugToProjectId`'s own keys are never
+   * consulted here as a fallback.
+   */
+  private navigateToThread(detail: {
+    conversationKey: string;
+    projectId: string;
+    projectSlug?: string;
+    threadName: string;
+    defaultAgent?: string;
+  }): void {
     // Determine the slug for the readable URL
     const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
@@ -2647,12 +2821,202 @@ export class ScionPageChat extends LitElement {
   // Quick Switcher (Cmd/Ctrl-K)  — #1048
   // =========================================================================
 
-  /** Global keydown handler: open the quick-switcher on Cmd/Ctrl+K. */
+  /**
+   * Global keydown handler: open the quick-switcher (or, under the rollout
+   * flag, the grouped palette) on Cmd/Ctrl+K. This is the single shortcut
+   * owner — exactly one of the legacy switcher or the new palette reacts,
+   * never both, and every guard below runs before either does.
+   */
   private _handleGlobalKeydown(e: KeyboardEvent): void {
-    if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
+    if (e.defaultPrevented || e.repeat || e.isComposing) return;
+    if (e.altKey || e.shiftKey) return;
+    // Exactly one of Ctrl/Meta — not both (e.g. some IMEs), not neither.
+    if (e.metaKey === e.ctrlKey) return;
+    if (e.key.toLowerCase() !== 'k') return;
+
+    // Ctrl+K must keep reaching the terminal's PTY untouched, and a chat page
+    // hidden behind the terminal workspace must perform zero palette state
+    // changes or fetches even though it stays mounted.
+    if (this._eventFromTerminalSurface(e)) return;
+    if (!this.isV2) return;
+    if (!this._isOnChatRoute()) return;
+    if (!this._isPageVisible()) return;
+    if (this._isUnrelatedModalActive()) return;
+
+    e.preventDefault();
+    if (this.isPaletteEnabled) {
+      void this.togglePalette();
+    } else {
       void this.toggleSwitcher();
     }
+  }
+
+  /** True when the event's real (composedPath) origin is inside a terminal pane / xterm surface. */
+  private _eventFromTerminalSurface(e: KeyboardEvent): boolean {
+    return e.composedPath().some((node) => {
+      if (!(node instanceof Element)) return false;
+      if (node.tagName === 'SCION-TERMINAL-PANE') return true;
+      return node.classList?.contains('xterm') ?? false;
+    });
+  }
+
+  /** Is the current URL (relative to BASE_URL) `/chat` or a route below it? */
+  private _isOnChatRoute(): boolean {
+    const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+    let path = window.location.pathname;
+    if (base && path.startsWith(base)) {
+      path = path.slice(base.length) || '/';
+    }
+    return path === '/chat' || path.startsWith('/chat/');
+  }
+
+  /**
+   * Is this page actually visible? The chat page stays mounted (and its
+   * document keydown listener stays live) while the terminal workspace hides
+   * the route outlet via an ancestor `hidden` attribute, not on this element
+   * itself — so this walks up through light DOM and shadow-root hosts,
+   * preferring the standard `checkVisibility()` where available.
+   */
+  private _isPageVisible(): boolean {
+    if (document.hidden) return false;
+    const checkVisibility = (
+      this as unknown as { checkVisibility?: (opts?: Record<string, boolean>) => boolean }
+    ).checkVisibility;
+    if (typeof checkVisibility === 'function') {
+      try {
+        return checkVisibility.call(this, { checkOpacity: false, checkVisibilityCSS: true });
+      } catch {
+        // Fall through to the manual walk below (e.g. not implemented in this environment).
+      }
+    }
+    let node: Node | null = this as unknown as Node;
+    while (node) {
+      const el = node as HTMLElement;
+      if (el.hidden) return false;
+      if (typeof getComputedStyle === 'function' && node instanceof Element) {
+        try {
+          const style = getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+        } catch {
+          // Ignore — environments without a real layout engine (e.g. some test DOMs).
+        }
+      }
+      const parent: Element | null = (node as Element).parentElement;
+      if (parent) {
+        node = parent;
+        continue;
+      }
+      const root = node.getRootNode();
+      node = root instanceof ShadowRoot ? root.host : null;
+    }
+    return true;
+  }
+
+  /**
+   * Is some dialog/drawer other than our own switcher/palette currently
+   * open? Queried live at keydown time rather than tracked from `sl-show`/
+   * `sl-after-hide` events, for two reasons:
+   *
+   * 1. Shoelace only fires `sl-show` on an `open` false->true *transition*.
+   *    Every real dialog in this app that renders as `<sl-dialog open>`
+   *    behind a `when(...)`/ternary (the attachment preview, the interagent
+   *    marker overlay, the space rail's emoji picker) is "born open" and
+   *    never fires it at all — an event-tracked set would never see them.
+   * 2. An event-tracked set only removes an entry on `sl-after-hide`. A
+   *    dialog that is *disconnected* while still open (conditional
+   *    re-render, conversation switch, back navigation) never fires that
+   *    event, so the entry — and the guard it feeds — would leak forever,
+   *    permanently killing Ctrl+K for every v2 user including the flag-off
+   *    legacy switcher.
+   *
+   * A live query has neither failure mode: it only ever reports what is
+   * actually open and connected right now.
+   */
+  private _isUnrelatedModalActive(): boolean {
+    return this._hasOpenModalDescendant(document, this._switcherEl ?? null);
+  }
+
+  /**
+   * Recursively walks `root`'s descendants — including into every open
+   * shadow root, not just the light-DOM tree `querySelectorAll` alone would
+   * reach — looking for an open `sl-dialog`, `sl-drawer` or native `dialog`.
+   * `exclude` (our own switcher/palette host) and everything inside its
+   * shadow tree is skipped entirely, since composedPath()-based exclusion
+   * does not work here: our own dialog lives inside `exclude`'s shadow root,
+   * and `Element.contains()` does not cross shadow boundaries.
+   */
+  private _hasOpenModalDescendant(root: ParentNode, exclude: Element | null): boolean {
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      if (exclude && el === exclude) continue;
+      if (this._isOpenModalElement(el)) return true;
+      if (el.shadowRoot && this._hasOpenModalDescendant(el.shadowRoot, exclude)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Is `el` a currently-open *modal* surface — an `sl-dialog`, a non-
+   * `contained` `sl-drawer` (a `contained` drawer renders inside its own
+   * container rather than as a page-blocking overlay, per Shoelace), or a
+   * native `<dialog open>`? Shared between the live modal query above and
+   * `_handleDocumentModalShow` below, since both need exactly this
+   * definition of "modal" — not every Shoelace element that happens to fire
+   * `sl-show` (toasts/`sl-alert`, `sl-tooltip`, `sl-dropdown`, `sl-details`,
+   * `sl-select` all do, and none of them are modal).
+   */
+  private _isOpenModalElement(el: Element): boolean {
+    const tag = el.tagName;
+    if (tag === 'SL-DIALOG') {
+      return Boolean((el as unknown as { open?: boolean }).open);
+    }
+    if (tag === 'SL-DRAWER') {
+      if (el.hasAttribute('contained')) return false;
+      return Boolean((el as unknown as { open?: boolean }).open);
+    }
+    if (tag === 'DIALOG') {
+      return el.hasAttribute('open');
+    }
+    return false;
+  }
+
+  /**
+   * If another modal opens while the palette is open, close it without
+   * restoring focus into hidden chat. `composedPath()[0]` is the
+   * real element that emitted `sl-show`, even from inside a shadow root.
+   * Only actual modal surfaces close the palette — `sl-show`
+   * also fires (bubbling + composed) from non-modal Shoelace elements like
+   * `sl-alert` toasts, `sl-tooltip`, `sl-dropdown`, `sl-details` and
+   * `sl-select`, none of which should steal focus from an open palette.
+   */
+  private _handleDocumentModalShow(e: Event): void {
+    if (!this.v2PaletteOpen) return;
+    const path = e.composedPath();
+    if (this._switcherEl && path.includes(this._switcherEl)) return; // our own dialog opening
+    const origin = path[0];
+    if (!(origin instanceof Element) || !this._isOpenModalElement(origin)) return;
+    this._closePaletteWithoutFocusRestore();
+  }
+
+  /**
+   * If a route change hides chat while the palette is open, close it
+   * without restoring focus into hidden chat. `navigateTo`/`pushState`
+   * callers don't fire `popstate` themselves, but the browser does for
+   * back/forward, and main.ts's terminal-workspace transition uses
+   * `pushState` directly — this covers the case a route change leaves the
+   * page non-current while the palette is still open.
+   */
+  private _handlePopStateForPalette(): void {
+    if (!this.v2PaletteOpen) return;
+    if (!this._isOnChatRoute() || !this._isPageVisible()) {
+      this._closePaletteWithoutFocusRestore();
+    }
+  }
+
+  private _closePaletteWithoutFocusRestore(): void {
+    this._paletteSkipFocusRestore = true;
+    this._closePaletteAndCancelLoad();
   }
 
   private async toggleSwitcher(): Promise<void> {
@@ -2743,37 +3107,620 @@ export class ScionPageChat extends LitElement {
     this.v2SwitcherConversations = convs;
   }
 
+  /**
+   * Legacy flat-switcher selection (rollout flag off). A thread whose project
+   * has no known slug routes by that thread's own `projectId`
+   * (`/chat/space/{projectId}/thread/{key}`, matching `navigateToThread`'s
+   * fallback), and every path segment is encoded.
+   */
   private handleSwitcherSelect(e: CustomEvent): void {
     const detail = e.detail as { conversationKey: string };
     this.v2SwitcherOpen = false;
-    if (detail?.conversationKey) {
-      const key = detail.conversationKey;
-      if (key.startsWith('dm:')) {
-        navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
-      } else {
-        // Find the project slug for this thread via its projectId.
-        let foundSlug = '';
-        const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
-        if (conv?.projectId) {
-          foundSlug = this._projectIdToSlug.get(conv.projectId) || '';
-        }
-        if (foundSlug) {
-          navigateTo(`/chat/${foundSlug}/${key}`);
-        } else {
-          // Fall back: let the page's route handler resolve by iterating slugs.
-          const firstSlug = this._slugToProjectId.keys().next().value;
-          if (firstSlug) {
-            navigateTo(`/chat/${firstSlug}/${key}`);
-          } else {
-            navigateTo(`/chat`);
-          }
-        }
-      }
+    if (!detail?.conversationKey) return;
+    const key = detail.conversationKey;
+    if (key.startsWith('dm:')) {
+      navigateTo(`/chat/dm/${encodeURIComponent(key)}`);
+      return;
+    }
+    const conv = this.v2SwitcherConversations.find((c) => c.conversationKey === key && !c.isDM);
+    const slug = conv?.projectId ? this._projectIdToSlug.get(conv.projectId) || '' : '';
+    if (slug) {
+      navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(key)}`);
+    } else if (conv?.projectId) {
+      navigateTo(
+        `/chat/space/${encodeURIComponent(conv.projectId)}/thread/${encodeURIComponent(key)}`
+      );
+    } else {
+      navigateTo('/chat');
     }
   }
 
   private handleSwitcherClose(): void {
     this.v2SwitcherOpen = false;
+  }
+
+  // =========================================================================
+  // Grouped palette (native chat quick command palette)
+  // =========================================================================
+
+  /**
+   * Open (or, on a repeat press, close) the grouped palette. Closing here —
+   * the "toggle" dismiss path — does not unmount the switcher element; it
+   * only flips `open`, so Shoelace's own close animation runs and
+   * `sl-after-hide` fires exactly as it does for escape/backdrop, which is
+   * what restores deep focus and cursor/selection on every dismissal path.
+   */
+  private async togglePalette(): Promise<void> {
+    if (this.v2PaletteOpen) {
+      this._closePaletteAndCancelLoad();
+      return;
+    }
+    if (this._palettePendingOpen) {
+      // A second Ctrl+K arrived while the first press's lazy import was
+      // still in flight — cancel the pending open rather
+      // than opening a second time (or doing nothing, which would silently
+      // eat the press). The suspended first call below observes this flag
+      // once its await resolves and backs out.
+      this._palettePendingOpen = false;
+      return;
+    }
+    this._palettePendingOpen = true;
+    try {
+      this._capturePaletteInvokerFocus();
+      if (!this.v2SwitcherLoaded) {
+        await loadChatSwitcher();
+        this.v2SwitcherLoaded = true;
+        // Let <scion-chat-switcher> mount and render with open=false first.
+        // Shoelace's dialog reacts to `open` transitioning false -> true to
+        // run its show animation and fire sl-initial-focus/sl-show; created
+        // already-open, it skips that lifecycle entirely — a real Shoelace
+        // quirk, confirmed against a real sl-dialog.
+        await this.updateComplete;
+      }
+      if (!this._palettePendingOpen) {
+        // Cancelled by a second press while we were awaiting above.
+        return;
+      }
+      this.v2PaletteOpen = true;
+      this._startPaletteVisibilityWatchdog();
+      this._loadPaletteGroupsOnOpen();
+    } finally {
+      this._palettePendingOpen = false;
+    }
+  }
+
+  /**
+   * On open, reuse a group's last successful snapshot when it is still
+   * inside the 30s cache window and nothing has invalidated it since. A
+   * group that has never loaded, is stale, or was marked dirty by an SSE
+   * event gets a fresh fetch instead.
+   */
+  private _loadPaletteGroupsOnOpen(): void {
+    if (!this._shouldUseCachedPaletteGroup('agents')) void this._loadPaletteAgents();
+    if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
+    if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
+  }
+
+  private _shouldUseCachedPaletteGroup(group: PaletteGroup): boolean {
+    const state = this.v2PaletteGroups[group];
+    if (!state || state.status !== 'ready') return false;
+    if (this._paletteGroupDirty[group]) return false;
+    const cachedAt = this._paletteGroupCacheAt[group];
+    if (!cachedAt) return false;
+    return Date.now() - cachedAt < PALETTE_GROUP_CACHE_MS;
+  }
+
+  /**
+   * Mark one or more palette groups stale: their cached snapshot (if any) is
+   * no longer trusted for a future open, and — if the palette is currently
+   * open — a 500ms debounced refresh reloads them shortly. Safe to call
+   * whether or not the palette is loaded/open, or whether the palette
+   * feature is even enabled for this user.
+   */
+  private _markPaletteGroupsDirty(...groups: PaletteGroup[]): void {
+    if (!this.isPaletteEnabled) return;
+    for (const group of groups) {
+      this._paletteGroupDirty[group] = true;
+      this._paletteGroupInvalidationEpoch[group] =
+        (this._paletteGroupInvalidationEpoch[group] ?? 0) + 1;
+    }
+    if (this.v2PaletteOpen) this._schedulePaletteDebouncedRefresh();
+  }
+
+  /** Snapshot the invalidation epoch for `group` at load start — pass the result to {@link _finishPaletteGroupLoad}. */
+  private _beginPaletteGroupLoad(group: PaletteGroup): number {
+    return this._paletteGroupInvalidationEpoch[group] ?? 0;
+  }
+
+  /**
+   * Mark a successful load's group fresh — but only if nothing invalidated
+   * it since {@link _beginPaletteGroupLoad} captured `epochAtStart`. If an
+   * invalidation landed mid-load, leave `dirty=true` and the cache timestamp
+   * untouched: the debounced refresh that invalidation already scheduled (or
+   * the next open, since a dirty group is never cache-eligible) will pick up
+   * the real, current data instead of the possibly-stale snapshot this load
+   * just fetched.
+   */
+  private _finishPaletteGroupLoad(group: PaletteGroup, epochAtStart: number): void {
+    if ((this._paletteGroupInvalidationEpoch[group] ?? 0) !== epochAtStart) return;
+    this._paletteGroupDirty[group] = false;
+    this._paletteGroupCacheAt[group] = Date.now();
+  }
+
+  private _schedulePaletteDebouncedRefresh(): void {
+    if (this._paletteRefreshDebounce) clearTimeout(this._paletteRefreshDebounce);
+    this._paletteRefreshDebounce = setTimeout(() => {
+      this._paletteRefreshDebounce = null;
+      this._refreshDirtyPaletteGroups();
+    }, PALETTE_REFRESH_DEBOUNCE_MS);
+  }
+
+  private _stopPaletteDebouncedRefresh(): void {
+    if (this._paletteRefreshDebounce) {
+      clearTimeout(this._paletteRefreshDebounce);
+      this._paletteRefreshDebounce = null;
+    }
+  }
+
+  /** Reload every group an SSE event invalidated while the palette is open. A group not currently dirty is left untouched. */
+  private _refreshDirtyPaletteGroups(): void {
+    if (!this.v2PaletteOpen) return;
+    if (this._paletteGroupDirty.agents) void this._loadPaletteAgents();
+    if (this._paletteGroupDirty.people) void this._loadPalettePeople();
+    if (this._paletteGroupDirty.threads) void this._loadPaletteThreads();
+  }
+
+  /**
+   * Bounded polling for the "route hides chat" case while the palette
+   * is open. `popstate` alone is not enough: the terminal-workspace
+   * transition (and other in-page navigations) change the route via
+   * `history.pushState` directly, which — by design of the History API —
+   * does not fire `popstate` itself; only actual back/forward navigation
+   * does. A short interval catches that case (and any other way the page
+   * could stop being the current route/visible) without depending on how
+   * the transition happens, at the cost of a small close delay instead of
+   * an instant one. The popstate listener still gives instant closing for
+   * real back/forward.
+   */
+  private _startPaletteVisibilityWatchdog(): void {
+    this._stopPaletteVisibilityWatchdog();
+    this._paletteVisibilityWatchdog = setInterval(() => {
+      if (!this.v2PaletteOpen) {
+        this._stopPaletteVisibilityWatchdog();
+        return;
+      }
+      if (!this._isOnChatRoute() || !this._isPageVisible()) {
+        this._closePaletteWithoutFocusRestore();
+      }
+    }, 250);
+  }
+
+  private _stopPaletteVisibilityWatchdog(): void {
+    if (this._paletteVisibilityWatchdog) {
+      clearInterval(this._paletteVisibilityWatchdog);
+      this._paletteVisibilityWatchdog = null;
+    }
+  }
+
+  /**
+   * Close the palette and cancel any in-flight group load — closing the
+   * palette cancels in-flight first-open work but retains completed groups.
+   * `cancel()` on an already-settled controller is a harmless no-op, so this
+   * is safe to call from every close path uniformly.
+   */
+  private _closePaletteAndCancelLoad(): void {
+    this._paletteDataController.cancel();
+    // Supersede a People load still resolving identity when the palette
+    // closes — the data controller's own cancel() above doesn't cover
+    // `_resolveSelfUserId`'s unsignalled `/auth/me` fetch.
+    this._peopleLoadSeq++;
+    this._stopPaletteVisibilityWatchdog();
+    this._stopPaletteDebouncedRefresh();
+    this.v2PaletteOpen = false;
+  }
+
+  /** Load the Agents group from the real paginated agents/DM APIs. */
+  private async _loadPaletteAgents(): Promise<void> {
+    this.v2PaletteGroups = {
+      ...this.v2PaletteGroups,
+      agents: { status: 'loading', candidates: this.v2PaletteGroups.agents?.candidates ?? [] },
+    };
+    const epochAtStart = this._beginPaletteGroupLoad('agents');
+    try {
+      const candidates = await this._paletteDataController.loadAgentsGroup();
+      this.v2PaletteGroups = { ...this.v2PaletteGroups, agents: { status: 'ready', candidates } };
+      this._finishPaletteGroupLoad('agents', epochAtStart);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        agents: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
+      };
+    }
+  }
+
+  /**
+   * Resolve the authenticated self ID for the palette's People group,
+   * fetching `/api/v1/auth/me` when `pageData.user.id` isn't known yet (the
+   * same fallback `resolveDMByPeerId` already uses for token-based auth) and
+   * caching the result onto `pageData.user`. Returns `''` if identity truly
+   * cannot be resolved right now — the caller must not publish or cache a
+   * `ready` People group in that case: a `''` self ID excludes nothing, so a
+   * real self row — and a nonsensical self-DM target — could otherwise leak
+   * into the list and get cached for 30s with no way to self-correct once
+   * identity does resolve.
+   *
+   * Does not mark People dirty itself: its only caller,
+   * {@link _loadPalettePeople}, uses the resolved ID immediately within the
+   * very same load, so a self-triggered dirty mark would only bump the
+   * group's own invalidation epoch out from under its own
+   * {@link _finishPaletteGroupLoad} check and schedule a pointless second
+   * reload 500ms later. A genuinely external resolver (one that is not
+   * itself in the middle of a People load) is responsible for marking
+   * People dirty if it wants a still-open palette to retry.
+   */
+  private async _resolveSelfUserId(): Promise<string> {
+    const known = this.pageData?.user?.id;
+    if (known) return known;
+    try {
+      const authRes = await apiFetch('/api/v1/auth/me');
+      if (authRes.ok) {
+        const authData = (await authRes.json()) as { id?: string };
+        if (authData.id && this.pageData) {
+          // A plain field write, not a `pageData` reassignment. `updated()`
+          // re-parses the current route whenever `changedProperties`
+          // contains `pageData` — that path exists so the page parses its
+          // route when `main.ts` hands a freshly created element its
+          // `pageData` (alongside the parse `connectedCallback` does); it is
+          // not a response to an identity change. Resolving identity here,
+          // in the background, while a conversation may already be open,
+          // must not re-trigger that parse and revert it to whatever the
+          // URL happens to read right now. `requestUpdate()` with no
+          // property name still schedules the render every pageData-bound
+          // binding (e.g. currentUserId) needs, without adding `pageData`
+          // to that set.
+          if (this.pageData.user) {
+            this.pageData.user.id = authData.id;
+          } else {
+            this.pageData.user = { id: authData.id, email: '', name: '' };
+          }
+          this.requestUpdate();
+          return authData.id;
+        }
+      }
+    } catch {
+      // Identity truly unavailable right now — caller treats '' as failure.
+    }
+    return '';
+  }
+
+  /**
+   * Load the People group. Requires the authenticated self ID (resolved via
+   * {@link _resolveSelfUserId}) to exclude the current user from the list and
+   * to build the deterministic sorted-user DM key on selection
+   * (`openDM`/`buildDMKey`). If identity cannot be resolved, the group is
+   * published as a retryable error — never as a self-inclusive `ready` list,
+   * and never cached.
+   */
+  private async _loadPalettePeople(): Promise<void> {
+    this.v2PaletteGroups = {
+      ...this.v2PaletteGroups,
+      people: { status: 'loading', candidates: this.v2PaletteGroups.people?.candidates ?? [] },
+    };
+    const epochAtStart = this._beginPaletteGroupLoad('people');
+    const mySeq = ++this._peopleLoadSeq;
+    const selfId = await this._resolveSelfUserId();
+    // The identity fetch above carries no abort signal of its own, so it is
+    // not cancelled by `_closePaletteAndCancelLoad`'s `cancel()` the way the
+    // group loaders' own fetches are. Guard manually with this load's own
+    // sequence token — not `v2PaletteOpen` — since closing and reopening
+    // sets `v2PaletteOpen` back to `true`, which would let a stale load's
+    // identity resolution overwrite a newer, already-`ready` People state.
+    // A newer People load (from a reopen, a refresh, or another call) or a
+    // close in the meantime bumps `_peopleLoadSeq`, superseding this one.
+    if (mySeq !== this._peopleLoadSeq) {
+      return;
+    }
+    if (!selfId) {
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        people: {
+          status: 'error',
+          candidates: [],
+          error: 'Could not resolve your identity yet.',
+        },
+      };
+      return;
+    }
+    try {
+      const candidates = await this._paletteDataController.loadPeopleGroup(selfId);
+      this.v2PaletteGroups = { ...this.v2PaletteGroups, people: { status: 'ready', candidates } };
+      this._finishPaletteGroupLoad('people', epochAtStart);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        people: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
+      };
+    }
+  }
+
+  /**
+   * Load (or, with `retryOnly`, re-fetch only the previously-failed spaces
+   * of) the Threads group. A partial failure keeps the group `'ready'` with
+   * its successful rows selectable and `incomplete: true`, rather than
+   * hiding them behind an `'error'` state.
+   */
+  private async _loadPaletteThreads(retryOnly = false): Promise<void> {
+    const previous = this.v2PaletteGroups.threads;
+    this.v2PaletteGroups = {
+      ...this.v2PaletteGroups,
+      threads: {
+        status: 'loading',
+        candidates: previous?.candidates ?? [],
+        ...(previous?.incomplete ? { incomplete: true } : {}),
+      },
+    };
+    const epochAtStart = this._beginPaletteGroupLoad('threads');
+    try {
+      const result = retryOnly
+        ? await this._paletteDataController.retryThreadsGroup()
+        : await this._paletteDataController.loadThreadsGroup();
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        threads: {
+          status: 'ready',
+          candidates: result.candidates,
+          ...(result.incomplete ? { incomplete: true } : {}),
+        },
+      };
+      this._finishPaletteGroupLoad('threads', epochAtStart);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
+      this.v2PaletteGroups = {
+        ...this.v2PaletteGroups,
+        threads: { status: 'error', candidates: [], ...(message ? { error: message } : {}) },
+      };
+    }
+  }
+
+  /**
+   * Retry a failed (or partially failed) palette group. Threads retries only
+   * its own previously-failed spaces via
+   * {@link ChatPaletteDataController.retryThreadsGroup}.
+   */
+  private _handlePaletteRetry(e: CustomEvent<{ group: PaletteGroup }>): void {
+    const group = e.detail?.group;
+    if (group === 'agents') void this._loadPaletteAgents();
+    else if (group === 'people') void this._loadPalettePeople();
+    else if (group === 'threads') void this._loadPaletteThreads(true);
+  }
+
+  /**
+   * A palette selection is untrusted stale UI state until checked against
+   * the freshly loaded group: verify the candidate is still present before
+   * navigating. A `dm` target reuses the existing `openDM` — same typed
+   * peerKind and deterministic DM key as a member-click or mention-click
+   * selection. A `thread` target reuses the rail's own in-page navigation
+   * path (`navigateToThread`), which already routes correctly when a
+   * project has no known slug.
+   */
+  private _handlePaletteSelect(e: CustomEvent<{ target: PaletteTarget }>): void {
+    const target = e.detail?.target;
+    this._closePaletteAndCancelLoad();
+    if (!target) return;
+    if (target.kind === 'dm') {
+      const group = target.peerKind === 'agent' ? 'agents' : 'people';
+      const stillPresent = (this.v2PaletteGroups[group]?.candidates ?? []).some(
+        (c) =>
+          c.target.kind === 'dm' &&
+          c.target.peerKind === target.peerKind &&
+          c.target.peerId === target.peerId
+      );
+      // A rejected stale candidate falls through to the normal (invoker-
+      // restoring) dismissal path below — only an actual navigation takes
+      // the "focus the new composer" path. The flag is set only once a
+      // navigation is confirmed, so sl-after-hide never points at a composer
+      // that was never opened.
+      if (!stillPresent) return;
+      this._paletteClosedBySelection = true;
+      this.openDM(target.peerId, target.peerKind, target.displayName);
+      return;
+    }
+    const stillPresent = (this.v2PaletteGroups.threads?.candidates ?? []).some(
+      (c) =>
+        c.target.kind === 'thread' &&
+        c.target.projectId === target.projectId &&
+        c.target.threadId === target.threadId
+    );
+    if (!stillPresent) return;
+    this._paletteClosedBySelection = true;
+    this.navigateToThread({
+      conversationKey: target.threadId,
+      projectId: target.projectId,
+      ...(target.projectSlug ? { projectSlug: target.projectSlug } : {}),
+      threadName: target.threadName,
+      ...(target.defaultAgent ? { defaultAgent: target.defaultAgent } : {}),
+    });
+  }
+
+  /**
+   * Escape/backdrop/close-button: Shoelace is already animating its own
+   * close in parallel (we never preventDefault its sl-request-close), so
+   * this just syncs our `open` truth to match — see togglePalette's doc
+   * comment for why this doesn't unmount the element. The reason itself
+   * doesn't change what happens next — sl-after-hide always restores the
+   * invoker for a non-selection dismissal — so it isn't threaded further.
+   */
+  private _handlePaletteDismiss(): void {
+    this._closePaletteAndCancelLoad();
+  }
+
+  /**
+   * Fires once Shoelace's close animation actually completes, regardless of
+   * how the palette closed. A selection focuses the new conversation's
+   * composer; every other dismissal restores the captured invoker.
+   */
+  private _handlePaletteAfterHide(e: Event): void {
+    // Focus/close handlers must be filtered to the owned dialog, not nested
+    // bubbling events. This listener sits on <scion-chat-switcher> itself,
+    // one shadow-root boundary away from the actual sl-dialog that emits
+    // sl-after-hide — any *other* Shoelace modal a future change nests
+    // inside the switcher would otherwise bubble through here and wrongly
+    // trigger a focus restore/composer-focus that this dismissal was never
+    // about.
+    const origin = e.composedPath()[0] as Element | undefined;
+    if (!origin || !origin.classList?.contains('palette-dialog')) return;
+    if (this._paletteSkipFocusRestore) {
+      // Closed programmatically (route change hid chat, or another modal
+      // opened) — the invoker may now be hidden or gone; do not touch focus.
+      this._paletteSkipFocusRestore = false;
+      this._paletteInvoker = null;
+      this._paletteInvokerSelection = null;
+      return;
+    }
+    if (this._paletteClosedBySelection) {
+      this._paletteClosedBySelection = false;
+      void this._focusComposerAfterPaletteSelection();
+      return;
+    }
+    this._restorePaletteInvokerFocus();
+  }
+
+  /** Find the real focused element, descending through shadow roots (mirrors `dismissKeyboard`'s walk). */
+  private _deepActiveElement(): Element | null {
+    let el: Element | null = document.activeElement;
+    while (el && (el as HTMLElement).shadowRoot?.activeElement) {
+      el = (el as HTMLElement).shadowRoot!.activeElement;
+    }
+    return el;
+  }
+
+  private _capturePaletteInvokerFocus(): void {
+    const el = this._deepActiveElement();
+    this._paletteInvoker = el instanceof HTMLElement ? el : null;
+    this._paletteInvokerSelection =
+      el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement
+        ? this._readInvokerSelection(el)
+        : null;
+  }
+
+  /**
+   * Some `<input>` types (`number`, `email`, ...) don't support a text
+   * selection at all: per the current spec their `selectionStart`/
+   * `selectionEnd`/`selectionDirection` getters just return `null`. Older
+   * engines (pre-2016 spec) instead threw an `InvalidStateError` from these
+   * getters. Either way there's nothing to restore, so treat both the same
+   * rather than letting the throwing case crash capture.
+   */
+  private _readInvokerSelection(el: HTMLTextAreaElement | HTMLInputElement): {
+    start: number | null;
+    end: number | null;
+    direction: 'forward' | 'backward' | 'none' | null;
+  } | null {
+    try {
+      return { start: el.selectionStart, end: el.selectionEnd, direction: el.selectionDirection };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `offsetParent` is null both for an actually-hidden element and for a
+   * `position: fixed` one, so it can't tell those two cases apart — a
+   * visible invoker pinned with `position: fixed` (e.g. inside a docked
+   * toolbar) would be wrongly treated as hidden. `checkVisibility()` tests
+   * true visibility (display, visibility, and content-visibility) without
+   * that false negative, once both `visibilityProperty` and its older alias
+   * `checkVisibilityCSS` are passed — without them the CSS `visibility`
+   * property is not checked by default, so a `visibility: hidden` invoker
+   * would count as visible. `opacity` is deliberately left unchecked: an
+   * `opacity: 0` element is still focusable and should get focus back.
+   * Where `checkVisibility` isn't implemented, an element with no client
+   * rects has no layout box at all, which covers `display: none` and a
+   * disconnected element the same way `offsetParent === null` did.
+   */
+  private _isInvokerVisible(el: HTMLElement): boolean {
+    const checkVisibility = (
+      el as unknown as { checkVisibility?: (opts?: Record<string, boolean>) => boolean }
+    ).checkVisibility;
+    if (typeof checkVisibility === 'function') {
+      return checkVisibility.call(el, { visibilityProperty: true, checkVisibilityCSS: true });
+    }
+    return el.getClientRects().length > 0;
+  }
+
+  private _restorePaletteInvokerFocus(): void {
+    const el = this._paletteInvoker;
+    const selection = this._paletteInvokerSelection;
+    this._paletteInvoker = null;
+    this._paletteInvokerSelection = null;
+    if (!el || !el.isConnected || !this._isInvokerVisible(el)) {
+      this._focusPaletteFallback();
+      return;
+    }
+    el.focus();
+    if (selection && (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement)) {
+      try {
+        el.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined);
+      } catch {
+        // Some input types (number, email, ...) throw on setSelectionRange
+        // regardless of arguments — selection restore is best-effort; focus
+        // already succeeded above.
+      }
+    }
+  }
+
+  /**
+   * The invoker disappeared (e.g. its panel was swiped away) or no composer
+   * ever mounted — fall back to the page's own conversation container,
+   * which is always present and visible whenever v2 renders at all (unlike
+   * a generic "first `[tabindex]` element", which could be an offscreen or
+   * `display:none` control elsewhere in the shadow root).
+   */
+  private _focusPaletteFallback(): void {
+    const fallback = this.shadowRoot?.querySelector<HTMLElement>('#palette-focus-fallback');
+    if (!fallback) return;
+    const checkVisibility = (fallback as unknown as { checkVisibility?: () => boolean })
+      .checkVisibility;
+    if (typeof checkVisibility === 'function' && !checkVisibility.call(fallback)) return;
+    fallback.focus();
+  }
+
+  /**
+   * After a DM selection, `openDM` has already updated `v2Conversation` and
+   * pushed the new URL without recreating the page. Wait for this page (and
+   * the newly (re)rendered thread/composer beneath it) to settle, then focus
+   * the new composer — never the old one.
+   */
+  private async _focusComposerAfterPaletteSelection(): Promise<void> {
+    await this.updateComplete;
+    // scion-chat-thread/scion-chat-composer mount as a consequence of the
+    // just-committed property update above, but their own nested render
+    // passes are separate async update cycles this page's updateComplete
+    // does not wait for. Poll briefly rather than checking once after a
+    // single rAF, which can lose the race under load and silently fall back
+    // instead of focusing the real composer.
+    const deadline = Date.now() + 2000;
+    let slTextarea: Element | null = null;
+    do {
+      const thread = this.shadowRoot?.querySelector('scion-chat-thread');
+      const composer = thread?.shadowRoot?.querySelector('scion-chat-composer');
+      slTextarea = composer?.shadowRoot?.querySelector('sl-textarea') ?? null;
+      if (slTextarea) break;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    } while (Date.now() < deadline);
+
+    if (slTextarea instanceof HTMLElement) {
+      slTextarea.focus();
+      return;
+    }
+    // The composer never became available (e.g. read-only) — fall back to a
+    // focusable heading/container rather than leaving focus lost.
+    this._focusPaletteFallback();
   }
 
   // =========================================================================
@@ -2862,16 +3809,32 @@ export class ScionPageChat extends LitElement {
 
   private renderV2() {
     return html`
-      ${this.v2SwitcherOpen
-        ? html`
-            <scion-chat-switcher
-              .conversations=${this.v2SwitcherConversations}
-              @switcher-select=${this.handleSwitcherSelect}
-              @switcher-close=${this.handleSwitcherClose}
-            ></scion-chat-switcher>
-          `
-        : nothing}
+      ${this.isPaletteEnabled
+        ? this.v2SwitcherLoaded
+          ? html`
+              <scion-chat-switcher
+                palette-mode
+                .open=${this.v2PaletteOpen}
+                .groups=${this.v2PaletteGroups}
+                @palette-select=${this._handlePaletteSelect}
+                @palette-retry=${this._handlePaletteRetry}
+                @palette-dismiss=${this._handlePaletteDismiss}
+                @sl-after-hide=${this._onPaletteAfterHide}
+              ></scion-chat-switcher>
+            `
+          : nothing
+        : this.v2SwitcherOpen
+          ? html`
+              <scion-chat-switcher
+                .conversations=${this.v2SwitcherConversations}
+                @switcher-select=${this.handleSwitcherSelect}
+                @switcher-close=${this.handleSwitcherClose}
+              ></scion-chat-switcher>
+            `
+          : nothing}
       <div
+        id="palette-focus-fallback"
+        tabindex="-1"
         class="v2-panels"
         data-panel=${this.mobilePanel}
         @touchstart=${this.handleTouchStart}
@@ -2884,6 +3847,7 @@ export class ScionPageChat extends LitElement {
             ? html`
                 <scion-chat-space-rail
                   selectedKey=${this.v2Conversation?.conversationKey || ''}
+                  currentUserId=${this.pageData?.user?.id || ''}
                   @thread-select=${this.handleThreadSelect}
                   @reset-view=${this.handleResetView}
                 ></scion-chat-space-rail>
