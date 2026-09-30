@@ -2121,7 +2121,7 @@ func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDef
 	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("providers: failed to look up max_agents_per_broker limit definition", "error", err)
+			slog.WarnContext(ctx, "providers: failed to look up max_agents_per_broker limit definition", "error", err)
 		}
 		return nil
 	}
@@ -2156,14 +2156,14 @@ func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, lim
 
 	effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
 	if err != nil {
-		slog.Warn("providers: failed to resolve effective agent limit",
+		slog.WarnContext(ctx, "providers: failed to resolve effective agent limit",
 			"broker_id", brokerID, "error", err)
 		return nil, nil
 	}
 
 	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
 	if err != nil {
-		slog.Warn("providers: failed to count active reservations",
+		slog.WarnContext(ctx, "providers: failed to count active reservations",
 			"broker_id", brokerID, "error", err)
 		return nil, nil
 	}
