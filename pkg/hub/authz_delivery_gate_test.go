@@ -183,6 +183,45 @@ func TestDeliveryGate_SuperAdminDenied(t *testing.T) {
 	assert.True(t, d.Allowed, "super-admin secret.use: reason %q", d.Reason)
 }
 
+// A gated deliver deny produces exactly one decision audit record through
+// Decide, with the audit PermissionID set only from a caller-supplied
+// registered permission (never from the permission resolved from resource
+// and action).
+func TestDeliveryGate_DenyAuditedOnce(t *testing.T) {
+	f := newGoldenFixture(t)
+	emitter := &recordingDecisionAuditEmitter{}
+	f.authz.SetDecisionAuditEmitter(emitter)
+	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
+	secret := Resource{Type: "secret", ID: f.secretID}
+
+	cases := []struct {
+		name       string
+		permission string
+		wantPermID string
+	}{
+		{"explicit permission", "secret.deliver", "secret.deliver"},
+		{"resolved from resource and action", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(emitter.records)
+			d := f.authz.Decide(context.Background(), AuthzRequest{
+				Principal:  principalContextForIdentity(admin),
+				Credential: credentialContextForIdentity(admin),
+				Resource:   secret,
+				Action:     ActionDeliver,
+				Permission: tc.permission,
+			})
+			require.False(t, d.Allowed)
+			require.Equal(t, deliveryGateReason, d.Reason)
+			require.Len(t, emitter.records[before:], 1, "a gated deny emits exactly one decision audit record")
+			rec := emitter.records[len(emitter.records)-1]
+			assert.Equal(t, "deny", rec.Result)
+			assert.Equal(t, tc.wantPermID, rec.PermissionID)
+		})
+	}
+}
+
 func permissionResource(t *testing.T, id string) string {
 	t.Helper()
 	for _, p := range permissions.Registry {

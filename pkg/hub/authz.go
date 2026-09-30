@@ -450,11 +450,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		result := decorateDecision(d, request, principal, credential, auditPermissionID(request))
-		if a.decisionAuditEmitter != nil {
-			a.emitDecisionAudit(ctx, request, result)
-		}
-		return result
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
