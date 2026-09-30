@@ -239,6 +239,27 @@ export class ScionPageBrokers extends LitElement {
     this.viewMode = e.detail.view;
   }
 
+  /**
+   * Renders the broker's effective agent capacity as "7 / 30" or
+   * "7 / unlimited", with the precedence source in a tooltip
+   * (ptone/scion#2061 P2.2, design.md §5.6). Renders '-' when the fields are
+   * absent — e.g. the caller lacks visibility, or capacity resolution didn't
+   * run.
+   */
+  private renderAgentCapacity(broker: RuntimeBroker) {
+    if (broker.agentCount === undefined) {
+      return html`<span class="meta-text">—</span>`;
+    }
+    const capLabel = broker.agentLimit !== undefined ? String(broker.agentLimit) : 'unlimited';
+    const sourceLabel = broker.agentLimitSource ? ` (${broker.agentLimitSource})` : '';
+    return html`
+      <span class="mono-cell" title="Source: ${broker.agentLimitSource || 'unknown'}"
+        >${broker.agentCount} / ${capLabel}</span
+      >
+      <span class="meta-text" style="font-size: 0.75rem">${sourceLabel}</span>
+    `;
+  }
+
   override render() {
     return html`
       <div class="header">
@@ -353,6 +374,19 @@ export class ScionPageBrokers extends LitElement {
                 </div>
               `
             : ''}
+          ${broker.agentCount !== undefined
+            ? html`
+                <div class="stat">
+                  <span class="stat-label">Agents / Cap</span>
+                  <span
+                    class="stat-value"
+                    title=${`Source: ${broker.agentLimitSource || 'unknown'}`}
+                    >${broker.agentCount} /
+                    ${broker.agentLimit !== undefined ? broker.agentLimit : 'unlimited'}</span
+                  >
+                </div>
+              `
+            : ''}
           ${broker.createdBy
             ? html`
                 <div class="stat">
@@ -388,6 +422,7 @@ export class ScionPageBrokers extends LitElement {
               <th class="hide-mobile">Capabilities</th>
               <th>Last Heartbeat</th>
               <th class="hide-mobile">Profiles</th>
+              <th class="hide-mobile">Agents / Cap</th>
             </tr>
           </thead>
           <tbody>
@@ -444,6 +479,7 @@ export class ScionPageBrokers extends LitElement {
           <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
         </td>
         <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
+        <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>
       </tr>
     `;
   }

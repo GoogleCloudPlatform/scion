@@ -75,6 +75,20 @@ interface UsageReservation {
   reserved: number;
   createdAt: string;
   releasedAt?: string;
+  /**
+   * The broker's current effective max_agents_per_broker limit, present only
+   * for broker-scoped reservations under that limit (ptone/scion#2061 P2.2,
+   * design.md §5.9). Mirrors Go usageReservationView.BrokerAgentLimit
+   * (pkg/hub/handlers_quota.go) exactly — hand-written since there is no
+   * Go->TS generator (design.md §6). Absent for every other reservation.
+   */
+  brokerAgentLimit?: number;
+  /**
+   * The precedence step that produced brokerAgentLimit: "broker" |
+   * "entitlement" | "hub_default" | "unlimited". Present under the same
+   * condition as brokerAgentLimit.
+   */
+  brokerAgentLimitSource?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1108,21 @@ export class ScionPageAdminQuotas extends LitElement {
                             <div class="meta-text" style="font-size: 0.75rem">
                               Resource: <span class="mono">${r.resourceId}</span>
                             </div>
+                            ${r.brokerAgentLimitSource
+                              ? html`
+                                  <div class="meta-text" style="font-size: 0.75rem">
+                                    Broker cap:
+                                    <span class="mono"
+                                      >${r.brokerAgentLimit !== undefined
+                                        ? this.formatValue(r.brokerAgentLimit)
+                                        : 'unlimited'}</span
+                                    >
+                                    <span title="Precedence source"
+                                      >(${r.brokerAgentLimitSource})</span
+                                    >
+                                  </div>
+                                `
+                              : nothing}
                           </div>
                         `
                       )}

@@ -790,6 +790,27 @@ export interface RuntimeBroker {
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;
+  /**
+   * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061
+   * P2.2, design.md §5.6, §5.9). Mirrors Go
+   * RuntimeBrokerWithCapabilities.AgentLimit (pkg/hub/response_types.go)
+   * exactly — hand-written since there is no Go->TS generator (design.md
+   * §6). Absent when unlimited, or when resolution didn't run or failed;
+   * never 0 (a non-positive effective limit means unlimited).
+   */
+  agentLimit?: number;
+  /**
+   * The number of active max_agents_per_broker reservations held by this
+   * broker. Absent under the same conditions as agentLimit; a zero count is
+   * reported as 0, not omitted.
+   */
+  agentCount?: number;
+  /**
+   * The precedence step that produced agentLimit: "broker" | "entitlement" |
+   * "hub_default" | "unlimited". Present under the same condition as
+   * agentLimit/agentCount.
+   */
+  agentLimitSource?: string;
 }
 
 /**
