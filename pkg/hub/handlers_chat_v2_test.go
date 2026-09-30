@@ -4794,6 +4794,119 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
 }
 
+// readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
+// snapshots the sender's read state for the message's conversation at the
+// moment of the call — i.e. what a client would see if it reacted to the SSE
+// event the instant it arrives. Used to pin down that the sender's read
+// watermark (and the conversation's last-message watermark) are advanced
+// *before* the message is published, not after, closing the self-unread
+// flash race rather than narrowing it.
+type readStateAtPublishSpy struct {
+	noopEventPublisher
+	wcs WebChatStore
+
+	called             bool
+	messageID          string
+	readStateAtPublish *WebChatReadState
+}
+
+func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef) {
+	p.called = true
+	p.messageID = msg.ID
+	p.readStateAtPublish, _ = p.wcs.GetReadState(ctx, msg.SenderID, msg.ThreadID)
+}
+
+// TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish is a
+// regression test for the self-unread flash: sendHumanToHuman used to call
+// touchConversationActivity/autoAdvanceSenderReadState *after*
+// PublishUserMessage, so a client reacting to its own echoed SSE message
+// could re-fetch unread state in the gap and briefly see itself as unread.
+func TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	topicID := tid("topic-h2h-watermark")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "human-only-watermark",
+		CreatedBy: "dev",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	spy := &readStateAtPublishSpy{wcs: wcs}
+	srv.SetEventPublisher(spy)
+
+	body := map[string]string{"content": "just chatting"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !spy.called {
+		t.Fatal("PublishUserMessage was never called")
+	}
+	if spy.readStateAtPublish == nil {
+		t.Fatal("sender read state was not set by the time the message was published — self-send would flash unread")
+	}
+	if spy.readStateAtPublish.LastReadMessageID != spy.messageID {
+		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
+			"self-send would flash unread until the read state catches up",
+			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+}
+
+// TestChatV2_Send_AgentRouted_ReadWatermarkAdvancedBeforePublish mirrors
+// TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish for the
+// agent-routed send path (sendAgentRouted), where the same
+// touchConversationActivity/autoAdvanceSenderReadState calls previously ran
+// after PublishUserMessage — and after agent dispatch, widening the race
+// window even further.
+func TestChatV2_Send_AgentRouted_ReadWatermarkAdvancedBeforePublish(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:        tid("agent-watermark-route"),
+		ProjectID: proj.ID,
+		Name:      "Watermark Router",
+		Slug:      "watermark-router",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
+
+	spy := &readStateAtPublishSpy{wcs: wcs}
+	srv.SetEventPublisher(spy)
+
+	body := map[string]string{"content": "hello agent, help me please"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !spy.called {
+		t.Fatal("PublishUserMessage was never called")
+	}
+	if spy.readStateAtPublish == nil {
+		t.Fatal("sender read state was not set by the time the message was published — self-send would flash unread")
+	}
+	if spy.readStateAtPublish.LastReadMessageID != spy.messageID {
+		t.Errorf("sender read watermark at publish time = %q, want %q (the sent message) — "+
+			"self-send would flash unread until the read state catches up",
+			spy.readStateAtPublish.LastReadMessageID, spy.messageID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Interagent endpoint: authorization and cross-project visibility
 // ---------------------------------------------------------------------------

@@ -1528,6 +1528,16 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
+	// Update topic/DM watermark and auto-advance the sender's read watermark
+	// *before* publishing the SSE event below. The sender's own client
+	// receives that event immediately and may re-fetch unread state in
+	// response; if the watermark update ran after the publish (as it
+	// previously did, following agent dispatch), that fetch could land in the
+	// gap and briefly report the sender's own message as unread. Advancing
+	// first closes the race rather than narrowing it.
+	s.touchConversationActivity(ctx, key, storeMsg.ID)
+	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -1746,14 +1756,6 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
-
-	// Update topic/DM watermark.
-	s.touchConversationActivity(ctx, key, storeMsg.ID)
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the thread as unread.  The user just sent the message, so they have
-	// implicitly read everything up to and including it.
-	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// --- W6: Human mention notifications ---
 	// Resolve @mentions that didn't match agents — they may be human members.
@@ -1983,11 +1985,6 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		}
 	}
 
-	// Publish SSE event. For the unreachable-default override, this carries
-	// the row's actual failed state so other open tabs see "Agent
-	// unreachable" too, not a false "Delivered".
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-
 	// For DMs, ensure DM registry rows exist for both participants. This must
 	// precede the watermark update: touchConversationActivity is a plain
 	// UPDATE and would affect zero rows on the first message of a DM.
@@ -1995,14 +1992,22 @@ func (s *Server) sendHumanToHuman(w http.ResponseWriter, r *http.Request, key, p
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
-	// Update conversation watermark.
+	// Update conversation watermark and auto-advance the sender's read
+	// watermark *before* publishing the SSE event below, so their own message
+	// never appears as unread. The sender's own client receives that event
+	// immediately and may re-fetch unread state in response; running these
+	// updates after the publish (as this previously did) left a gap where
+	// such a fetch could land and briefly report the sender's own message as
+	// unread. Advancing first closes the race rather than narrowing it.
 	if wcs != nil {
 		s.touchConversationActivity(ctx, key, storeMsg.ID)
 	}
-
-	// Auto-advance the sender's read watermark so their own message does not
-	// mark the conversation as unread.
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
+
+	// Publish SSE event. For the unreachable-default override, this carries
+	// the row's actual failed state so other open tabs see "Agent
+	// unreachable" too, not a false "Delivered".
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// --- W6: Chat notifications ---
 	// Shared unconditionally with the unreachable-default override (R1): a
