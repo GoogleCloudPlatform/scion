@@ -21,6 +21,7 @@ import tempfile
 import tomllib
 import unittest
 from contextlib import contextmanager
+from typing import Any
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("codex_provision", PROVISION_PATH)
@@ -653,27 +654,11 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(data["model"], "top-level")
         self.assertEqual(data["projects"]["/a=b]c"]["model"], "should-stay-here")
 
-    def test_reconcile_codex_toml_leaves_file_untouched_when_edit_does_not_round_trip(self) -> None:
-        # Backstop test for ptone/scion#2365 review round 3 (F2): a
-        # top-level multi-line basic string whose body happens to contain a
-        # header-shaped line (e.g. a `developer_instructions` block
-        # documenting TOML syntax) is a known gap this line-oriented editor
-        # can't handle — the inserted `model` line lands inside the string
-        # text instead of at the real top level. The result is still valid
-        # TOML (the extra text is just part of the string), so it parses,
-        # but the intended top-level `model` never actually appears. Rather
-        # than silently ship that, _reconcile_codex_toml must detect the
-        # mismatch, leave the existing file untouched, and log a warning.
-        original = (
-            'developer_instructions = """\n'
-            "Header lines look like this:\n"
-            "[IMPORTANT]\n"
-            "Explanation text.\n"
-            '"""\n'
-            "[features]\n"
-            "hooks = true\n"
-        )
-
+    def _reconcile_and_capture(
+        self, original: str, **kwargs: Any
+    ) -> tuple[str, list[str]]:
+        """Runs _reconcile_codex_toml against `original` content and returns
+        (file content after the call, list of ctx.info messages logged)."""
         with tempfile.TemporaryDirectory() as tmp:
             with temporary_home(tmp):
                 codex_dir = os.path.join(tmp, ".codex")
@@ -686,28 +671,172 @@ class CodexProvisionTest(unittest.TestCase):
                 warnings: list[str] = []
                 ctx.info = warnings.append  # type: ignore[method-assign]
 
-                provision._reconcile_codex_toml(ctx, None, None, model="gpt-6.1-sol")
+                provision._reconcile_codex_toml(ctx, None, None, **kwargs)
 
                 with open(config_path, "r", encoding="utf-8") as f:
                     after = f.read()
+        return after, warnings
 
-        self.assertEqual(after, original, "file must be left untouched when the edit doesn't round-trip")
-        self.assertTrue(
-            any("round-trip" in w for w in warnings),
-            f"expected a round-trip warning to be logged, got: {warnings}",
+    def test_reconcile_codex_toml_applies_otel_but_not_model_when_string_is_corrupted(self) -> None:
+        # Backstop test for ptone/scion#2365 review round 4 (N1): when the
+        # model/model_reasoning_effort edit doesn't preserve the file (here,
+        # a top-level multi-line string whose body contains a header-shaped
+        # line, so the inserted `model` lands inside the string text
+        # instead of at the real top level), _reconcile_codex_toml must
+        # still apply the telemetry (otel) reconciliation on a fallback pass
+        # that never touches the string — telemetry-disabled enforcement
+        # must not silently no-op just because the model couldn't be
+        # written. codex still gets an explicit model via SCION_MODEL/
+        # --model argv regardless of what config.toml says.
+        original = (
+            'developer_instructions = """\n'
+            "Header lines look like this:\n"
+            "[IMPORTANT]\n"
+            "Explanation text.\n"
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+            '[otel.exporter."otlp-grpc"]\n'
+            'endpoint = "https://ext.invalid"\n'
         )
 
-    def test_toml_edit_round_trips_accepts_valid_content_with_matching_model(self) -> None:
-        self.assertTrue(provision._toml_edit_round_trips('model = "x"\n', "x"))
+        after, warnings = self._reconcile_and_capture(original, model="gpt-6.1-sol")
+        data = tomllib.loads(after)
 
-    def test_toml_edit_round_trips_rejects_invalid_toml(self) -> None:
-        self.assertFalse(provision._toml_edit_round_trips("model = [unterminated\n", "x"))
+        self.assertNotIn("model", data, "model must not be written when the edit doesn't preserve content")
+        self.assertEqual(
+            data["developer_instructions"],
+            "Header lines look like this:\n[IMPORTANT]\nExplanation text.\n",
+        )
+        self.assertEqual(data["otel"]["exporter"], "none", "telemetry must still be reconciled to disabled")
+        self.assertTrue(
+            any("telemetry" in w and "model" in w for w in warnings),
+            f"expected a warning naming both telemetry and model, got: {warnings}",
+        )
 
-    def test_toml_edit_round_trips_rejects_missing_top_level_model(self) -> None:
-        self.assertFalse(provision._toml_edit_round_trips('[table]\nmodel = "x"\n', "x"))
+    def test_reconcile_codex_toml_rejects_effort_spliced_into_multiline_string(self) -> None:
+        # Regression test for ptone/scion#2365 review round 4 (R1), repro
+        # (a): with SCION_MODEL empty (model=None) and a thinking level set,
+        # the old backstop (round 3) only checked the top-level `model` —
+        # which this path never even touches — so it had nothing to catch
+        # `model_reasoning_effort` getting spliced into a top-level
+        # multi-line string's body. The new backstop must check that the
+        # effort value round-trips too, and that the string's content is
+        # otherwise unchanged.
+        original = (
+            'developer_instructions = """\n'
+            "Headers look like:\n"
+            "[IMPORTANT]\n"
+            "text\n"
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
 
-    def test_toml_edit_round_trips_ignores_model_when_none_expected(self) -> None:
-        self.assertTrue(provision._toml_edit_round_trips("other_key = 1\n", None))
+        after, warnings = self._reconcile_and_capture(original, model=None, reasoning_effort="high")
+        data = tomllib.loads(after)
+
+        self.assertNotIn("model_reasoning_effort", data)
+        self.assertEqual(data["developer_instructions"], "Headers look like:\n[IMPORTANT]\ntext\n")
+        self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
+
+    def test_reconcile_codex_toml_rejects_model_and_effort_lines_stripped_from_multiline_string(self) -> None:
+        # Regression test for ptone/scion#2365 review round 4 (R1), repro
+        # (b): _is_toml_key_line matches any line whose stripped text starts
+        # with "model"/"reasoning_effort" followed by a space, `=`, or tab —
+        # including prose lines inside a top-level multi-line string that
+        # merely happen to start that way. _strip_toml_top_level_key then
+        # deletes them, because nothing at the line level knows they're
+        # inside a string. The old backstop passed because the *correct*
+        # top-level model/effort get inserted elsewhere in the file; only
+        # comparing the string's own content before and after catches the
+        # incidental deletion.
+        original = (
+            'developer_instructions = """\n'
+            "model choice is up to you.\n"
+            "reasoning_effort matters\n"
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+
+        after, warnings = self._reconcile_and_capture(original, model="gpt-6.1-sol", reasoning_effort="high")
+        data = tomllib.loads(after)
+
+        self.assertNotIn("model", data)
+        self.assertNotIn("model_reasoning_effort", data)
+        self.assertEqual(
+            data["developer_instructions"],
+            "model choice is up to you.\nreasoning_effort matters\n",
+        )
+        self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
+
+    def test_reconcile_codex_toml_leaves_file_completely_untouched_when_otel_fallback_also_fails(self) -> None:
+        # Defense-in-depth test: if even the telemetry-only fallback edit
+        # doesn't preserve the file's content (here, a fake "[otel...]"
+        # -shaped line inside a top-level multi-line string confuses
+        # scion_harness.strip_toml_sections' own naive header matching into
+        # deleting part of the string, including its closing delimiter),
+        # _reconcile_codex_toml must give up entirely rather than write
+        # anything — no model, no effort, no telemetry change.
+        original = (
+            'developer_instructions = """\n'
+            "Telemetry config looks like:\n"
+            '[otel.exporter."otlp-grpc"]\n'
+            'endpoint = "override-me"\n'
+            "end of docs\n"
+            '"""\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+
+        after, warnings = self._reconcile_and_capture(original, model="gpt-6.1-sol")
+
+        self.assertEqual(after, original, "file must be left completely untouched when even the fallback fails")
+        self.assertTrue(
+            any("fallback" in w for w in warnings),
+            f"expected a warning naming the failed fallback, got: {warnings}",
+        )
+
+    def test_toml_edit_preserves_accepts_valid_content_with_matching_model_and_effort(self) -> None:
+        self.assertTrue(
+            provision._toml_edit_preserves(
+                'other_key = 1\n', 'other_key = 1\nmodel = "x"\nmodel_reasoning_effort = "high"\n', "x", "high"
+            )
+        )
+
+    def test_toml_edit_preserves_rejects_invalid_toml(self) -> None:
+        self.assertFalse(provision._toml_edit_preserves("", "model = [unterminated\n", "x", None))
+
+    def test_toml_edit_preserves_rejects_missing_top_level_model(self) -> None:
+        self.assertFalse(provision._toml_edit_preserves("", '[table]\nmodel = "x"\n', "x", None))
+
+    def test_toml_edit_preserves_rejects_missing_top_level_effort(self) -> None:
+        self.assertFalse(provision._toml_edit_preserves("", '[table]\nmodel_reasoning_effort = "high"\n', None, "high"))
+
+    def test_toml_edit_preserves_ignores_model_and_effort_when_none_expected(self) -> None:
+        self.assertTrue(provision._toml_edit_preserves("other_key = 1\n", "other_key = 1\n", None, None))
+
+    def test_toml_edit_preserves_rejects_unmanaged_key_changed(self) -> None:
+        self.assertFalse(
+            provision._toml_edit_preserves('other_key = "before"\n', 'other_key = "after"\nmodel = "x"\n', "x", None)
+        )
+
+    def test_toml_edit_preserves_ignores_managed_keys_when_diffing(self) -> None:
+        # reasoning_effort is stripped unconditionally (see
+        # _MANAGED_TOP_LEVEL_KEYS) even though this script never writes it,
+        # so its disappearance alone must not fail the preservation check.
+        self.assertTrue(
+            provision._toml_edit_preserves(
+                'reasoning_effort = "low"\nother_key = 1\n',
+                'other_key = 1\nmodel = "x"\n',
+                "x",
+                None,
+            )
+        )
+
+    def test_toml_edit_preserves_true_when_original_unparseable(self) -> None:
+        self.assertTrue(provision._toml_edit_preserves("not [valid toml", 'model = "x"\n', "x", None))
 
     def test_strip_toml_top_level_key_section_safety(self) -> None:
         content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'

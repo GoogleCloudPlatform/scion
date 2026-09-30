@@ -40,12 +40,16 @@ This script's job:
 
 The script is stdlib-only; it does manual TOML editing because tomllib (3.11+)
 is read-only and we must avoid third-party dependencies. tomllib is still
-used, read-only, as a post-edit validation backstop: _toml_edit_round_trips
-parses the finished config.toml and checks the top-level `model` before the
-edit is committed to disk, so a TOML construct the line-oriented editor
-doesn't fully understand (e.g. a multi-line string) fails safe — the
-existing file is left untouched, with a warning logged — instead of writing
-a subtly-corrupted file.
+used, read-only, as a post-edit validation backstop: _toml_edit_preserves
+parses both the original and the finished config.toml and checks that
+everything outside the keys this script owns (model, model_reasoning_effort,
+otel) is unchanged, plus that those owned keys round-tripped to the values
+just written. So a TOML construct the line-oriented editor doesn't fully
+understand (e.g. a multi-line string whose body gets a key spliced into or
+deleted from it) fails safe — the existing file is left untouched, with a
+warning logged — instead of writing a subtly-altered file. If even a
+telemetry-only edit doesn't preserve the file, the file is left completely
+untouched.
 """
 
 from __future__ import annotations
@@ -260,6 +264,18 @@ def _is_toml_key_line(line: str, key: str) -> bool:
 # a header). Used together with _toml_entering_array_depths: a line can only
 # be a genuine header if it also has zero open-bracket depth entering it —
 # see that function's docstring for why the shape check alone isn't enough.
+#
+# In valid TOML outside a multi-line string, "depth == 0 and starts with
+# '['" is already sufficient on its own — this shape check mostly overlaps
+# with depth tracking (ptone/scion#2365 review round 4 mutation testing:
+# reverting this regex to a bare `startswith("[")` while keeping depth
+# tracking still passes the full suite). It's kept anyway as a second,
+# independent line of defense: the one case where it earns its keep is a
+# line *inside* a top-level multi-line string that happens to look like a
+# header, e.g. `[projects."/a=b"]` in prose — there, `_toml_edit_preserves`
+# (the tomllib round-trip/preservation backstop below) is what actually
+# fails the edit safely either way, but rejecting the shape earlier means
+# fewer edits need that backstop to save them.
 _TOML_TABLE_HEADER_RE = re.compile(
     r'^\s*\[\[?\s*(?:[^\[\]="\'#]|"(?:\\.|[^"\\])*"|\'[^\']*\')+\]\]?\s*(#.*)?$'
 )
@@ -268,7 +284,7 @@ _TOML_TABLE_HEADER_RE = re.compile(
 # trailing comment, for masking before bracket-counting (see
 # _toml_mask_strings_and_comments). Does not match triple-quoted
 # (multi-line) strings — that gap is closed separately by
-# _toml_edit_round_trips validating the finished file with tomllib rather
+# _toml_edit_preserves validating the finished file with tomllib rather
 # than trying to make the masking itself fully TOML-aware.
 _TOML_STR_OR_COMMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*')
 
@@ -303,8 +319,8 @@ def _toml_entering_array_depths(lines: list[str]) -> list[int]:
     unbalanced bracket in an unrelated comment (ptone/scion#2365 review
     round 3). This is still line-oriented rather than a full tokenizer, so
     it does not understand triple-quoted (multi-line) strings; that residual
-    gap is caught by _toml_edit_round_trips validating the finished file
-    with tomllib, not by making this counter fully TOML-aware.
+    gap is caught by _toml_edit_preserves validating the finished file with
+    tomllib, not by making this counter fully TOML-aware.
     """
     depths = []
     depth = 0
@@ -362,28 +378,63 @@ def _insert_toml_top_level_line(content: str, line: str) -> str:
     return "\n".join(lines)
 
 
-def _toml_edit_round_trips(content: str, expected_model: str | None) -> bool:
-    """True if `content` parses as valid TOML and, when a model was
-    supplied, its top-level `model` equals what we intended to write.
+# Top-level keys this script owns the value of. _toml_edit_preserves ignores
+# these when comparing the original file to an edited one — they're
+# expected to change — and requires everything else to be byte-for-byte
+# identical after a round trip through tomllib. `reasoning_effort` is
+# included even though this script never writes it: _reconcile_codex_toml
+# unconditionally strips it (a legacy key name it replaces with
+# `model_reasoning_effort`), so a file that legitimately had it would
+# otherwise always fail the "everything else is unchanged" comparison.
+_MANAGED_TOP_LEVEL_KEYS = ("model", "model_reasoning_effort", "reasoning_effort", "otel")
+
+
+def _toml_edit_preserves(
+    original: str, content: str, model: str | None, effort: str | None
+) -> bool:
+    """True if `content` is a safe edit of `original`.
+
+    "Safe" means: `content` parses as TOML; the keys this script just wrote
+    (`model`, `model_reasoning_effort`) equal the values it meant to write,
+    when those values were supplied; and every top-level key `content`
+    doesn't own (i.e. not in _MANAGED_TOP_LEVEL_KEYS) is unchanged from
+    `original`.
 
     This is the backstop for this module's line-oriented TOML editing,
     which — despite the string/comment masking and bracket-depth tracking
-    above — is still not a full TOML tokenizer and cannot handle every
-    construct (the known gap is a top-level multi-line basic string, e.g. a
-    triple-quoted `developer_instructions` value, whose body happens to
-    contain a header-shaped line: the insertion can land inside the string
-    text instead of at the real top level). Rather than trust every edit
-    blindly, verify the finished content before it's written to disk; the
-    caller leaves the existing file untouched and logs a warning when this
-    returns False.
+    above — is still not a full TOML tokenizer. An earlier version of this
+    function only checked "does it parse" and "is the top-level model
+    correct", which passes even when a top-level multi-line string's body
+    gets a `model`/`model_reasoning_effort`-shaped line spliced into or
+    deleted from it: the file is still valid TOML, and when the edit was
+    only inserting `model_reasoning_effort` (no `model` supplied), the
+    'model' check has nothing to catch it at all (ptone/scion#2365 review
+    round 4). Comparing everything the script doesn't own closes that
+    whole class of edit, not just the one shape a given review happened to
+    try. Rather than trust every edit blindly, the caller verifies the
+    finished content before writing it to disk, and leaves the existing
+    file untouched (logging a warning) when this returns False.
     """
     try:
-        parsed = tomllib.loads(content)
+        after = tomllib.loads(content)
     except tomllib.TOMLDecodeError:
         return False
-    if expected_model and parsed.get("model") != expected_model:
+    if model and after.get("model") != model:
         return False
-    return True
+    if effort and after.get("model_reasoning_effort") != effort:
+        return False
+    try:
+        before = tomllib.loads(original)
+    except tomllib.TOMLDecodeError:
+        # No parseable baseline to compare against (missing, empty, or
+        # already-invalid file) — the checks above are all there is to
+        # validate, and they've already passed.
+        return True
+
+    def _unmanaged(data: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in data.items() if k not in _MANAGED_TOP_LEVEL_KEYS}
+
+    return _unmanaged(before) == _unmanaged(after)
 
 
 def _reconcile_codex_toml(
@@ -396,14 +447,22 @@ def _reconcile_codex_toml(
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
-    content = ""
+    original = ""
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    content = _strip_toml_top_level_key(content, "reasoning_effort")
+            original = f.read()
+
+    otel_section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
+                     else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
+
+    def _with_reconciled_otel(base: str) -> str:
+        stripped = scion_harness.strip_toml_sections(base, lambda h: h == "[otel]" or h.startswith("[otel."))
+        stripped = stripped.rstrip("\n\t ") + "\n\n" + otel_section
+        return stripped.strip() + "\n"
+
+    content = _strip_toml_top_level_key(original, "reasoning_effort")
     content = _strip_toml_top_level_key(content, "model_reasoning_effort")
     content = _strip_toml_top_level_key(content, "model")
-    content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]" or h.startswith("[otel."))
 
     if model:
         model_line = f'model = "{scion_harness.toml_escape(model)}"'
@@ -413,24 +472,44 @@ def _reconcile_codex_toml(
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
         content = _insert_toml_top_level_line(content, re_line)
 
-    section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
-               else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
-    content = content.rstrip("\n\t ") + "\n\n" + section
-    content = content.strip() + "\n"
+    content = _with_reconciled_otel(content)
 
-    if not _toml_edit_round_trips(content, model):
-        ctx.info(
-            "config.toml edit did not round-trip through tomllib "
-            "(parse failure or top-level model mismatch); leaving "
-            "config.toml untouched rather than risk corrupting or "
-            "silently misplacing existing settings. This can happen with "
-            "hand-edited TOML this line-oriented editor doesn't fully "
-            "understand, e.g. a multi-line string containing a "
-            "header-shaped line."
-        )
+    if _toml_edit_preserves(original, content, model, reasoning_effort):
+        scion_harness.atomic_write_text(config_path, content)
         return
 
-    scion_harness.atomic_write_text(config_path, content)
+    # The full edit (model/model_reasoning_effort strip+insert, plus the
+    # otel swap) altered something it doesn't own — most likely a top-level
+    # multi-line string that a header- or key-shaped line inside its body
+    # got spliced into or stripped out of (see _toml_edit_preserves).
+    # Retrying with *only* the otel swap, untouched by the model/effort
+    # strip-and-insert steps, keeps telemetry reconciliation working even
+    # when model/model_reasoning_effort can't be safely written to this
+    # file: an explicit model still reaches codex via SCION_MODEL/--model
+    # argv (pkg/agent/run.go) regardless of what config.toml says, so this
+    # isn't a full feature loss — just this file not reflecting it.
+    otel_only_content = _with_reconciled_otel(original)
+    if _toml_edit_preserves(original, otel_only_content, None, None):
+        ctx.info(
+            "config.toml edit for model/model_reasoning_effort did not "
+            "preserve existing content (top-level model/effort mismatch, "
+            "or other content changed unexpectedly); applied telemetry "
+            "settings only and left model/model_reasoning_effort "
+            "unwritten in config.toml. codex still receives an explicit "
+            "model via SCION_MODEL/--model argv when one is resolved. "
+            "This can happen with hand-edited TOML this line-oriented "
+            "editor doesn't fully understand, e.g. a multi-line string "
+            "containing a header-shaped or key-shaped line."
+        )
+        scion_harness.atomic_write_text(config_path, otel_only_content)
+        return
+
+    ctx.info(
+        "config.toml edit did not round-trip through tomllib safely even "
+        "for the telemetry-only fallback; leaving config.toml completely "
+        "untouched rather than risk corrupting or silently altering "
+        "existing settings."
+    )
 
 
 # --- MCP server emission ---------------------------------------------------
