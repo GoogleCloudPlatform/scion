@@ -2654,7 +2654,7 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	initial := list[0]
+	recID := list[0].ID
 	defer close(disp.release)
 	select {
 	case <-disp.entered: // worker has written the stopping and provisioning steps
@@ -2665,9 +2665,8 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	// Both provisioning writes (the record via tryAdvanceReincarnation, the
 	// agent row via updateReincarnationStep) finish before
 	// DispatchAgentReprovision and share one timestamp, which stays stable
-	// while the worker is held there. `initial` is not a usable baseline:
-	// the worker may already have written this step when it was read.
-	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
+	// while the worker is held there.
+	cur, err := s.GetAgentReincarnation(context.Background(), recID)
 	require.NoError(t, err)
 	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
 		"the record's own state must track the worker's progress, not stay pending")
