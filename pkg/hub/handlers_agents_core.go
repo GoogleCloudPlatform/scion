@@ -516,7 +516,11 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	}
 
 	// Check if any of the active roles grant the "agent.create" permission.
-	targetPermission := derivePermissionID("agent", ActionCreate)
+	targetPermission, err := resolveResourcePermission("agent", ActionCreate)
+	if err != nil {
+		slog.WarnContext(ctx, "listAgents: agent-create permission is not resolvable", "error", err)
+		return
+	}
 	for _, rd := range roleDefs {
 		if rd == nil {
 			continue
@@ -2459,10 +2463,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.TaskSummary = updates.TaskSummary
 	}
 
-	// Apply config updates (only allowed for agents in 'created' phase)
+	// Apply config updates (only allowed for non-deleted agents in 'created' or 'stopped' phase;
+	// starting a stopped agent always recreates its container from AppliedConfig).
 	if updates.Config != nil {
-		if agent.Phase != string(state.PhaseCreated) {
-			Conflict(w, "Config can only be updated for agents in 'created' phase")
+		if !agent.DeletedAt.IsZero() {
+			Conflict(w, "Config cannot be updated for deleted agents")
+			return
+		}
+		if agent.Phase != string(state.PhaseCreated) && agent.Phase != string(state.PhaseStopped) {
+			Conflict(w, "Config can only be updated for agents in 'created' or 'stopped' phase")
 			return
 		}
 		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)

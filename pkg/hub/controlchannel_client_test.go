@@ -270,8 +270,13 @@ func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing
 	}
 }
 
+// The StatusServiceUnavailable case is a regression test for
+// ptone/scion#2165: a 503 (the broker's container runtime transiently
+// unavailable) means "unknown, retry" — not "no such agent" — and must
+// propagate as an error rather than be folded into the 404
+// idempotent-success carve-out above.
 func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T) {
-	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		tunnel := &mockControlChannelTunnel{connected: true, status: status}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 

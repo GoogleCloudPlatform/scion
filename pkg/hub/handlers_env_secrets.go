@@ -2143,6 +2143,47 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// projectProviderView decorates a project's provider record with read-only
+// broker capacity fields for the providers list response (ptone/scion#2161).
+// AgentLimit and AgentCount are computed at request time from the same
+// quota primitives checkAndReserveBrokerQuota uses to admit or reject agent
+// starts (pkg/hub/broker_quota.go) — they report that decision's inputs,
+// they do not make one: nothing here creates, modifies, or releases a
+// reservation. Unexported: only pkg/hub constructs this view; clients see
+// the wire shape through hubclient.ProjectProvider.
+type projectProviderView struct {
+	store.ProjectProvider
+	// AgentLimit is the effective max_agents_per_broker ceiling for this
+	// broker. Unset (nil) when the hub has no quota enforcement configured,
+	// no max_agents_per_broker definition exists, resolution failed for
+	// this provider, or the broker is unlimited. The field is never 0: a
+	// non-positive effective limit means unlimited and is omitted. Older
+	// clients that don't know this field are unaffected.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// held by agents in a counted phase (see isBrokerQuotaCountedPhase),
+	// from any project on this broker. It is exact when the broker has a
+	// limit, since every admission and release goes through
+	// QuotaService.Reserve/Release synchronously. When the broker is
+	// unlimited, Reserve returns before creating a reservation (quota.go),
+	// so newly started agents are only reflected here once the periodic
+	// broker-quota-reconcile job backfills them; the value may lag by up to
+	// that reconcile interval. This is broker-wide and distinct from the
+	// project-level agentCount reported elsewhere (e.g. Project.AgentCount).
+	// Unset (nil) when the hub has no quota enforcement configured, no
+	// max_agents_per_broker definition exists, or resolution failed for
+	// this provider — a zero count is reported as 0, not omitted.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
+	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
+	// "hub_default" (the limit definition's default value), or "unlimited"
+	// (resolved with no cap). Omitted whenever resolution didn't run or
+	// failed — the same conditions that leave AgentLimit and AgentCount
+	// unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
+}
+
 // listProjectProviders returns all providers for a project.
 func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
@@ -2153,9 +2194,73 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
+	// Looked up once and reused for every provider: the limit definition
+	// row is the same for all of them, so this turns what would otherwise
+	// be one lookup (and, on failure, one warning) per provider into one
+	// for the whole listing.
+	limitDef := s.lookupAgentLimitDefinition(ctx)
+
+	views := make([]projectProviderView, len(providers))
+	for i, p := range providers {
+		views[i] = projectProviderView{ProjectProvider: p}
+		views[i].AgentLimit, views[i].AgentCount, views[i].AgentLimitSource = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"providers": providers,
+		"providers": views,
 	})
+}
+
+// lookupAgentLimitDefinition fetches the max_agents_per_broker limit
+// definition once for reuse across all providers in a single listing
+// request. Returns nil when no quota service is configured or when no such
+// limit definition exists (store.ErrNotFound), matching how
+// QuotaService.Reserve treats a missing definition as "no limit — no
+// enforcement" (quota.go). Other lookup errors are logged.
+func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDefinition {
+	if s.quotaService == nil {
+		return nil
+	}
+
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "providers: failed to look up max_agents_per_broker limit definition", "error", err)
+		}
+		return nil
+	}
+	return limitDef
+}
+
+// resolveBrokerCapacity is a thin wrapper over brokerCapacity
+// (broker_capacity.go) — the one read model shared by enforcement and every
+// read path (ptone/scion#2061 P2, design.md §5.9, AC-P2-10) — that adapts it
+// to the providers listing's pre-existing (agentLimit, agentCount, source)
+// field shape (ptone/scion#2161). It mirrors exactly the primitives
+// checkAndReserveBrokerQuota uses to admit or reject an agent start
+// (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself). This is a read: it
+// never creates, updates, or releases a reservation.
+//
+// limitDef is looked up once by the caller (lookupAgentLimitDefinition) and
+// shared across every provider in a listing.
+//
+// The listing's pre-existing contract is all-or-nothing per provider: if
+// either half of BrokerCapacity couldn't be resolved, both agentLimit and
+// agentCount come back nil (never "an agentLimit with no matching count to
+// compare it against") — so that a failure for one provider never fails the
+// whole providers listing (per ptone/scion#2161), while also never reporting
+// half a picture for that provider. Count is nil exactly when either the
+// limit or the count resolution failed, or nothing is configured at all
+// (brokerCapacity skips counting when there's no limitDef/quotaService) —
+// all three collapse to the listing's existing "leave both unset" case here.
+// Failures are logged inside brokerCapacity, not duplicated here.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64, source string) {
+	bc := s.brokerCapacity(ctx, brokerID, limitDef)
+	if bc.Count == nil {
+		return nil, nil, ""
+	}
+	return bc.Limit, bc.Count, bc.Source
 }
 
 // addProjectProvider adds a broker as a provider to a project.

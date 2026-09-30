@@ -35,6 +35,15 @@ type Schedule struct {
 	ent.Schema
 }
 
+// Mixin of the Schedule. InitiatorAttributionMixin is shared verbatim with
+// ScheduledEvent (E.2b) so the two schemas expose an identical attribution
+// column set.
+func (Schedule) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		InitiatorAttributionMixin{},
+	}
+}
+
 // Fields of the Schedule.
 func (Schedule) Fields() []ent.Field {
 	return []ent.Field{

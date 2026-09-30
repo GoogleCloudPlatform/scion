@@ -1141,6 +1141,21 @@ type BrokerDispatch struct {
 	CreatedAt  time.Time  `json:"createdAt"`
 	UpdatedAt  time.Time  `json:"updatedAt"`
 	DeadlineAt *time.Time `json:"deadlineAt,omitempty"`
+
+	// Initiator attribution (E.2b, path F). Set once at insert
+	// (deferredDataOpResult / deferredLifecycle) from the request context
+	// that originated the cross-node op; never updated afterward. This is a
+	// separate, smaller field set from InitiatorAttribution (no snapshot, no
+	// version, no revision): a broker dispatch is a transport retry of an
+	// already-authorized operation, not a re-evaluated authoring point.
+	InitiatorPrincipalKind  string `json:"initiatorPrincipalKind,omitempty"`
+	InitiatorPrincipalID    string `json:"initiatorPrincipalId,omitempty"`
+	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialID   string `json:"initiatorCredentialId,omitempty"`
+	// CorrelationID ties this dispatch row back to the originating request's
+	// log/audit trail (the same request ID plumbed through decision/mutation
+	// audit).
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // BrokerDispatch.State values.
@@ -1949,6 +1964,70 @@ type ConversationFilter struct {
 }
 
 // =============================================================================
+// Initiator attribution (async work; tracker E.2b, ptone/scion#2127)
+// =============================================================================
+
+// InitiatorAttribution records the initiating principal/credential of an
+// asynchronously authored or executed row. It is embedded identically in
+// both ScheduledEvent and Schedule, via one ent mixin
+// (pkg/ent/schema/mixin_initiator_attribution.go), so a recurring fire is a
+// single struct assignment (event.InitiatorAttribution =
+// schedule.InitiatorAttribution) and B.3 reads the same shape from either
+// row (rulings "E.2b field names", "B.3 adoption" — names are committed and
+// adopted verbatim; do not rename).
+//
+// A row written before E.2b (AttributionVersion NULL/0) reads with every
+// field its zero value. Callers MUST treat that as legacy_unknown — never as
+// an interactive credential (plan correction (c); use the scheduledInitiator
+// read helper in pkg/hub rather than reading these fields directly).
+//
+// Attribution is not authority (cutover rule): E.2b records and exposes the
+// initiator; it does not change who is authorized at fire time. B.3 owns the
+// fire-time authority decision and its own ceiling column(s) on the same
+// rows, updated in the same transaction as an attribution replacement.
+type InitiatorAttribution struct {
+	InitiatorPrincipalKind      string `json:"initiatorPrincipalKind,omitempty"`
+	InitiatorPrincipalID        string `json:"initiatorPrincipalId,omitempty"`
+	InitiatorCredentialKind     string `json:"initiatorCredentialKind,omitempty"` // session|uat|agent|legacy_unknown
+	InitiatorCredentialID       string `json:"initiatorCredentialId,omitempty"`
+	InitiatorCredentialSnapshot string `json:"initiatorCredentialSnapshot,omitempty"` // bounded JSON: name, boundary, purpose, labels
+	AttributionVersion          int    `json:"attributionVersion,omitempty"`          // 0/absent = legacy_unknown; 1 = written by E.2b
+	// AuthorizationRevision is bumped atomically with each attribution
+	// replacement (ruling Q2): a fully reauthorized mutation that changes
+	// future dispatch replaces the attribution and this revision together.
+	// Schedules own the counter; events copy the schedule's current value at
+	// materialization and keep it unchanged afterward (already-materialized
+	// events keep their revision snapshot). B.3's delegation edge reads it
+	// back as a typed SourceAuthorizationRevision.
+	AuthorizationRevision int `json:"authorizationRevision,omitempty"`
+}
+
+// InitiatorCredentialKind* are the values InitiatorAttribution.InitiatorCredentialKind
+// may hold. This is a deliberately smaller, committed domain than
+// hub.CredentialKind: async attribution only ever records one of these four
+// values (rulings "E.2b field names").
+const (
+	InitiatorCredentialKindSession       = "session"
+	InitiatorCredentialKindUAT           = "uat"
+	InitiatorCredentialKindAgent         = "agent"
+	InitiatorCredentialKindLegacyUnknown = "legacy_unknown"
+)
+
+// ScheduleFieldMask marks which of Schedule's mutable metadata fields
+// UpdateSchedule should write from the struct passed to it. A field left
+// false is not referenced at all by the write — no Set, no Clear — so a
+// struct built from a possibly-stale read can never revert a column the
+// caller did not intend to change in this call.
+type ScheduleFieldMask struct {
+	Name      bool
+	CronExpr  bool
+	EventType bool
+	Payload   bool
+	Status    bool
+	NextRunAt bool
+}
+
+// =============================================================================
 // Scheduled Events (One-Shot Timers)
 // =============================================================================
 
@@ -1965,6 +2044,15 @@ type ScheduledEvent struct {
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	ScheduleID string     `json:"scheduleId,omitempty"` // FK to schedules.id for recurring schedule fires
+
+	// InitiatorAttribution is set at authoring time (one-shot create) or
+	// copied from the parent schedule at each recurrence (E.2b). See the
+	// type doc above. json:"-": nothing in the brief or plan asks for wire
+	// exposure, and a token's descriptive metadata (name, purpose, labels,
+	// boundary) is otherwise shown only to its owner. Callers that need it
+	// read the row from the store; B.3 and E.2b's own tests read the
+	// embedded struct field directly.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduledEventStatus constants
@@ -2006,6 +2094,13 @@ type Schedule struct {
 	CreatedAt     time.Time  `json:"createdAt"`
 	CreatedBy     string     `json:"createdBy,omitempty"`
 	UpdatedAt     time.Time  `json:"updatedAt"`
+
+	// InitiatorAttribution is set at authoring time and replaced atomically
+	// (together with AuthorizationRevision) whenever a fully reauthorized
+	// mutation changes future dispatch (E.2b, ruling Q2). CreatedBy is never
+	// overwritten by a re-attribution. See the type doc above. json:"-": see
+	// ScheduledEvent's field doc above for why.
+	InitiatorAttribution `json:"-"`
 }
 
 // ScheduleStatus constants
@@ -2330,6 +2425,31 @@ type HubSetting struct {
 	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
+// =============================================================================
+// Broker Settings (ptone/scion#2061 P2, ptone/scion#2177)
+// =============================================================================
+
+// BrokerSettings is the typed document stored per runtime broker. It is a
+// general per-broker settings mechanism (design.md §5.1): each field is one
+// key in the pkg/hub/brokersettings registry. maxAgents is the first key: a
+// per-broker override of the max_agents_per_broker quota. nil means
+// "inherit" (fall through to the entitlement engine / hub-wide default); 0
+// means unlimited; a positive value is the cap, and may be lower than the
+// hub-wide default or any system-scoped entitlement binding.
+type BrokerSettings struct {
+	MaxAgents *int64 `json:"maxAgents,omitempty"`
+}
+
+// BrokerSettingsRecord is a BrokerSettings document plus the metadata needed
+// for optimistic concurrency and attribution.
+type BrokerSettingsRecord struct {
+	BrokerID  string         `json:"brokerId"`
+	Settings  BrokerSettings `json:"settings"`
+	Revision  int64          `json:"revision"`
+	UpdatedBy string         `json:"updatedBy,omitempty"`
+	Updated   time.Time      `json:"updated"`
 }
 
 // SkillRegistryType constants
@@ -2757,7 +2877,7 @@ type LimitDefinition struct {
 	Unit         string    `json:"unit"`         // e.g. "count"
 	Description  string    `json:"description"`
 	DefaultValue int64     `json:"defaultValue"` // 0 = unlimited
-	System       bool      `json:"system"`       // true = seeded, not user-modifiable
+	System       bool      `json:"system"`       // true = seeded; only default_value/description are editable, cannot be deleted
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }

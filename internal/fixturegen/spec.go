@@ -401,6 +401,14 @@ func Spec() []TableFixture {
 				"create_time": baseTime, "update_time": baseTime,
 			},
 		}},
+		{Table: "broker_settings", Rows: []row{
+			{ // exercises the non-NULL updated_by path; hub_settings above
+				// already covers the NULL case for this same document shape.
+				"id": "b5000000-0000-0000-0000-000000000001", "broker_id": brokerID,
+				"value": `{"maxAgents":5}`, "revision": int64(1), "updated_by": userID,
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
 		{Table: "launch_reaper_states", Rows: []row{
 			{ // the single row the launch reaper reads/writes (id is fixed:
 				// launchReaperStateID in pkg/store/entadapter/launch_reaper.go);

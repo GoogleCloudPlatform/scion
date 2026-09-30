@@ -65,9 +65,9 @@ func TestHandleExistingAgentResponseBody_EnvHiding(t *testing.T) {
 		}
 		require.NoError(t, f.store.CreateUser(ctx, projectAdmin))
 		ensureHubMembership(ctx, f.store, projectAdmin.ID)
-		// Project admin gets every capability except ActionAttach/ActionPortAccess
-		// (ownerAdminExcludedActions, capabilities.go) unless they own or are an
-		// ancestor of the resource -- neither is true here, so this admin can
+		// ActionAttach/ActionPortAccess come only from the owner/ancestor
+		// relationship to the agent, not from the project admin role. This
+		// admin neither owns nor is an ancestor of the agent, so this admin can
 		// manage the agent's lifecycle (and so reach a 200) but must not see env.
 		createTestUserWithProjectRole(t, f.store, projectAdmin.ID, projectAdmin.Email, f.project.ID, store.ProjectRoleAdmin)
 

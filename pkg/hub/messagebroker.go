@@ -73,6 +73,7 @@ type MessageBrokerProxy struct {
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
+	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
 	stopCh              chan struct{}
 	stopOnce            sync.Once
 	wg                  sync.WaitGroup
@@ -95,6 +96,7 @@ func NewMessageBrokerProxy(
 		subscriptions:       make(map[string][]eventbus.Subscription),
 		pluginSubscriptions: make(map[string]eventbus.Subscription),
 		subscribedTopics:    make(map[string]bool),
+		runningSeen:         make(map[string]bool),
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -184,6 +186,7 @@ func (p *MessageBrokerProxy) Stop() {
 			delete(p.pluginSubscriptions, pattern)
 		}
 		p.subscribedTopics = make(map[string]bool)
+		p.runningSeen = make(map[string]bool)
 		p.mu.Unlock()
 
 		p.log.Info("Message broker proxy stopped")
@@ -327,9 +330,16 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent status event", "error", err)
 			return
 		}
-		// We don't need to take action on status events for the subscription
-		// proxy — subscriptions are per-agent, not per-status. The agent's
-		// subscription persists through status changes until it's deleted.
+		// Subscriptions are per-agent and persist through status changes, but
+		// they are only created at startup (for agents already running) and on
+		// agent.created. An agent that was not running when the hub started
+		// and is later started or resumed never gets them, so its outbound
+		// replies to users (published on the project user-message topic) find
+		// no subscriber and are silently dropped. Ensure them the first time
+		// each agent reports running.
+		if status.Phase == "running" && status.ProjectID != "" && status.AgentID != "" {
+			p.ensureSubscriptionsForRunningAgent(status.ProjectID, status.AgentID)
+		}
 
 	case containsSuffix(evt.Subject, ".agent.deleted"):
 		var deleted AgentDeletedEvent
@@ -337,12 +347,50 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent deleted event", "error", err)
 			return
 		}
+		p.mu.Lock()
+		delete(p.runningSeen, deleted.AgentID)
+		p.mu.Unlock()
 		// Agent subscriptions are cleaned up when the project's subscriptions
 		// are rebuilt. Individual cleanup is handled by the broker's
 		// Unsubscribe mechanism if needed.
 		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
 			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
+}
+
+// ensureSubscriptionsForRunningAgent subscribes a running agent's topic and
+// its project's broadcast and user-message topics, once per agent ID per
+// proxy lifetime. The agent is read back first so that a status event that
+// is already stale (the agent stopped again) does not mark it as handled.
+// The subscribe helpers are idempotent; the runningSeen guard only avoids a
+// store read on every later status event of the same agent.
+func (p *MessageBrokerProxy) ensureSubscriptionsForRunningAgent(projectID, agentID string) {
+	p.mu.Lock()
+	seen := p.runningSeen[agentID]
+	p.mu.Unlock()
+	if seen {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, agentID)
+	if err != nil {
+		p.log.Error("Failed to read running agent for broker subscriptions",
+			"project_id", projectID, "agent_id", agentID, "error", err)
+		return
+	}
+	if agent.Phase != "running" || agent.ProjectID != projectID {
+		return
+	}
+
+	p.subscribeAgent(projectID, agent.Slug)
+	p.subscribeProjectBroadcast(projectID)
+	p.subscribeProjectUserMessages(projectID)
+
+	p.mu.Lock()
+	p.runningSeen[agentID] = true
+	p.mu.Unlock()
 }
 
 // subscribeAgent creates a broker subscription for an individual agent's message topic.
@@ -689,24 +737,45 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 // deliverToAgent dispatches a message to a specific agent via the existing
 // DispatchAgentMessage path. ObserverOnly messages are skipped — they were
 // already delivered directly and are only published for plugin observers.
+//
+// Raw forwarding note (ptone/scion#2192 inventory): this function and its
+// siblings fanOutToProject/fanOutGlobal forward msg.Raw unchanged with no
+// guard. That is intentional and safe here: after ptone/scion#2192, no Hub
+// publisher places a raw message on this bus at all. Broadcast and group
+// forms reject raw upstream before they would ever publish, the
+// still-supported single-agent raw shape is dispatched directly through the
+// dispatcher (never through this bus), and the agent-to-agent observer
+// copies (agent_dm_operation.go, handlers_agent_messaging.go) are skipped
+// entirely for raw. Inbound traffic from plugin adapters never reaches this
+// bus either; it is delivered directly by handlers_broker_inbound.go /
+// _routed.go, which is where the raw guard for that ingress path lives. Do
+// not add a second guard here without first confirming a new Hub-originated
+// publisher can put a raw message on this bus — that would be duplicating
+// policy, not adding containment.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.ObserverOnly {
 		return
 	}
 
+	// msg may be a pointer shared across broker event-bus subscribers, so it
+	// is never mutated in place — a private copy is made once here (cheap:
+	// struct fields only, no deep copy needed unless a field below is
+	// reassigned) and both the "!" rewrite and the #2257 P2 metadata strip
+	// (design auto-offload-large-dm §4.2 item 1) apply to that copy.
+	copied := *msg
+	msg = &copied
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// A leading "!" in the message body acts as an inline interrupt signal:
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
-	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
 	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
-		stripped := *msg
 		content := strings.TrimSpace(trimmed[1:])
 		if content == "" {
 			content = "interrupt"
 		}
-		stripped.Msg = content
-		stripped.Urgent = true
-		msg = &stripped
+		msg.Msg = content
+		msg.Urgent = true
 	}
 
 	dispatcher := p.getDispatcher()

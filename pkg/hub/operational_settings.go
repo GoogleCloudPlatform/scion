@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"sync"
 	"time"
@@ -50,6 +51,18 @@ type sectionState struct {
 	// distinguish "validated document" from "unreadable document" without
 	// re-parsing and without swallowing errors silently.
 	Malformed bool
+
+	// ExperimentsOverrides is the parsed overrides for the "experiments"
+	// section only; nil for every other section, and nil for "experiments"
+	// itself when absent, malformed, or a valid document with no overrides
+	// field. Populated at the same ingest points as Malformed (Refresh,
+	// Update), so it is always part of the same sectionState value and is
+	// replaced or removed together with it — a delete, a replace, or an
+	// eviction can never leave it stale. ExperimentsSnapshot is on a hot
+	// path (GET /api/v1/experiments runs on every page load, and
+	// requireExperiment runs per request), so parsing once here rather than
+	// per read matters.
+	ExperimentsOverrides map[string]bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -99,6 +112,9 @@ type Layer1Snapshot struct {
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
+
+	// Quotas
+	EnforceBrokerQuotas *bool
 
 	// Project defaults
 	DefaultScratchpad *bool
@@ -260,13 +276,15 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 				)
 			}
 		}
+		experimentsOverrides, malformed := experimentsOverridesFor(row.Section, row.Value, malformed)
 		o.cache[row.Section] = sectionState{
-			Value:     row.Value,
-			Revision:  row.Revision,
-			UpdatedAt: row.UpdatedAt,
-			UpdatedBy: row.UpdatedBy,
-			Origin:    row.Origin,
-			Malformed: malformed,
+			Value:                row.Value,
+			Revision:             row.Revision,
+			UpdatedAt:            row.UpdatedAt,
+			UpdatedBy:            row.UpdatedBy,
+			Origin:               row.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
 		}
 	}
 
@@ -279,6 +297,33 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 	}
 
 	return changed, nil
+}
+
+// experimentsOverridesFor returns the parsed "experiments" section overrides
+// and the (possibly updated) malformed flag, for storage in sectionState
+// alongside the generic ingest check that produced malformed. It is a no-op
+// for any section other than "experiments": callers pass malformed straight
+// through unchanged and get a nil map back.
+//
+// Folding this into sectionState (rather than a second, separately-tracked
+// field on OperationalSettings) means every write, delete, or replace of the
+// cache entry carries the parsed overrides automatically — there is no
+// second place that can go out of step with the cache.
+func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool) (map[string]bool, bool) {
+	if section != "experiments" || malformed {
+		return nil, malformed
+	}
+	doc, docMalformed := opsettings.ParseExperimentsDoc(raw)
+	if docMalformed {
+		// The caller's ingest check (Refresh/Update's sec.New() unmarshal)
+		// already applies the same predicate (the "experiments" section's
+		// New() unmarshals into the same ExperimentsSettings shape
+		// ParseExperimentsDoc uses), so this cannot happen in practice. Fail
+		// closed rather than trust an inconsistent parse, and let it show up
+		// in Malformed too.
+		return nil, true
+	}
+	return doc.Overrides, malformed
 }
 
 // Snapshot returns an immutable merged Layer-1 view.
@@ -523,14 +568,16 @@ func (o *OperationalSettings) Update(
 			)
 		}
 	}
+	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
 	o.cache[section] = sectionState{
-		Value:     result.Value,
-		Revision:  result.Revision,
-		UpdatedAt: result.UpdatedAt,
-		UpdatedBy: result.UpdatedBy,
-		Origin:    result.Origin,
-		Malformed: malformed,
+		Value:                result.Value,
+		Revision:             result.Revision,
+		UpdatedAt:            result.UpdatedAt,
+		UpdatedBy:            result.UpdatedBy,
+		Origin:               result.Origin,
+		Malformed:            malformed,
+		ExperimentsOverrides: experimentsOverrides,
 	}
 	o.mu.Unlock()
 
@@ -777,6 +824,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.AutoExposePortsEnabled = &v
 	}
 
+	// Quotas
+	if k.Exists("quotas.enforce_broker_quotas") {
+		v := k.Bool("quotas.enforce_broker_quotas")
+		snap.EnforceBrokerQuotas = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -922,6 +975,11 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Quotas — read from settings.yaml top-level quotas section, so a
+	// file-mode admin save takes effect without a restart (unlike
+	// AutoExposePortsEnabled, which is intentionally not populated here).
+	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
@@ -933,6 +991,17 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	}
 
 	return snap
+}
+
+// boolPtrEqual reports whether two *bool values are equal, treating nil as a
+// distinct value from both true and false (unlike dereferencing, which would
+// panic on nil, or treating nil as false, which would conflate "unset" with
+// "explicitly false").
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -976,6 +1045,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if oldVal == nil || *oldVal != *snap.DefaultScratchpad {
 			applied = append(applied, "default_scratchpad")
 		}
+	}
+
+	// Quotas. Unlike the other *bool settings above, nil here is a real,
+	// meaningful value — the fail-safe default (enforced) — not "unset,
+	// leave the current value alone". So this assigns unconditionally: a
+	// snapshot with EnforceBrokerQuotas==nil (switch cleared, section
+	// deleted, or a PUT of {}) must flip the live hub back to enforced, not
+	// silently keep an old in-memory `false` in place while GET/the UI both
+	// report "enforced" (findings F3).
+	oldEnforceBrokerQuotas := s.config.EnforceBrokerQuotas
+	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
+		applied = append(applied, "enforce_broker_quotas")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
@@ -1298,6 +1380,40 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	return true // field omitted in doc → compiled default → ON
 }
 
+// OffloadThresholdRunes returns the rune-count threshold above which an
+// agent-recipient DM body is offloaded to a fetch stub at dispatch
+// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Returns 0
+// (disabled) when the section is absent, the document is malformed, the
+// field is omitted, or the stored value is negative — matching
+// messaging.OffloadPolicy's "<= 0 disables" contract.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) OffloadThresholdRunes() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return 0 // section absent → compiled default → disabled
+	}
+	if state.Malformed {
+		return 0 // unreadable → fail closed → disabled
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return 0 // parse error → fail closed → disabled
+	}
+
+	if ms.OffloadThresholdRunes == nil {
+		return 0 // field omitted → compiled default → disabled
+	}
+	if *ms.OffloadThresholdRunes < 0 {
+		return 0
+	}
+	return *ms.OffloadThresholdRunes
+}
+
 // SectionRevision returns the current revision of the named settings section.
 // Returns 0 if the section does not exist or operational settings are unavailable.
 func (o *OperationalSettings) SectionRevision(section string) int64 {
@@ -1395,6 +1511,89 @@ func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.C
 	}
 	// Field omitted → compiled default → OFF.
 	return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+}
+
+// ExperimentsSnapshot is one consistent view of the cached "experiments"
+// section, taken under a single RLock, so revision, overrides, malformed
+// flag and metadata always belong to the same refresh.
+type ExperimentsSnapshot struct {
+	// Overrides is a copy of the stored admin overrides; empty when
+	// malformed or absent. May contain names this binary does not know
+	// (ptone/scion#2217).
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	UpdatedAt time.Time
+	UpdatedBy string
+	// Present is false when no row exists.
+	Present bool
+}
+
+// ExperimentsSnapshot returns one consistent view of the cached "experiments"
+// section. Read path: it never parses JSON. state.ExperimentsOverrides is
+// parsed once, when the cache entry is written (Refresh, Update); this only
+// clones that already-parsed map, so a caller mutating the returned map can
+// never affect another caller or a later snapshot. No logging here (Refresh
+// logs once per ingest).
+func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["experiments"]
+	if !ok {
+		return ExperimentsSnapshot{Overrides: map[string]bool{}}
+	}
+
+	snap := ExperimentsSnapshot{
+		Revision:  state.Revision,
+		Malformed: state.Malformed,
+		UpdatedAt: state.UpdatedAt,
+		UpdatedBy: state.UpdatedBy,
+		Present:   true,
+	}
+	snap.Overrides = maps.Clone(state.ExperimentsOverrides)
+	if snap.Overrides == nil {
+		snap.Overrides = map[string]bool{}
+	}
+	return snap
+}
+
+// ExperimentsReadResult holds the authoritative experiments overrides and
+// revision, read directly from the store (not the cache).
+type ExperimentsReadResult struct {
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	Err       error
+}
+
+// ReadAuthoritativeExperiments reads the "experiments" section straight from
+// the store, bypassing the replica-local cache. Write path only; the
+// precedent is ReadAuthoritativeCrossProjectEnabled.
+//
+//	row absent (store.ErrNotFound)             → {Overrides: {}, Revision: 0}
+//	row present, ParseExperimentsDoc ok        → {Overrides, Revision}
+//	row present, ParseExperimentsDoc malformed → {Overrides: {}, Revision, Malformed: true}
+//	store error                                → {Err}
+func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) ExperimentsReadResult {
+	setting, err := o.store.GetHubSetting(ctx, "experiments")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: 0}
+		}
+		slog.Warn("ReadAuthoritativeExperiments: store read failed", "error", err)
+		return ExperimentsReadResult{Err: fmt.Errorf("authoritative experiments read: %w", err)}
+	}
+
+	doc, malformed := opsettings.ParseExperimentsDoc(setting.Value)
+	if malformed {
+		return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: setting.Revision, Malformed: true}
+	}
+	overrides := doc.Overrides
+	if overrides == nil {
+		overrides = map[string]bool{}
+	}
+	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

@@ -38,6 +38,18 @@ type CreateScheduledEventRequest struct {
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Plain     bool   `json:"plain,omitempty"`
 
+	// Deliberately no top-level Raw field (ptone/scion#2192 inventory): a
+	// "raw" key at this level is an unrecognized field, dropped by JSON
+	// decoding like any typo — it never reaches Payload construction, since
+	// the "message" auto-construct path below only reads
+	// AgentID/AgentName/Message/Interrupt/Plain. This differs from
+	// req.Payload (the advanced field at the top of this struct): callers
+	// supply that JSON directly, and although MessageEventPayload has no
+	// Raw field, a caller may still include a "raw" key there expecting it
+	// to take effect, which is why it gets its own explicit tombstone
+	// (rejectRawScheduledPayload) but this convenience-field surface does
+	// not need one.
+
 	// Convenience fields for "dispatch_agent" events — used to auto-construct Payload
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
@@ -224,6 +236,15 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	// are request-derived (not system-plane) and must pass the same authorization
 	// as direct sends — both at authoring and again at fire time.
 	if req.EventType == "message" {
+		// Phase 0.2 (ptone/scion#2192): scheduled message delivery does not
+		// forward StructuredMessage.Raw — MessageEventPayload has no Raw
+		// field. A caller-supplied "raw" key is rejected at decode (422),
+		// so a caller cannot believe scheduled raw delivery is supported.
+		if err := rejectRawScheduledPayload(req.Payload); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+				map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+			return
+		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, req.AgentID, req.AgentName) {
 			return
 		}
@@ -323,6 +344,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		Payload:   payload,
 		Status:    store.ScheduledEventPending,
 		CreatedBy: createdBy,
+		// E.2b: record the authoring request's initiator attribution in the
+		// same write as the event row (design check (a): atomic by
+		// construction, since ScheduleEvent below issues a single insert).
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 	}
 
 	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {
@@ -399,6 +424,14 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// No future dispatch remains after a cancel, so there is no
+	// re-attribution — just a record of who cancelled it.
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "scheduled_event_cancel",
+		TargetType:   "scheduled_event",
+		TargetID:     eventID,
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }

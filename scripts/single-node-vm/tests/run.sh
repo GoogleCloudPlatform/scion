@@ -16,9 +16,10 @@
 # scripts/single-node-vm/tests/run.sh — runs every test_*.sh file in this
 # directory against a stub `gcloud`.
 #
-# This never contacts GCP: it puts tests/lib (containing a stub `gcloud`)
-# at the front of PATH, sources tests/lib/harness.sh once for shared
-# fixture and assertion helpers, then sources every tests/test_*.sh file
+# This never contacts GCP: it puts tests/lib (containing a stub `gcloud`
+# and a stub `kubectl`) at the front of PATH, sources tests/lib/harness.sh
+# once for shared fixture and assertion helpers and hybrid-tier.sh once
+# for the function-level tests, then sources every tests/test_*.sh file
 # (sorted) -- each in its own subshell -- and calls each test_* function
 # it finds. Test files that drive deploy.sh itself run it as a real
 # subprocess against the same stub; see README.md for how to add a new
@@ -37,10 +38,18 @@
 # default VERSION, and every test in this suite passes --version to skip
 # that path.
 #
+# The settings.yaml parse tests in test_deploy_wiring.sh also require a Go
+# toolchain: they run `go run -buildvcs=false
+# tests/lib/settings-yaml-to-json.go` from the repository root, which
+# needs the repository's github.com/knadh/koanf YAML parser module in the
+# Go module cache (fetched on first use when the network allows it).
+# Without Go, those tests fail rather than skip.
+#
 # Requires bash >= 4 (uses `mapfile` and associative arrays). This is a
-# dev-only test runner, not a deployment artifact: deploy.sh itself
-# targets bash 3.2+ (macOS's shipped /bin/bash), but this runner does not
-# need to, and is not the vehicle for verifying that support.
+# dev-only test runner, not a deployment artifact: deploy.sh and
+# hybrid-tier.sh themselves target bash 3.2+ (macOS's shipped /bin/bash),
+# but this runner does not need to, and is not the vehicle for verifying
+# that support -- see the bash-3.2 note in hybrid-tier.sh's header.
 #
 # Usage:
 #   ./run.sh
@@ -65,7 +74,7 @@ export PATH="${SCRIPT_DIR}/lib:${PATH}"
 export TIER_DIR
 
 # Every mktemp/mktemp -d call anywhere in this run -- fresh_gcloud_state's
-# own two per-test entries, each test's own RESULT_FILE below, and any ad
+# own four per-test entries, each test's own RESULT_FILE below, and any ad
 # hoc mktemp inside an individual test -- lands under TMPDIR. Pointing
 # TMPDIR at a fresh, run-scoped directory instead of the caller's ambient
 # one (or /tmp) means the whole run's footprint is bounded to this one
@@ -76,8 +85,14 @@ RUN_TMPDIR="$(mktemp -d)"
 export TMPDIR="$RUN_TMPDIR"
 trap 'rm -rf "$RUN_TMPDIR"' EXIT
 
+export KUBECONFIG="/nonexistent/should-never-be-read-or-written-kubeconfig"
+
 # shellcheck source=scripts/single-node-vm/tests/lib/harness.sh
 source "${SCRIPT_DIR}/lib/harness.sh"
+# hybrid-tier.sh is sourced once here, like harness.sh, so its hybrid_*
+# functions are defined in every test file's subshell below.
+# shellcheck source=scripts/single-node-vm/hybrid-tier.sh
+source "${TIER_DIR}/hybrid-tier.sh"
 
 # Discover every test file in this directory (sorted, for a deterministic
 # run order), not a hardcoded list -- multiple stub-case PRs each add
@@ -157,8 +172,10 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
       # one -- still get a chance to run.
       RESULT_FILE="$(mktemp)"
       (
-        # Cleans up this one test's own fresh_gcloud_state entries the
-        # moment this subshell exits, on any path -- normal return, a
+        # Cleans up this one test's own fresh_gcloud_state entries, plus
+        # HYBRID_KUBECONFIG (set by hybrid_k8s_setup_kubeconfig whenever
+        # a test exercises anything on the Kubernetes side), the moment
+        # this subshell exits, on any path -- normal return, a
         # test's own early `exit` (the CRASH case below), or a signal.
         # This is deliberately systematic rather than relying on each
         # test remembering its own cleanup: without a trap here, each
@@ -167,7 +184,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         # inspecting TMPDIR mid-run (or a run that never reaches its own
         # exit, killed from outside) would still see the full
         # accumulation.
-        trap 'rm -rf "${GCLOUD_STUB_STATE_DIR:-}"; rm -f "${GCLOUD_STUB_LOG:-}"' EXIT
+        trap 'rm -rf "${GCLOUD_STUB_STATE_DIR:-}" "${KUBECTL_STUB_STATE_DIR:-}"; rm -f "${GCLOUD_STUB_LOG:-}" "${KUBECTL_STUB_LOG:-}" "${HYBRID_KUBECONFIG:-}"' EXIT
         PASS_COUNT=0
         FAIL_COUNT=0
         "$CURRENT_TEST"

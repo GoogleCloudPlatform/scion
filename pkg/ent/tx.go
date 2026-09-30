@@ -36,6 +36,8 @@ type Tx struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
+	// BrokerSetting is the client for interacting with the BrokerSetting builders.
+	BrokerSetting *BrokerSettingClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
 	// Conversation is the client for interacting with the Conversation builders.
@@ -279,6 +281,7 @@ func (tx *Tx) init() {
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
+	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)

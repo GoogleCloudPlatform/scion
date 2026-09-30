@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -219,6 +220,14 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	// C1 containment: validate target agent project scope for message schedules.
 	if req.EventType == "message" {
+		// Phase 0.2 (ptone/scion#2192): recurring schedules accept the same
+		// advanced Payload JSON as one-shot scheduled events and must be
+		// tombstoned the same way (see createScheduledEvent).
+		if err := rejectRawScheduledPayload(req.Payload); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+				map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+			return
+		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, "", req.AgentName) {
 			return
 		}
@@ -293,6 +302,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		Status:    store.ScheduleStatusActive,
 		NextRunAt: &nextRunAt,
 		CreatedBy: createdBy,
+		// E.2b: record the authoring request's initiator attribution in the
+		// same write as the schedule row (design check (a)).
+		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 	}
 
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {
@@ -361,6 +373,10 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		NotFound(w, "Schedule")
 		return
 	}
+	originalStatus := schedule.Status
+	originalCronExpr := schedule.CronExpr
+	originalEventType := schedule.EventType
+	originalPayload := schedule.Payload
 
 	var req UpdateScheduleRequest
 	if err := readJSON(r, &req); err != nil {
@@ -391,15 +407,39 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		if req.Payload != "" {
 			effectivePayload = req.Payload
 		}
+		// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw" key
+		// in the advanced Payload JSON. Only checked when the caller is
+		// setting/changing Payload in this request — an update that leaves
+		// Payload untouched must not retroactively fail on an existing
+		// stored value.
+		if req.Payload != "" {
+			if err := rejectRawScheduledPayload(req.Payload); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
+					map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
+				return
+			}
+		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
 			return
 		}
 	}
 
+	// fields tracks exactly which columns this request changes. UpdateSchedule
+	// writes only these — never the rest of the struct — so a column this
+	// request doesn't mention can never be reverted to whatever GetSchedule
+	// happened to return above, even if that read has since gone stale.
+	var fields store.ScheduleFieldMask
 	if req.Name != "" {
 		schedule.Name = req.Name
+		fields.Name = true
 	}
-	if req.CronExpr != "" {
+	// CronExpr/EventType/Payload are compared against the stored values, not
+	// just checked for presence: a request that resends the current value
+	// (e.g. a client round-tripping the full resource on every PATCH) is
+	// metadata-only, the same as omitting the field. Only an actual change
+	// writes the column, which keeps the field mask consistent with
+	// changesFutureDispatch below.
+	if req.CronExpr != "" && req.CronExpr != originalCronExpr {
 		// Validate new cron expression
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		cronSchedule, err := parser.Parse(req.CronExpr)
@@ -410,18 +450,77 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		schedule.CronExpr = req.CronExpr
 		nextRunAt := cronSchedule.Next(time.Now().UTC())
 		schedule.NextRunAt = &nextRunAt
+		fields.CronExpr = true
+		fields.NextRunAt = true
 	}
-	if req.EventType != "" {
+	if req.EventType != "" && req.EventType != originalEventType {
 		schedule.EventType = req.EventType
+		fields.EventType = true
 	}
-	if req.Payload != "" {
+	if req.Payload != "" && req.Payload != originalPayload {
 		schedule.Payload = req.Payload
+		fields.Payload = true
 	}
 	if req.Status != "" {
 		schedule.Status = req.Status
+		fields.Status = true
 	}
 
-	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
+	// An enable transition (any prior status, e.g. paused, back to active)
+	// re-arms future dispatch the same way resumeSchedule does. If this
+	// request didn't already recompute NextRunAt via a real CronExpr change,
+	// it must be recomputed here from the stored cron: otherwise a schedule
+	// that went stale while paused (or was paused with a next_run_at already
+	// in the past) would reactivate carrying that stale time, and the
+	// scheduler would treat it as immediately due.
+	enabling := req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive
+	if enabling && !fields.CronExpr {
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		cronSchedule, err := parser.Parse(schedule.CronExpr)
+		if err != nil {
+			InternalError(w)
+			return
+		}
+		nextRunAt := cronSchedule.Next(time.Now().UTC())
+		schedule.NextRunAt = &nextRunAt
+		fields.NextRunAt = true
+	}
+
+	// Ruling Q2: a fully reauthorized mutation that changes future dispatch
+	// (payload/target/type/timing, or an enable transition) replaces the
+	// attribution and bumps authorization_revision atomically in the same
+	// write. A metadata-only edit (name, an unchanged cron/type/payload
+	// resent as-is, or a status change other than an enable, e.g. pause)
+	// does not re-attribute, and attribution is passed to the store only
+	// when it changed. Deriving this from the field mask itself (rather
+	// than from req's presence checks) is what keeps the two in sync: a
+	// dispatch field only re-attributes when the field mask also writes it.
+	changesFutureDispatch := fields.CronExpr || fields.EventType || fields.Payload || enabling
+
+	// The write is conditioned on the revision this handler just read,
+	// regardless of whether this particular call replaces attribution: a
+	// stale read must never be able to apply any field once a newer,
+	// revision-bumping write has landed first. prevRevisionKnown is derived
+	// from the same field the store predicates on (AuthorizationRevision),
+	// not from AttributionVersion — a schedule can carry a revision while its
+	// attribution_version is still NULL (e.g. a historical row), and that
+	// combination must remain writable, not permanently conflict.
+	prevRevision := schedule.AuthorizationRevision
+	prevRevisionKnown := schedule.AuthorizationRevision != 0
+
+	var attribution *store.InitiatorAttribution
+	if changesFutureDispatch {
+		newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
+		schedule.InitiatorAttribution = newAttr
+		attribution = &newAttr
+	}
+
+	if err := s.store.UpdateSchedule(r.Context(), schedule, fields, prevRevision, prevRevisionKnown, attribution); err != nil {
+		if errors.Is(err, store.ErrRevisionConflict) {
+			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
+				"schedule was concurrently modified; refresh and retry", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -446,6 +545,14 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	// No future dispatch is created by a delete, so there is no
+	// re-attribution — just a record of who deleted it.
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "schedule_delete",
+		TargetType:   "schedule",
+		TargetID:     scheduleID,
+	})
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -469,6 +576,14 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	// No future dispatch is created by a pause, so there is no
+	// re-attribution — just a record of who paused it.
+	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
+		MutationType: "schedule_pause",
+		TargetType:   "schedule",
+		TargetID:     scheduleID,
+	})
 
 	schedule.Status = store.ScheduleStatusPaused
 	writeJSON(w, http.StatusOK, schedule)
@@ -506,17 +621,28 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())
 
-	if err := s.store.UpdateScheduleStatus(r.Context(), scheduleID, store.ScheduleStatusActive); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Update next_run_at
+	// Ruling Q2: status, next_run_at and the re-attribution are one write,
+	// not two — a failure here must be reported as an error, never as a 200
+	// naming an attribution that was never persisted. prevRevisionKnown
+	// comes from AuthorizationRevision, the same field the store predicates
+	// on, not from AttributionVersion: a schedule can carry a revision while
+	// its attribution_version is still NULL, and that combination must
+	// remain resumable.
+	prevRevision := schedule.AuthorizationRevision
+	prevRevisionKnown := schedule.AuthorizationRevision != 0
 	schedule.Status = store.ScheduleStatusActive
 	schedule.NextRunAt = &nextRunAt
-	if err := s.store.UpdateSchedule(r.Context(), schedule); err != nil {
-		// Status was updated, but next_run_at wasn't — still return success
-		writeJSON(w, http.StatusOK, schedule)
+	newAttr := reattributeInitiator(r.Context(), schedule.InitiatorAttribution)
+	schedule.InitiatorAttribution = newAttr
+
+	fields := store.ScheduleFieldMask{Status: true, NextRunAt: true}
+	if err := s.store.UpdateSchedule(r.Context(), schedule, fields, prevRevision, prevRevisionKnown, &newAttr); err != nil {
+		if errors.Is(err, store.ErrRevisionConflict) {
+			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
+				"schedule was concurrently modified; refresh and retry", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 

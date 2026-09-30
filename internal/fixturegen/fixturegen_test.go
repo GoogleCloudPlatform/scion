@@ -24,6 +24,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +32,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 63
+const expectedTableCount = 64
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -75,6 +76,17 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM agents WHERE deleted_at IS NOT NULL").Scan(&deletedAgents))
 	assert.Positive(t, deletedAgents, "fixture should include a soft-deleted agent")
+
+	// The broker_settings row must be readable through the real store
+	// adapter, not just present as a row (ptone/scion#2061 P2 review round
+	// 3, F5): a value that satisfies the coverage count but fails to parse
+	// against its own schema's column type (field.UUID("id", ...)) would
+	// defeat the fixture's purpose as a representative, application-usable
+	// hub database.
+	settings, err := entadapter.NewBrokerSettingStore(client).GetBrokerSettings(ctx, brokerID)
+	require.NoError(t, err, "broker_settings fixture row must be readable via BrokerSettingStore")
+	require.NotNil(t, settings.Settings.MaxAgents)
+	assert.EqualValues(t, 5, *settings.Settings.MaxAgents)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

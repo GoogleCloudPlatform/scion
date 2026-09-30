@@ -275,6 +275,35 @@ describe('ChatUnreadCounter', () => {
     }
   });
 
+  // ChatUnreadCounter has no sender-identity logic — this just pins that an
+  // inbound event drives a real 0→unread transition through a full refetch.
+  it('updates the badge to a real unread count after a chat-message-received event', async () => {
+    vi.useFakeTimers();
+    let serverDMs: UnreadDM[] = [{ hasUnread: false }];
+    apiFetch.mockImplementation((url: string) => {
+      const body = url.includes('/chat/dms')
+        ? { dms: serverDMs }
+        : { spaces: [{ unreadCount: 0 }] };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getUnreadBadge()).toBe(0);
+
+    try {
+      serverDMs = [{ hasUnread: true }];
+      stateManager.dispatchEvent(
+        new CustomEvent('chat-message-received', { detail: { senderId: 'other-user' } })
+      );
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+
+      expect(getUnreadBadge()).toBe(1);
+    } finally {
+      counter.stop();
+    }
+  });
+
   it('refreshes for a chat notification', async () => {
     vi.useFakeTimers();
     mockChatApi([{ unreadCount: 1 }], []);

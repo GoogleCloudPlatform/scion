@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -168,6 +169,10 @@ type ServerConfig struct {
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. nil means unset — the
+	// fail-safe default (enforced) applies. See brokerQuotasEnforced.
+	EnforceBrokerQuotas *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -314,6 +319,13 @@ type ServerConfig struct {
 	// the AuditRetentionDays pattern. Zero or negative falls back to the
 	// default rather than disabling the sweep.
 	FailedMessageRetentionDays int
+
+	// Experiments is the compiled experiments registry used to resolve
+	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
+	// every reader goes through the nil-safe Server.experimentRegistry(),
+	// which falls back to experiments.Default(). Tests that need a
+	// server-layer experiment inject their own registry here (ptone/scion#2217).
+	Experiments *experiments.Registry
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -387,6 +399,22 @@ func DefaultServerConfig() ServerConfig {
 		StalledThreshold: 5 * time.Minute,
 		BrokerAuthConfig: DefaultBrokerAuthConfig(),
 	}
+}
+
+// brokerQuotasEnforced reports whether the per-broker agent quota cap
+// (max_agents_per_broker) is enforced on create. Fail-safe default: an
+// absent (nil) switch means enforced (design P1-D4/P1-D5).
+//
+// Thread-safe: s.config.EnforceBrokerQuotas is written under s.mu.Lock() by
+// ApplySnapshot (on the admin PUT path, and on every replica via the
+// LISTEN/NOTIFY + 60s poll propagation loop in postgres mode), so it must be
+// read under s.mu.RLock() here — this is called on every QuotaService.Reserve,
+// for every limit, on every create/start/restart/resume/wake.
+func (s *Server) brokerQuotasEnforced() bool {
+	s.mu.RLock()
+	v := s.config.EnforceBrokerQuotas
+	s.mu.RUnlock()
+	return v == nil || *v
 }
 
 // AgentDispatcher is the interface for dispatching agent operations to a runtime broker.
@@ -873,6 +901,7 @@ type Server struct {
 	agentTokenService      *AgentTokenService      // Agent JWT token service
 	userTokenService       *UserTokenService       // User JWT token service
 	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
+	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
 	oauthService           *OAuthService           // OAuth service for CLI authentication
@@ -1147,6 +1176,11 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+
+	// experiments is the compiled feature-flag registry (pkg/experiments).
+	// Nil in production and in most tests; always read through the
+	// nil-safe experimentRegistry() accessor, never directly.
+	experiments *experiments.Registry
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -1260,9 +1294,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
 
 	// Initialize quota enforcement service (Permissions Phase 2B).
+	// limitOverride wires in the ptone/scion#2061 P2 per-broker settings
+	// override (design.md §5.2): see brokerSettingLimitOverride.
 	srv.quotaService = &QuotaService{
 		store:  s,
 		logger: slog.Default().With("component", "quota"),
+		enforced: func(limitName string) bool {
+			return limitName != store.LimitMaxAgentsPerBroker || srv.brokerQuotasEnforced()
+		},
+		limitOverride: srv.brokerSettingLimitOverride,
 	}
 
 	// Per-sender chat send rate limiter (#1054).
@@ -1323,6 +1363,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize the dedicated download-URL signing key (#1792).
 	if err := srv.initDownloadSigningKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the dedicated authorized-list cursor sealing key
+	// (ptone/scion#2124).
+	if err := srv.initListCursorSealer(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1837,6 +1883,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
 
+	srv.experiments = cfg.Experiments
+
 	srv.registerRoutes()
 
 	return srv, nil
@@ -1916,6 +1964,21 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 
 	// Try to load from the secret backend if configured
 	if hasSecretBackend {
+		// Hub-scope signing keys created before ptone/scion#2152 only exist
+		// under the legacy (pre hub-prefix) GCP SM name. Copy the value
+		// forward to the current hub-prefixed name so it is reachable once an
+		// operator narrows IAM to the new prefix, without waiting for an
+		// explicit `migrate-names` run — losing a signing key invalidates
+		// every live session/agent token, so this can't wait on an operator's
+		// schedule the way ordinary secrets can. Idempotent; the legacy
+		// secret is left in place. Best-effort: a failure here just means the
+		// existing (legacy-ref) resolution below is used instead.
+		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+			if copyErr := gcpBackend.CopyHubSecretForward(ctx, keyName); copyErr != nil && copyErr != store.ErrNotFound {
+				slog.Warn("Failed to copy hub signing key forward to hub-prefixed GCP SM name", "key", keyName, "error", copyErr)
+			}
+		}
+
 		sv, err := s.secretBackend.Get(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil {
 			slog.Info("Loaded existing signing key from secret backend", "key", keyName)
@@ -3578,8 +3641,19 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
+		// Log the recorded initiator alongside the executor context set by
+		// the caller (fireEvent / executeSchedule), so a scheduled message is
+		// distinguishable in logs from a live send without changing the live
+		// authorization identity above (cutover rule).
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
-			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
+			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
+			"initiator_principal_kind", initiator.PrincipalKind,
+			"initiator_credential_kind", initiator.CredentialKind,
+			"initiator_credential_id", initiator.CredentialID,
+			"executor_kind", executor.Kind,
+			"executor_id", executor.ID)
 		return nil
 	}
 }
@@ -4073,6 +4147,42 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
 
+		// E.2b: success-path audit for scheduled dispatch. The deny-path
+		// records for this same CanDelegate check are in
+		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
+		// that deny-audit convention (the resolved creator/execution
+		// identity, required non-empty by the ent schema) — the cutover rule
+		// keeps the fire-time execution/authorization identity as CreatedBy,
+		// so the deny and allow audits for the same check agree on who the
+		// actor is.
+		//
+		// The recorded initiator's credential is copied onto the audit ONLY
+		// when the initiator is the same principal as the creator: after an
+		// update or resume by a different user, the initiator is not the
+		// creator, and ApplyActor exists specifically to prevent naming
+		// principal A with principal B's credential. When it does match, the
+		// value is mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// column every other writer fills from that domain, not
+		// InitiatorAttribution's smaller one.
+		scheduledDispatchAudit := &store.MutationAuditRecord{
+			MutationType:       "agent_delegation",
+			ActorPrincipalKind: creatorIdentity.Type(),
+			ActorPrincipalID:   creatorIdentity.ID(),
+			TargetType:         "agent",
+			TargetID:           agent.ID,
+			CanDelegateResult:  "allow",
+		}
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		if !initiator.LegacyUnknown &&
+			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
+				scheduledDispatchAudit.ActorCredentialType = hubKind
+				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
+			}
+		}
+		s.emitMutationAudit(ctx, scheduledDispatchAudit)
+
 		// Record delegation edge (Phase 1G) from the schedule creator to the
 		// dispatched agent. Best-effort: log errors but do not fail dispatch.
 		// Determine delegator type by looking up whether the creator is an agent.
@@ -4090,12 +4200,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
+		dispatchExecutor, _ := ExecutorContextFromContext(ctx)
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			slog.Warn("Scheduler: no dispatcher available, agent created but not started",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
-				"agentName", agent.Name)
+				"agentName", agent.Name,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return nil
 		}
 
@@ -4104,13 +4217,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"agentName", agent.Name,
-				"error", err)
+				"error", err,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"project_id", evt.ProjectID)
+			"project_id", evt.ProjectID,
+			"executor_kind", dispatchExecutor.Kind,
+			"executor_id", dispatchExecutor.ID)
 		return nil
 	}
 }
@@ -4169,6 +4286,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		Status:     store.ScheduledEventPending,
 		CreatedBy:  sched.CreatedBy,
 		ScheduleID: sched.ID,
+		// E.2b: every recurrence copies the schedule's current initiator
+		// attribution verbatim (plan §3.5) — a single struct assignment,
+		// since Schedule and ScheduledEvent share the same mixin. The
+		// materialized event then keeps this snapshot unchanged even if the
+		// schedule is later re-attributed.
+		InitiatorAttribution: sched.InitiatorAttribution,
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
@@ -4185,7 +4308,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		errMsg = fmt.Sprintf("unknown event type: %s", sched.EventType)
 		log.Error("schedule-evaluator: unknown event type", "event_type", sched.EventType)
 	} else {
-		handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// E.2b: mark this as deferred execution of the schedule, distinct
+		// from the initiator attribution just copied onto evt above.
+		handlerCtx, cancel := context.WithTimeout(
+			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
+			30*time.Second)
 		if handlerErr := handler(handlerCtx, evt); handlerErr != nil {
 			errMsg = handlerErr.Error()
 			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)

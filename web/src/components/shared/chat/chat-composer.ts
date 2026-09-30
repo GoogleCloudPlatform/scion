@@ -254,6 +254,13 @@ export class ScionChatComposer extends LitElement {
       this.resetMentionTracking();
       this.focusTextarea();
     }
+    // A new reply target (including switching from one message to another)
+    // must move focus into the textarea, caret at the end of the draft, so
+    // the user can start typing the reply immediately. Clearing `replyTo`
+    // (cancel/send) must not re-steal focus, hence the truthy check.
+    if (changedProperties.has('replyTo') && this.replyTo) {
+      this.focusTextareaCaretEnd();
+    }
     if (changedProperties.has('conversationKey')) {
       // Save the draft for the OLD conversation immediately before switching.
       const oldKey = changedProperties.get('conversationKey') as string;
@@ -1569,6 +1576,53 @@ export class ScionChatComposer extends LitElement {
         }
       });
     });
+  }
+
+  /**
+   * Focus the textarea with the caret placed after the last character of the
+   * current draft. Used for entry points (e.g. Reply) that must not disturb
+   * the existing draft text but still need the caret at a predictable spot
+   * so typing continues the message rather than landing mid-draft.
+   */
+  private focusTextareaCaretEnd(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        void this.applyCaretEndFocus();
+      });
+    });
+  }
+
+  /**
+   * Does the actual work for `focusTextareaCaretEnd()`. If `<sl-textarea>`
+   * has not finished its own first render yet — e.g. `replyTo` is already
+   * set on initial mount, before the child element has upgraded —
+   * `getTextareaElement()` returns null because its shadow DOM doesn't exist
+   * yet. In that case, wait once for the child's own `updateComplete` (if it
+   * exposes one) and retry before giving up. If the inner textarea is still
+   * unavailable, fall back to focusing the `<sl-textarea>` host so focus is
+   * not silently dropped.
+   */
+  private async applyCaretEndFocus(): Promise<void> {
+    let ta = this.getTextareaElement();
+    if (!ta) {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+      const pendingUpdate = (slTextarea as { updateComplete?: Promise<unknown> } | null)
+        ?.updateComplete;
+      if (pendingUpdate) {
+        await pendingUpdate;
+      }
+      ta = this.getTextareaElement();
+    }
+    if (ta) {
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      ta.focus();
+      return;
+    }
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (slTextarea) {
+      (slTextarea as HTMLElement).focus();
+    }
   }
 
   /** Show the right-click send context menu. */

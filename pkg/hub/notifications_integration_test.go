@@ -780,10 +780,19 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, agentNotifs, 1)
 
-	// Verify user notification (stored, not dispatched)
-	userNotifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, DevUserID, false)
-	require.NoError(t, err)
-	assert.Len(t, userNotifs, 1)
+	// Verify user notification (stored, not dispatched). Storing it is a
+	// separate write from the agent-side dispatch polled above, so it may
+	// still be in flight; poll for it too.
+	var userNotifs []store.Notification
+	require.Eventually(t, func() bool {
+		notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, DevUserID, false)
+		if err != nil {
+			return false
+		}
+		userNotifs = notifs
+		return len(userNotifs) >= 1
+	}, 2*time.Second, 50*time.Millisecond, "user notification for %s was never stored", DevUserID)
+	require.Len(t, userNotifs, 1)
 	assert.Equal(t, "COMPLETED", userNotifs[0].Status)
 }
 
