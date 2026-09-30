@@ -200,9 +200,13 @@ func TestProgenyPair_UnreviewedPairDenied(t *testing.T) {
 	}
 
 	// Positive control for the second pass: with the same set, a reviewed
-	// deliver pair builds the progeny candidate.
+	// deliver pair builds the progeny candidate, and the candidate is not
+	// rejected at the relationship_fact stage (the store adapter serves
+	// secret.deliver).
 	d := decidePerm(f.authz, agent, secret, ActionDeliver, "secret.deliver", true)
-	assert.Equal(t, "secret.deliver", relationshipResult(t, d, RelationshipRuleProgeny).Permission)
+	result := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.Equal(t, "secret.deliver", result.Permission)
+	assert.NotEqual(t, RelationshipRejectFact, result.RejectedBy, "reason %q", result.Detail)
 }
 
 // secret.use is denied without a progeny relationship: unrelated ancestry,
