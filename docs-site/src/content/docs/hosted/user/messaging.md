@@ -34,6 +34,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
 - **Zero-Reload Navigation**: Move between threads, project spaces, and configuration pages instantly with deep-linking support and no full-page reloads, ensuring no interruption to your active chat context or log streams.
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
+- **GitHub References**: `owner/repo#N` references in a message automatically link to the corresponding GitHub issue or pull request.
 - **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
 - **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
@@ -53,12 +54,13 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
-- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership and ordering are persisted server-side via user preferences.
+- **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership, ordering and each group's collapsed or expanded state are persisted server-side via your user preferences.
 - **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
 - **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
 - **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
+- **Quick Command Palette** *(rollout)*: When the `web.native_chat_palette` feature flag is enabled (it is off by default and requires native chat v2), Cmd/Ctrl-K opens a grouped, fuzzy-matched palette in place of the flat switcher. Results are grouped into **Agents**, **Threads**, **People** and **Recent Files**. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a recent file opens it in the file viewer. Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. To try it in your own browser, set the `localStorage` key `scion:feature:web.native_chat_palette` to `true`.
 - **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
 - **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
@@ -228,6 +230,8 @@ scion conversation join "#sprint-planning" user user-id
 scion conversation leave "#sprint-planning"
 ```
 
+A direct conversation registers both participants, so DMs you send or receive appear in `scion conversation list`.
+
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
 ## Discord
@@ -261,6 +265,7 @@ Messages are delivered in real-time to the Web Dashboard via Server-Sent Events 
 Messages to agents are never silently dropped:
 
 - **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
+- **Reincarnating recipients.** While an agent is being migrated with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate), messages to it are saved to its conversation history instead of being dispatched or dropped. DMs, group messages and @mentions return `202` with status `deferred`, and a sending agent gets a `DELIVERY_DEFERRED` system notice rather than a failure. The new generation is told to read what it missed with `scion conversation catch-up`. Scheduled messages that fire during a reincarnation fail loudly instead of being deferred.
 - **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
 
 ## Message Authorization & Modes
@@ -477,4 +482,5 @@ The `--cc` flag on `scion message` is deprecated and will be removed in a future
 1. **Deduplication**: If an agent is both `@mentioned` inside the body of a message and explicitly addressed as a recipient, Scion automatically deduplicates the list so they only receive a single `mention` message.
 2. **Project Scope Restriction**: Mentions are restricted to the parent project boundary. Body-mentions can only be resolved and delivered to agents that belong to the *same* project. Unresolved names will result in a warning printed to stderr, but will not fail delivery of the primary message.
 3. **Fan-Out Restrictions**: A single message is fanned out to a maximum of **10 recipients** per `@-mention` broadcast.
+4. **Agent-Authored Mentions**: When an agent's message @mentions another agent, the Hub delivers the mention server-side, authorized like a direct message and charged to the sender's send budget. Mentions between the same pair of agents are also capped (10 deliveries per 10 minutes) to stop mention loops. A mention that is denied or rate-limited is skipped without failing the primary message.
 
