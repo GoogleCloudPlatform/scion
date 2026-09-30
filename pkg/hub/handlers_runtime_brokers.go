@@ -683,6 +683,28 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// heartbeatBroker is loaded at most once per heartbeat, on first use: either
+	// eagerly right below when Capabilities need refreshing, or lazily by
+	// loadHeartbeatBroker the first time an agent's Runtime backfill actually
+	// needs it (ptone/scion#2262). Current brokers report Capabilities on
+	// every heartbeat, so this is normally the one read the Capabilities
+	// refresh already makes, and the Runtime backfill reuses it rather than
+	// adding another. A heartbeat without Capabilities reads the broker only
+	// if some agent needs a Runtime backfill. The error (if any) is cached
+	// alongside the broker so each caller can log it with its own message
+	// and level.
+	var heartbeatBroker *store.RuntimeBroker
+	var heartbeatBrokerErr error
+	var heartbeatBrokerLoaded bool
+	loadHeartbeatBroker := func() (*store.RuntimeBroker, error) {
+		if heartbeatBrokerLoaded {
+			return heartbeatBroker, heartbeatBrokerErr
+		}
+		heartbeatBrokerLoaded = true
+		heartbeatBroker, heartbeatBrokerErr = s.store.GetRuntimeBroker(ctx, id)
+		return heartbeatBroker, heartbeatBrokerErr
+	}
+
 	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
 	// reports them, so an already-registered broker's capabilities are never
 	// stuck at whatever CompleteBrokerJoin saw once at join time — the false
@@ -691,7 +713,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// all, and the store keeps whatever it already had (nil-safe: a missing
 	// field, not an empty struct, is the "don't touch" signal).
 	if heartbeat.Capabilities != nil {
-		if broker, err := s.store.GetRuntimeBroker(ctx, id); err != nil {
+		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
 				"broker_id", id, "error", err)
 		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
@@ -939,6 +961,40 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 				agent.AppliedConfig.Profile = agentHB.Profile
 				needsUpdate = true
+			}
+			// Companion to the Profile backfill above: when Runtime is
+			// still empty, resolve it from the applied profile (or from the
+			// broker's single shared profile type when the profile is
+			// unknown or unmatched) (ptone/scion#2262). This only fires for
+			// the broker sending this heartbeat, which is the broker the
+			// agent is actually running on.
+			//
+			// Runtime is persisted here (not left purely derived, the way
+			// display-time enrichment computes it on every read) because a
+			// couple of raw, unenriched reads of store.Agent surface it
+			// directly: restoreAgent publishes AgentCreatedEvent and returns
+			// agent.ToAPI() without enrichment (handlers_agent_messaging.go),
+			// and the agent-create path re-reads the row before publishing
+			// its own AgentCreatedEvent (handlers_agents_core.go) — so a
+			// heartbeat that backfills Runtime before either of those runs
+			// is reflected there.
+			//
+			// Only fires when Runtime is empty. The only other writer of a
+			// non-empty Runtime for a broker-hosted agent is the dispatch
+			// response path (httpdispatcher.go's applyBrokerResponse), which
+			// sets Runtime from the broker's own AgentInfo for the agent it
+			// actually started (recording Profile too when AppliedConfig
+			// exists), so it is authoritative and must never be overwritten
+			// by a resolveAgentRuntime guess here, even when a
+			// newly-backfilled Profile would resolve to a different value.
+			if agent.Runtime == "" {
+				broker, err := loadHeartbeatBroker()
+				if err != nil {
+					s.agentLifecycleLog.Debug("heartbeat: failed to load broker for runtime backfill", "broker_id", id, "error", err)
+				} else if rt := resolveAgentRuntime(agent, broker); rt != "" {
+					agent.Runtime = rt
+					needsUpdate = true
+				}
 			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
