@@ -14,10 +14,13 @@
 
 //go:build !no_sqlite
 
-// Full-chain API tests for GET /api/v1/experiments and
-// GET|PUT|DELETE /api/v1/admin/experiments (ptone/scion#2217). Every test in
-// this file runs through srv.Handler(), including UnifiedAuthMiddleware and
-// the route guard, using a real sqlite-backed store and OperationalSettings.
+// API tests for GET /api/v1/experiments and GET|PUT|DELETE
+// /api/v1/admin/experiments (ptone/scion#2217). The HTTP tests in this file
+// run through srv.Handler(), including UnifiedAuthMiddleware and the route
+// guard, using a real sqlite-backed store and OperationalSettings. A few unit
+// tests call the route table, the response builder, or the handler directly
+// where the chain adds nothing (nil OperationalSettings, the post-write
+// attribution fallback).
 package hub
 
 import (
@@ -1226,7 +1229,7 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 	})
 }
 
-// --- Generic section-reset rejection (round-5 disposition #1) ---
+// --- Generic section-reset rejection (ptone/scion#2217) ---
 
 func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
