@@ -798,6 +798,85 @@ class CodexProvisionTest(unittest.TestCase):
             f"expected a warning naming the failed fallback, got: {warnings}",
         )
 
+    def test_reconcile_codex_toml_preserves_nested_table_when_full_edit_is_rejected(self) -> None:
+        # Regression test for ptone/scion#2365 review round 5 (N1): the
+        # round-4 fix (_toml_edit_preserves comparing the whole parsed
+        # document, not just top-level scalars) has no test pinning its
+        # actual point — that a *nested* table like a user's own
+        # [profiles.fast] is protected too, not just top-level keys. A
+        # "shallow" mutant that only compares top-level scalar values (or
+        # skips dict-valued keys) would pass every other test in this file
+        # while silently dropping profiles.fast's contents on exactly this
+        # input, since the unbalanced "[" in the multi-line string hides
+        # the real [profiles.fast] header from the line-oriented editor the
+        # same way the round-3/round-4 repros hid other headers.
+        original = (
+            'developer_instructions = """\n'
+            "use [ brackets\n"
+            '"""\n'
+            "[profiles.fast]\n"
+            'model = "fast-model"\n'
+            'model_reasoning_effort = "low"\n'
+        )
+
+        after, warnings = self._reconcile_and_capture(original, model=None, reasoning_effort=None)
+        data = tomllib.loads(after)
+
+        self.assertEqual(
+            data["profiles"]["fast"],
+            {"model": "fast-model", "model_reasoning_effort": "low"},
+        )
+        self.assertTrue(any("telemetry" in w for w in warnings), f"expected a fallback warning, got: {warnings}")
+
+    def test_reconcile_codex_toml_warns_when_stale_top_level_model_survives(self) -> None:
+        # Regression test for ptone/scion#2365 review round 5 (N3): a
+        # header-shaped line inside an earlier top-level multi-line string
+        # can hide the real table header that would otherwise let
+        # _strip_toml_top_level_key find and remove a later, genuinely
+        # top-level `model` line. With SCION_MODEL empty (model=None),
+        # nothing replaces that stale value, so codex runs on it with no
+        # --model argv either — this is observability only (a warning),
+        # not a behavior change: the file content is unaffected.
+        original = (
+            'developer_instructions = """\n'
+            "[foo]\n"
+            '"""\n'
+            'model = "gpt-5.5"\n'
+            "[features]\n"
+            "hooks = true\n"
+        )
+
+        after, warnings = self._reconcile_and_capture(original, model=None)
+        data = tomllib.loads(after)
+
+        self.assertEqual(data.get("model"), "gpt-5.5", "stale model is expected to survive; this is observability only")
+        self.assertTrue(
+            any("stale" in w.lower() or "still sets top-level model" in w for w in warnings),
+            f"expected a stale-model warning to be logged, got: {warnings}",
+        )
+
+    def test_warn_if_stale_top_level_model_survives_is_silent_when_model_provided(self) -> None:
+        warnings: list[str] = []
+        ctx = _test_ctx()
+        ctx.info = warnings.append  # type: ignore[method-assign]
+        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', "gpt-5.5")
+        self.assertEqual(warnings, [])
+
+    def test_warn_if_stale_top_level_model_survives_is_silent_when_no_model_key(self) -> None:
+        warnings: list[str] = []
+        ctx = _test_ctx()
+        ctx.info = warnings.append  # type: ignore[method-assign]
+        provision._warn_if_stale_top_level_model_survives(ctx, "other_key = 1\n", None)
+        self.assertEqual(warnings, [])
+
+    def test_warn_if_stale_top_level_model_survives_warns_on_stale_model(self) -> None:
+        warnings: list[str] = []
+        ctx = _test_ctx()
+        ctx.info = warnings.append  # type: ignore[method-assign]
+        provision._warn_if_stale_top_level_model_survives(ctx, 'model = "gpt-5.5"\n', None)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("gpt-5.5", warnings[0])
+
     def test_toml_edit_preserves_accepts_valid_content_with_matching_model_and_effort(self) -> None:
         self.assertTrue(
             provision._toml_edit_preserves(
@@ -809,10 +888,20 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertFalse(provision._toml_edit_preserves("", "model = [unterminated\n", "x", None))
 
     def test_toml_edit_preserves_rejects_missing_top_level_model(self) -> None:
-        self.assertFalse(provision._toml_edit_preserves("", '[table]\nmodel = "x"\n', "x", None))
+        # ptone/scion#2365 review round 5 (N2): use an identical
+        # original/content baseline so the unmanaged-content diff trivially
+        # passes and only the explicit model check can reject this — an
+        # empty `original` (as in the pre-round-5 version of this test)
+        # made the unmanaged diff itself the reason for rejection ([table]
+        # appearing where nothing existed before), so the model check could
+        # be deleted entirely without this test noticing.
+        baseline = '[table]\nmodel = "x"\n'
+        self.assertFalse(provision._toml_edit_preserves(baseline, baseline, "x", None))
 
     def test_toml_edit_preserves_rejects_missing_top_level_effort(self) -> None:
-        self.assertFalse(provision._toml_edit_preserves("", '[table]\nmodel_reasoning_effort = "high"\n', None, "high"))
+        # Same fix as the model test above, for the effort check.
+        baseline = '[table]\nmodel_reasoning_effort = "high"\n'
+        self.assertFalse(provision._toml_edit_preserves(baseline, baseline, None, "high"))
 
     def test_toml_edit_preserves_ignores_model_and_effort_when_none_expected(self) -> None:
         self.assertTrue(provision._toml_edit_preserves("other_key = 1\n", "other_key = 1\n", None, None))

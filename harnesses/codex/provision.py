@@ -437,6 +437,42 @@ def _toml_edit_preserves(
     return _unmanaged(before) == _unmanaged(after)
 
 
+def _warn_if_stale_top_level_model_survives(
+    ctx: scion_harness.ProvisionContext, content: str, model: str | None
+) -> None:
+    """Logs an observability warning when SCION_MODEL was empty (no model
+    for this script to write) but `content` — whichever variant is about to
+    be committed to disk — still has a top-level `model` key left over from
+    a prior provision or a hand-edited file.
+
+    This can happen when a header-shaped line inside an earlier top-level
+    multi-line string hides the real table header that would otherwise let
+    _strip_toml_top_level_key find and remove a later, genuinely top-level
+    `model` line (ptone/scion#2365 review round 5, N3). It's purely
+    observational, logging only, with no change to what gets written:
+    rejecting the edit wouldn't help, since every fallback path keeps
+    whatever `content` already has for keys it doesn't own, and this stale
+    key is exactly such an unowned survivor. Without SCION_MODEL there's no
+    `--model` argv either, so codex will actually run on this stale value —
+    worth surfacing in provision logs even though nothing here can fix it.
+    """
+    if model:
+        return
+    try:
+        parsed = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return
+    stale = parsed.get("model")
+    if stale:
+        ctx.info(
+            f"config.toml still sets top-level model={stale!r} with no "
+            "SCION_MODEL to replace it (a header-shaped line earlier in "
+            "the file may be hiding it from this script's line-oriented "
+            "strip); codex will use it, since no --model argv is passed "
+            "either."
+        )
+
+
 def _reconcile_codex_toml(
     ctx: scion_harness.ProvisionContext,
     telemetry: dict[str, Any] | None,
@@ -475,6 +511,7 @@ def _reconcile_codex_toml(
     content = _with_reconciled_otel(content)
 
     if _toml_edit_preserves(original, content, model, reasoning_effort):
+        _warn_if_stale_top_level_model_survives(ctx, content, model)
         scion_harness.atomic_write_text(config_path, content)
         return
 
@@ -501,6 +538,7 @@ def _reconcile_codex_toml(
             "editor doesn't fully understand, e.g. a multi-line string "
             "containing a header-shaped or key-shaped line."
         )
+        _warn_if_stale_top_level_model_survives(ctx, otel_only_content, model)
         scion_harness.atomic_write_text(config_path, otel_only_content)
         return
 
@@ -510,6 +548,7 @@ def _reconcile_codex_toml(
         "untouched rather than risk corrupting or silently altering "
         "existing settings."
     )
+    _warn_if_stale_top_level_model_survives(ctx, original, model)
 
 
 # --- MCP server emission ---------------------------------------------------
