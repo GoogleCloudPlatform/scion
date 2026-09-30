@@ -319,6 +319,77 @@ func TestMappingDialect_Parse_TokenFieldMappings(t *testing.T) {
 	assert.Equal(t, int64(50), event.Data.CachedTokens)
 }
 
+// TestMappingDialect_Parse_CacheWriteAndReasoningTokenFieldMappings pins the
+// two new explicit yaml field targets (design §3.7 "Hook token plumbing"):
+// cache_write_tokens and reasoning_tokens, parsed the same way as the
+// existing token fields (positive int64 only; zero, negative and a missing
+// path all leave the field unset).
+func TestMappingDialect_Parse_CacheWriteAndReasoningTokenFieldMappings(t *testing.T) {
+	spec := MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "event",
+		Mappings: map[string]MappingEntrySpec{
+			"ModelDone": {
+				Event: hooks.EventModelEnd,
+				Fields: map[string]string{
+					"cache_write_tokens": ".stats.cacheWriteTokens",
+					"reasoning_tokens":   ".stats.reasoningTokens",
+				},
+			},
+		},
+	}
+	md := NewMappingDialect(spec)
+
+	t.Run("positive", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(30),
+				"reasoningTokens":  float64(15),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(30), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(15), event.Data.ReasoningTokens)
+	})
+
+	t.Run("zero", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(0),
+				"reasoningTokens":  float64(0),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+
+	t.Run("negative", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{
+				"cacheWriteTokens": float64(-5),
+				"reasoningTokens":  float64(-1),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"event": "ModelDone",
+			"stats": map[string]interface{}{},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), event.Data.ReasoningTokens)
+	})
+}
+
 func TestMappingDialect_Parse_TokenExtraction(t *testing.T) {
 	md := NewMappingDialect(MappingDialectSpec{
 		Dialect:        "test",

@@ -109,11 +109,17 @@ func isMintingOperation(action Action) bool {
 //     - Genuine store fault: fail closed for minting, open for reads.
 //  4. The Grandfathered flag is provenance metadata only — never used in
 //     allow/deny decisions.
+//
+// cause, when non-nil, receives a structural classification of the deny
+// (see DenyCause) for the specific sub-cases callers need to distinguish.
+// It is left at its zero value ("") for every other outcome, including
+// allows and denials with no dedicated classification.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
 	req AuthzRequest,
 	agentID string,
 	explain *[]DecisionStep,
+	cause *DenyCause,
 ) (bool, string, error) {
 	// Derive scope from the principal's own project, not from the resource.
 	// The agent's project ID is always available from the identity and matches
@@ -143,7 +149,7 @@ func (a *AuthzService) checkDelegationCeiling(
 		scopeID = resourceProjectID
 	}
 
-	return a.walkDelegationChain(ctx, req, store.DelegationPrincipalAgent, agentID, req.Principal.Identity, scopeType, scopeID, explain, 0)
+	return a.walkDelegationChain(ctx, req, store.DelegationPrincipalAgent, agentID, req.Principal.Identity, scopeType, scopeID, explain, 0, cause)
 }
 
 // maxDelegationDepth limits the delegation chain walk to prevent infinite loops.
@@ -163,6 +169,7 @@ func (a *AuthzService) walkDelegationChain(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	depth int,
+	cause *DenyCause,
 ) (bool, string, error) {
 	if depth > maxDelegationDepth {
 		return false, "delegation chain exceeded maximum depth", nil
@@ -302,7 +309,7 @@ func (a *AuthzService) walkDelegationChain(
 					// "system/migration" principal). Freeze ceiling at the
 					// agent's own recorded role — allow reads at current
 					// level, deny minting to prevent escalation.
-					return a.handleOrphanedDelegation(ctx, req, principalID, edge, permissionID, explain)
+					return a.handleOrphanedDelegation(ctx, req, principalID, edge, permissionID, explain, cause)
 				}
 				// Genuine store fault — fail closed unless read-only.
 				if !isReadOnlyOperation(req.Action) {
@@ -316,6 +323,9 @@ func (a *AuthzService) walkDelegationChain(
 						Step:   "delegation_ceiling_denied",
 						Detail: fmt.Sprintf("delegator user %s no longer holds permission %s: %s", edge.DelegatorID, permissionID, reason),
 					})
+				}
+				if cause != nil {
+					*cause = DenyCauseCeilingDelegatorLacksPermission
 				}
 				return false, fmt.Sprintf("delegator %s no longer holds %s", edge.DelegatorID, permissionID), nil
 			}
@@ -333,7 +343,7 @@ func (a *AuthzService) walkDelegationChain(
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					// Delegator agent definitively does not exist.
-					return a.handleOrphanedDelegation(ctx, req, principalID, edge, permissionID, explain)
+					return a.handleOrphanedDelegation(ctx, req, principalID, edge, permissionID, explain, cause)
 				}
 				// Genuine store fault — fail closed unless read-only.
 				if !isReadOnlyOperation(req.Action) {
@@ -348,11 +358,14 @@ func (a *AuthzService) walkDelegationChain(
 						Detail: fmt.Sprintf("delegator agent %s no longer holds permission %s: %s", edge.DelegatorID, permissionID, reason),
 					})
 				}
+				if cause != nil {
+					*cause = DenyCauseCeilingDelegatorLacksPermission
+				}
 				return false, fmt.Sprintf("delegator agent %s no longer holds %s: %s", edge.DelegatorID, permissionID, reason), nil
 			}
 
 			// The parent agent holds the permission, but we need to walk further up.
-			chainAllowed, chainReason, chainErr := a.walkDelegationChain(ctx, req, store.DelegationPrincipalAgent, edge.DelegatorID, nil, scopeType, scopeID, explain, depth+1)
+			chainAllowed, chainReason, chainErr := a.walkDelegationChain(ctx, req, store.DelegationPrincipalAgent, edge.DelegatorID, nil, scopeType, scopeID, explain, depth+1, cause)
 			if chainErr != nil {
 				if !isReadOnlyOperation(req.Action) {
 					return false, "delegation ceiling check failed (fail-closed): " + chainErr.Error(), chainErr
@@ -380,6 +393,10 @@ func (a *AuthzService) walkDelegationChain(
 // resolved (ErrNotFound). This covers synthetic principals like
 // "system/migration" and deleted delegators. The agent keeps its current
 // permissions (reads work at its recorded role) but cannot mint or escalate.
+//
+// cause, when non-nil, is set to DenyCauseCeilingOrphaned on every deny
+// returned from here — they all share the same root fact (the delegator
+// does not resolve), regardless of which sub-case produced the denial.
 func (a *AuthzService) handleOrphanedDelegation(
 	ctx context.Context,
 	req AuthzRequest,
@@ -387,6 +404,7 @@ func (a *AuthzService) handleOrphanedDelegation(
 	edge *store.DelegationEdge,
 	permissionID string,
 	explain *[]DecisionStep,
+	cause *DenyCause,
 ) (bool, string, error) {
 	a.logger.Info("Orphaned delegation: delegator not found, ceiling frozen at agent's own role",
 		"agent_id", agentID,
@@ -403,6 +421,9 @@ func (a *AuthzService) handleOrphanedDelegation(
 				Detail: fmt.Sprintf("delegator %s:%s not found; minting denied (ceiling frozen)", edge.DelegatorType, edge.DelegatorID),
 			})
 		}
+		if cause != nil {
+			*cause = DenyCauseCeilingOrphaned
+		}
 		return false, fmt.Sprintf("delegator %s not found; minting denied (orphaned delegation)", edge.DelegatorID), nil
 	}
 
@@ -415,6 +436,9 @@ func (a *AuthzService) handleOrphanedDelegation(
 				Step:   "delegation_ceiling_orphaned_deny_mutation",
 				Detail: fmt.Sprintf("delegator %s:%s not found; non-read-only action %s denied (ceiling frozen)", edge.DelegatorType, edge.DelegatorID, req.Action),
 			})
+		}
+		if cause != nil {
+			*cause = DenyCauseCeilingOrphaned
 		}
 		return false, fmt.Sprintf("delegator %s not found; non-read-only action %s denied (orphaned delegation)", edge.DelegatorID, req.Action), nil
 	}
@@ -455,6 +479,9 @@ func (a *AuthzService) handleOrphanedDelegation(
 					Detail: fmt.Sprintf("delegator %s:%s not found; permission %s has no agent scope mapping — denied", edge.DelegatorType, edge.DelegatorID, permissionID),
 				})
 			}
+			if cause != nil {
+				*cause = DenyCauseCeilingOrphaned
+			}
 			return false, fmt.Sprintf("orphaned delegation: unmapped permission %s denied", permissionID), nil
 		}
 		// Known read/list permission — allow at the agent's frozen
@@ -485,6 +512,9 @@ func (a *AuthzService) handleOrphanedDelegation(
 			Step:   "delegation_ceiling_orphaned_deny_scope",
 			Detail: fmt.Sprintf("delegator %s:%s not found; scope %s not in frozen ceiling (role=%s)", edge.DelegatorType, edge.DelegatorID, requiredScope, edge.Role),
 		})
+	}
+	if cause != nil {
+		*cause = DenyCauseCeilingOrphaned
 	}
 	return false, fmt.Sprintf("orphaned delegation: scope %s exceeds frozen ceiling (role=%s)", requiredScope, edge.Role), nil
 }
@@ -595,7 +625,7 @@ func (a *AuthzService) getCachedEffectivePermissions(ctx context.Context, princi
 }
 
 // checkUserHoldsPermission checks if a user still holds a specific permission
-// via their role bindings and policy grants.
+// via their role bindings (system- and project-scoped).
 func (a *AuthzService) checkUserHoldsPermission(
 	ctx context.Context,
 	userID, permissionID, scopeType, scopeID string,

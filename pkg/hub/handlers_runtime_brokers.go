@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -270,35 +271,64 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess
+	// Resource type must be permissions.ResourceBroker, not "runtime_broker"
+	// — the latter has no registry entry, so it silently denied every user
+	// identity.
+	//
+	// No-identity and non-user/non-broker-self callers are rejected before
+	// touching the store: that decision doesn't depend on whether the broker
+	// exists, so it stays ahead of the fetch below.
+	brokerSelf := false
+	var userIdent UserIdentity
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
-		// Broker accessing its own record — allowed
+		brokerSelf = true
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionRead, "no identity")
+			logAuthzDenial(r, nil, Resource{Type: permissions.ResourceBroker, ID: id}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionRead)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionRead, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionRead, "non-user non-broker identity")
+		var ok bool
+		userIdent, ok = identity.(UserIdentity)
+		if !ok {
+			logAuthzDenial(r, identity, Resource{Type: permissions.ResourceBroker, ID: id}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
 	}
 
+	// writeStoreErr, not writeErrorFromErr: the CheckAccess denial below
+	// writes the same "RuntimeBroker not found" body via NotFound, and a
+	// nonexistent broker must be indistinguishable from a denied one on the
+	// wire, body included — see the comment on that branch below.
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "RuntimeBroker")
 		return
+	}
+
+	// Authorize the resolved broker (self-access already established above).
+	// Using brokerResource(broker) — rather than a hand-typed literal —
+	// carries OwnerID, so the creator's ownership relationship grant applies
+	// the same way it does for update/delete.
+	//
+	// This is a read surface, not a mutation, so a denial is reported as 404
+	// rather than 403 — matching getProject (handlers_projects_core.go) and
+	// the authorizeRead helper's read surfaces (template_handlers.go,
+	// harness_config_handlers.go) elsewhere in this package: a caller who
+	// cannot read the broker must not be able to distinguish "exists but
+	// denied" from "does not exist" by probing IDs. That only holds if both
+	// branches write the identical body, which is why the store lookup just
+	// above also uses writeStoreErr(..., "RuntimeBroker") instead of a bare
+	// writeErrorFromErr.
+	if !brokerSelf {
+		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionRead)
+		if !decision.Allowed {
+			logAuthzDenial(r, userIdent, brokerResource(broker), ActionRead, decision.Reason)
+			NotFound(w, "RuntimeBroker")
+			return
+		}
 	}
 
 	// Enrich CreatedByName
@@ -940,36 +970,47 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess
+	// Resource type must be permissions.ResourceBroker, not "runtime_broker"
+	// — see getRuntimeBroker for the full explanation.
+	brokerSelf := false
+	var identity Identity
+	var userIdent UserIdentity
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
-		// Broker accessing its own project list — allowed
+		brokerSelf = true
 	} else {
-		identity := GetIdentityFromContext(ctx)
+		identity = GetIdentityFromContext(ctx)
 		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "no identity")
+			logAuthzDenial(r, nil, Resource{Type: permissions.ResourceBroker, ID: brokerID}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: brokerID}, ActionRead)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "non-user non-broker identity")
+		var ok bool
+		userIdent, ok = identity.(UserIdentity)
+		if !ok {
+			logAuthzDenial(r, identity, Resource{Type: permissions.ResourceBroker, ID: brokerID}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
 	}
 
-	// Verify broker exists
-	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	// Verify broker exists (also gives us OwnerID for the ownership grant).
+	// writeStoreErr, not writeErrorFromErr — see getRuntimeBroker: the denial
+	// branch below must write the identical body a nonexistent broker gets.
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		writeStoreErr(w, err, "RuntimeBroker")
 		return
+	}
+
+	// This is a read surface, not a mutation, so a denial is reported as 404
+	// rather than 403 — see getRuntimeBroker for the full explanation.
+	if !brokerSelf {
+		decision := s.authzService.CheckAccess(ctx, userIdent, brokerResource(broker), ActionRead)
+		if !decision.Allowed {
+			logAuthzDenial(r, userIdent, brokerResource(broker), ActionRead, decision.Reason)
+			NotFound(w, "RuntimeBroker")
+			return
+		}
 	}
 
 	// Get all projects this broker provides for
@@ -979,16 +1020,75 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		return
 	}
 
-	// Build response with project details
+	// Resolve project records up front: needed both for the response body
+	// and for the per-project read filter below. A project that no longer
+	// exists (its provider record not yet cleaned up) is left unenriched —
+	// listed by ID and LocalPath only, still subject to the read filter
+	// below, with no name or git remote — rather than an error; any other
+	// store error — a connection failure, for example — is propagated
+	// instead of silently producing an incomplete list.
+	projectsByID := make(map[string]*store.Project, len(providers))
+	for _, p := range providers {
+		project, err := s.store.GetProject(ctx, p.ProjectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		projectsByID[p.ProjectID] = project
+	}
+
+	// Cross-project disclosure guard: broker.read authorizes reading the
+	// BROKER record, but must not double as project.read for every project
+	// the broker happens to serve — an auto-provide broker can serve every
+	// project on the hub, so
+	// without this filter any hub member could recover the whole hub's
+	// project catalogue (names, git remotes) through this endpoint. Filter
+	// the provider list down to projects the caller can actually read,
+	// through the normal project authz path (so admins keep their usual
+	// bypass). The broker's own self-identity needs the unfiltered list to
+	// operate and is exempt, matching every other self-access branch in this
+	// file.
+	readable := make(map[string]bool, len(providers))
+	if brokerSelf {
+		for _, p := range providers {
+			readable[p.ProjectID] = true
+		}
+	} else {
+		resources := make([]Resource, len(providers))
+		for i, p := range providers {
+			if project, ok := projectsByID[p.ProjectID]; ok {
+				resources[i] = projectResource(project)
+			} else {
+				resources[i] = Resource{Type: permissions.ResourceProject, ID: p.ProjectID}
+			}
+		}
+		allowed, err := s.authzService.AuthorizeReadBatch(ctx, identity, resources)
+		if err != nil {
+			// Fail closed: an authorization-store error must not leak
+			// project names or git remotes.
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		for i, p := range providers {
+			readable[p.ProjectID] = allowed[i]
+		}
+	}
+
+	// Build response with project details, respecting the read filter.
 	projects := make([]BrokerProjectInfo, 0, len(providers))
 	for _, p := range providers {
+		if !readable[p.ProjectID] {
+			continue
+		}
+
 		info := BrokerProjectInfo{
 			ProjectID: p.ProjectID,
 			LocalPath: p.LocalPath,
 		}
-
-		// Fetch project details for name and git remote
-		if project, err := s.store.GetProject(ctx, p.ProjectID); err == nil {
+		if project, ok := projectsByID[p.ProjectID]; ok {
 			info.ProjectName = project.Name
 			info.GitRemote = project.GitRemote
 		}

@@ -1336,6 +1336,23 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	// substitutes for the other.
 	var embeddedBroker *store.RuntimeBroker
 	if req.Broker != nil {
+		// SECURITY-GATE: broker.create — the same gate createBrokerRegistration
+		// (handlers_brokers.go) requires for every user-credential POST
+		// /brokers path. This deprecated embedded-broker path creates a
+		// broker record and mints its HMAC secret exactly like that endpoint
+		// does, so it must clear the identical permission before the lookup
+		// below (whether this turns out to be a brand-new broker or a
+		// re-mint of an existing one) and before any project mutation.
+		// Reusing authorizeBrokerCreate rather than a parallel check means a
+		// caller cannot get broker-creation authority here that POST
+		// /brokers would deny them. broker.create authorizes creating and
+		// re-minting the broker's own credential only — it does not infer or
+		// grant this project's sharing/default-provider status, which is
+		// decided separately below.
+		if !s.authorizeBrokerCreate(w, r) {
+			return
+		}
+
 		embeddedBrokerID := req.Broker.ID
 		var embeddedBrokerMatchedByID bool
 
@@ -2265,15 +2282,13 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // shares that function's writeAgentGetResponse for the response body itself,
 // so the two routes cannot drift on what a single-agent response looks like.
 //
-// An agent-JWT caller reading itself is exempted from that permission check,
-// matching this route's existing, tested contract
+// An agent-JWT caller reading itself is exempted from that permission check
 // (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
-// has no AgentScopes mapping, so the strict check would deny even an agent
-// reading its own record, which is not this route's history and not what
-// that test expects. Reading a *different* agent -- project peer or not --
-// still goes through the same agent.read check as getAgent and is denied by
-// it (CO1), matching the security expectation the sibling test for that
-// route documents.
+// has no AgentScopes mapping, so the strict check would otherwise deny even
+// an agent reading its own record. getAgent applies the same exemption.
+// Reading a *different* agent in the caller's project still goes through
+// the same agent.read check as getAgent and is denied by it (CO1); an agent
+// in another project is answered 404 before that check.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
 		return

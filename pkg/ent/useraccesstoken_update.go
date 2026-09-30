@@ -269,6 +269,12 @@ func (_u *UserAccessTokenUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if _u.mutation.LastUsedCleared() {
 		_spec.ClearField(useraccesstoken.FieldLastUsed, field.TypeTime)
 	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(useraccesstoken.FieldPurpose, field.TypeString)
+	}
+	if _u.mutation.LabelsCleared() {
+		_spec.ClearField(useraccesstoken.FieldLabels, field.TypeString)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{useraccesstoken.Label}
@@ -558,6 +564,12 @@ func (_u *UserAccessTokenUpdateOne) sqlSave(ctx context.Context) (_node *UserAcc
 	}
 	if _u.mutation.LastUsedCleared() {
 		_spec.ClearField(useraccesstoken.FieldLastUsed, field.TypeTime)
+	}
+	if _u.mutation.PurposeCleared() {
+		_spec.ClearField(useraccesstoken.FieldPurpose, field.TypeString)
+	}
+	if _u.mutation.LabelsCleared() {
+		_spec.ClearField(useraccesstoken.FieldLabels, field.TypeString)
 	}
 	_node = &UserAccessToken{config: _u.config}
 	_spec.Assign = _node.assignValues

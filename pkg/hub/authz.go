@@ -151,6 +151,12 @@ type CredentialContext struct {
 	Type      string
 	ProjectID string
 	Scopes    []string
+
+	// E.1 descriptive credential metadata. Decoration is additive,
+	// server-derived attribution (token name/boundary/purpose/labels) for
+	// logs and audit. It is never read by authorization decisions — see
+	// TestCredentialDecorationNotReadByAuthzCode.
+	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -201,11 +207,45 @@ type Decision struct {
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
 
+	// DenyCause classifies certain deny decisions structurally, so callers
+	// can react to *why* access was denied without parsing or matching
+	// substrings of Reason (which is prose, for logs and explain, and is
+	// free to change wording). Set by Step 10 (the agent delegation
+	// ceiling) for a SUBSET of ceiling denials only — see the DenyCause
+	// constants for which ones. Other ceiling denials (e.g. max depth, no
+	// edge, duplicate active edges), and all non-ceiling denials, leave it
+	// at its zero value.
+	DenyCause DenyCause `json:"denyCause,omitempty"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
+
+// DenyCause is a structural tag for a subset of deny reasons that callers
+// need to distinguish without string-matching Reason. It is deliberately
+// small and closed: only the causes a caller actually branches on get a
+// value here, everything else is the zero value ("").
+type DenyCause string
+
+const (
+	// DenyCauseCeilingOrphaned marks a delegation-ceiling deny where the
+	// delegator (the principal that created the agent, directly or
+	// transitively) no longer resolves at all — e.g. its user was deleted.
+	DenyCauseCeilingOrphaned DenyCause = "ceiling_orphaned"
+
+	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
+	// deny where the delegator still exists but no longer holds the
+	// permission being exercised.
+	DenyCauseCeilingDelegatorLacksPermission DenyCause = "ceiling_delegator_lacks_permission"
+
+	// DenyCauseCeilingError marks a delegation-ceiling deny caused by a
+	// transient or internal fault (e.g. a store error) rather than a
+	// policy fact about the delegator. Callers should treat this like an
+	// ordinary denial, not surface it as a specific reason.
+	DenyCauseCeilingError DenyCause = "ceiling_error"
+)
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
@@ -460,29 +500,16 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// ── Step 5c: Skill scope containment (ptone/scion#1901) ───────────
-	// The curated hub-member/hub-viewer roles carry skill.read/skill.list at
-	// system scope purely so every hub member can browse the hub-wide
-	// (global/core) skill catalog. That grant must not leak into user- or
-	// project-scoped skills; see filterHubWideSkillGrants.
-	if request.Resource.Type == "skill" {
-		candidates = filterHubWideSkillGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-
-	// ── Step 5d/5e: Template and harness-config scope containment
-	// (ptone/scion#1916) ────────────────────────────────────────────────
-	// Same shape as step 5c: the curated hub-member/hub-viewer roles also
-	// carry template.read/list and harness_config.read/list at system
-	// scope, purely so every hub member can browse the hub-wide (global)
-	// catalog. That grant must not leak into user- or project-scoped
-	// records; see filterHubWideTemplateGrants and
-	// filterHubWideHarnessConfigGrants.
-	if request.Resource.Type == "template" {
-		candidates = filterHubWideTemplateGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
-	if request.Resource.Type == "harness_config" {
-		candidates = filterHubWideHarnessConfigGrants(candidates, roleDefs, request.Resource.ScopeKind)
-	}
+	// ── Step 5c/5d/5e: Hub-wide catalog scope containment (ptone/scion#1901,
+	// #1916) ───────────────────────────────────────────────────────────
+	// The curated hub-member/hub-viewer roles carry skill/template/
+	// harness_config read/list at system scope purely so every hub member
+	// can browse the hub-wide (global/core) catalog. That grant must not
+	// leak into user- or project-scoped records. applyHubWideScopeFilters
+	// (authz_boundary.go) is the single shared dispatcher for this rule —
+	// ptone/scion#2117's SystemAuthorityProof/MintTimeSystemGrant call the
+	// exact same function, so the two paths cannot drift apart.
+	candidates = applyHubWideScopeFilters(candidates, roleDefs, ProjectTargetClass{ResourceType: request.Resource.Type, ScopeKind: request.Resource.ScopeKind})
 
 	// ── Step 6: Build resource context ────────────────────────────────
 	resourceCtx := ResourceContext{
@@ -555,15 +582,18 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil)
+			var ceilingCause DenyCause
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				if !isReadOnlyOperation(request.Action) {
 					decision.Allowed = false
 					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+					decision.DenyCause = DenyCauseCeilingError
 				}
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.DenyCause = ceilingCause
 			}
 		}
 	}
@@ -1193,14 +1223,19 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 }
 
 // loadAccessConstraintRestrictions loads active access constraints from the
-// store and converts them to kernel restrictions.
+// store and converts them to kernel restrictions. On a load error it fails
+// closed by returning a deny-all restriction. Decide (no error return),
+// getEffectivePermissions and getProjectScopedPermissions call this form and
+// keep that behaviour. A caller with its own error return that needs a load
+// failure to surface as an error instead should call
+// accessConstraintRestrictions directly; see SystemAuthorityProof and
+// CanMintSelector's mint-time helpers.
 func (a *AuthzService) loadAccessConstraintRestrictions(
 	ctx context.Context,
 	closure map[string]struct{},
 	resource ResourceContext,
 ) []Restriction {
-	// R-1 fix: page through all constraints instead of capping at 200.
-	constraints, err := a.loadAllAccessConstraints(ctx)
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resource)
 	if err != nil {
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
@@ -1212,8 +1247,29 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 			// nil Check denies everything.
 		}}
 	}
+	return restrictions
+}
+
+// accessConstraintRestrictions is loadAccessConstraintRestrictions's
+// error-returning form: it loads active access constraints from the store
+// and converts them to kernel restrictions, but returns a load error to the
+// caller instead of converting it into a deny-all restriction. Use when the
+// caller has its own error return and a load failure must surface as an
+// error rather than an ordinary denial, as on the ProjectAdmissionForClass
+// and CanMintSelector paths. Every other caller should use
+// loadAccessConstraintRestrictions.
+func (a *AuthzService) accessConstraintRestrictions(
+	ctx context.Context,
+	closure map[string]struct{},
+	resource ResourceContext,
+) ([]Restriction, error) {
+	// R-1 fix: page through all constraints instead of capping at 200.
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -1272,13 +1328,39 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions
+	return restrictions, nil
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through
 // the store. R-1 fix: the previous call used a fixed limit of 200 which
 // silently truncated constraints beyond that threshold.
 func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.AccessConstraint, error) {
+	if cache := mintEligibilityCacheFromContext(ctx); cache != nil {
+		cache.mu.Lock()
+		if cache.constraintsLoaded {
+			all, err := cache.constraints, cache.constraintsErr
+			cache.mu.Unlock()
+			return all, err
+		}
+		cache.mu.Unlock()
+
+		all, err := a.loadAllAccessConstraintsUncached(ctx)
+
+		cache.mu.Lock()
+		cache.constraintsLoaded = true
+		cache.constraints, cache.constraintsErr = all, err
+		cache.mu.Unlock()
+		return all, err
+	}
+	return a.loadAllAccessConstraintsUncached(ctx)
+}
+
+// loadAllAccessConstraintsUncached is loadAllAccessConstraints's body, split
+// out so the mint-eligibility cache wrapper above never duplicates this
+// logic. Every caller outside a CanMintSelector call (e.g. the ordinary
+// Decide path) reaches this directly, with no cache in context, and behaves
+// exactly as before.
+func (a *AuthzService) loadAllAccessConstraintsUncached(ctx context.Context) ([]*store.AccessConstraint, error) {
 	const pageSize = 500
 	var all []*store.AccessConstraint
 	offset := 0
@@ -1377,7 +1459,14 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		// E.1: carry the descriptive decoration, if ValidateToken attached
+		// one, through to the credential context. This is the single copy
+		// point named in the E.1 design (plan §2.2); decoration is never
+		// otherwise derived here. Decoration() already returns a deep copy,
+		// so this assignment cannot alias the identity's stored value.
+		cc.Decoration = scoped.Decoration()
+		return cc
 	}
 	switch identity.Type() {
 	case "agent":
@@ -1815,98 +1904,18 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —
 // but only considers bindings where ScopeType == "project" && ScopeID == projectID.
+// Shares its group/binding resolution (projectScopedGrants, authz_boundary.go)
+// with projectScopedPermissionsStrict, CanMintSelector's flat-role mint path's
+// error-returning counterpart; this function keeps a deny-all restriction on
+// a constraint-table load failure rather than returning an error.
 func (a *AuthzService) getProjectScopedPermissions(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
-	normalizedType := NormalizePrincipalType(principalType)
-
-	// Build principals: direct + group-expanded.
-	principals := []store.PrincipalRef{{Type: normalizedType, ID: principalID}}
-	var groupIDs []string
-	var err error
-	switch normalizedType {
-	case store.RoleBindingPrincipalUser:
-		groupIDs, err = a.store.GetEffectiveGroups(ctx, principalID)
-	case store.RoleBindingPrincipalAgent:
-		groupIDs, err = a.store.GetEffectiveGroupsForAgent(ctx, principalID)
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		a.logger.Warn("failed to get effective groups for project-scoped permission resolution (fail-closed)",
-			"principalType", principalType, "principalID", principalID, "error", err)
-		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
-	}
-	for _, gid := range groupIDs {
-		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
-	}
-
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
 	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now()
-	seen := make(map[string]bool)
-	var result []string
-	for _, b := range bindings {
-		// A2: Only project-scoped bindings for the target project.
-		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
-			continue
-		}
-
-		// Activation window filtering (R-2 pattern).
-		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
-		if activation := evaluateActivation(cb, now); !activation.Active {
-			continue
-		}
-
-		rd, rdErr := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if rdErr != nil {
-			a.logger.Warn("failed to resolve role definition for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-			continue
-		}
-		if rd == nil {
-			a.logger.Warn("role definition not found for project-scoped binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
-			continue
-		}
-		for _, permID := range rd.Permissions {
-			if !seen[permID] {
-				seen[permID] = true
-				result = append(result, permID)
-			}
-		}
+	if len(perms) == 0 {
+		return perms, nil
 	}
-
-	// Apply AccessConstraint intersection (same pattern as getEffectivePermissions).
-	if len(result) > 0 {
-		closure := make(map[string]struct{}, len(principals))
-		for _, p := range principals {
-			closure[p.Type+":"+p.ID] = struct{}{}
-		}
-		resourceCtx := ResourceContext{ProjectID: projectID}
-		restrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
-		if len(restrictions) > 0 {
-			var filtered []string
-			for _, permID := range result {
-				blocked := false
-				for _, r := range restrictions {
-					if r.Check == nil || !r.Check(permID) {
-						blocked = true
-						break
-					}
-				}
-				if !blocked {
-					filtered = append(filtered, permID)
-				}
-			}
-			result = filtered
-		}
-	}
-
-	return result, nil
+	restrictions := a.loadAccessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
+	return applyRestrictions(perms, restrictions), nil
 }

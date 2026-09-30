@@ -584,7 +584,16 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
 `tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and `input_tokens` / `output_tokens` / `cached_tokens`.
+`file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
+(→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
+`cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
+`output_tokens` must be the *total* output including reasoning (canonical
+usage contract, `.design/hosted/usage-telemetry.md` §3.2); a `fields`
+mapping is a pure path copy with no arithmetic, so if the tool reports
+output and reasoning as exclusive values, the hook/bridge script must sum
+them into the payload field your `output_tokens` mapping reads, before the
+payload reaches sciontool. YAML cannot do this. (A built-in Go dialect
+would sum them in Go instead.)
 
 Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.

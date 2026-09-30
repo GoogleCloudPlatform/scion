@@ -193,9 +193,10 @@ release-candidate, or nightly tag is pushed. It:
 1. Builds the web UI and cross-compiles Scion for all supported platforms.
 2. Builds the Linux plugin binaries.
 3. Packages and uploads the build artifacts.
-4. Creates a GitHub release and marks non-stable channels as pre-releases.
-5. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
-6. Updates the corresponding channel in `LATEST.json` on `main`.
+4. Generates a `SHA256SUMS` checksums file covering every published asset.
+5. Creates a GitHub release and marks non-stable channels as pre-releases.
+6. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
+7. Updates the corresponding channel in `LATEST.json` on `main`.
 
 Release-candidate tags route to the preview branch and preview manifest entry.
 
@@ -220,3 +221,22 @@ The main `scion` binary is published for:
 
 Release artifacts are gzip-compressed tar archives. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
+
+## Checksums
+
+Every release publishes a `SHA256SUMS` asset alongside its binaries and plugin tarballs,
+covering every other asset in that release. It is generated from the final set of build
+artifacts with `sha256sum -- * | sort -k2`, so it always matches exactly what was
+published, including for nightly and preview builds.
+
+`scripts/single-node-vm/deploy.sh` downloads and verifies this file automatically before
+installing anything (see [Single-Node VM Deployment Guide](deploy/single-node-vm.md#quick-start)),
+as does the Hub's own binary auto-updater. To verify a manual download yourself:
+
+```bash
+curl -fsSLO https://github.com/GoogleCloudPlatform/scion/releases/download/<TAG>/SHA256SUMS
+curl -fsSLO https://github.com/GoogleCloudPlatform/scion/releases/download/<TAG>/scion-linux-amd64.tar.gz
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+A release published before this feature shipped has no `SHA256SUMS` asset.
