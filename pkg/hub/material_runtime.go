@@ -103,8 +103,7 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	// authority for the exact secret.use permission (SystemAuthorityProof).
 	// An unrelated custom project binding satisfies neither leg. This
 	// composition is deliberately narrower than ProjectAdmissionForClass,
-	// which counts any active project-scoped binding, while the
-	// exact-permission delegation ceiling is not yet enforced on every path.
+	// which counts any active project-scoped binding (ptone/scion#2129).
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

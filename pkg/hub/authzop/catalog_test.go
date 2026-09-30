@@ -296,7 +296,7 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"env_var.deliver":         "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
-		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only; not yet wired (ptone/scion#2129)",
+		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
 	}
 
 	var unconsumed []string
