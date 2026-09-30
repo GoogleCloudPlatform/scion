@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -770,6 +771,118 @@ func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, ErrCodeMessageDenied, errResp.Error.Code)
+}
+
+// TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState is a
+// regression test for nc-self-unread FYI 1 (round 2): a human posting into a
+// web-visible agent DM from a non-web channel (e.g. Discord) must not see
+// their own message as unread when they later open that same DM in native
+// web chat. Before the fix, handleBrokerInbound advanced only the legacy
+// Wave-1 TouchThread watermark — never the v2 DM last-message watermark or
+// the sender's v2 read state — so the v2 unread computation
+// (LastMessageID != LastReadMessageID) stayed permanently unread for the
+// sender's own cross-channel message.
+func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	wcs := NewWebChatStore(db, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
+	user := &store.User{
+		ID:          tid("user-xchan-dm"),
+		Email:       "xchan-dm@example.com",
+		DisplayName: "Cross Channel User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-xchan-dm"),
+		Slug:      "xchan-dm-proj",
+		Name:      "Cross Channel DM Test Project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroup(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-xchan-dm"),
+		Slug:         "xchan-agent",
+		Name:         "Cross Channel Agent",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// The web DM key for this agent+user pair — the same key native web chat
+	// uses to view this conversation and to compute its unread state.
+	dmKey := "dm:agent:" + agent.ID + ":user:" + user.ID
+
+	topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+	payload := inboundMessageRequest{
+		Topic: topic,
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from discord",
+			Type:      messages.TypeInstruction,
+			ThreadID:  dmKey,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Find the persisted message to get its server-assigned ID.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{ThreadID: dmKey}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1, "expected exactly one persisted message for the DM key")
+	persisted := msgs.Items[0]
+	assert.Equal(t, user.ID, persisted.SenderID)
+
+	// The v2 DM watermark must already point at this message...
+	dms, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	require.Len(t, dms, 1, "expected the DM registry row to exist for the sender")
+	assert.Equal(t, persisted.ID, dms[0].LastMessageID,
+		"DM last-message watermark was not advanced for the cross-channel sender")
+
+	// ...and the sender's own v2 read state must already be caught up to it,
+	// so native web chat never renders this DM as unread for the person who
+	// just sent it (albeit from Discord).
+	rs, err := wcs.GetReadState(ctx, user.ID, dmKey)
+	require.NoError(t, err)
+	require.NotNil(t, rs, "sender read state was not set for the cross-channel message")
+	assert.Equal(t, persisted.ID, rs.LastReadMessageID,
+		"sender read watermark was not advanced for the cross-channel message — would show unread in web chat")
 }
 
 // TestHandleBrokerInbound_MentionCoAddressees verifies that when a broker

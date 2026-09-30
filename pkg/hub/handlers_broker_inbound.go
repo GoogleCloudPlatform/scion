@@ -531,6 +531,26 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// HTTP response here would mislead the caller into retrying —
 		// which would double-deliver.
 	} else {
+		// nc-self-unread FYI 1: when this inbound message carries a real web
+		// DM key (validated and ownership-checked above), the human sender
+		// may also be viewing that same DM in native web chat. Without this,
+		// their own cross-channel message (e.g. sent from Discord) shows
+		// unread in the web view forever, because nothing here ever touches
+		// the v2 DM watermark or the sender's v2 read state — TouchThread
+		// below is the unrelated, legacy Wave-1 per-(user,project,agent)
+		// thread rail. Must run before publish, same invariant as
+		// sendAgentRouted/sendHumanToHuman: the sender's own client refetches
+		// unread state on the SSE event this triggers.
+		if strings.HasPrefix(storeMsg.ThreadID, "dm:") && senderUserID != "" {
+			s.mu.RLock()
+			dmWcs := s.webChatStore
+			s.mu.RUnlock()
+			if dmWcs != nil {
+				registerDMParticipants(r.Context(), dmWcs, storeMsg.ThreadID)
+				s.touchConversationActivity(r.Context(), storeMsg.ThreadID, storeMsg.ID)
+				s.autoAdvanceSenderReadState(r.Context(), senderUserID, storeMsg.ThreadID, storeMsg.ID)
+			}
+		}
 		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
 	}
 
