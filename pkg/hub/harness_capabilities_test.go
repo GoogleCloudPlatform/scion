@@ -205,3 +205,63 @@ func TestResolveModelAliasForAgent_NoHarnessConfigAtAllFallsBackToBuiltinTable(t
 	assert.NotEqual(t, "large", got, "must not pass the unresolved size alias through to the harness")
 	assert.Equal(t, "claude-opus-5-5", got, "should resolve via the claude harness's built-in model_aliases table")
 }
+
+func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testing.T) {
+	t.Run("stopped agent allows config model update", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		agent := seedCreatedAgentForHarnessTest(t, s, "stopped-model-update", "claude")
+		agent.Phase = string(state.PhaseStopped)
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{
+				"model": "claude-opus-4-8",
+			},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		updated, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, updated.AppliedConfig)
+		assert.Equal(t, "claude-opus-4-8", updated.AppliedConfig.Model)
+		require.NotNil(t, updated.AppliedConfig.InlineConfig)
+		assert.Equal(t, "claude-opus-4-8", updated.AppliedConfig.InlineConfig.Model)
+	})
+
+	t.Run("running agent rejects config update with 409 Conflict", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		agent := seedCreatedAgentForHarnessTest(t, s, "running-model-update", "claude")
+		agent.Phase = string(state.PhaseRunning)
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{
+				"model": "claude-opus-4-8",
+			},
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("soft-deleted agent rejects config update with 409 Conflict", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+
+		agent := seedCreatedAgentForHarnessTest(t, s, "deleted-model-update", "claude")
+		dbAgent, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		dbAgent.Phase = string(state.PhaseStopped)
+		dbAgent.DeletedAt = dbAgent.Created
+		require.NoError(t, s.UpdateAgent(ctx, dbAgent))
+
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+			"config": map[string]interface{}{
+				"model": "claude-opus-4-8",
+			},
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	})
+}
