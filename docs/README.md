@@ -17,3 +17,4 @@ Documentation for the Scion project lives in three places:
 - [Cloud Run IAM Grants](deploy/cloudrun-iam-grants.md) — Required IAM grants for Cloud Run deployments
 - [Multi-Hub HA: Terraform](deploy/terraform-ha.md) — Operator how-to for the multi-hub HA Terraform module set (shared Cloud SQL, Filestore, and GKE Autopilot behind per-hub Cloud Run + IAP)
 - [Agent Runbook: Multi-Hub HA Deployment (Terraform)](deploy/agent-runbook-terraform-ha.md) — Step-by-step procedure for an AI agent to run the Terraform deployment end to end
+- [Runbook: Secret Name Migration on Cloud Run (Private SQL)](deploy/migrate-names-cloudrun.md) — Run `scion hub secret migrate-names` against a Cloud Run hub whose database has no network path from a workstation, via a one-off Cloud Run job

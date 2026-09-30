@@ -188,7 +188,6 @@ export default defineConfig({
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
 								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
-								{ label: 'Runbook: Secret Name Migration', slug: 'hosted/ha/migrate-names-cloudrun' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
 								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },
 							],
