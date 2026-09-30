@@ -752,6 +752,43 @@ class ConfigHardeningTest(unittest.TestCase):
             data["mcp_servers"], {"srv": {"command": "y"}}, "second pass must replace, not duplicate, the server"
         )
 
+    def test_hardening_and_mcp_survive_extra_quote_before_closing_delimiter(self) -> None:
+        # Regression test for ptone/scion#2427 review round 5 (R5-1): 1-2
+        # extra content quotes immediately before a multi-line string's
+        # closing delimiter (`""""`, valid TOML for content ending in a
+        # literal quote) used to leave a leftover quote character that
+        # mis-paired with the next quote on the line, miscounting the `[`
+        # inside it as real structure. On this input, hardening never
+        # applied and MCP registration was stuck at its first-pass value on
+        # every later restart — main handled it correctly. Assert hardening
+        # applies, and MCP registration on a second pass is accepted with
+        # no duplicate, not rejected.
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx()
+            with temporary_home(tmp):
+                grok_dir = os.path.join(tmp, ".grok")
+                os.makedirs(grok_dir, exist_ok=True)
+                config_path = os.path.join(grok_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write('banned = ["""say "hi"""", "[x"]\n')
+
+                warnings: list[str] = []
+                ctx.warn = warnings.append  # type: ignore[method-assign]
+
+                provision._harden_config(ctx)
+                provision._write_mcp_toml(ctx, {"srv": {"command": "x"}})
+                # Second pass, simulating a restart.
+                provision._write_mcp_toml(ctx, {"srv": {"command": "y"}})
+
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+        self.assertEqual(warnings, [], f"expected no rejected writes, got: {warnings}")
+        self.assertEqual(data["cli"]["auto_update"], False, "hardening must be applied")
+        self.assertEqual(data["banned"], ['say "hi"', "[x"], "the string content must survive intact")
+        self.assertEqual(
+            data["mcp_servers"], {"srv": {"command": "y"}}, "second pass must replace, not duplicate, the server"
+        )
+
     def test_hardening_leaves_file_untouched_when_edit_would_corrupt_unmanaged_content(self) -> None:
         # write_toml_if_preserves backstop: a rejected edit must leave the
         # original file on disk untouched. Originally used a header-shaped

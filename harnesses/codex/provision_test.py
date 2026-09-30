@@ -86,7 +86,7 @@ def _force_is_header(fake_header_line: str):
     scion_harness.is_toml_table_header report True for the exact raw line
     `fake_header_line`, regardless of its actual depth — simulating a
     (currently hypothetical, since there are no known string-tracking gaps
-    left as of review round 4) bug where a line that is really inside a
+    left as of review round 5) bug where a line that is really inside a
     multi-line string gets mistaken for a genuine table header. This is
     deterministic and doesn't depend on finding a real remaining parsing
     gap to trigger it."""

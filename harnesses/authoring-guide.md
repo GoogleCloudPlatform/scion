@@ -569,18 +569,27 @@ Key API surface:
   whole sections (codex uses these for `model`/`model_reasoning_effort`);
   both also skip lines inside a multi-line string (including a
   backslash-escaped closing-delimiter sequence inside a `"""` (basic)
-  string — `'''` (literal) strings have no escapes in TOML at all, so no
-  such handling applies there). There are no known residual gaps in this
-  scanner as of ptone/scion#2427; the `tomllib` round-trip check above
-  remains the backstop regardless, since this is still a line-oriented
-  scanner rather than a full TOML tokenizer. See
-  `harnesses/scion_harness_test.py`'s `TestStripTomlSections` /
-  `TestTomlEnteringArrayDepths` / `TestTomlEditPreserves` /
-  `TestWriteTomlIfPreserves` for worked examples, including the fragility
-  repro cases (trailing comments on headers, nested arrays, multi-line
-  strings with header-shaped lines or unbalanced brackets, header
-  whitespace variants like `[ models ]`) this API was hardened against
-  (ptone/scion#2426, ptone/scion#2427).
+  string, on any line including the one that opens it — `'''` (literal)
+  strings have no escapes in TOML at all, so no such handling applies
+  there), and correctly consume the 1-2 extra content quote characters
+  TOML allows immediately before a closing delimiter (`""""`/`'''''`, e.g.
+  `"""say "hi""""` is the content `say "hi"`) instead of stopping after the
+  first 3-quote run. There are no known residual gaps in this scanner as of
+  ptone/scion#2427; the `tomllib` round-trip check above remains the
+  backstop regardless, since this is still a line-oriented scanner rather
+  than a full TOML tokenizer. A seeded, bounded fuzz test
+  (`TestTomlScannerFuzz` in `harnesses/scion_harness_test.py`) checks
+  `strip_toml_sections`'s output against a fresh `tomllib` parse across a
+  generated corpus of tricky multi-line-string/bracket/quote fragments on
+  every test run, to catch the next scanner edge automatically rather than
+  by manual review. See `harnesses/scion_harness_test.py`'s
+  `TestStripTomlSections` / `TestTomlEnteringArrayDepths` /
+  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` /
+  `TestTomlScannerFuzz` for worked examples, including the fragility repro
+  cases (trailing comments on headers, nested arrays, multi-line strings
+  with header-shaped lines, unbalanced brackets, escaped delimiters, or
+  extra closing quotes, header whitespace variants like `[ models ]`) this
+  API was hardened against (ptone/scion#2426, ptone/scion#2427).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 import tempfile
 import textwrap
@@ -786,6 +787,45 @@ class TestTomlEnteringArrayDepths(unittest.TestCase):
         self.assertNotIn("cli", data)
         self.assertEqual(data["a"], 'foo """ bar\n[fake]\n')
 
+    # --- ptone/scion#2427 review round 5 (R5-1): 1-2 extra content quotes
+    # immediately before a closing delimiter (e.g. `""""`, `'''''`). ------
+
+    def test_extra_quote_before_basic_closing_delimiter_with_later_string_on_same_line(self):
+        # Per TOML 1.0, `"""say "hi""""` is the content `say "hi"` closed
+        # by the *last* three quotes — one extra `"` of content immediately
+        # precedes the real closing delimiter. Naively stopping after the
+        # first 3-quote run leaves that extra `"` to be mis-scanned as
+        # opening a new single-line string, mis-pairing it with the next
+        # `"` on the line (here, the start of the second list element) and
+        # miscounting the `[` inside that element as real structure.
+        content = 'banned = ["""say "hi"""", "[x"]\n[cli]\nauto_update = true\n'
+        self.assertEqual(tomllib.loads(content)["banned"], ['say "hi"', "[x"])
+        depths = sh.toml_entering_array_depths(content.split("\n"))
+        self.assertEqual(depths, [0, 0, 0, 0])
+        result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
+        data = tomllib.loads(result)
+        self.assertNotIn("cli", data)
+        self.assertEqual(data["banned"], ['say "hi"', "[x"])
+
+    def test_extra_quote_before_literal_closing_delimiter_with_later_comment_on_same_line(self):
+        # The ''' equivalent: `'''Always answer with 'OK''''` is the
+        # content `Always answer with 'OK'` closed by the last three
+        # quotes. The leftover `'` used to pair with the next `'` in the
+        # trailing comment's `'['` fragment, hiding the comment's `[` from
+        # view — harmlessly here, since it's already inside a comment, but
+        # it corrupted depth for the rest of the file all the same.
+        content = (
+            "note = '''Always answer with 'OK'''' # type '[' to open a menu\n"
+            "[cli]\nauto_update = true\n"
+        )
+        self.assertEqual(tomllib.loads(content)["note"], "Always answer with 'OK'")
+        depths = sh.toml_entering_array_depths(content.split("\n"))
+        self.assertEqual(depths, [0, 0, 0, 0])
+        result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
+        data = tomllib.loads(result)
+        self.assertNotIn("cli", data)
+        self.assertEqual(data["note"], "Always answer with 'OK'")
+
 
 class TestIsTomlTableHeader(unittest.TestCase):
     def test_recognizes_simple_header_at_depth_zero(self):
@@ -1191,6 +1231,158 @@ class TestWriteTomlIfPreserves(unittest.TestCase):
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), original)
             self.assertEqual(len(warnings), 1)
+
+
+# ---------------------------------------------------------------------------
+# Seeded, bounded scanner fuzz test (ptone/scion#2427 review round 5,
+# "Consider"). Three consecutive review rounds each found a scanner edge
+# by hand (an unbalanced bracket in a multi-line string, an escaped
+# closing-delimiter sequence, and the same sequence on the string's
+# opening line, and 1-2 extra quote characters before a closing
+# delimiter). A small, deterministic fuzz test that runs on every test
+# invocation is meant to catch the next one automatically instead of
+# waiting for the next manual review round.
+#
+# This is trimmed from the reviewer's own fuzzer
+# (/scion-volumes/scratchpad/projects/toml-harden/fuzz/fuzz.py): same
+# fragment grammar, but the oracle here checks strip_toml_sections'
+# *output* against a fresh tomllib parse (remove the same key from the
+# original's own parsed data and compare) rather than comparing detected
+# headers against the generator's own bookkeeping of where it inserted
+# headers. The bookkeeping approach has a known class of false positive:
+# a value fragment can coincidentally form text that, once a preceding
+# multi-line string correctly closes, tomllib itself treats as a genuine
+# extra top-level table the generator didn't intend — confirmed by loading
+# such a case directly with tomllib. The strip/tomllib oracle used here
+# doesn't have that failure mode, since it never trusts anything but
+# tomllib's own parse of the input and the output.
+#
+# Deliberately does not fuzz strip_toml_top_level_key: it only handles
+# single-line values (removes exactly the `key = ...` line), so a
+# multi-line array or string value under a stripped key leaves orphan
+# lines — pre-existing behavior, caught by the tomllib backstop at every
+# real call site, and out of scope for this PR (ptone/scion#2427 review
+# round 5 FYI, declined).
+# ---------------------------------------------------------------------------
+
+
+class TestTomlScannerFuzz(unittest.TestCase):
+    _BASIC_FRAGMENTS = [
+        "x", "[", "]", "[fake]", '\\"""', "\\\\", '\\"', '""', '"',
+        "'''", "'", "#", "\n", "\\\n", "\n[fake2]\n", " model = 1", '\\""',
+        "{", ",",
+    ]
+    _LITERAL_FRAGMENTS = [
+        "x", "[", "]", "[fake]", '"""', "\\", "''", "'", "#", "\n",
+        "\n[fake3]\n", '"', '\\"',
+    ]
+    _SHORT_BASIC_FRAGMENTS = ["x", "[", "]", "'''", '\\"', "\\\\", "'", "#", "{"]
+    _SHORT_LITERAL_FRAGMENTS = ["x", "[", "]", '"""', "\\", '"', "#"]
+    _KEYS = ["a", "b_c", '"q[k]"']
+    _COMMENTS = ["", " # c", ' # """', " # '''", " # [x", " # ]"]
+
+    def _multiline_basic(self, rng: random.Random) -> str:
+        body = "".join(rng.choice(self._BASIC_FRAGMENTS) for _ in range(rng.randint(0, 6)))
+        return '"""' + body + rng.choice(['"""', '""""', '"""""'])
+
+    def _multiline_literal(self, rng: random.Random) -> str:
+        body = "".join(rng.choice(self._LITERAL_FRAGMENTS) for _ in range(rng.randint(0, 6)))
+        return "'''" + body + rng.choice(["'''", "''''", "'''''"])
+
+    def _short_basic(self, rng: random.Random) -> str:
+        body = "".join(rng.choice(self._SHORT_BASIC_FRAGMENTS) for _ in range(rng.randint(0, 4)))
+        return '"' + body + '"'
+
+    def _short_literal(self, rng: random.Random) -> str:
+        body = "".join(rng.choice(self._SHORT_LITERAL_FRAGMENTS) for _ in range(rng.randint(0, 4)))
+        return "'" + body + "'"
+
+    def _scalar(self, rng: random.Random, depth: int = 0) -> str:
+        choice = rng.randint(0, 7 if depth < 2 else 5)
+        if choice == 0:
+            return self._multiline_basic(rng)
+        if choice == 1:
+            return self._multiline_literal(rng)
+        if choice == 2:
+            return self._short_basic(rng)
+        if choice == 3:
+            return self._short_literal(rng)
+        if choice == 4:
+            return str(rng.randint(0, 9))
+        if choice == 5:
+            return '"[x]"'
+        if choice == 6:
+            items = [self._scalar(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+            sep = rng.choice([", ", ",\n  ", ",\n"])
+            return "[" + rng.choice(["", "\n  "]) + sep.join(items) + rng.choice(["", ",\n", "\n"]) + "]"
+        items = [f"k{i} = {self._scalar(rng, depth + 1)}" for i in range(rng.randint(0, 2))]
+        return "{" + ", ".join(items) + "}"
+
+    def _doc(self, rng: random.Random) -> tuple[str, int]:
+        """Returns (document_text, table_count); tables are named t0, t1, ..."""
+        lines: list[str] = []
+        used: set[str] = set()
+        num_tables = 0
+
+        def kv() -> None:
+            key = rng.choice(self._KEYS)
+            while key in used:
+                key = key + "z"
+            used.add(key)
+            value = self._scalar(rng)
+            lines.extend(f"{key} = {value}{rng.choice(self._COMMENTS)}".split("\n"))
+
+        for _ in range(rng.randint(0, 3)):
+            kv()
+        for _ in range(rng.randint(1, 3)):
+            used.clear()
+            lines.append(f"[t{num_tables}]{rng.choice(self._COMMENTS)}")
+            num_tables += 1
+            for _ in range(rng.randint(0, 3)):
+                kv()
+        return "\n".join(lines), num_tables
+
+    def test_strip_toml_sections_matches_tomllib_across_seeded_fuzz_corpus(self):
+        # ~2000 generated documents from a fixed seed, a bit over half of
+        # which are valid TOML (the grammar deliberately generates plenty
+        # of invalid TOML too, which is simply skipped). Deterministic;
+        # runs in well under 1 second.
+        seeds = (1,)
+        docs_per_seed = 2000
+        tested = 0
+        failures: list[tuple[str, str]] = []
+
+        for seed in seeds:
+            rng = random.Random(seed)
+            for _ in range(docs_per_seed):
+                text, num_tables = self._doc(rng)
+                try:
+                    original_data = tomllib.loads(text)
+                except tomllib.TOMLDecodeError:
+                    continue
+                tested += 1
+                target = f"t{rng.randrange(num_tables)}"
+                stripped = sh.strip_toml_sections(text, lambda h, t=target: h == f"[{t}]")
+                try:
+                    stripped_data = tomllib.loads(stripped)
+                except tomllib.TOMLDecodeError as e:
+                    failures.append((f"seed={seed}: strip [{target}] produced invalid TOML: {e}", text))
+                    continue
+                expected = dict(original_data)
+                expected.pop(target)
+                if stripped_data != expected:
+                    failures.append(
+                        (
+                            f"seed={seed}: strip [{target}] mismatch: "
+                            f"got {stripped_data!r}, want {expected!r}",
+                            text,
+                        )
+                    )
+
+        self.assertGreater(tested, 0, "sanity: the fuzz corpus must produce at least one valid document")
+        if failures:
+            detail = "\n\n".join(f"{msg}\n{text!r}" for msg, text in failures[:5])
+            self.fail(f"{len(failures)}/{tested} fuzzed documents failed:\n\n{detail}")
 
 
 # ---------------------------------------------------------------------------

@@ -972,6 +972,27 @@ def toml_mask_strings_and_comments(line: str) -> str:
     )
 
 
+def _toml_skip_closing_quotes(line: str, j: int, delim: str) -> int:
+    """Index just past a multi-line string's closing delimiter found at
+    `j` (a `delim`-length run — `\"\"\"` or `'''` — confirmed to start at
+    `j`). Per TOML 1.0, 1-2 extra quote characters of the same kind
+    immediately before the real closing delimiter are string *content*,
+    not part of the delimiter — e.g. `\"\"\"say "hi\"\"\"\"` is the content
+    `say "hi"` closed by the last three quotes, not content `say "hi` with
+    a leftover `"` after it. Naively stopping right after the first
+    3-quote run found (`j + 3`) leaves that leftover quote character to be
+    mis-scanned as the *start* of a new single-line string, mis-pairing it
+    with whatever quote character comes next on the line and miscounting
+    any brackets in between as real structure (ptone/scion#2427 review
+    round 5, R5-1). A run of 4 or 5 quote characters must be consumed as a
+    whole, not just its first 3.
+    """
+    k = j + 3
+    while k < len(line) and k < j + 5 and line[k] == delim[0]:
+        k += 1
+    return k
+
+
 def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | None]:
     """Strip string literals and comments from `line` for bracket counting,
     tracking a triple-quoted multi-line string ('\"\"\"' or "'''") that may
@@ -1042,14 +1063,14 @@ def _toml_code_and_ml_state(line: str, in_ml: str | None) -> tuple[str, str | No
                 j += 1
             if found == -1:
                 return "".join(out), state
-            i = found + 3
+            i = _toml_skip_closing_quotes(line, found, state)
             state = None
             continue
         if state is not None:
             j = line.find(state, i)
             if j == -1:
                 return "".join(out), state
-            i = j + 3
+            i = _toml_skip_closing_quotes(line, j, state)
             state = None
             continue
         ch = line[i]
