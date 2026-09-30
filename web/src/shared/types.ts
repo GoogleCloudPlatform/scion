@@ -808,9 +808,14 @@ export interface RuntimeBroker {
   agentCount?: number;
   /**
    * The precedence step that produced agentLimit: "broker" | "entitlement" |
-   * "hub_default" | "unlimited". Present under the same condition as
-   * agentCount, not agentLimit — it is still "unlimited" exactly when
-   * agentLimit is absent because the broker has no cap.
+   * "hub_default" | "unlimited". This names the step, not whether the result
+   * is a cap: when the effective limit is <= 0 (unlimited), agentLimit is
+   * absent but agentLimitSource is still whichever step produced it
+   * ("broker" for a settings.maxAgents=0 override, "entitlement"/
+   * "hub_default" for a 0 binding or default). "unlimited" itself means no
+   * limit definition or no quota service is configured hub-wide — in that
+   * case resolution does not count either, and all three fields
+   * (agentLimit/agentCount/agentLimitSource) are absent together.
    */
   agentLimitSource?: string;
 }

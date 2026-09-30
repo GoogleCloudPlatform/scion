@@ -85,10 +85,14 @@ interface UsageReservation {
   brokerAgentLimit?: number;
   /**
    * The precedence step that produced brokerAgentLimit: "broker" |
-   * "entitlement" | "hub_default" | "unlimited". Present for every
-   * broker-scoped reservation under that limit, including when the broker is
-   * unlimited (source "unlimited") — unlike brokerAgentLimit, which is then
-   * absent.
+   * "entitlement" | "hub_default" | "unlimited". This names the step, not
+   * whether the result is a cap: when the broker is unlimited,
+   * brokerAgentLimit is absent but brokerAgentLimitSource is still whichever
+   * step produced it ("broker" for a settings.maxAgents=0 override,
+   * "entitlement"/"hub_default" for a 0 binding or default). "unlimited"
+   * itself means no limit definition or no quota service is configured
+   * hub-wide, a state in which this reservation (which requires quota
+   * enforcement to have run) would not exist to display in the first place.
    */
   brokerAgentLimitSource?: string;
 }
@@ -1138,6 +1142,13 @@ export class ScionPageAdminQuotas extends LitElement {
                                         ? this.formatValue(r.brokerAgentLimit)
                                         : 'unlimited'}</span
                                     >
+                                    <!-- Defensive: brokerAgentLimitSource is
+                                    "unlimited" only when no limit definition
+                                    or quota service is configured hub-wide,
+                                    a state this reservation (which requires
+                                    quota enforcement to have run) can't
+                                    actually reach — kept to avoid ever
+                                    rendering the redundant "(unlimited)". -->
                                     ${r.brokerAgentLimitSource === 'unlimited'
                                       ? nothing
                                       : html`<span title="Precedence source"

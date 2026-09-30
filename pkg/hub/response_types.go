@@ -252,10 +252,17 @@ type RuntimeBrokerWithCapabilities struct {
 	AgentCount *int64 `json:"agentCount,omitempty"`
 	// AgentLimitSource is one of the BrokerLimitSource* constants
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
-	// "unlimited". Omitted only when resolution didn't run or failed — the
-	// same condition as AgentCount, not AgentLimit (AgentLimitSource is
-	// still present, as "unlimited", exactly when AgentLimit is nil because
-	// the broker has no cap).
+	// "unlimited". It is the precedence step that produced the result, not a
+	// statement about whether that result is a cap: when the effective limit
+	// is <= 0 (unlimited), AgentLimit is absent but AgentLimitSource is still
+	// whichever step produced it — "broker" for a settings.maxAgents=0
+	// override, "entitlement" or "hub_default" for a 0 binding or default.
+	// "unlimited" itself is reserved for effectiveBrokerLimit's other
+	// branch — no limit definition or no quota service configured at all —
+	// in which case brokerCapacity returns before counting and
+	// resolveBrokerCapacity omits all three fields, so "unlimited" is never
+	// actually observed here in practice (present in the source constants,
+	// not in this field's real values).
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 

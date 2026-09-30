@@ -115,8 +115,16 @@ type usageReservationView struct {
 	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
 	// "unlimited". Empty only when this row isn't a max_agents_per_broker
 	// broker-scoped reservation, or brokerCapacity's own resolution failed
-	// outright (BrokerCapacity{}, both fields zero). Unlike BrokerAgentLimit,
-	// it is still populated — as "unlimited" — when the broker has no cap.
+	// outright (BrokerCapacity{}, both fields zero). It is the precedence
+	// step that produced the result, not a statement about whether the
+	// result is a cap: when the effective limit is <= 0 (unlimited),
+	// BrokerAgentLimit is absent but BrokerAgentLimitSource is still
+	// whichever step produced it ("broker" for a settings.maxAgents=0
+	// override, "entitlement"/"hub_default" for a 0 binding or default).
+	// "unlimited" itself means no limit definition or no quota service is
+	// configured at all — in which case brokerCapacity returns before
+	// counting, so this row (which requires an actual reservation to exist)
+	// would not be reachable in practice.
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
