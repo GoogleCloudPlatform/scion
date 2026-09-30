@@ -249,8 +249,8 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 ## Monitoring
 
 The Hub exposes health check endpoints:
-- `/healthz`: Basic liveness check.
-- `/readyz`: Readiness check (verifies database connectivity).
+- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy` or `degraded`, with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` names this check (in either shape) instead of just reporting the Hub as not detected. `scion server start` names it too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset) — other `start` invocations print nothing about it.
+- `/readyz`: Readiness check (verifies database connectivity). Unaffected by the co-located broker check above — use `/readyz`, not `/healthz`, for Kubernetes/Cloud Run readiness probes.
 - `/health`: Legacy/alternative liveness check endpoint.
 
 ### Reverse Proxy / GFE Interception Handling

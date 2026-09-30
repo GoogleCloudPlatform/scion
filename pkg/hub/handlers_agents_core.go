@@ -2327,22 +2327,26 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	// with 404 rather than 403 so the response does not disclose that the agent
 	// exists. Authorizing first would turn that 404 into a 403 and leak
 	// existence (design §4.2).
+	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
 			NotFound(w, "Agent")
 			return
 		}
+		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// always denied here, self-read included -- see
-	// TestBypassAgents_LegitimateFlowsStillWork's "agent reads itself" case.
-	// This differs deliberately from getProjectAgent, which exempts an agent
-	// reading its *own* record from this check to preserve that route's
-	// existing, tested self-read contract -- see
-	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed. Reading a
-	// different agent still goes through this same check on both routes.
-	if !s.authorize(w, r, agentResource(agent), ActionRead) {
-		return
+	// denied reading any *other* agent here. An agent reading its own record
+	// is exempt, matching getProjectAgent's self-read contract (see
+	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
+	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
+	// both routes return the same writeAgentGetResponse body, so the exemption
+	// exposes nothing the project route doesn't already. The project:read
+	// scope check above still applies to self-reads.
+	if !isSelf {
+		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+			return
+		}
 	}
 
 	s.writeAgentGetResponse(w, r, agent)
@@ -2351,8 +2355,8 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 // writeAgentGetResponse builds and writes the standard single-agent response
 // body (capabilities, harness info, messageability, env redaction) shared by
 // every route that returns a single agent. It performs no authorization --
-// callers must gate before calling this, since their rules differ (see
-// getAgent vs. getProjectAgent above).
+// callers must gate before calling this (see getAgent and getProjectAgent
+// above, which apply the same rule).
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
@@ -3169,19 +3173,62 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Phase 1H: Check credential state before allowing refresh.
-	// Look up the current token's credential by JTI hash.
+	// Phase 1H: Agent-token authentication requires a successful
+	// credential-status evaluation, including on refresh. The credential-ID
+	// and legacy markers set by UnifiedAuthMiddleware are trusted when
+	// present, but their absence must not skip the check: re-derive the
+	// verified JTI from the validated token and evaluate status directly.
 	oldCredentialID := GetAgentCredentialIDFromContext(r.Context())
 	isLegacy := IsLegacyTokenFromContext(r.Context())
 
 	if oldCredentialID != "" {
-		// Credential found — check if it's been revoked
+		// The credential-ID marker is present: the middleware already found
+		// an active credential for this token. Re-check it hasn't been
+		// revoked since, and require the lookup itself to succeed — a store
+		// error here must not silently allow the refresh to proceed.
 		cred, credErr := s.store.GetAgentCredentialByJTIHash(r.Context(),
 			hashJTI(agentIdent.TokenID()))
-		if credErr == nil && cred.RevokedAt != nil {
+		switch {
+		case credErr == nil && cred == nil:
+			// The store reported success without a credential record, so
+			// the credential's status could not be determined.
+			slog.Error("Token refresh: credential status lookup returned no credential",
+				"agent_id", id)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"unable to verify credential status", nil)
+			return
+		case credErr == nil && cred.RevokedAt != nil:
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"token has been revoked", nil)
 			return
+		case credErr != nil:
+			slog.Error("Token refresh: credential status lookup failed",
+				"agent_id", id, "error", credErr)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"unable to verify credential status", nil)
+			return
+		}
+	} else if !isLegacy {
+		// Neither marker is present. Evaluate status directly from the
+		// validated token's JTI.
+		cred, legacy, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
+		switch {
+		case errors.Is(credErr, errAgentCredentialRevoked):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"token has been revoked", nil)
+			return
+		case credErr != nil:
+			slog.Error("Token refresh: credential status lookup failed",
+				"agent_id", id, "error", credErr)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"unable to verify credential status", nil)
+			return
+		case legacy:
+			// Legacy compatibility path, retained pending a product
+			// decision: the isLegacy checks below apply.
+			isLegacy = true
+		default:
+			oldCredentialID = cred.ID
 		}
 	}
 

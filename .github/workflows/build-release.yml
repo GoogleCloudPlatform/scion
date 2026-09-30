@@ -263,6 +263,15 @@ jobs:
           mkdir -p release
           find binaries -type f -exec mv {} release/ \;
 
+      - name: Generate checksums
+        working-directory: release
+        run: |
+          # Cover every published asset (scion-* binaries and scion-plugin-*
+          # binaries) with a single checksums file so deploy tooling can
+          # verify a download before extracting/installing it. Sort for a
+          # stable, reviewable diff between releases.
+          sha256sum -- * | sort -k2 > SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:

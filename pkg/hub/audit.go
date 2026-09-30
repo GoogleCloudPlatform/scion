@@ -181,12 +181,22 @@ type LifecycleHookExecutionEvent struct {
 
 // AgentSecretReadEvent represents an auditable agent secret read event.
 type AgentSecretReadEvent struct {
-	AgentID    string    `json:"agentId"`
-	ProjectID  string    `json:"projectId"`
-	SecretKey  string    `json:"secretKey"`
-	Success    bool      `json:"success"`
-	FailReason string    `json:"failReason,omitempty"`
-	Timestamp  time.Time `json:"timestamp"`
+	AgentID   string `json:"agentId"`
+	ProjectID string `json:"projectId"`
+	// Scope and ScopeID record the secret's scope and scope ID separately.
+	// Earlier callers folded the scope ID into ProjectID; the material
+	// selection compat path (logAgentSecretReadCompat) is the corrected
+	// shape.
+	Scope     string `json:"scope,omitempty"`
+	ScopeID   string `json:"scopeId,omitempty"`
+	SecretKey string `json:"secretKey"`
+	Success   bool   `json:"success"`
+	// Derived is true when this event has a partner MaterialSelectionEvent
+	// with the same CorrelationID.
+	Derived       bool      `json:"derived,omitempty"`
+	CorrelationID string    `json:"correlationId,omitempty"`
+	FailReason    string    `json:"failReason,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 // AuditLogger defines the interface for logging audit events.
@@ -465,6 +475,18 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 		slog.String("secret_key", event.SecretKey),
 		slog.Bool("success", event.Success),
 	}
+	if event.Scope != "" {
+		attrs = append(attrs, slog.String("scope", event.Scope))
+	}
+	if event.ScopeID != "" {
+		attrs = append(attrs, slog.String("scope_id", event.ScopeID))
+	}
+	if event.Derived {
+		attrs = append(attrs, slog.Bool("derived", event.Derived))
+	}
+	if event.CorrelationID != "" {
+		attrs = append(attrs, slog.String("correlation_id", event.CorrelationID))
+	}
 	if event.FailReason != "" {
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
@@ -536,24 +558,6 @@ func (l *LogAuditLogger) RecordSAAssignment(ctx context.Context, event *store.SA
 	slog.LogAttrs(ctx, level, "SA assignment audit event", attrs...)
 
 	return nil
-}
-
-// LogAgentSecretRead logs an agent secret read event through the AuditLogger interface.
-func LogAgentSecretRead(ctx context.Context, logger AuditLogger, agentID, projectID, secretKey string, success bool, failReason string) {
-	if logger == nil {
-		return
-	}
-
-	event := &AgentSecretReadEvent{
-		AgentID:    agentID,
-		ProjectID:  projectID,
-		SecretKey:  secretKey,
-		Success:    success,
-		FailReason: failReason,
-		Timestamp:  time.Now(),
-	}
-
-	_ = logger.LogAgentSecretReadEvent(ctx, event)
 }
 
 // AuditableBrokerAuthMiddleware creates middleware that logs authentication events.

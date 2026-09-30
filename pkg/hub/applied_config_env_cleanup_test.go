@@ -70,6 +70,13 @@ func (b *cleanupTestSecretBackend) Resolve(ctx context.Context, userID, projectI
 	return nil, nil
 }
 func (b *cleanupTestSecretBackend) HubID() string { return "test-hub" }
+func (b *cleanupTestSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
 
 // TestAppliedConfigEnvCleanupStripsGitHubTokenAndKnownSecrets is a
 // mutation-resistant check of the cleanup's per-key decision: GITHUB_TOKEN is

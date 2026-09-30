@@ -72,6 +72,8 @@ type Tx struct {
 	IntegrationUpdate *IntegrationUpdateClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LaunchReaperState is the client for interacting with the LaunchReaperState builders.
+	LaunchReaperState *LaunchReaperStateClient
 	// LifecycleHook is the client for interacting with the LifecycleHook builders.
 	LifecycleHook *LifecycleHookClient
 	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
@@ -295,6 +297,7 @@ func (tx *Tx) init() {
 	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
 	tx.IntegrationUpdate = NewIntegrationUpdateClient(tx.config)
 	tx.InviteCode = NewInviteCodeClient(tx.config)
+	tx.LaunchReaperState = NewLaunchReaperStateClient(tx.config)
 	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
 	tx.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(tx.config)
 	tx.LimitDefinition = NewLimitDefinitionClient(tx.config)

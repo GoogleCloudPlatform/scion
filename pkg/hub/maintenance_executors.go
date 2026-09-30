@@ -19,12 +19,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1130,6 +1133,7 @@ type ReleaseUpdateCheckResult struct {
 	LatestVersion   string `json:"latest_version"`
 	Channel         string `json:"channel"`
 	DownloadURL     string `json:"download_url,omitempty"`
+	ChecksumsURL    string `json:"checksums_url,omitempty"`
 	ReleaseURL      string `json:"release_url,omitempty"`
 }
 
@@ -1181,14 +1185,23 @@ func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo s
 	}
 	result.UpdateAvailable = info.UpdateAvailable
 
-	// If an update is available, resolve the download URL from GitHub Releases.
+	// If an update is available, resolve the download and checksums URLs
+	// from GitHub Releases.
 	if result.UpdateAvailable {
-		downloadURL, err := resolveReleaseAssetURL(ctx, repo, result.LatestVersion)
+		downloadURL, checksumsURL, err := resolveReleaseAssets(ctx, repo, result.LatestVersion)
 		if err != nil {
 			log.Warn("Failed to resolve download URL", "version", result.LatestVersion, "error", err)
 			// Non-fatal: we still know an update is available.
 		} else {
 			result.DownloadURL = downloadURL
+			result.ChecksumsURL = checksumsURL
+			if checksumsURL == "" {
+				// Not fatal here either: BinaryUpdateExecutor.Run fails
+				// closed on its own when it can't verify a checksum, but
+				// that decision belongs there, not in the check step.
+				log.Warn("Release has no SHA256SUMS asset; the binary update will fail closed",
+					"version", result.LatestVersion)
+			}
 		}
 	}
 
@@ -1201,25 +1214,30 @@ func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo s
 	return result, nil
 }
 
-// resolveReleaseAssetURL queries the GitHub Releases API to find the download URL
-// for the platform-appropriate binary tarball in a given release tag.
-func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, error) {
+// resolveReleaseAssets queries the GitHub Releases API to find the download
+// URL for the platform-appropriate binary tarball in a given release tag,
+// along with the URL for that release's SHA256SUMS checksums asset (see
+// .github/workflows/build-release.yml). checksumsURL is returned empty,
+// not as an error, when the release predates checksum publishing --
+// callers that require a checksum decide how to handle that themselves
+// (BinaryUpdateExecutor.Run fails closed on it).
+func resolveReleaseAssets(ctx context.Context, repo, version string) (downloadURL, checksumsURL string, err error) {
 	// Query the GitHub Releases API for the tag.
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("create GitHub release request: %w", err)
+		return "", "", fmt.Errorf("create GitHub release request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch GitHub release: %w", err)
+		return "", "", fmt.Errorf("fetch GitHub release: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub release API returned %s", resp.Status)
+		return "", "", fmt.Errorf("GitHub release API returned %s", resp.Status)
 	}
 
 	var release struct {
@@ -1229,18 +1247,119 @@ func resolveReleaseAssetURL(ctx context.Context, repo, version string) (string, 
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("decode GitHub release: %w", err)
+		return "", "", fmt.Errorf("decode GitHub release: %w", err)
 	}
 
-	// Look for the platform-appropriate tarball.
+	// Look for the platform-appropriate tarball and the release's
+	// checksums asset.
 	wantName := fmt.Sprintf("scion-linux-%s.tar.gz", runtime.GOARCH)
 	for _, asset := range release.Assets {
-		if asset.Name == wantName {
-			return asset.BrowserDownloadURL, nil
+		switch asset.Name {
+		case wantName:
+			downloadURL = asset.BrowserDownloadURL
+		case "SHA256SUMS":
+			checksumsURL = asset.BrowserDownloadURL
 		}
 	}
 
-	return "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
+	if downloadURL == "" {
+		return "", "", fmt.Errorf("no asset matching %q found in release %s", wantName, version)
+	}
+
+	return downloadURL, checksumsURL, nil
+}
+
+// deriveChecksumsURL derives a release's SHA256SUMS asset URL from one of
+// its own asset download URLs, by replacing the last path element. Used
+// when a caller supplies download_url directly (bypassing
+// CheckForReleaseUpdates, which already resolves both URLs together via
+// resolveReleaseAssets), so the checksum verification in
+// BinaryUpdateExecutor.Run still has somewhere to look.
+func deriveChecksumsURL(downloadURL string) string {
+	idx := strings.LastIndex(downloadURL, "/")
+	if idx < 0 {
+		return ""
+	}
+	return downloadURL[:idx+1] + "SHA256SUMS"
+}
+
+// fetchExpectedChecksum downloads the release's SHA256SUMS asset and
+// returns the expected hash for assetName -- the tarball's filename *on
+// the release*, not any local path. Deliberately callable before the
+// (potentially large) release tarball itself is downloaded: this backs an
+// unattended updater that re-checks on a recurring schedule, and a release
+// with no checksums asset, or no entry for this asset, should fail
+// immediately rather than after downloading the whole tarball every cycle.
+// An empty checksumsURL, a download failure, and a missing entry are all
+// treated as equally fatal -- there is no "proceed anyway" path here (see
+// verifyFileChecksum's doc comment for why this differs from deploy.sh's
+// own, operator-driven install-time tooling).
+func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
+	if checksumsURL == "" {
+		return "", fmt.Errorf("no checksums URL available for %s", assetName)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "scion-update-sums-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp directory for checksums: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	sumsPath := filepath.Join(tmpDir, "SHA256SUMS")
+	if err := downloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
+		return "", fmt.Errorf("download checksums: %w", err)
+	}
+
+	sumsData, err := os.ReadFile(sumsPath)
+	if err != nil {
+		return "", fmt.Errorf("read checksums file: %w", err)
+	}
+
+	for _, line := range strings.Split(string(sumsData), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		// sha256sum's own output uses a "*name" prefix in binary mode,
+		// "name" in text mode (what build-release.yml's `sha256sum --`
+		// produces); accept either.
+		if strings.TrimPrefix(fields[1], "*") == assetName {
+			return fields[0], nil
+		}
+	}
+
+	return "", fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
+}
+
+// verifyFileChecksum hashes the file at path and compares it against
+// expectedHash (as returned by fetchExpectedChecksum), failing closed on a
+// mismatch. This is an unattended background updater, not an interactive
+// install, so unlike deploy.sh's own preflight/verification there is no
+// override here: a mismatch always fails the update, with nothing swapped
+// in.
+func verifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open tarball for checksum: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hash tarball: %w", err)
+	}
+	actualHash := hex.EncodeToString(h.Sum(nil))
+
+	if !strings.EqualFold(actualHash, expectedHash) {
+		return fmt.Errorf("checksum mismatch for %q: expected %s, got %s", assetName, expectedHash, actualHash)
+	}
+
+	_, _ = fmt.Fprintf(logger, "Checksum verified for %s: %s\n", assetName, actualHash)
+	return nil
 }
 
 // BinaryUpdateExecutor downloads, verifies, and installs a new scion binary
@@ -1278,9 +1397,11 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	_, _ = fmt.Fprintf(logger, "Current binary: %s\n", binaryPath)
 	_, _ = fmt.Fprintf(logger, "Service name: %s\n", serviceName)
 
-	// Get target version and download URL — from params or by running a release check.
+	// Get target version, download URL, and checksums URL — from params or
+	// by running a release check.
 	targetVersion := params["target_version"]
 	downloadURL := params["download_url"]
+	checksumsURL := params["checksums_url"]
 
 	if targetVersion == "" || downloadURL == "" {
 		_, _ = fmt.Fprintln(logger, "Checking for release updates...")
@@ -1308,10 +1429,20 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 		if downloadURL == "" {
 			downloadURL = result.DownloadURL
 		}
+		if checksumsURL == "" {
+			checksumsURL = result.ChecksumsURL
+		}
 	}
 
 	if downloadURL == "" {
 		return fmt.Errorf("no download URL available for version %s", targetVersion)
+	}
+	if checksumsURL == "" {
+		// A caller passed download_url directly without a matching
+		// checksums_url (e.g. a manually-triggered run) — derive it from
+		// the same release's own asset URL rather than treating "no
+		// checksums_url param" as "skip verification".
+		checksumsURL = deriveChecksumsURL(downloadURL)
 	}
 
 	_, _ = fmt.Fprintf(logger, "Target version: %s\n", targetVersion)
@@ -1320,6 +1451,23 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 		"target_version", targetVersion,
 		"download_url", downloadURL,
 		"binary_path", binaryPath)
+
+	// ── Step 1b: FETCH EXPECTED CHECKSUM ─────────────────────────────────
+	// Fetch and parse SHA256SUMS *before* downloading the (potentially
+	// large) release tarball below: this update check runs on a recurring
+	// schedule, and a release with no checksums asset, or no entry for
+	// this asset, should fail immediately rather than after a full
+	// download every cycle. Fails closed the same way the combined check
+	// used to — see fetchExpectedChecksum's doc comment for what's fatal
+	// and why there is no override here.
+
+	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
+
+	assetName := path.Base(downloadURL)
+	expectedHash, err := fetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
+	if err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
+	}
 
 	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
 
@@ -1338,6 +1486,14 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 
 	if err := downloadFile(ctx, downloadURL, tarballPath, logger); err != nil {
 		return fmt.Errorf("download failed: %w", err)
+	}
+
+	// ── Step 2b: VERIFY CHECKSUM ─────────────────────────────────────────
+
+	_, _ = fmt.Fprintf(logger, "\n==> Verifying checksum...\n")
+
+	if err := verifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 
 	// ── Step 3: VERIFY ──────────────────────────────────────────────────
