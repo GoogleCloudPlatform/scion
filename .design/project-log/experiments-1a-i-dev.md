@@ -1,7 +1,8 @@
 # Experiments Phase 1a-i — Go core (ptone/scion#2217)
 
-PR: ptone/scion#2276 · Branch: `scion/experiments-1a-i` · Design: revision 6
-(frozen), §3.2, §3.3, §3.6, §7 1a-i, §9, §10.
+PR: ptone/scion#2276 · Branch: `scion/experiments-1a-i`. Implements the Go
+core for hub-wide experiments: registry, storage, resolution, and
+server-side check helpers.
 
 ## Scope
 
@@ -10,7 +11,7 @@ section, `OperationalSettings` accessors, and the server-side resolution and
 `requireExperiment` gate. No HTTP endpoints and no authorization wiring — that
 is Phase 1a-ii. No web changes; the `DEFAULT_ON_FLAGS` consistency test reads
 `web/src/utils/feature-flags.ts` as it stands today and passes unmodified,
-per §7.
+as scoped for this phase.
 
 ## Decisions / notes for reviewers
 
@@ -21,15 +22,15 @@ per §7.
   tail, and both PRs touch the `TestRegistryHasAllSections` expected-names
   line (`opsettings_test.go:33-35`). My change there is a single-element append to
   keep that conflict minimal and textual, as instructed.
-- **`TestSectionHasKoanfPaths`** (pre-existing test, not called out in the
-  design) also enumerates DB-only sections by name. Added `"experiments"`
+- **`TestSectionHasKoanfPaths`** (pre-existing test, not part of this phase's
+  brief) also enumerates DB-only sections by name. Added `"experiments"`
   there alongside `"maintenance"`/`"messaging"` — needed for the suite to
   pass, same rationale as the `TestRegistryHasAllSections` addition.
 - **`ExperimentsReadResult`** fields are `{Overrides, Revision, Malformed,
-  Err}`, per the design's "FYI notes" (left to the implementer).
-- **Seeding-skip test.** The design points at extending
+  Err}`, left to the implementer to define.
+- **Seeding-skip test.** The natural place to extend was
   `seed_roundtrip_test.go`; that file's existing tests are about
-  `SeedEquivalent` env-var round-tripping, not per-section seeding skip, so I
+  `SeedEquivalent` env-var conversion, not per-section seeding skip, so I
   added a new, separately-scoped test there
   (`TestExperimentsSectionSkippedBySeeding`) asserting `KoanfPaths == nil` and
   that `ExtractSectionFromKoanf` returns an empty document, rather than
@@ -38,7 +39,7 @@ per §7.
   read-and-compare test against `feature-flags.ts`, there's a second test
   (`TestDefaultOnFlagsConsistency_DetectsMissingEntry`) that feeds a synthetic
   registry and a stale flag list to the comparison function directly, proving
-  the check fails on drift (an explicit §9 criterion) without needing to
+  the check fails on drift (one of the acceptance criteria) without needing to
   simulate an out-of-sync file on disk.
 - **Zero-value `&Server{}` test seam.** `experimentRegistry()` and
   `experimentsSnapshot()` are nil-safe (fall back to `experiments.Default()`
@@ -50,7 +51,8 @@ per §7.
   actually carries `ServerConfig.Experiments` onto a real server.
 - **No package-level mutation.** All registry tests build fresh `*Registry`
   values via `NewRegistry`; none touch `compiled`/`compiledRetired` directly,
-  so `t.Parallel()` would be safe if added later (design.md §3.2, §9).
+  so `t.Parallel()` would be safe if added later (an explicit invariant and
+  acceptance criterion).
 
 ## Deviations from the initial draft
 
@@ -58,12 +60,13 @@ per §7.
   several single-assertion tests into table-driven tests
   (`TestExperimentEnabledIn_Resolution`, `TestExperimentsSnapshot`,
   `TestReadAuthoritativeExperiments`, `TestNewRegistry_InvariantViolations`).
-  The diff still ends up above the ~450–600 target — the §9/§10 rows assigned
-  to 1a-i cover a wide matrix (registry invariants, the malformed-row policy,
-  snapshot/read-result cases, `requireExperiment`'s gate and panic behaviors)
-  plus coverage added during review, and I did not cut coverage to hit the
-  number. See the PR diff stat for the current size rather than a count here,
-  which would go stale on the next push.
+  The diff still ends up above the ~450–600 target — the acceptance criteria
+  and test-plan rows assigned to 1a-i cover a wide matrix (registry
+  invariants, the malformed-row policy, snapshot/read-result cases,
+  `requireExperiment`'s gate and panic behaviors) plus coverage added during
+  review, and I did not cut coverage to hit the number. See the PR diff stat
+  for the current size rather than a count here, which would go stale on the
+  next push.
 
 ## Verification
 
@@ -81,3 +84,22 @@ per §7.
   `TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt` — are in binary
   backup/update and agent-reincarnation code this PR does not touch. All
   experiments-related tests within that run passed.
+
+## Upstream review and rebase
+
+- Addressed upstream review feedback in two areas: a test comparison helper
+  switched from a plain map index read to a presence-checked lookup so a
+  missing key is never mistaken for a present zero value, and the
+  operational-settings read path for the experiments section switched from
+  parsing its stored document on every read to parsing it once when the
+  cache entry is written, folding the parsed result into that same cache
+  entry so a delete or replace can never leave a stale copy behind. Added
+  tests for the write and delete paths that previously lacked direct
+  coverage.
+- The branch was rebased onto a later upstream main. The rebase conflicted
+  with a `quotas` settings section added by GoogleCloudPlatform/scion#2115 at
+  the same two points this change touches — the schema map and the
+  section-name list in a registry completeness test — because both changes
+  insert next to the same existing entry. Both sections were kept intact.
+- All experiments and quotas tests pass after the rebase and after the
+  review fixes.
