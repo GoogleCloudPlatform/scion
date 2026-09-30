@@ -65463,6 +65463,7 @@ type UserAccessTokenMutation struct {
 	prefix                 *string
 	key_hash               *string
 	project_id             *uuid.UUID
+	boundary_kind          *string
 	scopes                 *string
 	ceiling_version        *int32
 	addceiling_version     *int32
@@ -65744,7 +65745,7 @@ func (m *UserAccessTokenMutation) ProjectID() (r uuid.UUID, exists bool) {
 // OldProjectID returns the old "project_id" field's value of the UserAccessToken entity.
 // If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v *uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
 	}
@@ -65758,9 +65759,58 @@ func (m *UserAccessTokenMutation) OldProjectID(ctx context.Context) (v uuid.UUID
 	return oldValue.ProjectID, nil
 }
 
+// ClearProjectID clears the value of the "project_id" field.
+func (m *UserAccessTokenMutation) ClearProjectID() {
+	m.project_id = nil
+	m.clearedFields[useraccesstoken.FieldProjectID] = struct{}{}
+}
+
+// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
+func (m *UserAccessTokenMutation) ProjectIDCleared() bool {
+	_, ok := m.clearedFields[useraccesstoken.FieldProjectID]
+	return ok
+}
+
 // ResetProjectID resets all changes to the "project_id" field.
 func (m *UserAccessTokenMutation) ResetProjectID() {
 	m.project_id = nil
+	delete(m.clearedFields, useraccesstoken.FieldProjectID)
+}
+
+// SetBoundaryKind sets the "boundary_kind" field.
+func (m *UserAccessTokenMutation) SetBoundaryKind(s string) {
+	m.boundary_kind = &s
+}
+
+// BoundaryKind returns the value of the "boundary_kind" field in the mutation.
+func (m *UserAccessTokenMutation) BoundaryKind() (r string, exists bool) {
+	v := m.boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBoundaryKind returns the old "boundary_kind" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBoundaryKind: %w", err)
+	}
+	return oldValue.BoundaryKind, nil
+}
+
+// ResetBoundaryKind resets all changes to the "boundary_kind" field.
+func (m *UserAccessTokenMutation) ResetBoundaryKind() {
+	m.boundary_kind = nil
 }
 
 // SetScopes sets the "scopes" field.
@@ -66206,7 +66256,7 @@ func (m *UserAccessTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserAccessTokenMutation) Fields() []string {
-	fields := make([]string, 0, 14)
+	fields := make([]string, 0, 15)
 	if m.user_id != nil {
 		fields = append(fields, useraccesstoken.FieldUserID)
 	}
@@ -66221,6 +66271,9 @@ func (m *UserAccessTokenMutation) Fields() []string {
 	}
 	if m.project_id != nil {
 		fields = append(fields, useraccesstoken.FieldProjectID)
+	}
+	if m.boundary_kind != nil {
+		fields = append(fields, useraccesstoken.FieldBoundaryKind)
 	}
 	if m.scopes != nil {
 		fields = append(fields, useraccesstoken.FieldScopes)
@@ -66267,6 +66320,8 @@ func (m *UserAccessTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.KeyHash()
 	case useraccesstoken.FieldProjectID:
 		return m.ProjectID()
+	case useraccesstoken.FieldBoundaryKind:
+		return m.BoundaryKind()
 	case useraccesstoken.FieldScopes:
 		return m.Scopes()
 	case useraccesstoken.FieldCeilingVersion:
@@ -66304,6 +66359,8 @@ func (m *UserAccessTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldKeyHash(ctx)
 	case useraccesstoken.FieldProjectID:
 		return m.OldProjectID(ctx)
+	case useraccesstoken.FieldBoundaryKind:
+		return m.OldBoundaryKind(ctx)
 	case useraccesstoken.FieldScopes:
 		return m.OldScopes(ctx)
 	case useraccesstoken.FieldCeilingVersion:
@@ -66365,6 +66422,13 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProjectID(v)
+		return nil
+	case useraccesstoken.FieldBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBoundaryKind(v)
 		return nil
 	case useraccesstoken.FieldScopes:
 		v, ok := value.(string)
@@ -66474,6 +66538,9 @@ func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *UserAccessTokenMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(useraccesstoken.FieldProjectID) {
+		fields = append(fields, useraccesstoken.FieldProjectID)
+	}
 	if m.FieldCleared(useraccesstoken.FieldCeilingPermissionIds) {
 		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
 	}
@@ -66503,6 +66570,9 @@ func (m *UserAccessTokenMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *UserAccessTokenMutation) ClearField(name string) error {
 	switch name {
+	case useraccesstoken.FieldProjectID:
+		m.ClearProjectID()
+		return nil
 	case useraccesstoken.FieldCeilingPermissionIds:
 		m.ClearCeilingPermissionIds()
 		return nil
@@ -66540,6 +66610,9 @@ func (m *UserAccessTokenMutation) ResetField(name string) error {
 		return nil
 	case useraccesstoken.FieldProjectID:
 		m.ResetProjectID()
+		return nil
+	case useraccesstoken.FieldBoundaryKind:
+		m.ResetBoundaryKind()
 		return nil
 	case useraccesstoken.FieldScopes:
 		m.ResetScopes()
