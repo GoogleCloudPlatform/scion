@@ -2829,19 +2829,36 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	existing, rsErr := wcs.GetReadState(ctx, user.ID(), key)
+	hasExisting := rsErr == nil && existing != nil && existing.LastReadMessageID != ""
+
+	// Fast path: re-marking with the already-current watermark is a no-op —
+	// skip the message lookup and the write entirely.
+	if hasExisting && existing.LastReadMessageID == body.MessageID {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
 	// Reject IDs that aren't persisted messages: clients must never set a
 	// client-local placeholder as the watermark. Existence only, not also
 	// same-conversation membership — history lists by ConversationID, and a
 	// visible row's ThreadID may differ from key.
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
-	if err != nil || targetMsg == nil {
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			ValidationError(w, "messageId does not refer to a known message", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
+		}
+		return
+	}
+	if targetMsg == nil {
 		ValidationError(w, "messageId does not refer to a known message", nil)
 		return
 	}
 	// Monotonic: a stale advance must never roll the watermark backward;
 	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
-	if existing, rsErr := wcs.GetReadState(ctx, user.ID(), key); rsErr == nil &&
-		existing != nil && existing.LastReadMessageID != "" && existing.LastReadMessageID != body.MessageID {
+	if hasExisting {
 		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil && currentMsg != nil {
 			newer := targetMsg.CreatedAt.After(currentMsg.CreatedAt) ||
 				(targetMsg.CreatedAt.Equal(currentMsg.CreatedAt) && targetMsg.ID > currentMsg.ID)

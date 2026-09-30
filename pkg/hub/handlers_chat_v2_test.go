@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1164,6 +1165,93 @@ func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
 	}
 	if rs == nil || rs.LastReadMessageID != hi.ID {
 		t.Errorf("tie-break rolled back: got %+v, want LastReadMessageID to remain %q (the higher ID)", rs, hi.ID)
+	}
+}
+
+// getMessageErrStore wraps a store.Store and forces GetMessage to return a
+// caller-supplied error for one specific ID (any other ID falls through to
+// the real store). Used to distinguish "message not found" from "the store
+// itself failed" in handleConversationRead.
+type getMessageErrStore struct {
+	store.Store
+	failID string
+	err    error
+}
+
+func (f *getMessageErrStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
+	if id == f.failID {
+		return nil, f.err
+	}
+	return f.Store.GetMessage(ctx, id)
+}
+
+// TestChatV2_ConversationRead_StoreErrorReturns500: a genuine store failure
+// (e.g. a dropped DB connection) while looking up the watermark candidate
+// must surface as 500, not be folded into the 400 "unknown message" path
+// used for a not-found/malformed ID.
+func TestChatV2_ConversationRead_StoreErrorReturns500(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-store-err", ProjectID: proj.ID, Name: "store-err", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	failID := tid("store-err-msg")
+	srv.store = &getMessageErrStore{Store: s, failID: failID, err: errors.New("connection reset by peer")}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-store-err/read",
+		map[string]string{"messageId": failID})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a genuine store error (not not-found), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-store-err")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs != nil && rs.LastReadMessageID != "" {
+		t.Errorf("read state should not have been written after a store error, got %+v", rs)
+	}
+}
+
+// TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent: re-posting
+// the conversation's current watermark must short-circuit before any message
+// lookup or write — proven here by swapping in a store whose GetMessage
+// always errors for that ID after the watermark is already set.
+func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-noop", ProjectID: proj.ID, Name: "noop", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	msg := &store.Message{ID: tid("noop-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-noop", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-noop", CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// Establish the watermark first — this call legitimately hits GetMessage.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-noop/read",
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial advance: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Any further GetMessage call for this ID now fails loudly, so a 200
+	// here can only mean the fast path skipped the lookup entirely.
+	srv.store = &getMessageErrStore{Store: s, failID: msg.ID, err: errors.New("GetMessage should not have been called")}
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-noop/read",
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-posting the current watermark: expected 200 (fast-path no-op), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
