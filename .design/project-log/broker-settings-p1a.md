@@ -31,6 +31,14 @@ invalidate.
   system limits (previously hidden entirely), with name/resource
   type/unit rendered read-only in the edit dialog when `limit.system` is
   true, so the UI can't produce a request the server will 403.
+- `pkg/hub/handlers_quota.go` (added after upstream review, see Round 5
+  below): `createLimitDefinition` and the non-system branch of
+  `updateLimitDefinition` now trim `resource_type` and reject it with `400`
+  if empty, matching the existing `name` validation. `unit` is trimmed on
+  update but deliberately **not** required on either path — `unit` isn't
+  read by quota resolution, and requiring it on update while create never
+  required it would have made pre-existing empty-unit rows permanently
+  uneditable. System-row identity-field handling is unchanged.
 - Docs: `docs-site/.../reference/api.md` and
   `docs-site/.../hosted/ha/multi-broker.md` no longer describe the
   `system_default`/`scope=broker` entitlement override as a working way to
@@ -64,6 +72,15 @@ invalidate.
   exercised.
 - `pkg/hub/agent_ceiling_gate_test.go`: updated a stale comment referencing
   the old default of 12 to 100.
+- `pkg/hub/handlers_quota_test.go` (Round 5): `TestQuotaAPI_CreateLimitDefinition_EmptyResourceType`/`_WhitespaceResourceType`;
+  `TestQuotaAPI_UpdateLimitDefinition_EmptyResourceType` (kept from the
+  initial upstream fix); `TestQuotaAPI_UpdateLimitDefinition_EmptyUnitFromCreateStillEditable`
+  (a limit created with an empty unit stays editable — the round-5 F1
+  regression test); `TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit`
+  (padded whitespace is trimmed and the trimmed value persists);
+  `TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_EmptyResourceTypeAndUnitForbidden`
+  (an empty/whitespace resource_type or unit sent to a system row takes the
+  403 identity-mismatch path, not the non-system 400 validation).
 
 ## Coordination
 
@@ -124,6 +141,20 @@ seeded definition, per the design.
   "Lint 405 Allow header" (reporting-only) and reporting-only
   `internal/fixturegen TestFixtureCoverage` both fail pre-existing and
   repo-wide, unrelated to this PR.
+- After `GoogleCloudPlatform/scion#2110` merged (fixing the
+  `GoogleCloudPlatform/scion#2088` vet break) and a rebase, CI on
+  `ptone/scion#2268` went fully green on every required check: Build & Test
+  (including Verify Web Types, Vet Code, Run Tests), golangci-lint, pkg/hub
+  SQLite Tests, T1 Postgres, shellcheck, single-node-vm harness,
+  Mergeability Gate. Only the pre-existing reporting-only "Lint 405" stayed
+  red.
+- Round 5 fix (`resource_type`/`unit` validation symmetry, see "Upstream
+  mirror" below): `go build ./...` clean; `go vet ./pkg/hub/` and
+  `go vet -tags no_sqlite ./pkg/hub/` clean;
+  `go test ./pkg/hub/ -run 'Limit|Quota|Seed' -count=1` pass; `make
+  test-hub-sqlite` pass; `golangci-lint run --new-from-rev=upstream-main
+  ./pkg/hub/...` 0 issues. No web files touched this round, so `tsc
+  --noEmit` was not re-run.
 
 ## Surprises / notes for reviewers
 
@@ -204,3 +235,46 @@ seeded definition, per the design.
   - F3: the PR body said the `pkg/runtimebroker`/`pkg/sciontool/supervisor`
     env-leakage failures were seen "in earlier CI runs"; they were actually
     local `make test-fast` runs, never a CI failure. Reworded.
+
+## Upstream mirror: GoogleCloudPlatform/scion#2114
+
+ptone opened `GoogleCloudPlatform/scion#2114` from this branch, mirroring
+`ptone/scion#2268`. gemini-code-assist reviewed it and flagged (medium)
+that `updateLimitDefinition`'s non-system branch wrote `resource_type`
+straight through with no validation, so an empty or whitespace-only value
+would silently corrupt the row. Fixed in commit `44deb4a43` by trimming and
+requiring `resource_type`, and — per broker-settings-em's instruction to
+check `name` and `unit` for the same hole — also trimming and requiring
+`unit` (an overreach corrected in Round 5 below) and confirming `name`
+already had this validation.
+
+- **Round 5** (`broker-settings-rev-p1a-5`, fresh/independent, reviewing the
+  `44deb4a43` upstream fix): REQUEST CHANGES.
+  - F1 (Required): requiring `unit` on update was a regression.
+    `createLimitDefinition` never required `unit` (the admin UI treats it
+    as optional, rendering `—`), so a row created with an empty unit could
+    no longer be edited at all — a plain `defaultValue`-only PUT now failed
+    with `400 "unit is required"`. broker-settings-em's decision: keep
+    trimming `unit` on update, but drop the requirement. Added
+    `TestQuotaAPI_UpdateLimitDefinition_EmptyUnitFromCreateStillEditable`.
+  - F2: the same `resource_type` hole the upstream thread flagged for
+    update was also reachable through `createLimitDefinition` (accepted
+    `"   "` with `201`; accepted `""` and 500'd from an ent validator).
+    Fixed: `createLimitDefinition` now trims and requires `resource_type`
+    too, without touching `unit` on create. Added
+    `TestQuotaAPI_CreateLimitDefinition_EmptyResourceType`/`_WhitespaceResourceType`.
+  - F3: `..._SystemSeeded_EmptyFieldsUnaffected` was misleadingly named — it
+    sent no empty fields, and mostly duplicated
+    `..._SystemSeeded_DefaultValueAllowed`. Replaced with
+    `..._SystemSeeded_EmptyResourceTypeAndUnitForbidden`, which actually
+    sends an empty/whitespace `resource_type` and `unit` to a system row
+    and asserts the real outcome: `403` (the pre-existing identity-mismatch
+    path), not the new non-system `400` validation, since the checks live
+    only in the non-system branch.
+  - F4: added `TestQuotaAPI_UpdateLimitDefinition_TrimsResourceTypeAndUnit`
+    to assert that a non-system PUT's trimmed `resource_type`/`unit` values
+    are what gets persisted (previously verified only by the reviewer's
+    manual probe, not by a committed test).
+  - Fix commit: see the PR/branch history for the current SHA (this file
+    avoids pinning a SHA that a rebase would invalidate, per Round 3 F2/F5
+    above).
