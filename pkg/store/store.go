@@ -440,11 +440,8 @@ type AgentFilter struct {
 	// adapter backs this with a dedicated, plain-equality column
 	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
 	// AppliedConfig.HarnessConfig on every write, rather than parsing or
-	// pattern-matching AppliedConfig's JSON at query time — two earlier
-	// attempts at the latter each had a real correctness bug (a Postgres
-	// version floor, then false positives from a same-named nested key
-	// elsewhere in AppliedConfig) that a real column eliminates by
-	// construction (ptone/scion#2146 review R3-1).
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146
+	// review R3-1).
 	HarnessConfig string
 
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.
@@ -478,22 +475,18 @@ type AgentFilter struct {
 	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
 	// messaging-permission query — it says nothing about who the reference
 	// agent may message under any message mode (scion set-message-mode),
-	// which can be a different, smaller set (ptone/scion#2146 review R2-1,
-	// R2-2; an earlier version of this doc incorrectly implied the two were
-	// related). The root ID this field is set to is computed client-side
-	// (see resolveLineageRootID in cmd/list.go): the reference's direct
-	// parent, or the reference itself when it has no parent at all (an
-	// empty Ancestry), when its parent is a user rather than an agent, or
-	// when its only recorded parent is an agent the caller cannot list
-	// (ptone/scion#2146 review R6-5 — this third case is not the same as
-	// "parent is a user": both fall back to rooting at self, since the
-	// caller can't tell them apart, but only the first two mean there is
-	// no agent parent at all). "Parent is a user" is NOT simply "Ancestry
-	// has fewer than 2 entries"
-	// — an earlier version of this doc and of resolveLineageRootID asserted
-	// that equivalence, and it is false: a child can inherit a length-1,
-	// agent-only Ancestry from a creator whose own Ancestry was itself
-	// empty (ptone/scion#2146 review R4-3; see resolveLineageRootID's doc
+	// which can be a different, smaller set. The root ID this field is set
+	// to is computed client-side (see resolveLineageRootID in cmd/list.go):
+	// the reference's direct parent, or the reference itself when it has no
+	// parent at all (an empty Ancestry), when its parent is a user rather
+	// than an agent, or when its only recorded parent is an agent the
+	// caller cannot list. The latter two both fall back to rooting at self,
+	// since the caller can't tell them apart, but only they (not a length-1
+	// parent the caller CAN list) mean there is no agent parent at all.
+	//
+	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
+	// child can inherit a length-1, agent-only Ancestry from a creator
+	// whose own Ancestry was itself empty (see resolveLineageRootID's doc
 	// for exactly when this happens). Determining "is the parent a user"
 	// therefore requires resolving a length-1 Ancestry entry through the
 	// caller's authorized list (never a bare per-ID fetch) rather than a

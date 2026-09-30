@@ -1444,17 +1444,11 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	}
 }
 
-// TestCreateHubClient_PrefersOAuthOverAgentToken is the ptone/scion#2146
-// review R4-6 addition, renamed in review R5-10: it sets BOTH an OAuth
-// credential and an agent token and proves OAuth wins, which is what a test
-// with this name should do — an earlier version of this file had a
-// same-named test that never actually configured OAuth at all (it only
-// checked that SCION_AUTH_TOKEN is picked up when OAuth is absent, which
-// duplicated TestCreateHubClient_UsesAgentTokenFromEnv and has been
-// removed). OAuth was believed untestable here because
-// credentials.GetAccessToken reads a global store — that store is just a
-// file under HOME, though, so a clean, test-local HOME plus
-// credentials.Store makes it directly testable after all.
+// TestCreateHubClient_PrefersOAuthOverAgentToken sets BOTH an OAuth
+// credential and an agent token and proves OAuth wins (ptone/scion#2146
+// review R4-6). credentials.GetAccessToken reads its store from a file
+// under HOME, so a clean, test-local HOME plus credentials.Store makes
+// OAuth directly testable here.
 func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer oauth-access-token" {

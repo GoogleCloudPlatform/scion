@@ -219,42 +219,28 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		// returns nothing for a bare agent token, even for the caller's own
 		// ID — only the project-scoped endpoint's same-project carve-out
 		// (listProjectAgents, pkg/hub/handlers_projects_core.go) lets an
-		// agent list anything without extra grants. An earlier version of
-		// this code tried to route just the reference-agent *resolution*
-		// step through the project-scoped endpoint while leaving the final
-		// listing on the global one; that made resolution succeed but the
-		// final listing still came back empty — a silent wrong answer
-		// indistinguishable from "no descendants" (ptone/scion#2146 review
-		// R2-4), and it also broke `--all` for HUMAN callers naming a
-		// reference agent in a *different* project, since it forced
-		// resolution through the caller's own project unconditionally
-		// (review R2-3). Failing loudly here instead removes both defects:
-		// humans keep the pre-existing global-endpoint behavior for --all,
-		// and an agent caller gets a clear error instead of a wrong empty
-		// list.
+		// agent list anything without extra grants. Failing loudly here
+		// means an agent caller gets a clear error instead of a wrong,
+		// silently empty list indistinguishable from "no descendants"
+		// (ptone/scion#2146 review R2-4); humans keep the existing
+		// global-endpoint behavior for --all regardless of which project a
+		// named reference lives in (review R2-3).
 		//
-		// This keys on hubCtx.CredentialKind — which credential
-		// hubsync.createHubClient actually selected (this is the only
-		// function that sets it; getHubClient, cmd/hub.go's independent
-		// implementation of the same auth-priority logic, never does, and
-		// scion list never calls it — see ptone/scion#2213 for the
-		// duplication itself) — not on CLI mode (ptone/scion#2146 review
-		// R4-6, replacing the R3-2
-		// mode-keyed version of this guard). The mode-keyed version had two
-		// real gaps: (1) inside an agent container, the CLI can still
-		// authenticate as a user (OAuth credentials, or dev auth on a
-		// localhost hub for a non-hub-managed agent take priority over the
-		// agent token — see hubsync.createHubClient's auth priority order),
-		// in which case --all actually works but the mode check still
-		// blocked it; (2) it does not distinguish an agent token that
-		// carries a group-derived agent.list grant, which gets a non-empty
-		// (if project-limited) global result, so "would always be empty"
-		// was never a universal guarantee for every agent token either —
-		// that residual imprecision is unchanged by this fix and is
-		// accepted, same as before, since the remedy ("drop --all") still
-		// yields the same set in that case. Keying on CredentialKind fixes
-		// exactly gap (1): a user-authenticated caller in agent mode is no
-		// longer blocked.
+		// This keys on hubCtx.CredentialKind — the credential
+		// hubsync.createHubClient actually selected; getHubClient,
+		// cmd/hub.go's independent implementation of the same auth-priority
+		// logic (tracked as a duplication in ptone/scion#2213), never sets
+		// it, and scion list never calls getHubClient — not on CLI mode
+		// (ptone/scion#2146 review R4-6). This distinguishes a
+		// user-authenticated caller (OAuth, or dev auth on a localhost hub
+		// for a non-hub-managed agent — see hubsync.createHubClient's auth
+		// priority order) running inside an agent container from an actual
+		// agent-token caller: only the latter is blocked. It does not
+		// distinguish an agent token that carries a group-derived
+		// agent.list grant, which gets a non-empty (if project-limited)
+		// global result — "would always be empty" is not a universal
+		// guarantee for every agent token, but the remedy ("drop --all")
+		// still yields the same set in that case, so this is accepted.
 		//
 		// Note: hubCtx.CredentialKind is set only for a HubContext built via
 		// CheckHubAvailability* (which is how `scion list` always gets one);
@@ -515,9 +501,7 @@ func resolveRelationshipReference(ctx context.Context, client hubclient.Client, 
 //     identity that is neither a user nor an agent, or it predates ancestry
 //     tracking entirely), the child's Ancestry is `[creatorAgent.ID]`:
 //     length 1, but an AGENT's ID, not a user's (ptone/scion#2146 review
-//     R4-3 — an earlier version of this function treated every length-1
-//     Ancestry as "parent is a user", which is false in exactly this case).
-//     `len(ancestry)` alone cannot distinguish the two; only resolving what
+//     R4-3). `len(ancestry)` alone cannot distinguish the two; only resolving what
 //     the ID actually names can. So it is resolved through the same
 //     authorized-list mechanism `resolveReferenceAgent` uses — never a bare
 //     per-ID fetch outside list authorization (see

@@ -285,7 +285,7 @@ Lists all agents and their status.
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
     - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND.
-    - `--owner <user>` (Hub mode only): Filter by owner — a user ID, name, email, or the reserved value `me` (a user whose display name is literally "me" cannot be matched by name; use their ID or email). Owner is the direct creator (`createdBy`), which for an agent-created agent is another **agent**, not the human at the root of the tree — `--owner alice` does not include agents created by alice's agents, and `--owner me` in agent mode means "agents I directly created."
+    - `--owner <user>` (Hub mode only): Filter by owner — a user ID, name, email, or the reserved value `me` (a user whose display name is literally "me" cannot be matched by name; use their ID or email). Owner is the direct creator (`createdBy`), which for an agent-created agent is another **agent**, not the human at the root of the tree — `--owner alice` does not include agents created by alice's agents, and `--owner me` when authenticated with an agent token means "agents I directly created."
     - `--broker <name|id>` (Hub mode only): Filter by runtime broker name or ID.
     - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
     - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference. With no value, the reference is the calling agent in agent mode, or the calling user otherwise (a user's ID is recorded as the creator in its directly-created agents' ancestry, so this still works).

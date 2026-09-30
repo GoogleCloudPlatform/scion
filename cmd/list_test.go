@@ -1462,9 +1462,9 @@ func TestResolveLineageRootID(t *testing.T) {
 	}
 
 	// ptone/scion#2146 review R6-6: the R5-7 >1-exact-match hardening,
-	// tested directly. Mutation-verified: replacing the ID-equality check
-	// with `true` made this case return the first duplicate instead of
-	// erroring, failing.
+	// tested directly. Guards the >1-exact-match branch: removing the
+	// `found != nil` check makes this case fail. (It does not distinguish
+	// the ID-equality mutant; the mismatched-ID case above does.)
 	t.Run("single ancestry entry whose lookup returns TWO exact-ID matches (R5-7/R6-6): must fail loud, not guess", func(t *testing.T) {
 		requestCount = 0
 		_, err := resolveLineageRootID(context.Background(), agentSvc, "child-id", []string{duplicateMatchEntry})
@@ -1702,6 +1702,73 @@ func TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, refID, a.ID)
 	assert.False(t, bareListCalled, "a UUID reference must resolve via id[], not a full-list page scan")
+}
+
+// TestResolveReferenceAgent_UUIDMismatchedIDNotFound is the ptone/scion#2146
+// review R6-7/R7-4 fix, tested directly: a Hub that ignores the `id` query
+// param (a pre-#2146 Hub, R4-11) and hands back an arbitrary agent must not
+// be trusted — the response element's ID must actually equal ref.
+// Mutation-verified: replacing `resp.Agents[i].ID == ref` with `true` makes
+// this case pass instead of erroring (it would wrongly resolve to the
+// mismatched agent), so it fails as intended against that mutant.
+func TestResolveReferenceAgent_UUIDMismatchedIDNotFound(t *testing.T) {
+	const ref = "77777777-7777-7777-7777-777777777777"
+	const unexpectedAgentID = "88888888-8888-8888-8888-888888888888"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+ref:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/agents":
+			require.Equal(t, []string{ref}, r.URL.Query()["id"])
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{{ID: unexpectedAgentID, Slug: "unexpected-agent"}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	_, err = resolveReferenceAgent(context.Background(), client.Agents(), ref)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestResolveReferenceAgent_UUIDDuplicateMatchErrors is the ptone/scion#2146
+// review R7-4 fix: two response elements both claiming ID == ref should
+// never happen against a real Hub (IDs is a single-element set), but the
+// function must fail loud rather than guess which one.
+func TestResolveReferenceAgent_UUIDDuplicateMatchErrors(t *testing.T) {
+	const ref = "99999999-9999-9999-9999-999999999999"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/agents/"+ref:
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/api/v1/agents":
+			require.Equal(t, []string{ref}, r.URL.Query()["id"])
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents": []hubclient.Agent{
+					{ID: ref, Slug: "dup-1"},
+					{ID: ref, Slug: "dup-2"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	_, err = resolveReferenceAgent(context.Background(), client.Agents(), ref)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "more than one record")
 }
 
 // TestResolveReferenceAgent_PagesThroughNameMatches is the ptone/scion#2146

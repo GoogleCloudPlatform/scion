@@ -1292,12 +1292,7 @@ func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTe
 // TestAgentStore_HarnessConfigFilter verifies filtering agents by the
 // harness_config shadow column (pkg/ent/schema/agent.go), which
 // CreateAgent/UpdateAgent keep in sync with the top-level
-// AppliedConfig.HarnessConfig (ptone/scion#2146 review R3-1 — this replaced
-// two prior attempts at parsing/pattern-matching the applied_config JSON
-// document at query time, each of which had a real correctness bug: R1-4's
-// PG16-only pg_input_is_valid guard, then R2/R3's strpos/to_json substring
-// search, which produced false positives from CreateInputs.HarnessConfig,
-// a same-named field declared later in AgentAppliedConfig). These tests
+// AppliedConfig.HarnessConfig (ptone/scion#2146 review R3-1). These tests
 // execute the real predicate (agent.HarnessConfigEQ) via ListAgents, not a
 // hand-simulation of it.
 func TestAgentStore_HarnessConfigFilter(t *testing.T) {
@@ -1528,9 +1523,8 @@ func TestAgentStore_IDsFilter(t *testing.T) {
 		// This is the actual production path "skip entries that are users,
 		// not agents" takes: a user ID is a perfectly valid UUID, it just
 		// never matches any row in the agents table (ptone/scion#2146
-		// review R1-12/R2-7 — an earlier version of this case used a
-		// non-UUID string here, which exercises parseUUIDList's drop path
-		// below instead of this one).
+		// review R1-12/R2-7). The malformed, non-UUID entry below exercises
+		// the separate parseUUIDList drop path instead.
 		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, uuid.NewString()}}, store.ListOptions{})
 		require.NoError(t, err)
 		require.Len(t, result.Items, 1)
