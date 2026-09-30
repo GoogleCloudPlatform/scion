@@ -229,46 +229,34 @@ func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
 // the file is chowned to uid:gid by fchown on the temp file's open fd
 // before the rename, never by a separate path-based chown afterwards that a
 // symlink swapped in at path could redirect to an arbitrary file.
+// chownLimitsStateFn is writeLimitsState's own fd-based chown hook —
+// defaults to syscall.Fchown, overridable only by this package's own tests
+// (mirroring pkg/sciontool/hub's fchownFn) so a test can observe exactly
+// when the chown fires relative to the rename that publishes the new
+// content at path, without needing real root to chown to an arbitrary uid.
+var chownLimitsStateFn = syscall.Fchown
+
+// writeLimitsState marshals ls and installs it at path the same fd-based,
+// no-follow way every other atomic write into a workload-owned directory in
+// this codebase does: this can run as root (InitLimitsFile's own caller,
+// RunInit, calls it before privilege drop) against a path under agentHome,
+// which the workload owns outright and can replace any entry in — a plain
+// path-based os.Rename would follow a symlink planted at path to an
+// arbitrary target, so this instead goes through dirfd.
+// WriteFileNoFollowWithChown's fd-based temp-file-then-rename sequence,
+// whose fd-based Chown happens strictly before the rename that publishes
+// the new content at path, never after.
 func writeLimitsState(path string, ls *LimitsState, uid, gid int) error {
 	data, err := json.MarshalIndent(ls, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling limits state: %w", err)
 	}
-
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, "agent-limits-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+	// ReplaceLeaf, not RefuseSymlink: path lives inside agentHome, which the
+	// workload owns outright, so whatever currently sits at the leaf is a
+	// stale entry this install means to overwrite, not tamper to refuse.
+	if err := dirfd.WriteFileNoFollowWithChown(path, data, 0600, uid, gid, dirfd.ReplaceLeaf, chownLimitsStateFn); err != nil {
+		return fmt.Errorf("writing limits state: %w", err)
 	}
-	tmpPath := tmpFile.Name()
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, werr := tmpFile.Write(data); werr != nil {
-		_ = tmpFile.Close()
-		err = fmt.Errorf("writing temp file: %w", werr)
-		return err
-	}
-	if uid > 0 {
-		if cerr := tmpFile.Chown(uid, gid); cerr != nil {
-			_ = tmpFile.Close()
-			err = fmt.Errorf("chowning temp file: %w", cerr)
-			return err
-		}
-	}
-	if cerr := tmpFile.Close(); cerr != nil {
-		err = fmt.Errorf("closing temp file: %w", cerr)
-		return err
-	}
-
-	if rerr := os.Rename(tmpPath, path); rerr != nil {
-		err = fmt.Errorf("atomic rename: %w", rerr)
-		return err
-	}
-
 	return nil
 }
 

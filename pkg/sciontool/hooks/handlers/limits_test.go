@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -390,23 +391,71 @@ func TestWriteLimitsState_AtomicWrite(t *testing.T) {
 }
 
 // TestWriteLimitsState_ChownsTempFdBeforeRename proves the uid>0 path
-// chowns the temp file via its open fd before the rename rather than the
-// final path afterwards. A non-root test can't chown to an arbitrary uid,
-// but chowning to its own current uid/gid is always permitted, which is
-// enough to prove the fd-based call succeeds and doesn't error.
+// actually chowns the temp file's open fd BEFORE the rename that publishes
+// it at path, not merely that the call succeeds without error: the
+// intercepted chown hook checks path's own content at the instant it
+// fires, which must still be the pre-existing seed — if chown ran after
+// the rename instead, the new content would already be visible there.
 func TestWriteLimitsState_ChownsTempFdBeforeRename(t *testing.T) {
 	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, []byte("old-seed-content"), 0o600))
+
+	orig := chownLimitsStateFn
+	var chownCalled, sawPreRenameContent bool
+	chownLimitsStateFn = func(fd, uid, gid int) error {
+		chownCalled = true
+		data, rerr := os.ReadFile(limitsPath)
+		sawPreRenameContent = rerr == nil && string(data) == "old-seed-content"
+		return syscall.Fchown(fd, uid, gid)
+	}
+	t.Cleanup(func() { chownLimitsStateFn = orig })
 
 	ls := &LimitsState{MaxTurns: 1, StartedAt: "2026-02-22T10:30:00Z"}
 	err := writeLimitsState(limitsPath, ls, os.Getuid(), os.Getgid())
 	require.NoError(t, err)
 
+	require.True(t, chownCalled, "expected the chown hook to fire for uid>0")
+	assert.True(t, sawPreRenameContent, "path still showed the pre-existing content when chown fired, proving chown ran before the rename that publishes the new content")
+
 	entries, err := os.ReadDir(tmpDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "no temp file should remain after a successful write")
 	assert.Equal(t, "agent-limits.json", entries[0].Name())
+}
+
+// TestWriteLimitsState_SymlinkAtLimitsPathReplacedNotFollowed proves a
+// symlink planted at agent-limits.json — the workload owns the containing
+// directory and can always do this — is replaced outright by the atomic
+// install, never written through: the symlink's target must be left
+// completely untouched, and a fresh regular file with the new limits state
+// must end up at limitsPath.
+func TestWriteLimitsState_SymlinkAtLimitsPathReplacedNotFollowed(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	const victimContent = "do-not-touch"
+	require.NoError(t, os.WriteFile(victim, []byte(victimContent), 0o600))
+
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.Symlink(victim, limitsPath))
+
+	ls := &LimitsState{MaxTurns: 1, StartedAt: "2026-02-22T10:30:00Z"}
+	err := writeLimitsState(limitsPath, ls, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+
+	victimData, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, victimContent, string(victimData), "the symlink's target must be untouched")
+
+	fi, err := os.Lstat(limitsPath)
+	require.NoError(t, err)
+	assert.Zero(t, fi.Mode()&os.ModeSymlink, "limitsPath should no longer be a symlink after a write")
+
+	read, err := os.ReadFile(limitsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(read), "2026-02-22T10:30:00Z", "the new limits state should have been installed at limitsPath")
 }
 
 func TestLimitsTriggerFileConstant(t *testing.T) {

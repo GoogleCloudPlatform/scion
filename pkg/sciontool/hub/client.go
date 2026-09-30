@@ -1237,9 +1237,20 @@ var fchownFn = syscall.Fchown
 // handling this relies on.
 func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// dirfd.EnsureDirNoFollow, not os.MkdirAll: this can run as root
+	// (sciontool init, before privilege drop) against a world-writable
+	// directory (in practice /tmp, DefaultGitHubTokenPath's parent) where
+	// the workload can plant a symlink at the leaf. A symlinked dir would
+	// make os.MkdirAll's own Stat-based existence check treat "the
+	// symlink's target is a directory" as "dir already exists" and
+	// silently no-op through it. dirfd.EnsureDirNoFollow only ever creates
+	// dir's own leaf (its parent must already exist) and refuses a
+	// symlinked leaf outright instead.
+	d, err := dirfd.EnsureDirNoFollow(dir, 0700)
+	if err != nil {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
+	_ = d.Close()
 	if err := WriteFileNoFollowChown(path, []byte(token), githubTokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write GitHub token file: %w", err)
 	}
@@ -1477,9 +1488,18 @@ func WriteTokenFile(token string, uid, gid int) error {
 	path := TokenFilePath()
 	dir := filepath.Dir(path)
 
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// dirfd.EnsureDirNoFollow, not os.MkdirAll: this can run as root
+	// (sciontool init, before privilege drop) against ".scion" under the
+	// scion user's home, which the workload owns and can replace with a
+	// symlink — see WriteGitHubTokenFile's identical reasoning. dir's own
+	// parent (the home directory itself) always already exists here, so
+	// EnsureDirNoFollow's single-leaf-only creation is not a capability
+	// loss versus os.MkdirAll's full recursive create.
+	d, err := dirfd.EnsureDirNoFollow(dir, 0700)
+	if err != nil {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
+	_ = d.Close()
 
 	if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)

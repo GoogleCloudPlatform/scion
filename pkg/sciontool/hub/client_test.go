@@ -1203,6 +1203,13 @@ func TestWriteTokenFile_RefusesSymlinkedScionDir(t *testing.T) {
 
 	err := WriteTokenFile("tok", 0, 0)
 	require.Error(t, err)
+	// dirfd.EnsureDirNoFollow's O_NOFOLLOW open of ".scion" refuses this at
+	// the create-directory step itself (os.MkdirAll's Stat-based existence
+	// check would instead have followed the symlink, seen a real directory,
+	// and silently no-op'd through it, leaving only the later write's own
+	// refusal to catch this).
+	assert.Contains(t, err.Error(), "failed to create token file directory",
+		"expected the symlinked .scion to be refused at the create-directory step, not merely fail later at the write")
 
 	entries, rerr := os.ReadDir(attackerDir)
 	require.NoError(t, rerr)
@@ -1555,6 +1562,40 @@ func TestWriteGitHubTokenFile_Hardening(t *testing.T) {
 		info, serr := os.Stat(tokenPath)
 		require.NoError(t, serr)
 		assert.True(t, info.IsDir(), "the directory at the final path should be untouched")
+	})
+
+	// TestWriteGitHubTokenFile_Hardening/refuses a symlinked containing
+	// directory, not just a symlinked leaf: the workload owns every
+	// directory this can be pointed at (a custom EnvGitHubTokenPath) and can
+	// replace any of them with a symlink to an attacker-controlled
+	// directory. dirfd.EnsureDirNoFollow's O_NOFOLLOW open of the directory
+	// leaf refuses this at the directory-creation step itself — proven here
+	// by the error coming from that step, not merely from the write that
+	// follows it.
+	t.Run("refuses a symlinked containing directory, target directory untouched", func(t *testing.T) {
+		root := t.TempDir()
+		attackerDir := filepath.Join(root, "attacker-dir")
+		require.NoError(t, os.Mkdir(attackerDir, 0700))
+		victim := filepath.Join(attackerDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+
+		linked := filepath.Join(root, "linked")
+		require.NoError(t, os.Symlink(attackerDir, linked))
+		tokenPath := filepath.Join(linked, "github-token")
+
+		err := WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create token file directory",
+			"expected the symlinked directory to be refused at the create-directory step, not merely fail later at the write")
+
+		entries, rerr := os.ReadDir(attackerDir)
+		require.NoError(t, rerr)
+		require.Len(t, entries, 1, "nothing should have been written into the attacker directory")
+		assert.Equal(t, "victim", entries[0].Name())
+
+		data, rerr := os.ReadFile(victim)
+		require.NoError(t, rerr)
+		assert.Equal(t, "orig", string(data), "the victim file must be untouched")
 	})
 
 	t.Run("a planted symlink at a predictable github-token.tmp path is never reused or followed", func(t *testing.T) {
