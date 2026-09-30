@@ -179,6 +179,16 @@ func init() {
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
 		},
+		{
+			// experiments is durable via DB but has no settings.yaml
+			// representation. It is runtime/API-owned state: absent DB
+			// row = compiled registry defaults for every experiment.
+			// Seeding skips this section (KoanfPaths nil) -- experiment
+			// names contain dots, which koanf would otherwise split on.
+			Name:       "experiments",
+			KoanfPaths: nil,
+			New:        func() any { return &ExperimentsSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -353,6 +363,23 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// experiments schema is hand-written -- it is runtime/API-owned
+		// state with no $defs in settings-v1.schema.json (like maintenance
+		// and messaging). overrides is a map of experiment name -> bool;
+		// the pattern mirrors experiments.namePattern (pkg/experiments).
+		"experiments": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"overrides": map[string]interface{}{
+					"type": "object",
+					"patternProperties": map[string]interface{}{
+						`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`: map[string]interface{}{"type": "boolean"},
+					},
+					"additionalProperties": false,
+				},
 			},
 			"additionalProperties": false,
 		},

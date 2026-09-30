@@ -1,0 +1,184 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package experiments declares the hub-wide experiments (feature flags)
+// registry. It has no dependency on pkg/hub, so a future broker or CLI
+// design can import it directly.
+package experiments
+
+import (
+	"fmt"
+	"regexp"
+	"sort"
+	"sync"
+)
+
+// Layer identifies which part of the system an experiment gates.
+type Layer string
+
+const (
+	// LayerWeb gates web UI code via isFeatureEnabled().
+	LayerWeb Layer = "web"
+	// LayerServer gates hub server code via Server.experimentEnabled().
+	LayerServer Layer = "server"
+)
+
+// Stage is a cosmetic lifecycle badge shown in the Experiments tab. It has
+// no behavioural effect.
+type Stage string
+
+const (
+	StageAlpha Stage = "alpha"
+	StageBeta  Stage = "beta"
+)
+
+// namePattern is the required shape of an experiment name, e.g.
+// "web.terminal_workspace" or "hub.foo.bar".
+var namePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+
+// Experiment describes one hub-wide feature flag.
+type Experiment struct {
+	// Name is the stable identifier, e.g. "web.terminal_workspace". It must
+	// match namePattern. "web." is the convention for UI-only gates, "hub."
+	// for anything that gates server behaviour (Layers is the source of
+	// truth; the prefix is only a readability aid).
+	Name string
+	// Title is a short UI label, e.g. "Persistent terminal workspace".
+	Title string
+	// Description is one or two sentences shown in the Experiments tab.
+	Description string
+	// Default is the value used when no admin override exists.
+	Default bool
+	// Layers lists which parts of the system this experiment gates.
+	Layers []Layer
+	// Stage is a cosmetic lifecycle badge; not behavioural.
+	Stage Stage
+	// Issue is the tracking issue, e.g. "ptone/scion#1662".
+	Issue string
+	// Owner is the team or handle responsible for graduating or removing it.
+	Owner string
+	// ReviewBy is a YYYY-MM-DD date; after it passes the tab shows "review
+	// overdue".
+	ReviewBy string
+}
+
+// HasLayer reports whether the experiment gates the given layer.
+func (e Experiment) HasLayer(l Layer) bool {
+	for _, layer := range e.Layers {
+		if layer == l {
+			return true
+		}
+	}
+	return false
+}
+
+// compiled is the production experiment list. It is reachable only through
+// Default(); there is no package-level Lookup/All, so hub code cannot bypass
+// the Registry instance it was given (design.md §3.2).
+var compiled = []Experiment{
+	{
+		Name:        "web.terminal_workspace",
+		Title:       "Persistent terminal workspace",
+		Description: "Opens agent terminals in the persistent /terminals workspace instead of the legacy single-terminal page.",
+		Default:     true,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageBeta,
+		Issue:       "ptone/scion#1662",
+		Owner:       "web",
+		ReviewBy:    "2026-12-31",
+	},
+}
+
+// compiledRetired lists names that PUT rejects true/false for, ignores and
+// prunes if still stored, and that must never be reused.
+var compiledRetired = []string{
+	"web.access_boundaries_read",
+	"web.access_boundaries_authoring",
+}
+
+// Registry is an immutable, validated set of experiments. It is the only way
+// to read them: there are no package-level Lookup/All functions, so hub code
+// cannot bypass the instance it was given, and tests using t.Parallel()
+// cannot affect each other through a shared global.
+type Registry struct {
+	byName  map[string]Experiment
+	ordered []Experiment
+	retired map[string]bool
+}
+
+// NewRegistry validates active and retired together and returns an error on
+// the first invariant violation:
+//   - names are unique and match namePattern
+//   - no active name appears in the retired list
+//   - every entry has a non-empty Title, Description, Issue, Owner and
+//     ReviewBy, and at least one Layer
+func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
+	retiredSet := make(map[string]bool, len(retired))
+	for _, name := range retired {
+		retiredSet[name] = true
+	}
+
+	byName := make(map[string]Experiment, len(active))
+	ordered := make([]Experiment, 0, len(active))
+	for _, e := range active {
+		if !namePattern.MatchString(e.Name) {
+			return nil, fmt.Errorf("experiments: invalid name %q: must match %s", e.Name, namePattern.String())
+		}
+		if _, dup := byName[e.Name]; dup {
+			return nil, fmt.Errorf("experiments: duplicate name %q", e.Name)
+		}
+		if retiredSet[e.Name] {
+			return nil, fmt.Errorf("experiments: %q is both active and retired", e.Name)
+		}
+		if e.Title == "" || e.Description == "" || e.Issue == "" || e.Owner == "" || e.ReviewBy == "" {
+			return nil, fmt.Errorf("experiments: %q is missing a required field (title, description, issue, owner, review_by)", e.Name)
+		}
+		if len(e.Layers) == 0 {
+			return nil, fmt.Errorf("experiments: %q has no layers", e.Name)
+		}
+		byName[e.Name] = e
+		ordered = append(ordered, e)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
+
+	return &Registry{byName: byName, ordered: ordered, retired: retiredSet}, nil
+}
+
+// All returns every active experiment in stable order (by Name).
+func (r *Registry) All() []Experiment { return r.ordered }
+
+// Lookup returns the named active experiment, or false if it is unknown or
+// retired.
+func (r *Registry) Lookup(name string) (Experiment, bool) {
+	e, ok := r.byName[name]
+	return e, ok
+}
+
+// IsRetired reports whether name was retired and must never resolve again.
+func (r *Registry) IsRetired(name string) bool { return r.retired[name] }
+
+// defaultRegistry builds the production registry exactly once.
+var defaultRegistry = sync.OnceValue(func() *Registry {
+	r, err := NewRegistry(compiled, compiledRetired)
+	if err != nil {
+		// The invariant tests run this exact construction and fail first,
+		// so an invalid compiled list never ships.
+		panic(fmt.Sprintf("experiments: invalid compiled registry: %v", err))
+	}
+	return r
+})
+
+// Default returns the compiled production registry, built once. It panics if
+// the compiled list is invalid.
+func Default() *Registry { return defaultRegistry() }

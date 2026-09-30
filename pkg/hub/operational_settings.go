@@ -1435,6 +1435,99 @@ func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.C
 	return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
 }
 
+// ExperimentsSnapshot is one consistent view of the cached "experiments"
+// section, taken under a single RLock, so revision, overrides, malformed
+// flag and metadata always belong to the same refresh.
+type ExperimentsSnapshot struct {
+	// Overrides is a copy of the stored admin overrides; empty when
+	// malformed or absent. May contain names this binary does not know
+	// (design.md §3.3).
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	UpdatedAt time.Time
+	UpdatedBy string
+	// Present is false when no row exists.
+	Present bool
+}
+
+// ExperimentsSnapshot returns one consistent view of the cached "experiments"
+// section. Read path. No logging here (Refresh logs once per ingest).
+func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["experiments"]
+	if !ok {
+		return ExperimentsSnapshot{Overrides: map[string]bool{}}
+	}
+
+	snap := ExperimentsSnapshot{
+		Revision:  state.Revision,
+		Malformed: state.Malformed,
+		UpdatedAt: state.UpdatedAt,
+		UpdatedBy: state.UpdatedBy,
+		Present:   true,
+	}
+	if state.Malformed {
+		snap.Overrides = map[string]bool{}
+		return snap
+	}
+
+	doc, malformed := opsettings.ParseExperimentsDoc(state.Value)
+	if malformed {
+		// Should not happen: Refresh already validated via sec.New() using
+		// the same predicate. Fail closed rather than trust an inconsistent
+		// cache.
+		snap.Malformed = true
+		snap.Overrides = map[string]bool{}
+		return snap
+	}
+	snap.Overrides = doc.Overrides
+	if snap.Overrides == nil {
+		snap.Overrides = map[string]bool{}
+	}
+	return snap
+}
+
+// ExperimentsReadResult holds the authoritative experiments overrides and
+// revision, read directly from the store (not the cache).
+type ExperimentsReadResult struct {
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	Err       error
+}
+
+// ReadAuthoritativeExperiments reads the "experiments" section straight from
+// the store, bypassing the replica-local cache. Write path only; the
+// precedent is ReadAuthoritativeCrossProjectEnabled.
+//
+//	row absent (store.ErrNotFound)             → {Overrides: {}, Revision: 0}
+//	row present, ParseExperimentsDoc ok        → {Overrides, Revision}
+//	row present, ParseExperimentsDoc malformed → {Revision, Malformed: true}
+//	store error                                → {Err}
+func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) ExperimentsReadResult {
+	setting, err := o.store.GetHubSetting(ctx, "experiments")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: 0}
+		}
+		slog.Warn("ReadAuthoritativeExperiments: store read failed", "error", err)
+		return ExperimentsReadResult{Err: fmt.Errorf("authoritative experiments read: %w", err)}
+	}
+
+	doc, malformed := opsettings.ParseExperimentsDoc(setting.Value)
+	if malformed {
+		return ExperimentsReadResult{Revision: setting.Revision, Malformed: true}
+	}
+	overrides := doc.Overrides
+	if overrides == nil {
+		overrides = map[string]bool{}
+	}
+	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
+}
+
 // applySnapshotLogLevel applies the log-level portion of the snapshot.
 // This is separated from applySnapshot because log level is a Layer-0 setting
 // (per design §3.1) and is only changed in file mode via reloadSettings.

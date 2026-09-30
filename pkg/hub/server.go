@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -318,6 +319,13 @@ type ServerConfig struct {
 	// the AuditRetentionDays pattern. Zero or negative falls back to the
 	// default rather than disabling the sweep.
 	FailedMessageRetentionDays int
+
+	// Experiments is the compiled experiments registry used to resolve
+	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
+	// every reader goes through the nil-safe Server.experimentRegistry(),
+	// which falls back to experiments.Default(). Tests that need a
+	// server-layer experiment inject their own registry here (design.md §3.2).
+	Experiments *experiments.Registry
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -910,13 +918,17 @@ type Server struct {
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
-	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
-	deliverMsg       func(ctx context.Context, m *store.Message) error
-	maintenance      *MaintenanceState // Runtime maintenance mode state
-	hubID            string            // Unique hub instance ID for secret namespacing
-	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
-	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
-	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	execDispatch func(ctx context.Context, d store.BrokerDispatch) (string, error)
+	deliverMsg   func(ctx context.Context, m *store.Message) error
+	maintenance  *MaintenanceState // Runtime maintenance mode state
+	// experiments is the compiled feature-flag registry (pkg/experiments).
+	// Nil in production and in most tests; always read through the
+	// nil-safe experimentRegistry() accessor, never directly.
+	experiments      *experiments.Registry
+	hubID            string // Unique hub instance ID for secret namespacing
+	instanceID       string // Unique per-process ID (uuid); affinity key for broker dispatch
+	encryptionKey    []byte // AES-256 key for encrypting backup secrets; nil disables encryption
+	embeddedBrokerID string // Broker ID when running in hub+broker combo mode
 	// embeddedBrokerPending is non-nil while a co-located broker is expected
 	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
 	// registration succeeds or fails. embeddedBrokerRegErr records a failed
@@ -1869,6 +1881,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		slog.Info("GE Google exchange service initialized",
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
+
+	srv.experiments = cfg.Experiments
 
 	srv.registerRoutes()
 
