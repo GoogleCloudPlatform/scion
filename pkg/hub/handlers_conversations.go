@@ -1189,11 +1189,16 @@ const (
 //  2. A non-agent peer (a human) is always allowed.
 //  3. For an agent peer, the peer's project is stampedPeerProject when
 //     non-nil. Otherwise it is looked up live: a deleted peer
-//     (errors.Is(err, store.ErrNotFound)) denies with peerDenied403 — this is
-//     the fix for the pre-existing unreachable "peerAgent == nil" branch,
-//     which intended 403 but the code always took the generic error branch
-//     (500) instead, since GetAgent returns (nil, ErrNotFound) for a missing
-//     row, never (nil, nil). Any other store error is peerErr500.
+//     (errors.Is(err, store.ErrNotFound)) allows when
+//     crossProjectMessagingEnabled() is on — with no stamp, same-project
+//     can't be told apart from cross-project, but when the flag is on every
+//     possible peer project is allowed anyway, so the missing project
+//     doesn't matter (msg-attach-arch, ptone/scion#2282) — and otherwise
+//     denies with peerDenied403. This also fixes the pre-existing
+//     unreachable "peerAgent == nil" branch, which intended 403 but the code
+//     always took the generic error branch (500) instead, since GetAgent
+//     returns (nil, ErrNotFound) for a missing row, never (nil, nil). Any
+//     other store error is peerErr500.
 //  4. Same project always allows. Different project allows only when
 //     crossProjectMessagingEnabled() is on, else peerDenied403.
 //
@@ -1212,6 +1217,21 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 		peerAgent, err := s.store.GetAgent(ctx, peerID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
+				// Refinement (msg-attach-arch, 2026-09-30, in response to
+				// ptone/scion#2282 — SenderProjectID/RecipientProjectID are
+				// never persisted, so stampedPeerProject is always nil in
+				// practice today): with no stamp we cannot tell same-project
+				// from cross-project for a deleted peer. But when the flag is
+				// ON, every possible peer project would be allowed anyway, so
+				// the missing project doesn't matter — allow. When the flag
+				// is OFF, assuming same-project would be a flag-off bypass
+				// for a genuinely cross-project deleted sender, so deny.
+				// This is exact under the current policy in both cases, and
+				// needs no change once the stamp is actually persisted
+				// (peerProjectFromRow will simply stop returning nil).
+				if s.crossProjectMessagingEnabled() {
+					return peerAllowed, ""
+				}
 				return peerDenied403, "cross-project read denied: peer agent not found"
 			}
 			slog.Error("crossProjectPeerAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
@@ -1220,6 +1240,9 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 		if peerAgent == nil {
 			// Defensive: GetAgent should not return (nil, nil), but if it
 			// does, treat it the same as ErrNotFound.
+			if s.crossProjectMessagingEnabled() {
+				return peerAllowed, ""
+			}
 			return peerDenied403, "cross-project read denied: peer agent not found"
 		}
 		peerProjectID = peerAgent.ProjectID

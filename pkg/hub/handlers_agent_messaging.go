@@ -1826,6 +1826,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
+	// actually rendered a second time and dispatched below; it defaults to
+	// today's structuredMsg (possibly nil) and is only replaced with an
+	// offloaded copy on the human/broker-sender branch, after persistence
+	// and the unchanged first render. Nothing derived after dispatch
+	// (mention fan-out, observers, the HTTP response) may read it — those
+	// keep using structuredMsg / plainMessage.
+	dispatchMsg := structuredMsg
 	// F2b (design doc §3.3): the resolved conversation's ID when it is a
 	// group conversation, hoisted above the conversation-resolution block
 	// (like persistedMsgID) so every processMentions call site below —
@@ -1890,6 +1898,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// If the CLI already resolved a conversation_id (S4 conversation references),
 		// use it directly instead of re-resolving.
 		var convResult *messaging.ConversationResult
+		// assertedConvRow holds the *store.Conversation row looked up below
+		// when the caller supplied an authorized conversation_id (design
+		// auto-offload-large-dm §4.3, r4 #6). The offload check after
+		// dispatch-text rendering reuses this row instead of a second
+		// lookup; for every other conversation source (ConversationRef, the
+		// derived path, or none held) it stays nil and the offload check
+		// falls back to GetConversation(storeMsg.ConversationID) itself,
+		// only when the body actually qualifies.
+		var assertedConvRow *store.Conversation
 		// groupConvIsExistingReference is true only when the group
 		// conversation came from the caller referencing an
 		// already-existing conversation by ID (looked up and checked below,
@@ -1935,6 +1952,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"caller-supplied conversation_id does not exist", nil)
 				return
 			}
+			assertedConvRow = conv
 
 			// Authority differs by conversation kind. Direct conversations
 			// have ProjectID == nil (global), so project scoping cannot be
@@ -2251,6 +2269,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
+		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
+		// hub-reserved offload metadata keys before persist/render/dispatch,
+		// so a client cannot spoof body_offloaded/body_chars/body_sha256.
+		structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
@@ -2276,6 +2299,41 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Msg:        structuredMsg,
 				CreatedAt:  storeMsg.CreatedAt,
 			})
+		}
+
+		// #2257 (design auto-offload-large-dm §4.4): offload an
+		// over-threshold body onto the DISPATCHED copy. The persisted row
+		// and the DeliveryText rendered just above keep the full body.
+		// persistedMsgID == "" (CreateMessage failed) means Qualifies'
+		// MessageID guard never offloads — the body is delivered inline, as
+		// today.
+		pol := s.offloadPolicy()
+		if messaging.Qualifies(storeMsg.Msg, structuredMsg.Raw, structuredMsg.Plain, pol) {
+			convRow := assertedConvRow
+			if convRow == nil && storeMsg.ConversationID != "" {
+				convRow, _ = s.store.GetConversation(ctx, storeMsg.ConversationID)
+			}
+			canRead := convRow != nil && s.recipientCanReadConversation(ctx, convRow, agent)
+
+			deliverMsg, off := messaging.OffloadForDelivery(messaging.OffloadInput{
+				Msg:                  structuredMsg,
+				PersistedBody:        storeMsg.Msg,
+				MessageID:            persistedMsgID,
+				ConversationID:       storeMsg.ConversationID,
+				RecipientCanReadConv: canRead,
+				FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
+			}, pol)
+			if off.Offloaded {
+				if s.writeDenyEnabled() {
+					deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+						MessageID:  storeMsg.ID,
+						ConvResult: convResult,
+						Msg:        deliverMsg,
+						CreatedAt:  storeMsg.CreatedAt,
+					})
+				}
+				dispatchMsg = deliverMsg
+			}
 		}
 	}
 
@@ -2348,7 +2406,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 			defer retryCancel()
 
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
 					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -2501,6 +2559,12 @@ type GroupMessageResponse struct {
 // handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
 func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
 	ctx := r.Context()
+
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before any recipient copy is rendered or
+	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
+	// map, so stripping it once here covers all of them.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
@@ -3143,6 +3207,13 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		return false
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before any recipient copy is rendered or
+	// dispatched. Every `agentMsg := *msg` copy below aliases msg.Metadata's
+	// map, so stripping it once here covers all of them. No offload here —
+	// broadcast rows have no ConversationID (design §10 P4 site 2).
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	for _, agent := range runningAgents {
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
@@ -3256,6 +3327,15 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		return nil
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys on originalMsg before any copy is derived from
+	// it. messages.NewMention below builds each mention's own fresh
+	// metadata map (not copied from originalMsg), so this is currently a
+	// defence-in-depth no-op for the mention copies themselves — it is kept
+	// here (rather than relying only on the caller's own strip) so this
+	// function's behaviour does not depend on caller discipline.
+	originalMsg.Metadata = messaging.StripReservedMetadata(originalMsg.Metadata)
+
 	// List project agents for resolution.
 	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
 	if err != nil {
@@ -3319,6 +3399,9 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// conversation (if any); the primary message's thread_id is never
 		// copied onto it.
 		mentionMsg.ThreadID = groupConversationThreadKey
+		// #2257 P2: strip on this copy too (U5(a) row), even though
+		// NewMention's own metadata never carries client input today.
+		mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
 		// a mentioned agent is a recipient in its own right, independent of
