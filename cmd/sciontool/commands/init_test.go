@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -3127,29 +3126,7 @@ func TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes(t *testing.T) {
 	}
 }
 
-// gitConfigGet reads key from the gitconfig file at path via git itself,
-// returning "" if the key is absent or the file can't be read — good enough
-// for test assertions, which always know what they expect to find.
-func gitConfigGet(t *testing.T, path, key string) string {
-	t.Helper()
-	out, err := exec.Command("git", "config", "--file", path, "--get", key).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = orig })
-	fn()
-	os.Stderr = orig
-	_ = w.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
-	return buf.String()
-}
+// captureStderr is defined in substrate_rootfs_test.go and reused here.
 
 // gitConfigGet reads key from the gitconfig file at path via git itself,
 // returning "" if the key is absent or the file can't be read — good enough

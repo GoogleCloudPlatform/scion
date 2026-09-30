@@ -85,7 +85,7 @@ func TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir(t *tes
 	outFile := filepath.Join(t.TempDir(), "pwd.out")
 
 	opts := InitRunOptions{
-		ForwardTermSignal: false,
+		DisableTermSignalForwarding: true,
 		// Must never be used: ResolveWorkingDir is also set, and its result
 		// must supersede this field outright — see WorkingDir's own doc
 		// comment for the documented precedence this pins.
@@ -135,7 +135,7 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 	resolverErr := errors.New("no usable harness working directory for the harness child")
 
 	opts := InitRunOptions{
-		ForwardTermSignal: false,
+		DisableTermSignalForwarding: true,
 		ResolveWorkingDir: func() (string, error) {
 			if !cloneCalled {
 				t.Error("ResolveWorkingDir was called before the workspace clone step")
@@ -244,7 +244,7 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 
 	resolverErr := errors.New("no usable harness working directory for the harness child")
 	opts := InitRunOptions{
-		ForwardTermSignal: false,
+		DisableTermSignalForwarding: true,
 		ResolveWorkingDir: func() (string, error) {
 			return "", resolverErr
 		},

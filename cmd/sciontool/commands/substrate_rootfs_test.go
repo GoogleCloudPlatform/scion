@@ -718,6 +718,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	orig := os.Stderr
 	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = orig })
 	fn()
 	os.Stderr = orig
 	_ = w.Close()
