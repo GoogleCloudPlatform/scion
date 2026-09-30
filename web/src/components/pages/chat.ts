@@ -3368,24 +3368,24 @@ export class ScionPageChat extends LitElement {
       if (authRes.ok) {
         const authData = (await authRes.json()) as { id?: string };
         if (authData.id && this.pageData) {
+          // A plain field write, not a `pageData` reassignment. `updated()`
+          // re-parses the current route whenever `changedProperties`
+          // contains `pageData` — that path exists so the page parses its
+          // route when `main.ts` hands a freshly created element its
+          // `pageData` (alongside the parse `connectedCallback` does); it is
+          // not a response to an identity change. Resolving identity here,
+          // in the background, while a conversation may already be open,
+          // must not re-trigger that parse and revert it to whatever the
+          // URL happens to read right now. `requestUpdate()` with no
+          // property name still schedules the render every pageData-bound
+          // binding (e.g. currentUserId) needs, without adding `pageData`
+          // to that set.
           if (this.pageData.user) {
-            // A plain field write, not a `pageData` reassignment.
-            // `updated()` re-parses the current route whenever
-            // `changedProperties` contains `pageData` — correct for a real
-            // identity change (e.g. sign-in), but resolving identity in the
-            // background while a conversation is already open must not
-            // revert it to whatever the URL happens to parse to right now.
-            // `requestUpdate()` with no property name still schedules the
-            // render every pageData-bound binding (e.g. currentUserId)
-            // needs, without adding `pageData` to that set.
             this.pageData.user.id = authData.id;
-            this.requestUpdate();
           } else {
-            this.pageData = {
-              ...this.pageData,
-              user: { id: authData.id, email: '', name: '' },
-            };
+            this.pageData.user = { id: authData.id, email: '', name: '' };
           }
+          this.requestUpdate();
           return authData.id;
         }
       }
