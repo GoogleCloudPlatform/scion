@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"strings"
 	"testing"
@@ -47,11 +48,8 @@ type liveInventoryKey struct {
 // TestLiveInventoryExclusionsNotStale asserts every key here still names a
 // real, currently-declared catalog HTTP entry point.
 var positiveCheckExclusions = map[liveInventoryKey]string{
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:             "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}:       "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}: "executeOperation (admin_maintenance.go) resolves a real executor and runs it (e.g. pulling container images) for any operation key that exists; a fake key 404s, so there is no fixture that both exists and is safe to actually run",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/migrations/{id}/run"}: "executeMigration (admin_maintenance.go) runs a real migration for any migration key that exists; same reasoning as the operations/{id}/run exclusion above",
-	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}"}:                "handleGetIntegration (handlers_integrations.go:359-382) 404s for any name unless a plugin manager has it loaded or a global on-disk plugin-settings file lists it; testServer configures neither, and reading or writing that global config file from this test is out of scope",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:       "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}: "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -66,9 +64,50 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:        "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
 	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}: "same as the GET .../proxy entry above: proxyAgentPort accepts every method by design",
 	{OperationID: "gcp.identity.verify", Method: "POST", Pattern: "/api/v1/gcp-service-accounts/{id}/verify"}:     "handleGCPServiceAccountByID (handlers_gcp_identity_scoped.go:297-304) matches on action==\"verify\" && method==POST as a single condition; any other method on the same action falls through to the generic \"action not found\" 404, never a 405",
-	{OperationID: "chat.access", Method: "GET", Pattern: "/api/v1/chat/prefs"}:                                    "handleChatPrefs (handlers_chat_prefs.go) checks webChatStore for nil and returns 503 before it ever looks at r.Method; testServer does not configure a webChatStore",
-	{OperationID: "chat.access", Method: "PUT", Pattern: "/api/v1/chat/prefs"}:                                    "same as the GET /chat/prefs entry above: the nil-webChatStore check precedes the method switch",
-	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}"}:           "handleAdminIntegrationByName (handlers_integrations.go:219-224) requires hub.integrations.update for PUT/POST/DELETE inline before the name/action switch; an unrecognized method other than GET still reaches the action switch and 404s there (unknown action), not 405, for the bare-name shape this catalog entry declares",
+}
+
+// suffixCheckExclusions lists HTTP catalog entry points for which
+// TestCatalogHTTPEntryPoints_LiveMethodCheck does not require "the declared
+// method at pattern + '/<bogus-segment>' returns 404 or 405" (the third,
+// path-suffix check — see the doc comment on the test). Each entry names the
+// live handler branch that accepts, or ignores, a trailing path segment the
+// catalog pattern does not declare, discovered by actually probing it, not
+// by assumption. This check is intentionally narrower than "no route should
+// ever accept an undeclared suffix" — see the test's doc comment for what it
+// does and does not prove.
+var suffixCheckExclusions = map[liveInventoryKey]string{
+	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                               "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
+	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                           "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                    "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
+	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                          "handleSecretByKey (handlers_env_secrets.go) treats the rest of the path as part of the secret key rather than rejecting it; with no secret backend configured in testServer this reaches a pre-dispatch 500 either way, not a 404/405",
+	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                         "same as secret.read above",
+	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                      "same as secret.read above",
+	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/installations/{id}"}:                 "handleGitHubAppInstallationByIDWrite (handlers_github_app.go) parses only a leading integer installation ID from the path and ignores everything after it",
+	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/installations/{id}"}:              "same as the PUT installations/{id} entry above",
+	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations/{id}"}:                   "same as the PUT installations/{id} entry above",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/entitlements/{id}"}:                                 "handleAdminEntitlementByID (handlers_quota.go) extracts the ID with extractID, which takes everything after the last known prefix segment, so a trailing suffix becomes part of the ID rather than a distinct route",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/entitlements/{id}"}:                               "same as the GET entitlements/{id} entry above",
+	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/entitlements/{id}"}:                            "same as the GET entitlements/{id} entry above",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}"}:                                       "handleAdminLimitByID (handlers_quota.go:136-148) extracts limitID as the first '/'-delimited segment and only special-cases a second segment of exactly \"entitlements\"; any other suffix is silently discarded, not rejected",
+	{OperationID: "quota.update", Method: "PUT", Pattern: "/api/v1/admin/limits/{id}"}:                                     "handleAdminLimitByID discards the suffix the same way as quota.read above; updateLimitDefinition (handlers_quota.go:335-346) then 400s on this test's generic empty PATCH body (\"name is required\") before the (correctly extracted) ID is even used — the same 400 happens on the bare path",
+	{OperationID: "quota.delete", Method: "DELETE", Pattern: "/api/v1/admin/limits/{id}"}:                                  "handleAdminLimitByID discards the suffix the same way as quota.read above; deleteLimitDefinition then fails deleting a limit this test's fixture entitlement still references, mapped to 400 — the same 400 happens on the bare path, independent of the suffix",
+	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                     "handleAdminUsageByLimit (handlers_quota.go:234-245) extracts limitID with extractID (server.go:5249-5257), which discards everything after the first path segment by design",
+	{OperationID: "role.binding.read", Method: "GET", Pattern: "/api/v1/admin/role-bindings/user/{userId}"}:                "handleAdminRoleBindingByID's \"user/\" branch (handlers_roles.go) takes the entire remaining path as the user ID with no further splitting; a nonexistent literal ID, suffixed or not, just returns an empty binding list (200), never a 404",
+	{OperationID: "env.read", Method: "GET", Pattern: "/api/v1/env/{key}"}:                                                 "handleEnvVarByKey (handlers_env_secrets.go:263-264) extracts the key with extractID (server.go:5249-5257), which discards everything after the first path segment by design, so the suffix never reaches the lookup",
+	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                 "getLifecycleHook (handlers_lifecycle_hooks.go:105) extracts the ID with extractID (server.go:5249-5257), which discards everything after the first path segment by design, so the suffix never reaches the lookup",
+	{OperationID: "project.membership.update", Method: "PATCH", Pattern: "/api/v1/projects/{id}/members/{memberId}"}:       "updateProjectMemberRole (handlers_project_members.go:367-371) 400s on this test's generic empty PATCH body (\"roleDefinitionId is required\") before bindingID is used for anything; the same 400 happens on the bare path, independent of the suffix",
+	{OperationID: "group.member.remove", Method: "DELETE", Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}"}: "handleGroupMemberByID (handlers_groups.go:797-807) splits memberPath into at most two parts, so a trailing suffix is appended onto memberID as one string rather than forming a separate segment; the resulting lookup fails with 400, not a routing 404",
+	{OperationID: "hub.config.update", Method: "DELETE", Pattern: "/api/v1/admin/server-config/sections/{id}"}:             "handleAdminServerConfigSectionReset (admin_settings.go:222-235) requires Postgres mode and 400s \"Section reset is only available in postgres mode\" before it ever parses the section name from the path; testServer runs SQLite, so the same 400 happens on the bare path, independent of the suffix",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/operations/{id}/run"}:     "handleAdminMaintenanceOps (admin_maintenance.go) splits the sub-path into at most three parts, so a fourth segment is absorbed into the \"run\" branch's own remainder rather than changing dispatch; combined with this entry's deliberate cross-category key (see patternOverrides), the resulting 400 is the same category-mismatch rejection as the bare path",
+	{OperationID: "hub.metrics.read", Method: "GET", Pattern: "/api/v1/metrics/{name}"}:                                    "the metrics dashboard is not configured in testServer (no telemetry project ID); the resulting pre-dispatch 503 fires before path structure is examined, the same limitation the positive check documents in the test's doc comment",
+	{OperationID: "chat.access", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}:                                  "handleAttachmentDownload needs an attachment storage backend testServer does not configure; the resulting pre-dispatch 503 fires regardless of the suffix",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                    "proxyAgentPort forwards the entire remaining path as part of the proxied request, with no path-based routing at all — the same design already excluded from the control check above",
+	{OperationID: "agent.portaccess", Method: "POST", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                   "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "PUT", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                    "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "DELETE", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy"}:                 "same as the GET .../proxy suffix entry above",
+	{OperationID: "agent.portaccess", Method: "GET", Pattern: "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}:          "same as the GET .../proxy suffix entry above",
+	{OperationID: "user.admin.invite", Method: "GET", Pattern: "/api/v1/admin/invites/{id}"}:                               "handleAdminInviteByID (admin_invites.go:65-96) special-cases only a second segment of \"revoke\"; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
+	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                            "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 }
 
 // idFixtures holds the real, store-seeded entity IDs this test substitutes
@@ -116,6 +155,9 @@ type idFixtures struct {
 	allowListEmail          string
 	maintenanceOpKey        string
 	maintenanceMigrationKey string
+	integrationName         string
+	lifecycleHook           string
+	chatTopic               string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -125,7 +167,7 @@ type idFixtures struct {
 // still needs) and returns their IDs. It never mints a real credential and
 // never calls out to any external service — everything it creates lives
 // only in the test's in-memory SQLite store.
-func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, s store.Store) idFixtures {
+func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s store.Store) idFixtures {
 	t.Helper()
 	now := time.Now()
 
@@ -167,6 +209,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, s store.Store)
 		roleDefinition:       tid("li-role"),
 		roleDefinitionDel:    tid("li-role-del"),
 		roleBindingDel:       tid("li-role-binding-del"),
+		integrationName:      "telegram",
+		lifecycleHook:        tid("li-lifecycle-hook"),
+		chatTopic:            tid("li-chat-topic"),
 	}
 
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: f.project, Name: "LI Project", Slug: "li-project"}))
@@ -273,21 +318,107 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, s store.Store)
 
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
-	// registry, not something a test creates. These are real, currently
-	// seeded keys used only for the GET-by-key entry (never for /run, which
-	// is excluded above).
+	// registry, not something a test creates.
 	f.maintenanceOpKey = "pull-images"
 	f.maintenanceMigrationKey = "secret-hub-id-migration"
+
+	// hub.integrations.read needs a plugin manager that actually has a
+	// plugin loaded: handleGetIntegration (handlers_integrations.go) 404s
+	// for any name the manager doesn't have, and testServer configures no
+	// plugin manager at all. mockIntegrationManager is already defined in
+	// this package's test sources (handlers_integrations_test.go).
+	mgr := newMockIntegrationManager()
+	mgr.plugins[f.integrationName] = map[string]string{}
+	srv.pluginManager = mgr
+
+	// chat.access's /chat/prefs entries need a real WebChatStore:
+	// handleChatPrefs (handlers_chat_prefs.go) checks webChatStore for nil
+	// before its method switch, so with no store configured every method —
+	// including the bogus control method — hits the same pre-dispatch 503.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store does not expose DB() *sql.DB; cannot wire a WebChatStore")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	// Wiring a real WebChatStore above (for /chat/prefs) also changes
+	// chat.access's /chat/topics/{id} and /chat/conversations/{id}/messages
+	// entries: both call WebChatStore.GetTopic(key) and 404 for a key it
+	// doesn't have (handleTopicGet, handleConversationHistory), where a nil
+	// store previously short-circuited to a graceful empty/200 response. A
+	// bare topic row is enough for both GET entries to resolve.
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        f.chatTopic,
+		ProjectID: f.project,
+		Name:      "li-chat-topic",
+		CreatedBy: f.user,
+		CreatedAt: now,
+	}))
+
+	require.NoError(t, s.CreateLifecycleHook(ctx, &store.LifecycleHook{
+		ID:        f.lifecycleHook,
+		Name:      "li-lifecycle-hook",
+		ScopeType: store.LifecycleHookScopeHub,
+		Trigger:   store.LifecycleHookTriggerRunning,
+		Action: &store.LifecycleHookAction{
+			Type:    store.LifecycleHookActionHTTP,
+			Method:  "POST",
+			URL:     "https://example.invalid/li-lifecycle-hook",
+			OnError: store.LifecycleHookOnErrorLog,
+		},
+		Enabled: true,
+		Created: now,
+		Updated: now,
+	}))
 
 	return f
 }
 
+// overrideKey identifies one (operation, pattern) pair for parameter
+// override lookup. Some patterns are declared by more than one operation
+// (e.g. GET, PATCH and DELETE all address "/api/v1/agents/{id}"); an entry
+// here overrides the pattern-only fallback in patternOverrides for that
+// specific operation only — typically to re-point a destructive verb at a
+// disposable fixture instance instead of the one longer-lived reads and
+// updates on the same pattern still need.
+type overrideKey struct {
+	OperationID string
+	Pattern     string
+}
+
+// opPatternOverrides holds every parameter override that must be resolved
+// by (operation, pattern) rather than by pattern alone, because the pattern
+// is shared with a different operation that needs a different fixture
+// instance. This is the only place a destructive verb is re-pointed at a
+// disposable twin; an operation not listed here uses whatever
+// patternOverrides gives its pattern.
+func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
+	return map[overrideKey]map[string]string{
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                     {"id": f.agentDel},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                 {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                               {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                           {"id": f.userDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                               {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                         {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:              {"id": f.harnessConfigDel},
+		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:          {"id": f.gcpSADel},
+		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                {"id": f.roleDefinitionDel},
+		{"quota.update", "/api/v1/admin/limits/{id}"}:                         {"id": f.limitUD},
+		{"quota.delete", "/api/v1/admin/limits/{id}"}:                         {"id": f.limitUD},
+		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                   {"id": f.entitlementUD},
+		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                   {"id": f.entitlementUD},
+		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}: {"id": f.accessConstraintUD},
+		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}: {"id": f.accessConstraintUD},
+	}
+}
+
 // patternOverrides maps a literal EntryPoint Pattern to the placeholder
 // values it needs, built once real fixture IDs are known. A pattern absent
-// from this map is substituted with the generic placeholder for every
-// "{name}" segment, which is correct for every entry whose live handler
-// dispatches on method (and, where applicable, resolves its target) without
-// an existence check that runs before the method switch.
+// from this map, and from opPatternOverrides, is substituted with the
+// generic placeholder for every "{name}" segment, which is correct for
+// every entry whose live handler dispatches on method (and, where
+// applicable, resolves its target) without an existence check that runs
+// before the method switch.
 func patternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		// --- agent family ---
@@ -330,17 +461,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/scheduled-events":      {"projectId": f.project},
 		"/api/v1/projects/{projectId}/schedules":             {"projectId": f.project},
 
-		// --- quota family ---
+		// --- quota family (read defaults; quota.update/.delete are
+		// re-pointed at the disposable UD instances by opPatternOverrides) ---
 		"/api/v1/admin/limits/{id}":              {"id": f.limit},
 		"/api/v1/admin/limits/{id}/entitlements": {"id": f.limit},
 		"/api/v1/admin/entitlements/{id}":        {"id": f.entitlement},
 		"/api/v1/admin/usage/{limit}":            {"limit": f.limit},
 
-		// --- GCP identity family ---
+		// --- GCP identity family (gcp.identity.delete is re-pointed at the
+		// disposable instance by opPatternOverrides) ---
 		"/api/v1/gcp-service-accounts/{id}":        {"id": f.gcpSA},
 		"/api/v1/gcp-service-accounts/{id}/verify": {"id": f.gcpSA},
 
-		// --- access constraint family ---
+		// --- access constraint family (read default; update/.delete are
+		// re-pointed at the disposable UD instance by opPatternOverrides) ---
 		"/api/v1/admin/access-constraints/{id}": {"id": f.accessConstraint},
 
 		// --- credential token family ---
@@ -360,53 +494,45 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},
 
-		// --- role family ---
+		// --- role family (role.definition.delete is re-pointed at the
+		// disposable instance by opPatternOverrides) ---
 		"/api/v1/admin/roles/{id}":           {"id": f.roleDefinition},
 		"/api/v1/admin/roles/{id}/export":    {"id": f.roleDefinition},
 		"/api/v1/admin/roles/{id}/duplicate": {"id": f.roleDefinition},
 		"/api/v1/admin/role-bindings/{id}":   {"id": f.roleBindingDel},
 
-		// --- maintenance family (read-by-key only; /run is excluded above) ---
+		// --- maintenance family: run entries deliberately use the OTHER
+		// category's key, so executeOperation/executeMigration's own
+		// category check rejects the request with 400 before anything
+		// executes (admin_maintenance.go:345-350, :138-142) — never a fake
+		// key (which would just 404, telling us nothing) and never a
+		// same-category real key (which would actually run it).
 		"/api/v1/admin/maintenance/operations/{id}":     {"id": f.maintenanceOpKey},
-		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceMigrationKey},
+		"/api/v1/admin/maintenance/operations/{id}/run": {"id": f.maintenanceMigrationKey},
+		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads": {"id": f.project},
+		"/api/v1/chat/spaces/{id}/threads":         {"id": f.project},
+		"/api/v1/chat/topics/{id}":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
+
+		// --- integrations family ---
+		"/api/v1/admin/integrations/{name}": {"name": f.integrationName},
+
+		// --- lifecycle hooks family ---
+		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},
 	}
 }
 
-// deleteVerbFixups re-points the delete-shaped catalog entries at the
-// disposable instance of their resource family, so exercising the real
-// DELETE (or, for role.definition.update, a real update-then-delete
-// sequence) cannot remove the fixture an earlier- or later-declared
-// non-destructive entry for the same family still needs. Keyed by
-// (OperationID, Pattern) since some operations share a pattern across
-// methods (all of which should target the same disposable instance).
-func deleteVerbFixups(f idFixtures) map[string]map[string]string {
-	return map[string]map[string]string{
-		"agent.lifecycle.delete":   {"id": f.agentDel},
-		"project.lifecycle.delete": {"id": f.projectDel},
-		"group.delete":             {"id": f.groupDel},
-		"user.admin.delete":        {"id": f.userDel},
-		"skill.delete":             {"id": f.skillDel},
-		"template.delete":          {"id": f.templateDel},
-		"harnessconfig.delete":     {"id": f.harnessConfigDel},
-		"gcp.identity.delete":      {"id": f.gcpSADel},
-		"role.definition.update":   {"id": f.roleDefinition},
-		"role.definition.delete":   {"id": f.roleDefinitionDel},
-		"role.binding.delete":      {"id": f.roleBindingDel},
+// queryOverrides holds a literal query string to append to a pattern's
+// substituted path. Only /chat/prefs needs one today: handleChatPrefs
+// (handlers_chat_prefs.go) requires an agentId query parameter to resolve
+// which agent's thread preferences to read or write, before it does
+// anything else (including its method switch).
+func queryOverrides(f idFixtures) map[string]string {
+	return map[string]string{
+		"/api/v1/chat/prefs": "agentId=" + f.agent,
 	}
-}
-
-func quotaUpdateDeleteFixups(f idFixtures) map[string]map[string]string {
-	return map[string]map[string]string{
-		"/api/v1/admin/limits/{id}":       {"id": f.limitUD},
-		"/api/v1/admin/entitlements/{id}": {"id": f.entitlementUD},
-	}
-}
-
-func accessConstraintUpdateDeleteFixup(f idFixtures) map[string]string {
-	return map[string]string{"id": f.accessConstraintUD}
 }
 
 // substituteLiveInventoryParams replaces every "{name}" placeholder in an
@@ -471,60 +597,81 @@ func catalogHTTPEntryPoints() []struct {
 // its handler is supposed to, this method must be rejected with 405.
 const bogusMethod = "PROPFIND"
 
+// bogusSegment is a path segment no catalog pattern declares, appended
+// after the substituted path for the suffix check: a handler that rejects
+// undeclared structure should 404 or 405 it, not silently accept it as part
+// of an ID or fall through to the same handling as the bare path.
+const bogusSegment = "live-inventory-bogus-suffix"
+
 // TestCatalogHTTPEntryPoints_LiveMethodCheck probes the real server mux for
 // every declared HTTP entry point in authzop.Catalog (skipping the small,
-// reviewed exclusion maps above) and makes two assertions per entry:
+// reviewed exclusion maps above) and makes three assertions per entry:
 //
 //  1. Positive check: sending the catalog's declared method at a path built
 //     from the declared pattern, with real fixture IDs substituted wherever
-//     the live handler needs one to exist, must not return 404 or 405. 404
-//     means the declared path does not reach the resource the operation
-//     addresses; 405 means the declared method is wrong.
-//  2. Control check: sending an unsupported method (bogusMethod) at the same
-//     path must return 405. This proves the positive check actually
-//     reached the handler's method dispatch — without it, a handler that
-//     404s or errors before ever looking at r.Method would make the
-//     positive check pass vacuously regardless of what method the catalog
-//     declares.
+//     the live handler needs one to exist, must not return 404 or 405.
+//  2. Control check (runs first — see the ordering note below): sending an
+//     unsupported method (bogusMethod) at the same path must return 405.
+//     This proves the positive check actually reached the handler's method
+//     dispatch — without it, a handler that 404s or errors before ever
+//     looking at r.Method would make the positive check pass vacuously
+//     regardless of what method the catalog declares.
+//  3. Suffix check: sending the declared method at path + "/" + bogusSegment
+//     must return 404 or 405. This catches a pattern that is missing a
+//     trailing segment a live route actually requires (declared too short),
+//     as opposed to declaring the wrong segment (caught by check 1, since a
+//     substituted-but-wrong segment reaches a different, real 404). It does
+//     not apply to a pattern with no "{param}" at all — see the skip
+//     condition at its call site for why appending a segment to a fully
+//     static path is not a meaningful probe of that path.
 //
-// Together, an entry can only pass both checks if changing its declared
-// method (positive check fails: no longer routes) or its declared path
-// (control check would have already flagged an unreachable dispatch, or the
-// positive check 404s once the path stops matching the fixture) breaks it —
-// which is #2227's AC2 ("a catalog entry whose method or path differs from
-// its route fails a test").
+// What these three checks together prove: for an entry not excluded from
+// any of them, the catalog's declared method is the one the live route
+// accepts, and the declared pattern (with its parameters substituted) is
+// long enough to reach that route's own dispatch rather than a shorter
+// prefix's. That is #2227's AC2 for the shape of drift the original catalog
+// actually had — a wrong method, or a wrong/incomplete path segment.
+//
+// What these checks do NOT prove, even for an included entry:
+//   - That the pattern is not too LONG — a handler that ignores or
+//     otherwise accepts an extra trailing segment (rather than 404/405ing
+//     it) will pass the suffix check regardless, and is listed in
+//     suffixCheckExclusions with the specific reason it does. A handful of
+//     handlers in this codebase are architecturally suffix-tolerant (e.g.
+//     handleUserByID only special-cases one specific suffix and otherwise
+//     falls through; extractID-based handlers fold a suffix into the ID
+//     itself), so this is a real, named limitation, not an oversight.
+//   - Full path correctness when the positive check's 2xx/4xx comes from a
+//     pre-dispatch condition unrelated to routing — most commonly a 5xx for
+//     a backend this test server does not configure (the secret backend,
+//     the metrics/telemetry project, Cloud Logging, GCP verification). For
+//     those entries this test still proves the method and the coarse
+//     path-length are right (both other checks still run), but the
+//     positive check's own status code does not additionally confirm the
+//     handler did real work with the substituted parameters.
 func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	f := seedLiveInventoryFixtures(t, ctx, s)
-	overrides := patternOverrides(f)
-	deleteFixups := deleteVerbFixups(f)
-	quotaFixups := quotaUpdateDeleteFixups(f)
-	acFixup := accessConstraintUpdateDeleteFixup(f)
+	f := seedLiveInventoryFixtures(t, ctx, srv, s)
+	opOverrides := opPatternOverrides(f)
+	patternFallback := patternOverrides(f)
+	queryFor := queryOverrides(f)
 
-	tested, controlChecked := 0, 0
+	tested, controlChecked, suffixChecked := 0, 0, 0
 	for _, entry := range catalogHTTPEntryPoints() {
 		ep := entry.EntryPoint
 		key := liveInventoryKey{OperationID: entry.OperationID, Method: ep.Method, Pattern: ep.Pattern}
 
-		params := overrides[ep.Pattern]
-		if fixup, ok := deleteFixups[entry.OperationID]; ok {
-			params = fixup
-		}
-		// access.constraint.update / .delete and quota.update / .delete
-		// share their pattern with a longer-lived read entry, so they are
-		// re-pointed by operation+pattern rather than by pattern alone.
-		if entry.OperationID == "access.constraint.update" || entry.OperationID == "access.constraint.delete" {
-			params = acFixup
-		}
-		if entry.OperationID == "quota.update" || entry.OperationID == "quota.delete" || entry.OperationID == "quota.create" {
-			if fixup, ok := quotaFixups[ep.Pattern]; ok {
-				params = fixup
-			}
+		params := opOverrides[overrideKey{entry.OperationID, ep.Pattern}]
+		if params == nil {
+			params = patternFallback[ep.Pattern]
 		}
 
 		path := substituteLiveInventoryParams(ep.Pattern, params)
+		if q, ok := queryFor[ep.Pattern]; ok {
+			path += "?" + q
+		}
 
 		var body interface{}
 		switch ep.Method {
@@ -550,6 +697,35 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 			}
 		}
 
+		// Suffix check also runs before the positive check, for the same
+		// destructive-entry reason as the control check above. It is
+		// skipped entirely — not via the reasoned exclusion map — for a
+		// pattern with no "{param}" at all: "is this pattern missing a
+		// trailing segment" is not a meaningful question for a fully static
+		// path, and appending one routes into a different, legitimately
+		// separate handler under the same mux prefix (e.g. a bare
+		// collection route like "/api/v1/secrets" sits under the same
+		// "/api/v1/secrets/" prefix as the by-key route, so a suffix on the
+		// former is indistinguishable from a real request to the latter).
+		if !strings.Contains(ep.Pattern, "{") {
+			t.Logf("suffix check does not apply to %s %s (operation %s): pattern has no path parameter", ep.Method, path, entry.OperationID)
+		} else if reason, excluded := suffixCheckExclusions[key]; excluded {
+			t.Logf("suffix check skipped for %s %s (operation %s): %s", ep.Method, path, entry.OperationID, reason)
+		} else {
+			suffixPath := path
+			if q, ok := queryFor[ep.Pattern]; ok {
+				suffixPath = strings.TrimSuffix(path, "?"+q) + "/" + bogusSegment + "?" + q
+			} else {
+				suffixPath += "/" + bogusSegment
+			}
+			suffixRec := doRequest(t, srv, ep.Method, suffixPath, body)
+			suffixChecked++
+			if suffixRec.Code != http.StatusNotFound && suffixRec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s (operation %s): got %d for an undeclared trailing segment, want 404 or 405 — the catalog pattern may be missing a segment the live route requires",
+					ep.Method, suffixPath, entry.OperationID, suffixRec.Code)
+			}
+		}
+
 		if reason, excluded := positiveCheckExclusions[key]; excluded {
 			t.Logf("positive check skipped for %s %s (operation %s): %s", ep.Method, path, entry.OperationID, reason)
 			continue
@@ -572,16 +748,19 @@ func TestCatalogHTTPEntryPoints_LiveMethodCheck(t *testing.T) {
 	if controlChecked == 0 {
 		t.Fatal("no HTTP catalog entry points were exercised by the control check — this test is broken")
 	}
-	t.Logf("live method/path check: %d positive checks, %d control checks, %d positive exclusions, %d control exclusions",
-		tested, controlChecked, len(positiveCheckExclusions), len(controlCheckExclusions))
+	if suffixChecked == 0 {
+		t.Fatal("no HTTP catalog entry points were exercised by the suffix check — this test is broken")
+	}
+	t.Logf("live method/path check: %d positive checks (%d excluded), %d control checks (%d excluded), %d suffix checks (%d excluded)",
+		tested, len(positiveCheckExclusions), controlChecked, len(controlCheckExclusions), suffixChecked, len(suffixCheckExclusions))
 }
 
 // TestLiveInventoryExclusionsNotStale asserts every entry in
-// positiveCheckExclusions and controlCheckExclusions still names a real,
-// currently declared catalog HTTP entry point. A stale exclusion — left
-// behind after a catalog correction changes or removes the entry point it
-// names — would silently stop meaning anything and hide the entry from
-// live-inventory coverage for no reason.
+// positiveCheckExclusions, controlCheckExclusions and suffixCheckExclusions
+// still names a real, currently declared catalog HTTP entry point. A stale
+// exclusion — left behind after a catalog correction changes or removes the
+// entry point it names — would silently stop meaning anything and hide the
+// entry from live-inventory coverage for no reason.
 func TestLiveInventoryExclusionsNotStale(t *testing.T) {
 	live := make(map[liveInventoryKey]bool)
 	for _, entry := range catalogHTTPEntryPoints() {
@@ -596,6 +775,12 @@ func TestLiveInventoryExclusionsNotStale(t *testing.T) {
 	for key := range controlCheckExclusions {
 		if !live[key] {
 			t.Errorf("stale control-check exclusion: operation %q method %q pattern %q does not match any current catalog HTTP entry point",
+				key.OperationID, key.Method, key.Pattern)
+		}
+	}
+	for key := range suffixCheckExclusions {
+		if !live[key] {
+			t.Errorf("stale suffix-check exclusion: operation %q method %q pattern %q does not match any current catalog HTTP entry point",
 				key.OperationID, key.Method, key.Pattern)
 		}
 	}
