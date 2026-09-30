@@ -26,7 +26,8 @@ permissive default).
 scope, which defaults to project — with `403 secret_scope_restricted` (new code in
 `pkg/hub/errors.go`), when the setting is on. The check sits immediately after scope resolution
 and before allowProgeny/decode/type/conflict handling and the `GetMeta` existence probe, so it
-can't be bypassed by `force` or a malformed body, and it never touches the secret backend. This is
+can't be bypassed by `force` and the request never reaches the secret backend. (Value/Encoding
+validation runs earlier and fails closed on its own terms regardless.) This is
 the *only* agent-writable project-scope secret route (design F1), so this one ~15-line check
 covers harness auth capture and ad-hoc `sciontool secret set` alike, with no sciontool flag,
 capture marker, or harness change — the design's whole rationale for choosing Option B over the

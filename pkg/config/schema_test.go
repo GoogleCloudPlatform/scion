@@ -256,6 +256,46 @@ quotas:
 	assert.NotEmpty(t, errors, "an unknown field under quotas should produce a validation error")
 }
 
+// TestValidateSettings_AgentSecrets, TestValidateSettings_AgentSecretsInvalidType and
+// TestValidateSettings_AgentSecretsUnknownField mirror the three Quotas tests above
+// (round-1 review Rec1, ptone/scion#2291): the hand-written opsettings schema for
+// agent_secrets is covered by opsettings_test.go's TestValidateValidDoc/InvalidDoc, but the
+// separate settings-v1.schema.json entry — the one scion config validate and a saved
+// settings.yaml actually go through — had no regression test, the same gap round 3 of
+// ptone/scion#2270 found and fixed for quotas.
+func TestValidateSettings_AgentSecrets(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  user_scope_only: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "a valid agent_secrets.user_scope_only should produce no errors, got: %v", errors)
+}
+
+func TestValidateSettings_AgentSecretsInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  user_scope_only: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean user_scope_only should produce a validation error")
+}
+
+func TestValidateSettings_AgentSecretsUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under agent_secrets should produce a validation error")
+}
+
 func TestValidateSettings_InvalidSchemaVersion(t *testing.T) {
 	data := []byte(`
 schema_version: "2"

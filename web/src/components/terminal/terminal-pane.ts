@@ -1654,6 +1654,14 @@ export class ScionTerminalPane extends LitElement {
   private static readonly SECRET_SCOPE_RESTRICTED_RE = /secret_scope_restricted/;
 
   /**
+   * Monotonically increasing token for the settings/public fetch below.
+   * If the dialog is closed and reopened before a fetch resolves, a stale
+   * response (or the stale fetch's `finally`) must not clear loading or
+   * overwrite a newer result (round-1 review N2).
+   */
+  private captureAuthSettingsRequestSeq = 0;
+
+  /**
    * Opens the capture scope dialog and fetches /api/v1/settings/public fresh
    * (design ptone/scion#2291 §7), so an admin toggling the policy while the
    * terminal is open takes effect the next time the dialog opens — this is
@@ -1663,27 +1671,29 @@ export class ScionTerminalPane extends LitElement {
   private async openCaptureAuthScopeDialog(): Promise<void> {
     this.captureAuthScopeDialogOpen = true;
     this.captureAuthSettingsLoading = true;
+    const requestSeq = ++this.captureAuthSettingsRequestSeq;
+    let agentSecretsUserScopeOnly = false;
     try {
       const response = await fetch('/api/v1/settings/public', { credentials: 'include' });
       if (response.ok) {
         const data = (await response.json()) as { agentSecretsUserScopeOnly?: boolean };
-        this.agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
-      } else {
-        this.agentSecretsUserScopeOnly = false;
+        agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
       }
     } catch (err) {
       console.error('Failed to fetch public settings for capture auth dialog:', err);
-      this.agentSecretsUserScopeOnly = false;
-    } finally {
-      // The setting forces the profile scope whatever was previously
-      // selected — it must win even if the dialog was already open with
-      // "project" chosen when an admin flipped it (§7: "forced to 'user'
-      // when the dialog opens, whatever the previous selection was").
-      if (this.agentSecretsUserScopeOnly) {
-        this.captureAuthSelectedScope = 'user';
-      }
-      this.captureAuthSettingsLoading = false;
     }
+    // A newer open has since started its own fetch; let that one own the
+    // final state instead of overwriting it with this stale result.
+    if (requestSeq !== this.captureAuthSettingsRequestSeq) return;
+    this.agentSecretsUserScopeOnly = agentSecretsUserScopeOnly;
+    // The setting forces the profile scope whatever was previously
+    // selected — it must win even if the dialog was already open with
+    // "project" chosen when an admin flipped it (§7: "forced to 'user'
+    // when the dialog opens, whatever the previous selection was").
+    if (agentSecretsUserScopeOnly) {
+      this.captureAuthSelectedScope = 'user';
+    }
+    this.captureAuthSettingsLoading = false;
   }
 
   private async handleCaptureAuth(
@@ -2132,12 +2142,13 @@ export class ScionTerminalPane extends LitElement {
         <sl-radio-group
           id="capture-scope-group"
           .value=${this.captureAuthSelectedScope}
-          ?disabled=${this.captureAuthSettingsLoading}
           @sl-change=${(e: any) => {
             this.captureAuthSelectedScope = e.target.value;
           }}
         >
-          <sl-radio value="project" ?disabled=${this.agentSecretsUserScopeOnly}
+          <sl-radio
+            value="project"
+            ?disabled=${this.captureAuthSettingsLoading || this.agentSecretsUserScopeOnly}
             >Project secret (all project agents)</sl-radio
           >
           ${this.agentSecretsUserScopeOnly
@@ -2146,7 +2157,9 @@ export class ScionTerminalPane extends LitElement {
                 profile.
               </div>`
             : nothing}
-          <sl-radio value="user">Profile secret (your personal credential)</sl-radio>
+          <sl-radio value="user" ?disabled=${this.captureAuthSettingsLoading}
+            >Profile secret (your personal credential)</sl-radio
+          >
         </sl-radio-group>
         <sl-button
           slot="footer"

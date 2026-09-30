@@ -93,6 +93,9 @@ const SCHEMA_RESPONSE = {
         'server.github_app.private_key_path',
       ],
     },
+    agent_secrets: {
+      koanf_paths: ['agent_secrets.user_scope_only'],
+    },
   },
 };
 
@@ -956,28 +959,39 @@ describe('scion-page-admin-server-config', () => {
       expect(sw!.hasAttribute('checked')).toBe(true);
     });
 
-    it('both payload builders send agent_secrets.user_scope_only on save', async () => {
-      let capturedPayload: Record<string, unknown> | null = null;
-      const config = makeBaseConfig({ agent_secrets: { user_scope_only: true } });
+    // Round-1 review R2: parameterised over both settings tiers, since
+    // 'file' alone only exercises buildFilePayload() — settingsTier === 'db'
+    // is what routes save through the separate buildLayer1Payload() builder
+    // (admin-server-config.ts's handleSave: `this.settingsTier === 'db' ?
+    // this.buildLayer1Payload() : this.buildFilePayload()`).
+    it.each(['file', 'db'] as const)(
+      'both payload builders send agent_secrets.user_scope_only on save (settings_tier=%s)',
+      async (settingsTier) => {
+        let capturedPayload: Record<string, unknown> | null = null;
+        const config = makeBaseConfig({
+          settings_tier: settingsTier,
+          agent_secrets: { user_scope_only: true },
+        });
 
-      element = await createComponent(
-        createFetchHandler(config, {
-          putHandler: (body) => {
-            capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
 
-      const buttons = queryAll(element, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-      (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+        (saveBtn as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
 
-      expect(capturedPayload).not.toBeNull();
-      const agentSecrets = capturedPayload!.agent_secrets as Record<string, unknown> | undefined;
-      expect(agentSecrets?.user_scope_only).toBe(true);
-    });
+        expect(capturedPayload).not.toBeNull();
+        const agentSecrets = capturedPayload!.agent_secrets as Record<string, unknown> | undefined;
+        expect(agentSecrets?.user_scope_only).toBe(true);
+      }
+    );
 
     it('env-overridden agent_secrets.user_scope_only renders read-only with env badge', async () => {
       const config = makeBaseConfig({
