@@ -1280,8 +1280,10 @@ func TestGCPBackend_DeleteLegacySecretName_RefusesWithoutPrefixedCopy(t *testing
 	legacyName := backend.legacyGCPSecretName("ORPHAN", ScopeUser, "user-1")
 	seedMockSecret(t, mock, backend.projectID, legacyName, "only-copy")
 
-	if err := backend.DeleteLegacySecretName(ctx, "ORPHAN", ScopeUser, "user-1"); err == nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "ORPHAN", ScopeUser, "user-1"); err == nil {
 		t.Error("expected error refusing to delete legacy secret with no prefixed copy")
+	} else if deleted {
+		t.Error("expected deleted=false alongside the refusal error")
 	}
 
 	mock.mu.Lock()
@@ -1302,8 +1304,10 @@ func TestGCPBackend_DeleteLegacySecretName_SucceedsAfterMigration(t *testing.T) 
 		t.Fatalf("MigrateNameForward failed: %v", err)
 	}
 
-	if err := backend.DeleteLegacySecretName(ctx, "READY", ScopeUser, "user-1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "READY", ScopeUser, "user-1"); err != nil {
 		t.Fatalf("DeleteLegacySecretName failed: %v", err)
+	} else if !deleted {
+		t.Error("expected deleted=true when the legacy secret was actually removed")
 	}
 
 	mock.mu.Lock()
@@ -1317,8 +1321,10 @@ func TestGCPBackend_DeleteLegacySecretName_SucceedsAfterMigration(t *testing.T) 
 func TestGCPBackend_DeleteLegacySecretName_NotFoundIsSuccess(t *testing.T) {
 	backend, _ := createTestGCPBackend(t)
 	ctx := context.Background()
-	if err := backend.DeleteLegacySecretName(ctx, "GONE", ScopeUser, "user-1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "GONE", ScopeUser, "user-1"); err != nil {
 		t.Errorf("expected nil error when legacy secret already gone, got: %v", err)
+	} else if deleted {
+		t.Error("expected deleted=false when there was nothing to delete")
 	}
 }
 
@@ -1562,8 +1568,10 @@ func TestGCPBackend_DeleteLegacySecretName_RefusesWhenDBRefNotPrefixed(t *testin
 		t.Fatalf("failed to seed DB record: %v", err)
 	}
 
-	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err == nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err == nil {
 		t.Error("expected DeleteLegacySecretName to refuse while the DB ref is still legacy")
+	} else if deleted {
+		t.Error("expected deleted=false alongside the refusal error")
 	}
 	mock.mu.Lock()
 	_, stillThere := mock.secrets[fmt.Sprintf("projects/%s/secrets/%s", backend.projectID, legacyName)]
@@ -1576,8 +1584,10 @@ func TestGCPBackend_DeleteLegacySecretName_RefusesWhenDBRefNotPrefixed(t *testin
 	if _, err := backend.RepairRefToPrefixed(ctx, "K", ScopeUser, "u1"); err != nil {
 		t.Fatalf("RepairRefToPrefixed failed: %v", err)
 	}
-	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
 		t.Errorf("expected DeleteLegacySecretName to succeed once the ref is repaired, got: %v", err)
+	} else if !deleted {
+		t.Error("expected deleted=true once the ref is repaired")
 	}
 }
 
@@ -1592,8 +1602,10 @@ func TestGCPBackend_DeleteLegacySecretName_NoDBRecordIsFine(t *testing.T) {
 	if _, err := backend.MigrateNameForward(ctx, "K", ScopeUser, "u1"); err != nil {
 		t.Fatalf("MigrateNameForward failed: %v", err)
 	}
-	if err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1"); err != nil {
 		t.Errorf("expected success with no DB record, got: %v", err)
+	} else if !deleted {
+		t.Error("expected deleted=true with no DB record and a matching prefixed value")
 	}
 }
 
@@ -2147,8 +2159,10 @@ func TestGCPBackend_DeleteLegacySecretName_SafeAfterRotationOnPrefixedName(t *te
 		t.Error("expected PlanLegacyDeletion to report the legacy secret as safe to delete despite the value mismatch caused by a post-migration rotation")
 	}
 
-	if err := backend.DeleteLegacySecretName(ctx, "ROTATED", ScopeUser, "user-1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "ROTATED", ScopeUser, "user-1"); err != nil {
 		t.Fatalf("expected DeleteLegacySecretName to succeed once the ref designates the prefixed name, even though the legacy value is now stale: %v", err)
+	} else if !deleted {
+		t.Error("expected deleted=true once the ref designates the prefixed name")
 	}
 
 	mock.mu.Lock()
@@ -2635,8 +2649,10 @@ func TestSPREV5_DeleteLegacySecretName_OrphanIsNotAFailure(t *testing.T) {
 		t.Error("expected nothing to delete for an ORPHAN record")
 	}
 
-	if err := backend.DeleteLegacySecretName(ctx, "GONE", ScopeUser, "user-1"); err != nil {
+	if deleted, err := backend.DeleteLegacySecretName(ctx, "GONE", ScopeUser, "user-1"); err != nil {
 		t.Errorf("expected DeleteLegacySecretName to succeed as a no-op for an ORPHAN record, got: %v", err)
+	} else if deleted {
+		t.Error("expected deleted=false for a no-op ORPHAN record")
 	}
 }
 
@@ -2960,8 +2976,10 @@ func TestSPREV6_DeleteLegacyTOCTOUWithOldBinaryWriter(t *testing.T) {
 	}
 	hb := NewGCPBackendWithClient(backend.store, hooked, backend.projectID, backend.hubID)
 
-	if err := hb.DeleteLegacySecretName(ctx, "API_KEY", ScopeUser, "user-1"); err != nil {
+	if deleted, err := hb.DeleteLegacySecretName(ctx, "API_KEY", ScopeUser, "user-1"); err != nil {
 		t.Fatalf("DeleteLegacySecretName itself doesn't error even though the concurrent write it destroyed was real: %v", err)
+	} else if !deleted {
+		t.Error("expected deleted=true -- the delete call itself did execute, destroying the concurrent write")
 	}
 	if _, gerr := backend.Get(ctx, "API_KEY", ScopeUser, "user-1"); gerr == nil {
 		t.Error("expected the concurrent old-binary write's only copy to have been destroyed by the TOCTOU race (Get should now fail) -- this is exactly the data loss the --delete-legacy precondition text exists to prevent")
@@ -3008,9 +3026,12 @@ func TestR7_Item6_NoStoredRefPermissionDenied(t *testing.T) {
 			}
 
 			_, perr := deny.PlanLegacyDeletion(ctx, "K", ScopeUser, "u1")
-			derr := deny.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1")
+			deleted, derr := deny.DeleteLegacySecretName(ctx, "K", ScopeUser, "u1")
 			if perr == nil || derr == nil {
 				t.Errorf("delete step: expected fatal errors (the known classification mismatch), got plan=%v delete=%v", perr, derr)
+			}
+			if deleted {
+				t.Error("delete step: expected deleted=false alongside the fatal error")
 			}
 
 			// Fail-closed: nothing was written or deleted either way.

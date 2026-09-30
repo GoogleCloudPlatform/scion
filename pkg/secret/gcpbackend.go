@@ -1000,20 +1000,31 @@ func (b *GCPBackend) RefPointsAtPrefixed(ctx context.Context, name, scope, scope
 // values is the only available evidence the prefixed copy is safe to treat
 // as a full replacement. NotFound on the legacy secret is treated as success
 // (already migrated/deleted).
-func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, scopeID string) error {
+//
+// deleted reports whether this call actually performed the delete (true) or
+// found nothing that needed deleting -- already gone, or not yet safe to
+// remove (false, nil in both cases; the latter is a refusal only when err is
+// also non-nil). This lets a caller that has already committed to deleting
+// (the non-dry-run migrate-names path) act on the outcome without a second,
+// redundant canDeleteLegacyName check via PlanLegacyDeletion (GoogleCloudPlatform/scion#2123
+// review discussion_r4144099464 / discussion_r4144099474): every existing
+// caller that only needs the error can keep ignoring the bool.
+func (b *GCPBackend) DeleteLegacySecretName(ctx context.Context, name, scope, scopeID string) (deleted bool, err error) {
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	legacyFull := fmt.Sprintf("projects/%s/secrets/%s", b.projectID, legacyName)
 
-	if ok, err := b.canDeleteLegacyName(ctx, name, scope, scopeID); err != nil {
-		return err
-	} else if !ok {
-		return nil
+	ok, err := b.canDeleteLegacyName(ctx, name, scope, scopeID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
 	}
 
 	if err := b.smClient.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: legacyFull}); err != nil && status.Code(err) != codes.NotFound {
-		return fmt.Errorf("failed to delete legacy secret %s: %w", legacyFull, err)
+		return false, fmt.Errorf("failed to delete legacy secret %s: %w", legacyFull, err)
 	}
-	return nil
+	return true, nil
 }
 
 // PlanLegacyDeletion is the read-only counterpart of DeleteLegacySecretName,
