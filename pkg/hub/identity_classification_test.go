@@ -641,6 +641,15 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 			},
 			wantDeny: "credential kind does not match identity",
 		},
+		{
+			name: "interactive user with a supplied principal ID that does not match",
+			request: AuthzRequest{
+				Principal: PrincipalContext{ID: "some-other-id", Identity: interactiveUser},
+				Resource:  Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:    ActionRead,
+			},
+			wantDeny: "principal id does not match identity",
+		},
 	}
 
 	for _, tc := range cases {
@@ -763,18 +772,31 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 		{
 			// The identity is unrecognized and its own ID() is empty, so the
 			// derived principal ID is "". A supplied, non-empty Principal.ID
-			// does not change the derived classification: the record must
-			// still carry the derived "" ID, never the supplied claim.
+			// differs from that derived "" and denies on the supplied-ID
+			// check, ahead of the unrecognized-kind case. Either way the
+			// record must carry the derived "" ID, never the supplied claim.
 			name: "unrecognized identity with an empty ID and a supplied principal ID records the derived empty ID",
 			request: AuthzRequest{
 				Principal: PrincipalContext{ID: "supplied-claim", Identity: &unclassifiedMockIdentity{id: ""}},
 				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
 				Action:    ActionRead,
 			},
-			wantReason:        "unrecognized principal kind",
+			wantReason:        "principal id does not match identity",
 			wantPrincipalKind: "",
 			wantCredKind:      "",
 			wantPrincipalID:   "",
+		},
+		{
+			name: "supplied principal ID mismatch decorates the derived ID, not the rejected claim",
+			request: AuthzRequest{
+				Principal: PrincipalContext{ID: "some-other-id", Identity: interactiveUser},
+				Resource:  Resource{Type: "agent", ID: tid("audit-target")},
+				Action:    ActionRead,
+			},
+			wantReason:        "principal id does not match identity",
+			wantPrincipalKind: PrincipalKindUser,
+			wantCredKind:      string(CredentialKindInteractive),
+			wantPrincipalID:   interactiveUserID,
 		},
 	}
 
@@ -805,7 +827,8 @@ func TestDecide_EntryDenyAuditsDerivedClassification(t *testing.T) {
 // ordinary callers leave empty, since they build a request from only
 // Principal.Identity (as AuthzRequestFromContext and every hand-built
 // AuthzRequest in this file do). This holds on both the allow path and an
-// early-deny path.
+// early-deny path, and a supplied Principal.ID that matches the identity's
+// own ID allows exactly the same way an omitted one does.
 func TestDecide_AuditRecordsDerivedPrincipalIDWhenRequestOmitsIt(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -844,6 +867,20 @@ func TestDecide_AuditRecordsDerivedPrincipalIDWhenRequestOmitsIt(t *testing.T) {
 		decision := srv.authzService.Decide(ctx, req)
 		require.False(t, decision.Allowed)
 		assert.Equal(t, "principal kind does not match identity", decision.Reason)
+		assert.Equal(t, ownerID, decision.PrincipalID)
+		require.Len(t, emitter.records, 1)
+		assert.Equal(t, ownerID, emitter.records[0].PrincipalID)
+	})
+
+	t.Run("allow with a supplied principal ID that matches", func(t *testing.T) {
+		emitter.records = nil
+		req := AuthzRequest{
+			Principal: PrincipalContext{ID: ownerID, Identity: owner},
+			Resource:  Resource{Type: "project", ID: projectID},
+			Action:    ActionRead,
+		}
+		decision := srv.authzService.Decide(ctx, req)
+		require.True(t, decision.Allowed)
 		assert.Equal(t, ownerID, decision.PrincipalID)
 		require.Len(t, emitter.records, 1)
 		assert.Equal(t, ownerID, emitter.records[0].PrincipalID)

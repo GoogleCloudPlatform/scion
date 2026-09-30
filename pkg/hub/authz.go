@@ -411,9 +411,14 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// every other case below assumes at least an identity was supplied, even
 	// one of an unrecognized concrete type.
 	//
-	// A request with an omitted Principal.Kind/Credential.Kind derives both
-	// from the identity via the adapter below; an omitted kind never reaches
-	// either check.
+	// A request with an omitted Principal.Kind/Credential.Kind/Principal.ID
+	// derives it from the identity via the adapter below; an omitted value
+	// never reaches the matching check.
+	//
+	// A supplied Principal.ID is checked against the derived principal's own
+	// ID the same way a supplied Principal.Kind is checked against the
+	// derived kind, immediately after it: the caller may name the principal
+	// it means, but never a different one than the identity resolves to.
 	//
 	// A supplied Credential is independent of Principal.Identity in the
 	// directions suppliedCredentialCompatible admits: a narrower
@@ -434,6 +439,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		denyReason = "missing principal"
 	case request.Principal.Kind != "" && request.Principal.Kind != derivedPrincipal.Kind:
 		denyReason = "principal kind does not match identity"
+	case request.Principal.ID != "" && request.Principal.ID != derivedPrincipal.ID:
+		denyReason = "principal id does not match identity"
 	case !isRecognizedPrincipalKind(derivedPrincipal.Kind) || !isRecognizedCredentialKind(derivedCredential.Kind):
 		if !isRecognizedPrincipalKind(derivedPrincipal.Kind) {
 			denyReason = "unrecognized principal kind"
