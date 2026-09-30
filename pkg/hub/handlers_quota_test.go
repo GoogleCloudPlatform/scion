@@ -492,6 +492,8 @@ func TestQuotaAPI_UsageMe_WithLimits(t *testing.T) {
 // count once the user holds a reservation against it — the counterpart to
 // TestQuotaAPI_UsageMe_ExcludesBrokerScopedLimit below (ptone/scion#2313:
 // only the broker-scoped row is dropped, user-scoped rows are unchanged).
+// It reserves at the (system, empty scope_id) shape getMyUsage queries,
+// not the scope shape any production limit is actually reserved at.
 func TestQuotaAPI_UsageMe_UserScopedLimitReflectsReservation(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
