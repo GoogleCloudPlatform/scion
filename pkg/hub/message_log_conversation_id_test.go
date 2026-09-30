@@ -260,9 +260,11 @@ func TestDedicatedLog_UserMessageDeliveredViaBroker_HasConversationID(t *testing
 
 // ---------------------------------------------------------------------------
 // pkg/messages LogAttrs() sanity check at the hub integration layer: a
-// caller-asserted conversation_id must survive into the "message dispatched"
-// dedicated log line emitted by handleAgentMessage, which logs via
-// structuredMsg.LogAttrs() before Phase 5 derivation runs.
+// caller-asserted conversation_id must survive into the "message received
+// for delivery" dedicated log line emitted by handleAgentMessage, which logs
+// via structuredMsg.LogAttrs() before Phase 5 derivation runs. Renamed from
+// "message dispatched" (A25.6 O6, report-7-gteam-2a): this line fires before
+// the migration-gate decision, so it must not claim a dispatch outcome.
 // ---------------------------------------------------------------------------
 
 func TestDedicatedLog_MessageDispatched_CallerAssertedConversationID(t *testing.T) {
@@ -306,5 +308,5 @@ func TestDedicatedLog_MessageDispatched_CallerAssertedConversationID(t *testing.
 	// the audit log line under test is emitted before that point.
 	_ = rr
 
-	assertLogHasConversationID(t, buf, "message dispatched", conv.ID)
+	assertLogHasConversationID(t, buf, "message received for delivery", conv.ID)
 }

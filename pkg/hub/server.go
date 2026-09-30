@@ -969,6 +969,10 @@ type Server struct {
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
 
+	// Per-pair sliding-window limiter for agent @mention fan-out loop/storm
+	// protection. Set once in New and read without the lock; nil-safe.
+	mentionPairLimiter *mentionPairLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1264,6 +1268,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Per-sender chat send rate limiter (#1054).
 	srv.chatSendLimiter = newChatSendLimiter()
 	srv.chatIdempotency = NewChatIdempotencyCache()
+
+	// Per-pair agent mention loop/storm protection.
+	srv.mentionPairLimiter = newMentionPairLimiter()
 
 	ctx := context.Background()
 
@@ -1763,6 +1770,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	// Give the resolver's existing-record-by-email branch the same
+	// account-state handling (invited activation, role re-evaluation,
+	// super-admin binding, grant sync, audit) that provisionUser's
+	// existing-record branch uses — see signInPolicyDeps / SetSignInPolicyDeps.
+	googleResolver.SetSignInPolicyDeps(srv.signInPolicyDeps())
 	// The external-bearer path (unlike the exchange endpoint) re-validates on
 	// every request, so it gets a caching decorator in front of the shared
 	// base validator. The exchange endpoint below is
@@ -3517,6 +3529,20 @@ func (s *Server) messageEventHandler() EventHandler {
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
 			return authErr
+		}
+
+		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
+		// O-a (p2a-r2 review): checked AFTER authorization, not before —
+		// same invariant deliverToAgent states explicitly: a denied creator
+		// must learn nothing about the recipient's migration state. Scheduled
+		// messages are not deferred (there is no sender to persist a "saved
+		// to history" row for, and no request to answer 202 to) — a
+		// scheduled message firing mid-`scion reincarnate` fails loudly
+		// instead of dispatching into a stopped or absent container and
+		// silently succeeding. The event records this as a failure so the
+		// blocked-wait pairing agents rely on is not silently lost.
+		if reincarnationInFlight(agent) {
+			return fmt.Errorf("target agent is reincarnating")
 		}
 
 		dispatcher := s.GetDispatcher()

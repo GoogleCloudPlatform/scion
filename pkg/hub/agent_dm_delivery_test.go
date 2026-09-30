@@ -313,7 +313,7 @@ func TestDelivery_WriteAgentDMResult_Dispatched(t *testing.T) {
 		MessageID:   "test-msg-id",
 		Recipient:   "agent:test-agent",
 		RecipientID: "test-agent-id",
-	})
+	}, nil)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]interface{}
@@ -439,7 +439,7 @@ func TestDelivery_WriteAgentDMResult_Ambiguous(t *testing.T) {
 		Recipient:   "agent:test-agent",
 		RecipientID: "test-agent-id",
 		DispatchErr: errors.New("CAS failed"),
-	})
+	}, nil)
 
 	assert.Equal(t, http.StatusAccepted, w.Code,
 		"ambiguous outcome must return 202 Accepted")

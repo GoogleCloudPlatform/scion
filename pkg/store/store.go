@@ -724,6 +724,14 @@ type BrokerDispatchStore interface {
 	// their recipient agent has been deleted (soft- or hard-deleted) and can
 	// therefore never accept delivery. Returns the number of messages failed.
 	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
+
+	// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
+	// "pending", or "failed" with reason == expiredReason, by the pre-fix
+	// nc-promote-busy bug (a storeMsg persisted without stamping
+	// DispatchState). The exact complement of ExpireStuckPendingMessages'
+	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
+	// is ever legitimately in either state. Returns the number repaired.
+	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
