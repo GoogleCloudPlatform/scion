@@ -34,13 +34,19 @@ import (
 // duration of a test. Callers must not use t.Parallel.
 func withDeliveryCredentialKinds(t *testing.T, kinds ...CredentialKind) {
 	t.Helper()
-	saved := deliveryCredentialKinds
 	set := map[CredentialKind]struct{}{}
 	for _, k := range kinds {
 		set[k] = struct{}{}
 	}
+	deliveryCredentialKindsMu.Lock()
+	saved := deliveryCredentialKinds
 	deliveryCredentialKinds = set
-	t.Cleanup(func() { deliveryCredentialKinds = saved })
+	deliveryCredentialKindsMu.Unlock()
+	t.Cleanup(func() {
+		deliveryCredentialKindsMu.Lock()
+		deliveryCredentialKinds = saved
+		deliveryCredentialKindsMu.Unlock()
+	})
 }
 
 // deliveryGateKindCases lists every credential kind the gate is evaluated
@@ -72,8 +78,11 @@ func TestDeliveryGate_KindSetMatchesTable(t *testing.T) {
 			want[tc.kind] = struct{}{}
 		}
 	}
-	assert.Equal(t, want, deliveryCredentialKinds)
-	for k := range deliveryCredentialKinds {
+	deliveryCredentialKindsMu.RLock()
+	got := deliveryCredentialKinds
+	deliveryCredentialKindsMu.RUnlock()
+	assert.Equal(t, want, got)
+	for k := range got {
 		found := false
 		for _, tc := range deliveryGateKindCases {
 			found = found || tc.kind == k
