@@ -62,16 +62,20 @@ func seedBrokerBinding(t *testing.T, ctx context.Context, s store.Store, limitDe
 }
 
 // TestBrokerQuotaBindingsToSettingsMigration_UserHackBindingBecomesSetting
-// proves the historical "user-subject hack" shape (subjectType=user,
-// scopeType=broker) is migrated into a broker setting with the migration
-// attribution.
+// proves the real historical "user-subject hack" shape — a user binding
+// whose subjectId IS the broker ID (the shape effectiveBrokerLimit's
+// subjectID=brokerID resolution actually matched, pkg/hub/broker_capacity.go)
+// — is migrated into a broker setting with the migration attribution.
 func TestBrokerQuotaBindingsToSettingsMigration_UserHackBindingBecomesSetting(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
 	broker := createTestRuntimeBroker(t, ctx, s, "broker-1", nil)
 	limitDef := seedMaxAgentsPerBrokerLimit(t, ctx, s, 100)
-	binding := seedBrokerBinding(t, ctx, s, limitDef.ID, store.EntitlementSubjectUser, "user-a", broker.ID, 5)
+	// The real hack: subjectId equals the broker ID, which is what made
+	// matchesScope/resolveEffectiveLimitWithSource pick this row up for
+	// subjectID=brokerID lookups.
+	binding := seedBrokerBinding(t, ctx, s, limitDef.ID, store.EntitlementSubjectUser, broker.ID, broker.ID, 5)
 
 	buf, restore := captureSlog(t)
 	defer restore()
@@ -90,6 +94,31 @@ func TestBrokerQuotaBindingsToSettingsMigration_UserHackBindingBecomesSetting(t 
 	got, err := s.GetEntitlementBinding(ctx, binding.ID)
 	require.NoError(t, err)
 	assert.Equal(t, binding.ID, got.ID)
+}
+
+// TestBrokerQuotaBindingsToSettingsMigration_NeverEnforcedSubjectStillMigrated
+// proves the migration deliberately takes a broker-scoped binding the
+// entitlement engine never enforced — a system_default row with a
+// non-empty subject (the exact ptone/scion#2063 item-3 silent no-op) — and
+// migrates it anyway, per design §5.5's "any subject" instruction. This is
+// a wider net than replicating the engine's own resolution would be.
+func TestBrokerQuotaBindingsToSettingsMigration_NeverEnforcedSubjectStillMigrated(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	broker := createTestRuntimeBroker(t, ctx, s, "broker-1", nil)
+	limitDef := seedMaxAgentsPerBrokerLimit(t, ctx, s, 100)
+	// system_default with a non-empty subject: the engine's system-default
+	// collection only ever looks up subjectID="" (pkg/hub/quota.go), so this
+	// row was never enforced pre-migration.
+	seedBrokerBinding(t, ctx, s, limitDef.ID, store.EntitlementSubjectSystemDefault, "legacy-non-empty-subject", broker.ID, 7)
+
+	runBrokerQuotaBindingsToSettingsMigration(ctx, s)
+
+	rec, err := s.GetBrokerSettings(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Settings.MaxAgents, "a binding the engine never enforced must still be migrated per design §5.5")
+	assert.Equal(t, int64(7), *rec.Settings.MaxAgents)
 }
 
 // TestBrokerQuotaBindingsToSettingsMigration_TwoBindingsGiveMax proves that
@@ -214,6 +243,101 @@ func TestBrokerQuotaBindingsToSettingsMigration_MissingBrokerSkipped(t *testing.
 	done, err := IsMigrationComplete(ctx, s, MigrationBrokerQuotaBindingsToSettings)
 	require.NoError(t, err)
 	assert.True(t, done, "a missing broker is a permanent outcome and must not block completion")
+}
+
+// TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection proves the
+// migration only ever acts on scopeType=broker bindings for
+// max_agents_per_broker: a system-scoped binding on the same limit is not
+// migrated (no settings row appears for the empty scope ID), a broker-scoped
+// binding on a DIFFERENT limit is invisible to this migration entirely (it
+// is filtered out before any broker is ever looked at, since bindings are
+// listed by this limit's ID), and a broker with no binding of its own gets
+// no settings row just because some other broker did.
+func TestBrokerQuotaBindingsToSettingsMigration_NegativeSelection(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	targetBroker := createTestRuntimeBroker(t, ctx, s, "broker-target", nil)
+	untouchedBroker := createTestRuntimeBroker(t, ctx, s, "broker-untouched", nil)
+
+	limitDef := seedMaxAgentsPerBrokerLimit(t, ctx, s, 100)
+	seedBrokerBinding(t, ctx, s, limitDef.ID, store.EntitlementSubjectUser, targetBroker.ID, targetBroker.ID, 5)
+
+	// A system-scoped binding on the SAME limit must not produce a settings
+	// row keyed by the empty scope ID, and must not affect targetBroker.
+	_, err := s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: limitDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		SubjectID:         "",
+		ScopeType:         store.QuotaScopeSystem,
+		ScopeID:           "",
+		Value:             999,
+		CreatedBy:         "test",
+	})
+	require.NoError(t, err)
+
+	// A broker-scoped binding on a DIFFERENT limit must be invisible to this
+	// migration: it is filtered out by the ListEntitlementBindings(limitDef.ID)
+	// call before any grouping happens, so it can't touch any broker's
+	// max_agents_per_broker setting.
+	otherLimit, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "some_other_broker_scoped_limit",
+		ResourceType: "test",
+		Unit:         "count",
+		DefaultValue: 0,
+	})
+	require.NoError(t, err)
+	seedBrokerBinding(t, ctx, s, otherLimit.ID, store.EntitlementSubjectUser, untouchedBroker.ID, untouchedBroker.ID, 42)
+
+	runBrokerQuotaBindingsToSettingsMigration(ctx, s)
+
+	rec, err := s.GetBrokerSettings(ctx, targetBroker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Settings.MaxAgents)
+	assert.Equal(t, int64(5), *rec.Settings.MaxAgents, "the system-scoped binding's value must not leak into the broker-scoped result")
+
+	_, err = s.GetBrokerSettings(ctx, untouchedBroker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a broker with no max_agents_per_broker binding of its own must get no settings row")
+
+	_, err = s.GetBrokerSettings(ctx, "")
+	assert.ErrorIs(t, err, store.ErrNotFound, "a system-scoped binding (empty scope ID) must never produce a settings row")
+}
+
+// TestBrokerQuotaBindingsToSettingsMigration_NilMaxAgentsCASUpdate proves the
+// migration correctly performs a CAS update (not a create) when a broker
+// already has a broker_settings row whose maxAgents field is nil — the
+// shape left behind when P2.1 shipped and an admin set, then cleared, a
+// cap (or wrote some other future settings key first). The migration must
+// use the existing row's revision, not 0, or the write would fail with
+// ErrRevisionConflict.
+func TestBrokerQuotaBindingsToSettingsMigration_NilMaxAgentsCASUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	broker := createTestRuntimeBroker(t, ctx, s, "broker-1", nil)
+	limitDef := seedMaxAgentsPerBrokerLimit(t, ctx, s, 100)
+	seedBrokerBinding(t, ctx, s, limitDef.ID, store.EntitlementSubjectUser, broker.ID, broker.ID, 9)
+
+	// Pre-create a settings row with maxAgents unset (revision 1), the shape
+	// an admin leaves behind by setting then clearing the cap.
+	created, err := s.PutBrokerSettings(ctx, broker.ID, store.BrokerSettings{}, 0, "admin@example.com")
+	require.NoError(t, err)
+	require.Nil(t, created.Settings.MaxAgents)
+	require.EqualValues(t, 1, created.Revision)
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runBrokerQuotaBindingsToSettingsMigration(ctx, s)
+
+	assert.Contains(t, buf.String(), "migrated=1", "a nil maxAgents on an existing row must still count as migrated, not already-set")
+
+	rec, err := s.GetBrokerSettings(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Settings.MaxAgents)
+	assert.Equal(t, int64(9), *rec.Settings.MaxAgents)
+	assert.EqualValues(t, 2, rec.Revision, "the write must be a CAS update (revision 1 -> 2), not a failed create")
+	assert.Equal(t, migrationUpdatedBy, rec.UpdatedBy)
 }
 
 // TestBrokerQuotaBindingsToSettingsMigration_NoLimitDefined confirms the

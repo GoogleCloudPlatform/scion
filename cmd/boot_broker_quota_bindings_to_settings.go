@@ -37,14 +37,22 @@ const migrationUpdatedBy = "migration:ptone/scion#2061"
 // precedence (broker setting beats bindings) reflect what the entitlement
 // engine used to enforce.
 //
-// Two historical shapes both produced a scopeType=broker binding on this
-// limit: the "user-subject hack" (subjectType=user, subjectId set to make
-// matchesScope select it) and a system_default row with a non-empty
-// subjectId (the ptone/scion#2063 item-3 workaround). This migration does
-// not distinguish between them — it groups purely by (limitName=
-// max_agents_per_broker, scopeType=broker, scopeId=B), which is exactly the
-// set the quota engine would have matched for B regardless of which hack
-// produced the row (see matchesScope, pkg/hub/quota.go).
+// This migration takes every scopeType=broker binding on this limit for B,
+// regardless of subject — it does NOT limit itself to what the entitlement
+// engine actually enforced. That is a deliberate, wider net than the
+// engine's own resolution: effectiveBrokerLimit resolves the broker scope
+// with subjectID=brokerID (broker_capacity.go), so Reserve's matching logic
+// (matchesScope / resolveEffectiveLimitWithSource, pkg/hub/quota.go) only
+// ever picked up two shapes — a user binding whose subjectId equals B (the
+// real "user-subject hack") and a system_default binding with an EMPTY
+// subject. A system_default row with a non-empty subject, or a user binding
+// for some other user scoped to B, was never enforced by the engine at all;
+// that silent no-op is exactly the ptone/scion#2063 item-3 bug. Design §5.5
+// asks this migration to sweep up every broker-scoped row anyway — not just
+// the ones that happened to work — so an operator's evident intent (they
+// scoped a binding to this broker for a reason) is honoured even where the
+// old bug ate it. That is why upgrading can newly impose or tighten a cap
+// for a broker that previously had no effective per-broker limit at all.
 //
 // M-1' semantics (same as the other boot migrations in this file): a
 // completion marker means a full pass finished without a run-level failure.
