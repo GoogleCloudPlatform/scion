@@ -189,15 +189,6 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 	})
 }
 
-// CreateTokenWithMetadata is CreateToken plus bounded, issuer-supplied
-// purpose/labels. Retained as a thin wrapper over CreateTokenWithParams so
-// existing callers built against this positional shape are unaffected.
-func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time, metadata TokenMetadata) (string, *store.UserAccessToken, error) {
-	return s.CreateTokenWithParams(ctx, CreateTokenParams{
-		UserID: userID, Name: name, ProjectID: projectID, Scopes: scopes, ExpiresAt: expiresAt, Metadata: metadata,
-	})
-}
-
 // CreateTokenWithParams is CreateToken's implementation, taking
 // CreateTokenParams directly.
 func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, params CreateTokenParams) (string, *store.UserAccessToken, error) {

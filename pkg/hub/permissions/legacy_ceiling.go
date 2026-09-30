@@ -31,16 +31,11 @@ package permissions
 // not an edit to this map — see TestLegacyUATScopeToPermissionID_Golden,
 // which fails on any modification.
 //
-// A handful of resource:action pairs are claimed by more than one
-// permission today (every hub.* action, since every hub.* permission
-// shares its resource across many distinct concerns — settings, config,
-// diagnostics, and so on — see the a1-operation-dispositions note on the
-// hub.settings.read/hub.config.read collision). This snapshot keeps
-// whichever permission Registry lists first for that pair, the same
-// resolution a plain resource:action scan has always produced; none of
-// those collision-prone resource:action pairs is a real UATScope, so no
-// legitimately minted token has ever been able to hold one, and the choice
-// only affects direct, non-mint test construction.
+// Three pairs (hub:execute, hub:read, hub:update) are shared by several
+// Registry permissions; each entry here keeps the first matching Registry
+// permission. No hub scope has ever been mintable, and a project-bound
+// credential is denied every hub-level resource before this ceiling is
+// consulted, so these entries do not affect request authorization.
 var legacyUATScopeToPermissionID = map[string]string{
 	"access_constraint:manage":     "access_constraint.admin",
 	"access_constraint:read":       "access_constraint.read",
