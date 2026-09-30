@@ -1969,10 +1969,9 @@ func TestListAgents_AttributeFiltersNarrowCorrectly(t *testing.T) {
 	}
 }
 
-// TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied is the
-// ptone/scion#2146 review R1-7(b) regression: the project-scoped list
-// endpoint (the default, non-`--all` CLI path) had no unauthorized-caller
-// coverage for the new filters at all. A non-member user and a
+// TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied covers: the
+// project-scoped list endpoint (the default, non-`--all` CLI path) needs
+// unauthorized-caller coverage for the new filters. A non-member user and a
 // wrong-project agent JWT must both be denied — never 200 with rows, and
 // never leaking whether the named id/owner exists in that project.
 func TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied(t *testing.T) {
@@ -2027,9 +2026,9 @@ func TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied(t *testing.T) {
 	})
 }
 
-// TestListAgents_MalformedOwnerIdReturns400 is the ptone/scion#2146 review
-// R1-7(d) regression: a malformed ownerId must fail loud with 400, not crash
-// the query with a 500 — parseUUID wraps store.ErrInvalidInput, which
+// TestListAgents_MalformedOwnerIdReturns400 covers: a malformed ownerId must
+// fail loud with 400, not crash the query with a 500 — parseUUID wraps
+// store.ErrInvalidInput, which
 // writeErrorFromErr maps to 400 (pkg/hub/errors.go). Locks that path in
 // explicitly rather than relying on it holding by accident.
 func TestListAgents_MalformedOwnerIdReturns400(t *testing.T) {
@@ -2072,11 +2071,11 @@ func TestListAgents_MalformedOwnerIdReturns400(t *testing.T) {
 	}
 }
 
-// TestApplyAgentAttributeAndRelationshipFilters_IDsCap is the
-// ptone/scion#2146 review R1-6 regression: id[] had no size limit, bounded
-// only by the ~1 MB HTTP header limit (~25k UUIDs) — one IN(...) bind list
-// alongside AuthorizedProjectIDs, far beyond what the real use (a CLI-
-// resolved Ancestry chain) ever needs.
+// TestApplyAgentAttributeAndRelationshipFilters_IDsCap covers: id[] is
+// capped at maxRelationshipIDs; unbounded, it would be limited only by the
+// ~1 MB HTTP header limit (~25k UUIDs) — one IN(...) bind list alongside
+// AuthorizedProjectIDs, far beyond what the real use (a CLI-resolved
+// Ancestry chain) ever needs.
 func TestApplyAgentAttributeAndRelationshipFilters_IDsCap(t *testing.T) {
 	ids := make([]string, maxRelationshipIDs+1)
 	for i := range ids {
@@ -2133,11 +2132,9 @@ func TestListAgents_TooManyIDsReturns400(t *testing.T) {
 }
 
 // TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBinding
-// is the ptone/scion#2146 review R1-6 regression: id[] was not deduped or
-// canonicalized before scopedCursorBinding, unlike every other set-like
-// field (Finding 8) — so the same logical request with id= params in a
-// different order minted a different cursor, and a cursor from one ordering
-// was rejected when replayed with another.
+// covers: id[] is deduped and canonicalized before scopedCursorBinding, like
+// every other set-like field, so the same logical request in a different
+// order mints the same cursor.
 func TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBinding(t *testing.T) {
 	idA, idB := uuid.NewString(), uuid.NewString()
 
@@ -2160,16 +2157,16 @@ func TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBind
 	assert.Equal(t, filterOrder1.IDs, filterDup.IDs)
 }
 
-// TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden is the
-// ptone/scion#2146 review R1-3 server-side fact that justifies
-// cmd/list.go's resolveReferenceAgent falling back to list-based resolution
-// on 403 as well as 404: an agent identity is denied a single-resource GET
-// on any agent other than itself (agent.read has no AgentScopes mapping —
-// see TestBypassAgents_LegitimateFlowsStillWork, authz_bypass_agents_test.go),
+// TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden covers the
+// server-side fact that justifies cmd/list.go's resolveReferenceAgent
+// falling back to list-based resolution on 403 as well as 404: an agent
+// identity is denied a single-resource GET on any agent other than itself
+// (agent.read has no AgentScopes mapping — see
+// TestBypassAgents_LegitimateFlowsStillWork, authz_bypass_agents_test.go),
 // but the identical peer is visible through the authorized list endpoint,
-// both narrowed by id[] and in a bare page. Before the fix, --descendants=<peer>
-// / --ancestors=<peer> failed outright in agent mode for exactly the
-// audience these flags are built for.
+// both narrowed by id[] and in a bare page. Without that fallback,
+// --descendants=<peer> / --ancestors=<peer> would fail outright in agent
+// mode for exactly the audience these flags are built for.
 func TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden(t *testing.T) {
 	f := bypassAgentsSetup(t)
 
@@ -2212,8 +2209,8 @@ func TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden(t *testing.T) {
 	// project-scoped route's same-project carve-out applies), so it finds
 	// nothing here — even the caller's own ID. This is exactly why
 	// listAgentsViaHub fails loudly instead of silently for `--all` combined
-	// with a relationship flag in agent mode (ptone/scion#2146 review R2-4):
-	// the final --all listing always goes through this global endpoint,
+	// with a relationship flag in agent mode: the final --all listing
+	// always goes through this global endpoint,
 	// which can't see this identity's own agents at all, so resolving the
 	// reference successfully (e.g. via the project-scoped endpoint) would
 	// not have made the overall command work end to end.

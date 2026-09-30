@@ -573,7 +573,7 @@ func AgentDomain() Domain[store.Agent] {
 			{
 				// HarnessConfig: matches the dedicated harness_config shadow
 				// column, kept in sync with AppliedConfig.HarnessConfig at
-				// write time (ptone/scion#2146 review R3-1). See
+				// write time (ptone/scion#2146). See
 				// pkg/store/entadapter/agent_store_test.go for the
 				// predicate-level tests (no-env, CreateInputs divergence,
 				// corrupt-row tolerance) that exercise the column directly.
@@ -619,9 +619,9 @@ func AgentDomain() Domain[store.Agent] {
 				// agents table, which is how "skip entries that are users"
 				// falls out without extra bookkeeping for relationship
 				// queries like CLI --ancestors (ptone/scion#2146). Split from
-				// the malformed-entry case below (review R3-7) so a
-				// regression in either path is diagnosed by name, not just
-				// an opaque count mismatch in one shared case.
+				// the malformed-entry case below so a regression in either
+				// path is diagnosed by name, not just an opaque count
+				// mismatch in one shared case.
 				Name: "ByIDs_UserIDStandIn",
 				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
 					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-keep")))

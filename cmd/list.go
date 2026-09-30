@@ -76,7 +76,7 @@ var listCmd = &cobra.Command{
 	Short:   "List running scion agents",
 	// Args rejects positional arguments so that `scion list --descendants foo`
 	// fails loudly instead of silently dropping "foo": --descendants has a
-	// NoOptDefVal (R1-2), so without "=" the flag consumes no value and "foo"
+	// NoOptDefVal, so without "=" the flag consumes no value and "foo"
 	// parses as a bare positional argument instead of the reference agent.
 	// Left unchecked, that positional is simply ignored (listCmd never reads
 	// args), so the command would run with --descendants inferring the
@@ -124,7 +124,7 @@ var listCmd = &cobra.Command{
 }
 
 // rejectHubOnlyFiltersInLocalMode returns a clear error if any Hub-only
-// filter flag is set while listing locally (ptone/scion#2146 review R1-5).
+// filter flag is set while listing locally (ptone/scion#2146).
 //
 // Local listing has no store.AgentFilter to push these into — it filters an
 // in-memory runtime.List() result by name/label only. Before this check,
@@ -222,16 +222,16 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		// agent list anything without extra grants. Failing loudly here
 		// means an agent caller gets a clear error instead of a wrong,
 		// silently empty list indistinguishable from "no descendants"
-		// (ptone/scion#2146 review R2-4); humans keep the existing
-		// global-endpoint behavior for --all regardless of which project a
-		// named reference lives in (review R2-3).
+		// (ptone/scion#2146); humans keep the existing global-endpoint
+		// behavior for --all regardless of which project a named reference
+		// lives in.
 		//
 		// This keys on hubCtx.CredentialKind — the credential
 		// hubsync.createHubClient actually selected; getHubClient,
 		// cmd/hub.go's independent implementation of the same auth-priority
 		// logic (tracked as a duplication in ptone/scion#2213), never sets
-		// it, and scion list never calls getHubClient — not on CLI mode
-		// (ptone/scion#2146 review R4-6). This distinguishes a
+		// it, and scion list never calls getHubClient — not on CLI mode.
+		// This distinguishes a
 		// user-authenticated caller (OAuth, or dev auth on a localhost hub
 		// for a non-hub-managed agent — see hubsync.createHubClient's auth
 		// priority order) running inside an agent container from an actual
@@ -350,9 +350,9 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 				return wrapHubError(err)
 			}
 			// Project-bound the query to the reference's own project,
-			// matching cascadeMessageMode's scoping (ptone/scion#2146
-			// review R2-8) — a creation-tree neighborhood does not cross
-			// project boundaries. Without --all this is already implied by
+			// matching cascadeMessageMode's scoping (ptone/scion#2146) — a
+			// creation-tree neighborhood does not cross project boundaries.
+			// Without --all this is already implied by
 			// opts.ProjectID (set above); under --all it is the only thing
 			// that keeps --lineage from searching every project.
 			opts.ProjectID = refAgent.ProjectID
@@ -411,7 +411,7 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 	// Fall back to a name/email search, paging through every result rather
 	// than only the first page. Search is a substring match, so an exact
 	// match can easily be pushed past the first page by other users sharing
-	// the same substring (ptone/scion#2146 review R1-8).
+	// the same substring (ptone/scion#2146).
 	lower := strings.ToLower(ownerRef)
 	var matches []hubclient.User
 	cursor := ""
@@ -500,8 +500,8 @@ func resolveRelationshipReference(ctx context.Context, client hubclient.Client, 
 //     `GetAgent` lookup failed at creation time, it was created by an
 //     identity that is neither a user nor an agent, or it predates ancestry
 //     tracking entirely), the child's Ancestry is `[creatorAgent.ID]`:
-//     length 1, but an AGENT's ID, not a user's (ptone/scion#2146 review
-//     R4-3). `len(ancestry)` alone cannot distinguish the two; only resolving what
+//     length 1, but an AGENT's ID, not a user's (ptone/scion#2146).
+//     `len(ancestry)` alone cannot distinguish the two; only resolving what
 //     the ID actually names can. So it is resolved through the same
 //     authorized-list mechanism `resolveReferenceAgent` uses — never a bare
 //     per-ID fetch outside list authorization (see
@@ -550,8 +550,8 @@ func resolveLineageRootID(ctx context.Context, agentSvc hubclient.AgentService, 
 // isAncestryEntryAnAgent resolves ancestryEntry — a literal principal ID
 // taken from an Ancestry array, always a UUID, never a name or slug — to an
 // agent via the same authorized-list IDs-narrowing mechanism
-// resolveReferenceAgent uses (ptone/scion#2146 review R4-3), rather than a
-// bare per-ID GET that would risk confirming an unauthorized ID is an agent.
+// resolveReferenceAgent uses (ptone/scion#2146), rather than a bare per-ID
+// GET that would risk confirming an unauthorized ID is an agent.
 // It returns (agent, true, nil) when ancestryEntry names a visible agent,
 // and (nil, false, nil) — not an error — when it does not: almost always
 // because it is a user's ID (the common case), but also an agent the caller
@@ -567,9 +567,9 @@ func isAncestryEntryAnAgent(ctx context.Context, agentSvc hubclient.AgentService
 	// Only trust a result whose ID actually equals ancestryEntry, mirroring
 	// resolveReferenceAgent's own skepticism of the response shape — a Hub
 	// that predates ptone/scion#2146 and silently ignores the `id` query
-	// param (see R4-11) would otherwise hand back an arbitrary agent, which
-	// this authz-adjacent path (its result becomes the --lineage root) must
-	// never trust blindly (ptone/scion#2146 review R5-7).
+	// param would otherwise hand back an arbitrary agent, which this
+	// authz-adjacent path (its result becomes the --lineage root) must never
+	// trust blindly.
 	var found *hubclient.Agent
 	for i := range resp.Agents {
 		if resp.Agents[i].ID == ancestryEntry {
@@ -591,7 +591,7 @@ func isAncestryEntryAnAgent(ctx context.Context, agentSvc hubclient.AgentService
 // maxResolutionPages bounds how many pages resolveOwnerID and
 // resolveReferenceAgent will fetch while searching for an exact name/email
 // match, so a misbehaving or never-terminating cursor cannot hang the CLI
-// forever (ptone/scion#2146 review R1-8).
+// forever (ptone/scion#2146).
 const maxResolutionPages = 1000
 
 // resolveReferenceAgent resolves ref (an agent ID, slug, or name) to the full
@@ -603,8 +603,8 @@ const maxResolutionPages = 1000
 // succeeds (notably when ref is the caller's own ID). But many agent
 // identities are denied GET on any agent other than themselves with a plain
 // 403, even though the identical agent is visible through the list endpoint
-// (ptone/scion#2146 review R1-3) — using GET as the primary path silently
-// failed --descendants=<peer> and --ancestors=<peer> for exactly the
+// (ptone/scion#2146) — using GET as the primary path silently failed
+// --descendants=<peer> and --ancestors=<peer> for exactly the
 // audience (agents naming a sibling) these flags exist for. So both 404 and
 // 403 fall through to list-based resolution below, never just 404.
 func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService, ref string) (*hubclient.Agent, error) {
@@ -623,11 +623,11 @@ func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService,
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve agent %q: %w", ref, err)
 		}
-		// Only trust a result whose ID actually equals ref (ptone/scion#2146
-		// review R6-7, mirroring isAncestryEntryAnAgent's own R5-7
-		// hardening in the other direction): a Hub that predates this
-		// change and silently ignores the `id` query param (R4-11) would
-		// otherwise hand back an arbitrary agent — in a project with
+		// Only trust a result whose ID actually equals ref (ptone/scion#2146,
+		// mirroring isAncestryEntryAnAgent's own hardening in the other
+		// direction): a Hub that predates this change and silently ignores
+		// the `id` query param would otherwise hand back an arbitrary agent
+		// — in a project with
 		// exactly one visible agent, that agent, for ANY UUID reference.
 		// The final list query is still authz-bounded regardless, so this
 		// is a correctness fix, not a leak fix.
@@ -648,8 +648,8 @@ func resolveReferenceAgent(ctx context.Context, agentSvc hubclient.AgentService,
 
 	// Not a UUID: page through the full authorized list, matching by slug or
 	// name, until an exact match is found or the list is exhausted
-	// (ptone/scion#2146 review R1-8 — matching only the first page silently
-	// missed real agents on a large, `--all`-scoped hub).
+	// (ptone/scion#2146 — matching only the first page silently missed real
+	// agents on a large, `--all`-scoped hub).
 	var matches []hubclient.Agent
 	cursor := ""
 	for page := 0; ; page++ {

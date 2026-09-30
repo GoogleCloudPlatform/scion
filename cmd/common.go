@@ -211,8 +211,8 @@ type HubContext struct {
 	ProjectPath string
 	IsGlobal    bool
 	// CredentialKind mirrors hubsync.HubContext.CredentialKind — see its doc
-	// for what it records and why (ptone/scion#2146 review R3-2/R4-6). Zero
-	// value (hubsync.CredentialKindUnknown) on any HubContext not built via
+	// for what it records and why (ptone/scion#2146). Zero value
+	// (hubsync.CredentialKindUnknown) on any HubContext not built via
 	// CheckHubAvailability* (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
 }

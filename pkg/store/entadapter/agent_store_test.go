@@ -1292,8 +1292,8 @@ func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTe
 // TestAgentStore_HarnessConfigFilter verifies filtering agents by the
 // harness_config shadow column (pkg/ent/schema/agent.go), which
 // CreateAgent/UpdateAgent keep in sync with the top-level
-// AppliedConfig.HarnessConfig (ptone/scion#2146 review R3-1). These tests
-// execute the real predicate (agent.HarnessConfigEQ) via ListAgents, not a
+// AppliedConfig.HarnessConfig (ptone/scion#2146). These tests execute the
+// real predicate (agent.HarnessConfigEQ) via ListAgents, not a
 // hand-simulation of it.
 func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	ctx := context.Background()
@@ -1334,10 +1334,9 @@ func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	assert.Equal(t, 3, all.TotalCount)
 }
 
-// TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case
-// (ptone/scion#2146 review R3-1's requested coverage): with no Env map at
-// all, filtering by HarnessConfig must still match exactly the top-level
-// value and nothing else.
+// TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:
+// with no Env map at all, filtering by HarnessConfig must still match
+// exactly the top-level value and nothing else.
 func TestAgentStore_HarnessConfigFilter_NoEnv(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -1352,14 +1351,13 @@ func TestAgentStore_HarnessConfigFilter_NoEnv(t *testing.T) {
 	assert.Equal(t, a.ID, result.Items[0].ID)
 }
 
-// TestAgentStore_HarnessConfigFilter_CreateInputsDivergence is the exact
-// ptone/scion#2146 review R3-1 probe case: an agent whose live, top-level
-// HarnessConfig ("gemini") differs from CreateInputs.HarnessConfig
-// ("claude") — reachable in production because the broker overwrites
-// AppliedConfig.HarnessConfig after create (pkg/hub/httpdispatcher.go)
-// while CreateInputs stays frozen at the create-time value. Filtering by
-// "claude" must NOT match this agent (that was R3-1's false positive on the
-// string-matching predicate); filtering by "gemini" must.
+// TestAgentStore_HarnessConfigFilter_CreateInputsDivergence covers an agent
+// whose live, top-level HarnessConfig ("gemini") differs from
+// CreateInputs.HarnessConfig ("claude") — reachable in production because
+// the broker overwrites AppliedConfig.HarnessConfig after create
+// (pkg/hub/httpdispatcher.go) while CreateInputs stays frozen at the
+// create-time value. Filtering by "claude" must NOT match this agent;
+// filtering by "gemini" must.
 func TestAgentStore_HarnessConfigFilter_CreateInputsDivergence(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -1382,8 +1380,7 @@ func TestAgentStore_HarnessConfigFilter_CreateInputsDivergence(t *testing.T) {
 	assert.Equal(t, a.ID, byLiveValue.Items[0].ID)
 }
 
-// TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow is the ptone/scion#2146
-// review R1-4 regression, re-verified after the R3-1 rework: a corrupt
+// TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow covers: a corrupt
 // applied_config row (a plain Ent field.Text column, not schema-validated
 // JSON) must not break a HarnessConfig-filtered query. With the harness_config
 // shadow column, this is now trivially true rather than merely
@@ -1522,9 +1519,9 @@ func TestAgentStore_IDsFilter(t *testing.T) {
 	t.Run("mix of agent ID and a real user ID (valid UUID, no agent row) skips the latter", func(t *testing.T) {
 		// This is the actual production path "skip entries that are users,
 		// not agents" takes: a user ID is a perfectly valid UUID, it just
-		// never matches any row in the agents table (ptone/scion#2146
-		// review R1-12/R2-7). The malformed, non-UUID entry below exercises
-		// the separate parseUUIDList drop path instead.
+		// never matches any row in the agents table. The malformed,
+		// non-UUID entry below exercises the separate parseUUIDList drop
+		// path instead.
 		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, uuid.NewString()}}, store.ListOptions{})
 		require.NoError(t, err)
 		require.Len(t, result.Items, 1)

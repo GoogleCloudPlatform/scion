@@ -142,7 +142,7 @@ type HubContext struct {
 	// selected for Client, so a caller that needs to know "is this actually
 	// an agent token" — not just "is the CLI running in agent mode" — can
 	// check it directly instead of inferring it from CLI mode
-	// (ptone/scion#2146 review R3-2/R4-6). It is purely observational: it
+	// (ptone/scion#2146). It is purely observational: it
 	// must never be used to change auth priority or behavior, only to let a
 	// caller-side guard key on the credential that's actually in use.
 	CredentialKind CredentialKind
@@ -165,10 +165,9 @@ const (
 	CredentialKindAgentToken CredentialKind = "agent_token"
 	// CredentialKindHubToken is a bearer token from the SCION_HUB_TOKEN env
 	// var — normally a user personal access token (`scion_pat_...`), or a
-	// bootstrap bearer token; never an agent identity token
-	// (ptone/scion#2146 review R5-9 — this matters because the agent-mode
-	// --all guard's correctness rests on hub_token being treated as a
-	// non-agent-token credential).
+	// bootstrap bearer token; never an agent identity token (this matters
+	// because the agent-mode --all guard's correctness rests on hub_token
+	// being treated as a non-agent-token credential).
 	CredentialKindHubToken CredentialKind = "hub_token"
 	// CredentialKindDevAuto covers both dev-auth paths: the automatic
 	// localhost dev-token override that takes priority over a non-dev agent
@@ -1371,8 +1370,8 @@ func readAgentTokenFile() string {
 }
 
 // createHubClient creates a new Hub client with proper authentication, and
-// reports which credential it selected (ptone/scion#2146 review R4-6) so a
-// caller like the CLI's --all guard can key on the credential actually in
+// reports which credential it selected (ptone/scion#2146) so a caller like
+// the CLI's --all guard can key on the credential actually in
 // use rather than inferring it from CLI mode. Recording the kind is purely
 // observational — it never changes auth priority or behavior.
 //

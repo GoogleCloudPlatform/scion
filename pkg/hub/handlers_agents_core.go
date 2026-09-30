@@ -121,8 +121,8 @@ func parseLabelFilters(params []string) (map[string]string, error) {
 	return m, nil
 }
 
-// maxRelationshipIDs caps the id[] relationship filter (ptone/scion#2146
-// review R1-6). Unbounded, it is one IN(...) bind list per caller, limited
+// maxRelationshipIDs caps the id[] relationship filter (ptone/scion#2146).
+// Unbounded, it is one IN(...) bind list per caller, limited
 // only by the ~1 MB HTTP header size (roughly 25k UUIDs) — that both bloats
 // the query next to AuthorizedProjectIDs and costs query-planning time far
 // beyond what the real use (a CLI-resolved Ancestry chain, or a lineage

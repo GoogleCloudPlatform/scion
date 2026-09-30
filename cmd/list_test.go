@@ -972,8 +972,8 @@ func TestValidateListFlagsNegativeCount(t *testing.T) {
 	}
 }
 
-// TestRejectHubOnlyFiltersInLocalMode is the ptone/scion#2146 review R1-5
-// regression: a Hub-only filter set while listing locally must error rather
+// TestRejectHubOnlyFiltersInLocalMode covers: a Hub-only filter set while
+// listing locally must error rather
 // than silently listing everything (a narrowing filter that narrows nothing
 // makes the output wider than asked for, with no indication anything was
 // ignored).
@@ -1012,9 +1012,9 @@ func TestRejectHubOnlyFiltersInLocalMode(t *testing.T) {
 	}
 }
 
-// TestListCmd_Args_RejectsPositionalArguments is the ptone/scion#2146 review
-// R1-2 regression: `scion list --descendants foo` (space, not "=") must not
-// silently drop "foo" as an ignored positional argument. Because
+// TestListCmd_Args_RejectsPositionalArguments covers: `scion list
+// --descendants foo` (space, not "=") must not silently drop "foo" as an
+// ignored positional argument. Because
 // --descendants has NoOptDefVal, the flag consumes no value without "=", so
 // "foo" would otherwise parse as a positional arg that listCmd's RunE never
 // reads — the command would then run with --descendants inferring the
@@ -1337,21 +1337,18 @@ func TestResolveRelationshipReference(t *testing.T) {
 	}
 }
 
-// TestResolveLineageRootID covers ptone/scion#2146 review R4-3: a length-1
-// Ancestry entry is not always a user. It can also be another AGENT's ID, if
-// that agent's own Ancestry was itself empty when it created the reference
-// (see resolveLineageRootID's doc for the three ways that happens). Only
+// TestResolveLineageRootID covers ptone/scion#2146: a length-1 Ancestry
+// entry is not always a user. It can also be another AGENT's ID, if that
+// agent's own Ancestry was itself empty when it created the reference (see
+// resolveLineageRootID's doc for the three ways that happens). Only
 // resolving what the entry actually names — through the same authorized-list
 // mechanism as --descendants/--ancestors, never a bare per-ID fetch — can
 // tell the two apart, so this test runs against a real stub Hub rather than
-// a purely local table (the pre-R4-3 version of this test asserted the false
-// "len(ancestry) < 2 means parent is a user" equivalence, which is exactly
-// the bug this round fixes).
+// a purely local table.
 func TestResolveLineageRootID(t *testing.T) {
 	const ancestryLessCreatorID = "11111111-1111-1111-1111-111111111111"
-	// ptone/scion#2146 review R6-6: a queried ID that gets back an agent
-	// whose ID does NOT match (e.g. a pre-#2146 Hub that ignores `id` and
-	// returns an arbitrary agent, R4-11).
+	// A queried ID that gets back an agent whose ID does NOT match (e.g. a
+	// pre-#2146 Hub that ignores `id` and returns an arbitrary agent).
 	const mismatchedIDEntry = "22222222-2222-2222-2222-222222222222"
 	const unexpectedAgentID = "33333333-3333-3333-3333-333333333333"
 	// A queried ID that gets back two elements both claiming that exact ID
@@ -1369,10 +1366,10 @@ func TestResolveLineageRootID(t *testing.T) {
 		ids := r.URL.Query()["id"]
 		switch {
 		case len(ids) == 1 && ids[0] == ancestryLessCreatorID:
-			// ancestryLessCreatorID names a real, visible agent — the R4-3
-			// edge case: a length-1 Ancestry entry that is an AGENT, not a
-			// user, because its own Ancestry was itself empty when it
-			// created the reference below.
+			// ancestryLessCreatorID names a real, visible agent — the edge
+			// case where a length-1 Ancestry entry is an AGENT, not a user,
+			// because its own Ancestry was itself empty when it created the
+			// reference below.
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []hubclient.Agent{{ID: ancestryLessCreatorID, Slug: "ancestry-less-creator"}},
 			})
@@ -1403,7 +1400,7 @@ func TestResolveLineageRootID(t *testing.T) {
 		id          string
 		ancestry    []string
 		want        string
-		wantNoCalls bool // ptone/scion#2146 review R5-6(b): len 0 and len>=2 must make zero requests
+		wantNoCalls bool // len 0 and len>=2 must make zero requests
 	}{
 		{
 			name:        "no ancestry: self is root (covers a user reference, which has no Ancestry at all)",
@@ -1431,12 +1428,11 @@ func TestResolveLineageRootID(t *testing.T) {
 			wantNoCalls: true,
 		},
 		{
-			// ptone/scion#2146 review R6-6: the R5-7 exact-ID-match
-			// hardening in isAncestryEntryAnAgent, tested directly.
-			// Mutation-verified: replacing the ID-equality check with
-			// `true` made this case return unexpectedAgentID instead of
-			// self, failing.
-			name:     "single ancestry entry whose lookup returns a DIFFERENT ID (R5-7/R6-6): must not trust it — root at self, not the mismatched agent",
+			// Guards the exact-ID-match hardening in isAncestryEntryAnAgent,
+			// tested directly. Mutation-verified: replacing the ID-equality
+			// check with `true` made this case return unexpectedAgentID
+			// instead of self, failing.
+			name:     "single ancestry entry whose lookup returns a DIFFERENT ID: must not trust it — root at self, not the mismatched agent",
 			id:       "child-with-mismatched-lookup",
 			ancestry: []string{mismatchedIDEntry},
 			want:     "child-with-mismatched-lookup",
@@ -1457,20 +1453,19 @@ func TestResolveLineageRootID(t *testing.T) {
 		})
 	}
 
-	// ptone/scion#2146 review R6-6: the R5-7 >1-exact-match hardening,
-	// tested directly. Guards the >1-exact-match branch: removing the
+	// Guards the >1-exact-match branch, tested directly: removing the
 	// `found != nil` check makes this case fail. (It does not distinguish
 	// the ID-equality mutant; the mismatched-ID case above does.)
-	t.Run("single ancestry entry whose lookup returns TWO exact-ID matches (R5-7/R6-6): must fail loud, not guess", func(t *testing.T) {
+	t.Run("single ancestry entry whose lookup returns TWO exact-ID matches: must fail loud, not guess", func(t *testing.T) {
 		requestCount = 0
 		_, err := resolveLineageRootID(context.Background(), agentSvc, "child-id", []string{duplicateMatchEntry})
 		require.Error(t, err)
 	})
 }
 
-// TestResolveLineageRootID_LookupError is the ptone/scion#2146 review R5-6(a)
-// gap: a length-1 ancestry's authorized-list lookup can fail (a real HTTP/
-// network error, not just a zero-result "not an agent" outcome), and that
+// TestResolveLineageRootID_LookupError covers: a length-1 ancestry's
+// authorized-list lookup can fail (a real HTTP/network error, not just a
+// zero-result "not an agent" outcome), and that
 // must propagate as a wrapped error, not silently root at self — rooting at
 // self on an unknown outcome would be indistinguishable from a legitimate
 // "it's a user" result, hiding a real failure from the caller.
@@ -1616,16 +1611,16 @@ func TestResolveReferenceAgent(t *testing.T) {
 	})
 }
 
-// TestResolveReferenceAgent_FallsBackOn403 is the ptone/scion#2146 review
-// R1-3 regression: many agent identities are denied a single-resource GET on
-// any agent other than themselves with a plain 403 (verified against a real
-// Hub in TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden,
+// TestResolveReferenceAgent_FallsBackOn403 covers: many agent identities are
+// denied a single-resource GET on any agent other than themselves with a
+// plain 403 (verified against a real Hub in
+// TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden,
 // pkg/hub/rs2_r1_fixes_test.go), even though the identical agent is visible
-// through the authorized list endpoint. Before this fix, resolveReferenceAgent
-// only fell through to list-based resolution on 404, so --descendants=<peer>
-// failed outright for exactly the audience (agents naming a sibling) it is
-// built for. This test proves the CLIENT-side fallback: given a GET that
-// returns 403, resolution must still succeed via the list endpoint.
+// through the authorized list endpoint. Falling through only on 404 would
+// make --descendants=<peer> fail outright for exactly the audience (agents
+// naming a sibling) it is built for. This test proves the CLIENT-side
+// fallback: given a GET that returns 403, resolution must still succeed via
+// the list endpoint.
 func TestResolveReferenceAgent_FallsBackOn403(t *testing.T) {
 	const peerID = "66666666-6666-6666-6666-666666666666"
 
@@ -1700,10 +1695,10 @@ func TestResolveReferenceAgent_UUIDNarrowsViaIDsFilter(t *testing.T) {
 	assert.False(t, bareListCalled, "a UUID reference must resolve via id[], not a full-list page scan")
 }
 
-// TestResolveReferenceAgent_UUIDMismatchedIDNotFound is the ptone/scion#2146
-// review R6-7/R7-4 fix, tested directly: a Hub that ignores the `id` query
-// param (a pre-#2146 Hub, R4-11) and hands back an arbitrary agent must not
-// be trusted — the response element's ID must actually equal ref.
+// TestResolveReferenceAgent_UUIDMismatchedIDNotFound covers, tested
+// directly: a Hub that ignores the `id` query param (a pre-ptone/scion#2146
+// Hub) and hands back an arbitrary agent must not be trusted — the response
+// element's ID must actually equal ref.
 // Mutation-verified: replacing `resp.Agents[i].ID == ref` with `true` makes
 // this case pass instead of erroring (it would wrongly resolve to the
 // mismatched agent), so it fails as intended against that mutant.
@@ -1734,10 +1729,10 @@ func TestResolveReferenceAgent_UUIDMismatchedIDNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-// TestResolveReferenceAgent_UUIDDuplicateMatchErrors is the ptone/scion#2146
-// review R7-4 fix: two response elements both claiming ID == ref should
-// never happen against a real Hub (IDs is a single-element set), but the
-// function must fail loud rather than guess which one.
+// TestResolveReferenceAgent_UUIDDuplicateMatchErrors covers: two response
+// elements both claiming ID == ref should never happen against a real Hub
+// (IDs is a single-element set), but the function must fail loud rather
+// than guess which one.
 func TestResolveReferenceAgent_UUIDDuplicateMatchErrors(t *testing.T) {
 	const ref = "99999999-9999-9999-9999-999999999999"
 
@@ -1767,9 +1762,9 @@ func TestResolveReferenceAgent_UUIDDuplicateMatchErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "more than one record")
 }
 
-// TestResolveReferenceAgent_PagesThroughNameMatches is the ptone/scion#2146
-// review R1-8 regression: a name/slug match must not be missed just because
-// it falls on a later page of the authorized list.
+// TestResolveReferenceAgent_PagesThroughNameMatches covers: a name/slug
+// match must not be missed just because it falls on a later page of the
+// authorized list.
 func TestResolveReferenceAgent_PagesThroughNameMatches(t *testing.T) {
 	const targetID = "88888888-8888-8888-8888-888888888888"
 
@@ -1887,7 +1882,7 @@ func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
 	filterDescendants = refID
 	outputFormat = "json"
 	// Explicit, not ambient: the --all/agent-mode/relationship-flag guard
-	// (review R2-4) reads SCION_CLI_MODE, and this test only cares about
+	// reads SCION_CLI_MODE, and this test only cares about
 	// resolution mechanics, not mode. Do not rely on the ambient
 	// environment defaulting to human mode — inside an agent container it
 	// does not.
@@ -1982,8 +1977,8 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	const rootlessRefID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 	const topLevelRefID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 	const topLevelRefProjectID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
-	// ptone/scion#2146 review R5-6(c): a length-1 ancestry whose entry
-	// resolves to a visible agent, through the full listAgentsViaHub path.
+	// A length-1 ancestry whose entry resolves to a visible agent, through
+	// the full listAgentsViaHub path.
 	const agentParentRefID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 	const agentParentRefProjectID = "11111111-2222-3333-4444-555555555555"
 	const agentParentID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
@@ -2047,9 +2042,9 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		filterLineage = refID
 		run()
 		assert.Equal(t, "parent-id", gotLineageRootID)
-		// R2-8/R4-7: project-bounding matters most in exactly this
-		// agent-parent case (the top-level-agent subtest below is not the
-		// only path that must bound to the reference's project).
+		// Project-bounding matters most in exactly this agent-parent case
+		// (the top-level-agent subtest below is not the only path that must
+		// bound to the reference's project).
 		assert.Equal(t, refProjectID, gotProjectID)
 	})
 
@@ -2060,13 +2055,12 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		assert.Equal(t, rootlessRefID, gotLineageRootID)
 	})
 
-	// ptone/scion#2146 review round 3: --lineage option (i) explicitly
-	// roots at the reference itself when its direct parent is a user (a
-	// top-level agent) rather than another agent — this is the CLI-level
-	// case (through the full listAgentsViaHub path, not just the
-	// resolveLineageRootID unit test above) that exercises exactly that,
-	// and also confirms the query is bounded to the reference's own
-	// project (R2-8).
+	// --lineage explicitly roots at the reference itself when its direct
+	// parent is a user (a top-level agent) rather than another agent — this
+	// is the CLI-level case (through the full listAgentsViaHub path, not
+	// just the resolveLineageRootID unit test above) that exercises exactly
+	// that, and also confirms the query is bounded to the reference's own
+	// project.
 	t.Run("top-level agent (direct parent is a user) is its own root, project-bounded", func(t *testing.T) {
 		gotLineageRootID, gotProjectID = "", ""
 		filterLineage = topLevelRefID
@@ -2075,9 +2069,9 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 		assert.Equal(t, topLevelRefProjectID, gotProjectID)
 	})
 
-	// ptone/scion#2146 review R5-6(c): a length-1 ancestry whose entry
-	// resolves to a visible agent (the R4-3 case), driven through the full
-	// listAgentsViaHub path, not just the resolveLineageRootID unit test.
+	// A length-1 ancestry whose entry resolves to a visible agent, driven
+	// through the full listAgentsViaHub path, not just the
+	// resolveLineageRootID unit test.
 	t.Run("length-1 ancestry entry resolving to a visible agent roots there, project-bounded", func(t *testing.T) {
 		gotLineageRootID, gotProjectID = "", ""
 		filterLineage = agentParentRefID
@@ -2087,9 +2081,8 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	})
 }
 
-// TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors is
-// the ptone/scion#2146 review R2-4 fix, re-keyed in review round 4 (R4-6):
-// an agent TOKEN plus --all plus any relationship flag must fail loudly, not
+// TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors: an
+// agent TOKEN plus --all plus any relationship flag must fail loudly, not
 // silently print an empty list. An agent identity has no hub-wide list
 // authority at all — the real Hub proves this directly
 // (TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden,
@@ -2102,12 +2095,12 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 // no silent wrong answer.
 //
 // The guard keys on hubCtx.CredentialKind == CredentialKindAgentToken, not
-// on CLI mode (R4-6 replaces R3-2's mode-keyed version) — SCION_CLI_MODE is
-// still set to "agent" here because that's the realistic pairing (an actual
-// agent container normally does authenticate with its agent token), but it
-// is CredentialKind, set explicitly below, that the guard actually reads.
-// See TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked
-// for the case this fixes: the same agent-mode setup, but a non-agent-token
+// on CLI mode — SCION_CLI_MODE is still set to "agent" here because that's
+// the realistic pairing (an actual agent container normally does
+// authenticate with its agent token), but it is CredentialKind, set
+// explicitly below, that the guard actually reads. See
+// TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked for
+// the complementary case: the same agent-mode setup, but a non-agent-token
 // credential, which must NOT be blocked.
 func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2137,10 +2130,9 @@ func TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors(t *te
 		{"descendants (bare)", func() { filterDescendants = scopeInferSentinel }},
 		{"ancestors (bare)", func() { filterAncestors = scopeInferSentinel }},
 		{"lineage (bare)", func() { filterLineage = scopeInferSentinel }},
-		// ptone/scion#2146 review R3-5: the guard must also fire for an
-		// explicit reference value, not only the bare (self-inferring)
-		// form — the final --all listing is what fails regardless of how
-		// the reference was named.
+		// The guard must also fire for an explicit reference value, not only
+		// the bare (self-inferring) form — the final --all listing is what
+		// fails regardless of how the reference was named.
 		{"descendants (explicit value)", func() { filterDescendants = "some-other-agent" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2205,8 +2197,8 @@ func TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked(t *tes
 
 // TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked is
 // TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked's
-// sibling for the other non-agent-token credential R3-2 named: dev auth on a
-// localhost Hub for a non-hub-managed agent.
+// sibling for the other non-agent-token credential: dev auth on a localhost
+// Hub for a non-hub-managed agent.
 func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *testing.T) {
 	const refID = "99999999-aaaa-bbbb-cccc-dddddddddddd"
 	var listCalled bool
@@ -2250,7 +2242,7 @@ func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *t
 // covers: the --all guard must NOT fire for a HubContext with no agent-token
 // CredentialKind set (this test's HubContext leaves it at its zero value,
 // hubsync.CredentialKindUnknown). SCION_CLI_MODE=assistant is still set here
-// for realism, even though the guard no longer reads it. Human mode is
+// for realism, although the guard does not read it. Human mode is
 // covered by TestListAgentsViaHub_AllMode_HumanCrossProjectReference;
 // agent mode with a non-agent-token credential is covered by
 // TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked and
@@ -2293,14 +2285,12 @@ func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t
 	assert.True(t, listCalled)
 }
 
-// TestListAgentsViaHub_AllMode_HumanCrossProjectReference is the
-// ptone/scion#2146 review R2-3 regression: under --all, a HUMAN caller must
-// still be able to name a reference agent in a *different* project than the
-// one linked in the current directory — this worked before the (reverted)
-// R1-3 refAgentSvc rework forced reference resolution through the caller's
-// current project unconditionally under --all, which broke it. Reference
-// resolution for a human/assistant caller under --all now goes through the
-// same global endpoint the final listing uses, exactly like a11a271.
+// TestListAgentsViaHub_AllMode_HumanCrossProjectReference covers: under
+// --all, a HUMAN caller must still be able to name a reference agent in a
+// *different* project than the one linked in the current directory.
+// Reference resolution for a human/assistant caller under --all goes
+// through the same global endpoint the final listing uses, never the
+// current directory's project.
 func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
 	const currentProjectID = "11111111-2222-3333-4444-555555555555"
 	const crossProjectRefID = "66666666-7777-8888-9999-000000000000"
@@ -2372,7 +2362,7 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
 		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents/"+callingAgentID:
 			// Agent mode's default (non-`--all`) path goes through the
-			// project-scoped endpoint — see review R2-3/R2-4.
+			// project-scoped endpoint.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: callingAgentID, Slug: "self", Ancestry: []string{"user-id", "parent-id"}})
 		case r.URL.Path == "/api/v1/projects/"+agentProjectID+"/agents":
 			agentsCalled = true
@@ -2420,9 +2410,9 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	t.Run("agent mode: bare --descendants resolves to the calling agent (unchanged)", func(t *testing.T) {
 		reset()
 		// Agent mode + a relationship flag is only ever exercised without
-		// --all (review R2-4: agent identities have no hub-wide list
-		// authority, so --all combined with a relationship flag is now a
-		// hard error — see TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors).
+		// --all: agent identities have no hub-wide list authority, so --all
+		// combined with a relationship flag is a hard error — see
+		// TestListAgentsViaHub_AllMode_AgentIdentityWithRelationshipFlag_Errors.
 		oldListAllLocal := listAll
 		listAll = false
 		defer func() { listAll = oldListAllLocal }()

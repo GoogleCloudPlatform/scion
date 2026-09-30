@@ -440,8 +440,7 @@ type AgentFilter struct {
 	// adapter backs this with a dedicated, plain-equality column
 	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
 	// AppliedConfig.HarnessConfig on every write, rather than parsing or
-	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146
-	// review R3-1).
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
 	HarnessConfig string
 
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.

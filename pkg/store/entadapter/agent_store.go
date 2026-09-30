@@ -287,7 +287,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	// binary that knows this column exists" — see
 	// CompositeStore.ReconcileHarnessConfigColumn's doc for why that
 	// distinction is what makes the reconcile query converge
-	// (ptone/scion#2146 review R5-1).
+	// (ptone/scion#2146).
 	create.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 	if !a.LastSeen.IsZero() {
 		create.SetLastSeen(a.LastSeen)
@@ -720,7 +720,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 		update.ClearAppliedConfig()
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
-	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146 review R5-1).
+	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
 	// AppliedConfig=nil (cleared above) still yields "" here, which is
 	// exactly the sentinel this row should carry, not NULL.
 	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
@@ -1377,11 +1377,11 @@ func marshalAppliedConfig(cfg *store.AgentAppliedConfig) string {
 // if cfg is nil or has none set. This is the single value CreateAgent and
 // UpdateAgent write into the harness_config shadow column (see its doc in
 // pkg/ent/schema/agent.go) — kept as its own function so both call sites
-// derive it identically and cannot drift (ptone/scion#2146 review R3-1).
-// Both call sites write this value UNCONDITIONALLY, including "", rather
-// than skipping the write or clearing the column to NULL when it's empty —
-// NULL is reserved to mean "never written by a binary that knows this
-// column exists" (ptone/scion#2146 review R5-1).
+// derive it identically and cannot drift (ptone/scion#2146). Both call
+// sites write this value UNCONDITIONALLY, including "", rather than
+// skipping the write or clearing the column to NULL when it's empty — NULL
+// is reserved to mean "never written by a binary that knows this column
+// exists".
 func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
 	if cfg == nil {
 		return ""
