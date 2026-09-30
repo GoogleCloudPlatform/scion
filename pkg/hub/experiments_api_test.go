@@ -806,14 +806,21 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 		if body.Malformed {
 			t.Error("expected malformed=false after recovery")
 		}
-		// wrapped keeps reporting the section as malformed on every read, so
-		// this response is always attributed through the caller/now fallback
-		// (buildAdminExperimentsResponseAfterWrite), never the refreshed
-		// snapshot; that fallback is asserted exactly in
-		// TestHandleAdminExperiments_RevisionChecks and
-		// TestHandleAdminExperiments_HealthyRowDeleteChecks instead.
-		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
-			t.Errorf("expected updated_by=dev@localhost with a non-nil updated_at, got %v / %v", body.UpdatedBy, body.UpdatedAt)
+		if body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
+			t.Errorf("expected updated_by=dev@localhost, got %v", body.UpdatedBy)
+		}
+		// Update() populates the cache directly from its own write result, so
+		// the refreshed-snapshot path in buildAdminExperimentsResponseAfterWrite
+		// applies here despite wrapped's read-side override (which only
+		// affects GetHubSetting/ListHubSettings calls, not Update()'s own
+		// cache write). Confirm that exactly, by comparing against the real
+		// underlying store rather than trusting non-nil.
+		row, err := wrapped.Store.GetHubSetting(ctx, "experiments")
+		if err != nil {
+			t.Fatalf("GetHubSetting: %v", err)
+		}
+		if body.UpdatedAt == nil || !body.UpdatedAt.Equal(row.UpdatedAt) {
+			t.Errorf("expected updated_at=%v (the write's own), got %v", row.UpdatedAt, body.UpdatedAt)
 		}
 		for _, e := range body.Experiments {
 			if e.Override != nil {
