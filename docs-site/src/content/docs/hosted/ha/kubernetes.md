@@ -89,6 +89,17 @@ When running in Google Kubernetes Engine (GKE), Scion natively supports Workload
 
 This provides the agent container with an ambient identity, which the underlying harness (e.g., Gemini or Claude via Vertex) can automatically resolve using Application Default Credentials (ADC).
 
+:::tip[GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION]
+Vertex AI auth also needs a project key (usually `GOOGLE_CLOUD_PROJECT`) and, for harnesses that require one, a region key — `GOOGLE_CLOUD_LOCATION` for most of those, though some (e.g. Claude, Gemini) also accept `CLOUD_ML_REGION` or `GOOGLE_CLOUD_REGION`. Rather than setting these per project, set them once at hub scope:
+
+```bash
+scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
+scion hub env set --scope hub --always GOOGLE_CLOUD_LOCATION=<region>
+```
+
+or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (or `profiles.<profile>.harness_overrides.<name>.env`), or in the harness-config directory's own `config.yaml` `env:` block. Any of these sources satisfies the broker's env preflight, so a Kubernetes Hub does not need a per-project step just for these two variables.
+:::
+
 :::note[Broker Workload Identity]
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
