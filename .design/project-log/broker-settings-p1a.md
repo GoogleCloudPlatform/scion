@@ -2,9 +2,11 @@
 
 Tracking: `ptone/scion#2061` (design AGREED rev 2, `.design` on the scratchpad volume,
 not this repo). Fixes item 1 of `ptone/scion#2063`. PR: `ptone/scion#2268`
-(branch `scion/broker-settings-p1a`; last substantive commit `c3e96a995496`,
+(branch `scion/broker-settings-p1a`; last substantive commit `a60a738b3`,
 which is the commit this log describes — a trailing commit updates only this
-line, since a commit cannot reference its own hash).
+line, since a commit cannot reference its own hash, and a rebase changes
+every commit's hash including this one's predecessor's — see the PR for the
+current head).
 
 ## What changed
 
