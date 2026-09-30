@@ -969,6 +969,10 @@ type Server struct {
 	// Set once in New and read without the lock; nil-safe.
 	chatSendLimiter *chatSendLimiter
 
+	// Per-pair sliding-window limiter for agent @mention fan-out loop/storm
+	// protection. Set once in New and read without the lock; nil-safe.
+	mentionPairLimiter *mentionPairLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1264,6 +1268,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Per-sender chat send rate limiter (#1054).
 	srv.chatSendLimiter = newChatSendLimiter()
 	srv.chatIdempotency = NewChatIdempotencyCache()
+
+	// Per-pair agent mention loop/storm protection.
+	srv.mentionPairLimiter = newMentionPairLimiter()
 
 	ctx := context.Background()
 

@@ -768,7 +768,7 @@ func TestWriteAgentDMResult_Success(t *testing.T) {
 		MessageID:   "test-msg-id",
 		Recipient:   "agent:test-agent",
 		RecipientID: "test-agent-id",
-	})
+	}, nil)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var resp map[string]interface{}
