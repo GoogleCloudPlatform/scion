@@ -2,7 +2,9 @@
 
 Tracking: `ptone/scion#2061` (design AGREED rev 2, `.design` on the scratchpad volume,
 not this repo). Fixes item 1 of `ptone/scion#2063`. PR: `ptone/scion#2268`
-(branch `scion/broker-settings-p1a`, head `2b93d14f2`).
+(branch `scion/broker-settings-p1a`; last substantive commit `c3e96a995496`,
+which is the commit this log describes — a trailing commit updates only this
+line, since a commit cannot reference its own hash).
 
 ## What changed
 
@@ -80,13 +82,20 @@ seeded definition, per the design.
 
 - `go build ./...` — clean.
 - `go test -tags no_sqlite ./pkg/hub/...` (targeted) and `make test-hub-sqlite`
-  (covers the `//go:build !no_sqlite` quota/broker-quota suite) — pass.
-- `make test-fast` — the two failing packages (`pkg/runtimebroker`,
-  `pkg/sciontool/supervisor`) are pre-existing and environment-induced (the
-  supervisor failure is a literal conflict with this container's own
-  `CLAUDE_CODE_ENABLE_TELEMETRY=1`); confirmed identical failures on a clean
-  `upstream-main` worktree with no broker-settings changes applied, so
-  neither is attributable to this PR.
+  (covers the `//go:build !no_sqlite` quota/broker-quota suite) — pass, aside
+  from `pkg/hub/authzop` `TestMutationClassificationBidirectional`, which is
+  pre-existing on the base branch (an unrelated rename in
+  `pkg/hub/useraccesstoken.go` left the mutation classification registry
+  stale) and tracked upstream as `GoogleCloudPlatform/scion#2105`.
+- `make test-fast` initially also showed failures in `pkg/runtimebroker` and
+  `pkg/sciontool/supervisor`. The round-2 independent reviewer
+  (`broker-settings-rev-p1a-2`) re-ran those packages, plus `pkg/agent`,
+  `pkg/config`, `pkg/harness`, `cmd`, and `pkg/runtime`, with a scrubbed
+  environment (`env -i` keeping only `HOME`/`PATH`/`USER`/`TMPDIR`/Go vars)
+  and all passed on both base and this PR's head. The failures were caused
+  by ambient `SCION_*`/`CLAUDE_*` environment variables leaking into the test
+  process from this container, not a base-branch bug and not caused by this
+  PR.
 - `golangci-lint run --new-from-rev=upstream-main ./pkg/hub/...` — 0 issues
   (originally flagged 2 unchecked `s.Close()` errors in the new test file,
   fixed).
@@ -95,6 +104,12 @@ seeded definition, per the design.
   were needed: `LimitDefinition.system` is a local interface field in
   `admin-quotas.ts` already present before this change, and the JSON shape
   of the PUT request/response is unchanged.
+- CI on `ptone/scion#2268`: golangci-lint, shellcheck, T1 Postgres,
+  single-node-vm harness, and Mergeability Gate all passed. "Build & Test"
+  and "pkg/hub SQLite Tests" failed solely on the same pre-existing
+  `TestMutationClassificationBidirectional` (`GoogleCloudPlatform/scion#2105`).
+  "Lint 405 Allow header" (reporting-only) failed pre-existing and
+  repo-wide, unrelated to this PR.
 
 ## Surprises / notes for reviewers
 
@@ -107,3 +122,33 @@ seeded definition, per the design.
   test as-is (it changes name+value together and still expects 403, which
   remains correct under the new rule) rather than folding it into the new
   tests, to avoid rewriting a pre-existing regression test unnecessarily.
+
+## Review rounds
+
+- **Round 1** (`broker-settings-rev-p1a-1`): REQUEST CHANGES on one Required
+  doc finding (F1: the documented `PUT` recipe for the Cloud Run mitigation
+  erased the seeded `description`, since `PUT` replaces the whole row) plus
+  three Nits (F2: admin-quotas resource-type select was missing `group`;
+  F3: duplicated field assignments in `updateLimitDefinition`; F4: a test
+  helper switch simplified to `fmt.Sprintf`). All four fixed.
+- **Round 2** (`broker-settings-rev-p1a-2`, fresh/independent): APPROVE, with
+  five non-blocking findings, all addressed:
+  - F1: the Default Value field coerced an empty input to `0` (=
+    unlimited), so clearing it on `max_agents_per_broker` would have
+    silently disabled the crash ceiling. `saveLimitDefinition` now rejects
+    an empty/non-numeric value as a validation error; an explicit `0` is
+    still accepted, with `help-text` on the field spelling out "0 =
+    unlimited".
+  - F2: worded the 8 CPU/32 GiB sizing guidance in
+    `hub-setup-cloudrun.md` so it no longer contradicts the "sizing to the
+    ceiling is not the safe choice" guidance earlier in the same doc.
+  - F3: corrected the `seed.go` comment's Cloud Run crash-point figures to
+    match `.design/hosted/cloud-run-single-node.md` §9.1 (~19-20 idle on
+    4 CPU/8 GiB, not ~17-18).
+  - F4: updated the stale `LimitDefinition.System` field comment in
+    `pkg/store/models.go` to describe the new default_value/description-only
+    editability. Left the similarly-worded `RoleDefinition.System` comment
+    at a different line untouched — role definitions did not change in this
+    PR and remain fully immutable, so that comment is still accurate.
+  - F5: this file — corrected the head SHA and the `make test-fast`
+    attribution (see Verification above).
