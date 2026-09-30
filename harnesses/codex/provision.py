@@ -39,7 +39,13 @@ This script's job:
   5. Write outputs/env.json (intentionally empty).
 
 The script is stdlib-only; it does manual TOML editing because tomllib (3.11+)
-is read-only and we must avoid third-party dependencies.
+is read-only and we must avoid third-party dependencies. tomllib is still
+used, read-only, as a post-edit validation backstop: _toml_edit_round_trips
+parses the finished config.toml and checks the top-level `model` before the
+edit is committed to disk, so a TOML construct the line-oriented editor
+doesn't fully understand (e.g. a multi-line string) fails safe — the
+existing file is left untouched, with a warning logged — instead of writing
+a subtly-corrupted file.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ import json
 import os
 import re
 import sys
+import tomllib
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -244,12 +251,37 @@ def _is_toml_key_line(line: str, key: str) -> bool:
     return len(rest) > 0 and rest[0] in (" ", "=", "\t")
 
 
-# Matches a table header ([table] / ["quoted.table"]) or array-of-tables
-# header ([[table]]), with an optional trailing comment, and nothing else on
-# the line. Used together with _toml_entering_array_depths: a line can only
+# Matches a table header ([table] / [[table]]) with an optional trailing
+# comment, and nothing else on the line. The header's inner content allows
+# quoted segments (which may themselves contain `=`, `]`, `#`, or `[`, e.g.
+# `[projects."/a=b"]`) as well as ordinary bare-key characters, but rejects
+# anything else — in particular a trailing `,` (an array element, not a
+# header) or an unquoted `=`/`]` (which would make it a key assignment, not
+# a header). Used together with _toml_entering_array_depths: a line can only
 # be a genuine header if it also has zero open-bracket depth entering it —
 # see that function's docstring for why the shape check alone isn't enough.
-_TOML_TABLE_HEADER_RE = re.compile(r'^\s*\[\[?[^\]=]*\]\]?\s*(#.*)?$')
+_TOML_TABLE_HEADER_RE = re.compile(
+    r'^\s*\[\[?\s*(?:[^\[\]="\'#]|"(?:\\.|[^"\\])*"|\'[^\']*\')+\]\]?\s*(#.*)?$'
+)
+
+# Matches a single-line basic ("...") or literal ('...') string, or a
+# trailing comment, for masking before bracket-counting (see
+# _toml_mask_strings_and_comments). Does not match triple-quoted
+# (multi-line) strings — that gap is closed separately by
+# _toml_edit_round_trips validating the finished file with tomllib rather
+# than trying to make the masking itself fully TOML-aware.
+_TOML_STR_OR_COMMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*')
+
+
+def _toml_mask_strings_and_comments(line: str) -> str:
+    """Blank out string literals and strip trailing comments so bracket
+    counting on the result only sees TOML structure, not `[`/`]` characters
+    that happen to appear inside a string value or a comment (e.g. `#
+    temperature range [0, 1)` or `hint = "press [ to go"`, neither of which
+    opens a real array)."""
+    return _TOML_STR_OR_COMMENT_RE.sub(
+        lambda m: "" if m.group(0).startswith("#") else '""', line
+    )
 
 
 def _toml_entering_array_depths(lines: list[str]) -> list[int]:
@@ -263,17 +295,23 @@ def _toml_entering_array_depths(lines: list[str]) -> list[int]:
     ambiguity: a `[`-shaped line only means "table header" when depth is
     zero entering it, i.e. no multi-line array is still open.
 
-    Deliberately naive (does not understand TOML strings/comments, so a
-    string value containing a literal `[`/`]` would throw the count off) to
-    match this module's other line-oriented TOML edits (_is_toml_key_line,
-    strip_toml_sections) — adequate for the machine-written config.toml this
-    script edits, not a general-purpose TOML tokenizer.
+    Brackets are counted after masking out string literals and comments
+    (_toml_mask_strings_and_comments), so a stray `[`/`]` inside either one
+    doesn't throw off the whole file's section tracking — an earlier version
+    of this function counted raw brackets and could silently delete
+    table-scoped keys (e.g. `[profiles.fast]`'s `model`) after a single
+    unbalanced bracket in an unrelated comment (ptone/scion#2365 review
+    round 3). This is still line-oriented rather than a full tokenizer, so
+    it does not understand triple-quoted (multi-line) strings; that residual
+    gap is caught by _toml_edit_round_trips validating the finished file
+    with tomllib, not by making this counter fully TOML-aware.
     """
     depths = []
     depth = 0
     for line in lines:
         depths.append(depth)
-        depth = max(0, depth + line.count("[") - line.count("]"))
+        code = _toml_mask_strings_and_comments(line)
+        depth = max(0, depth + code.count("[") - code.count("]"))
     return depths
 
 
@@ -324,7 +362,32 @@ def _insert_toml_top_level_line(content: str, line: str) -> str:
     return "\n".join(lines)
 
 
+def _toml_edit_round_trips(content: str, expected_model: str | None) -> bool:
+    """True if `content` parses as valid TOML and, when a model was
+    supplied, its top-level `model` equals what we intended to write.
+
+    This is the backstop for this module's line-oriented TOML editing,
+    which — despite the string/comment masking and bracket-depth tracking
+    above — is still not a full TOML tokenizer and cannot handle every
+    construct (the known gap is a top-level multi-line basic string, e.g. a
+    triple-quoted `developer_instructions` value, whose body happens to
+    contain a header-shaped line: the insertion can land inside the string
+    text instead of at the real top level). Rather than trust every edit
+    blindly, verify the finished content before it's written to disk; the
+    caller leaves the existing file untouched and logs a warning when this
+    returns False.
+    """
+    try:
+        parsed = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return False
+    if expected_model and parsed.get("model") != expected_model:
+        return False
+    return True
+
+
 def _reconcile_codex_toml(
+    ctx: scion_harness.ProvisionContext,
     telemetry: dict[str, Any] | None,
     env: dict[str, str] | None,
     reasoning_effort: str | None = None,
@@ -354,6 +417,19 @@ def _reconcile_codex_toml(
                else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
     content = content.rstrip("\n\t ") + "\n\n" + section
     content = content.strip() + "\n"
+
+    if not _toml_edit_round_trips(content, model):
+        ctx.info(
+            "config.toml edit did not round-trip through tomllib "
+            "(parse failure or top-level model mismatch); leaving "
+            "config.toml untouched rather than risk corrupting or "
+            "silently misplacing existing settings. This can happen with "
+            "hand-edited TOML this line-oriented editor doesn't fully "
+            "understand, e.g. a multi-line string containing a "
+            "header-shaped line."
+        )
+        return
+
     scion_harness.atomic_write_text(config_path, content)
 
 
@@ -488,6 +564,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.info("model=<unset>, falling back to codex's own built-in default")
 
     _reconcile_codex_toml(
+        ctx,
         telemetry if isinstance(telemetry, dict) else None,
         env_overlay,
         reasoning_effort=reasoning_effort,
