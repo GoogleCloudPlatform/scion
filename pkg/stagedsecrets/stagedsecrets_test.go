@@ -353,6 +353,84 @@ func TestWriteAs_ChownsOnlyUnderHome(t *testing.T) {
 	})
 }
 
+// TestWriteAs_DirectInHomeTargetChowned proves a file secret whose Target
+// lives directly inside homeDir (dir == homeDir itself, e.g. ~/.netrc,
+// ~/.npmrc, ~/.git-credentials) is chown-eligible exactly like any other
+// under-home target — this is the shape
+// dirfd.EnsureDirNoFollowUnderRoot's path==root handling exists for.
+func TestWriteAs_DirectInHomeTargetChowned(t *testing.T) {
+	homeDir := t.TempDir()
+	target := filepath.Join(homeDir, ".netrc")
+
+	// uid 1 is never the current test uid; a chown ATTEMPT to it fails
+	// EPERM for an unprivileged test process — proving the leaf really is
+	// treated as under-home (chown-eligible), not silently skipped.
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "NETRC", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("machine example.com"))},
+	}}
+	if err := writeAs(homeDir, staged, 1, 1); err == nil {
+		t.Fatal("writeAs() = nil error, want a chown failure proving a direct-in-home target is chown-eligible")
+	}
+
+	// With the test's own uid/gid (an unprivileged self-chown always
+	// succeeds), the write must succeed end to end and land the content —
+	// proving the fix doesn't just fail differently, it actually works.
+	staged2 := &Staged{FileSecrets: []FileSecret{
+		{Name: "NETRC", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("machine example.com"))},
+	}}
+	if err := writeAs(homeDir, staged2, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("writeAs with the caller's own uid/gid failed: %v", err)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read %s: %v", target, err)
+	}
+	if string(content) != "machine example.com" {
+		t.Errorf("content = %q, want %q", content, "machine example.com")
+	}
+}
+
+// TestWriteAs_ContainmentTable is the containment table: a target whose
+// parent directory IS homeDir itself (dir == root) is chown-eligible
+// exactly like any other under-home target, while a target whose parent
+// merely shares homeDir's own string prefix (a sibling directory, not a
+// descendant) is never chowned. The fix for the direct-in-home case must
+// not loosen containment for a path that only looks similar as a string.
+func TestWriteAs_ContainmentTable(t *testing.T) {
+	parent := t.TempDir()
+	homeDir := filepath.Join(parent, "home")
+	if err := os.Mkdir(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siblingDir := filepath.Join(parent, "home-other")
+	if err := os.Mkdir(siblingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name          string
+		target        string
+		wantChownable bool // a uid=1 chown attempt should fail iff the target is chown-eligible
+	}{
+		{"direct-in-home target is chown-eligible", filepath.Join(homeDir, ".netrc"), true},
+		{"sibling-of-home target is never chowned", filepath.Join(siblingDir, "leaf"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			staged := &Staged{FileSecrets: []FileSecret{
+				{Name: "X", Target: tt.target, Value: base64.StdEncoding.EncodeToString([]byte("v"))},
+			}}
+			err := writeAs(homeDir, staged, 1, 1)
+			if tt.wantChownable && err == nil {
+				t.Fatal("writeAs() = nil error, want a chown failure (target should be chown-eligible)")
+			}
+			if !tt.wantChownable && err != nil {
+				t.Fatalf("writeAs() = %v, want nil (target must never be chowned)", err)
+			}
+		})
+	}
+}
+
 func TestDecodeErrors(t *testing.T) {
 	for name, encoded := range map[string]string{
 		"invalid base64": "not-valid-base64!!!",

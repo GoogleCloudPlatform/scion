@@ -138,11 +138,18 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 
 // EnsureDirNoFollowUnderRoot ensures that path exists as a directory,
 // anchored under root: it reports underRoot=false (with a nil error) without
-// touching anything when path does not resolve under root at all — root
-// itself, a ".."-relative escape, or anything relUnderRoot cannot express as
-// a descendant of root — so a caller with a legitimate reason to create a
-// directory outside root (e.g. an operator-configured absolute path) can
-// fall back to its own handling for that case.
+// touching anything when path does not resolve under root at all — a
+// ".."-relative escape, a sibling that merely shares root's own string
+// prefix, or anything relUnderRoot cannot express as a descendant of root —
+// so a caller with a legitimate reason to create a directory outside root
+// (e.g. an operator-configured absolute path) can fall back to its own
+// handling for that case. path EQUAL to root itself is reported as
+// underRoot=true: root is trivially "under" itself, the same way a file
+// directly inside $HOME (dir == $HOME) is a legitimate under-home target,
+// not an escape. relUnderRoot's own rel=="." refusal exists for a different
+// caller (ReadUnderRootNoFollow, where reading root itself as a leaf file
+// makes no sense) and says nothing about this case, so it is checked before
+// ever calling relUnderRoot.
 //
 // When path DOES resolve under root, this walks from root (opened once via
 // OpenDirNoFollow, so a symlink at root's own leaf or any of root's own
@@ -170,6 +177,21 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // pre-existing (untouched) or freshly created (owned by uid:gid), there is
 // nothing left along the chain for a symlink swap to redirect.
 func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid int) (underRoot bool, err error) {
+	if absRoot, aerr := filepath.Abs(root); aerr == nil {
+		if absPath, aerr := filepath.Abs(path); aerr == nil && filepath.Clean(absRoot) == filepath.Clean(absPath) {
+			// path IS root itself (e.g. a file secret directly inside
+			// $HOME): nothing to create or chown along an empty component
+			// list, but root itself must still resolve to a real,
+			// symlink-free directory before this reports it as usable.
+			rootFile, oerr := OpenDirNoFollow(root)
+			if oerr != nil {
+				return true, fmt.Errorf("dirfd: open root %s: %w", root, oerr)
+			}
+			_ = rootFile.Close()
+			return true, nil
+		}
+	}
+
 	rel, rerr := relUnderRoot(root, path)
 	if rerr != nil {
 		return false, nil

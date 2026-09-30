@@ -425,3 +425,76 @@ func TestEnsureDirNoFollowUnderRoot_OutsideRootReportsFalseUntouched(t *testing.
 		t.Error("EnsureDirNoFollowUnderRoot must not create anything for an outside-root target")
 	}
 }
+
+// TestEnsureDirNoFollowUnderRoot_PathEqualsRootIsUnderRoot proves that
+// path == root itself is reported as underRoot=true, not an escape: this is
+// the shape a file secret directly inside the agent home takes (its parent
+// dir IS the home directory). Root already exists, so nothing is created,
+// but the call still opens root no-follow to confirm it resolves to a real
+// directory.
+func TestEnsureDirNoFollowUnderRoot_PathEqualsRootIsUnderRoot(t *testing.T) {
+	root := t.TempDir()
+
+	underRoot, err := EnsureDirNoFollowUnderRoot(root, root, 0o755, 1, 1)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowUnderRoot(root, root): %v (must not try to chown pre-existing root)", err)
+	}
+	if !underRoot {
+		t.Fatal("underRoot = false, want true for path == root")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_PathEqualsRootButSymlinkRefused proves the
+// path==root case still refuses a symlinked root rather than silently
+// reporting it usable.
+func TestEnsureDirNoFollowUnderRoot_PathEqualsRootButSymlinkRefused(t *testing.T) {
+	parent := t.TempDir()
+	victim := t.TempDir()
+	root := filepath.Join(parent, "home")
+	if err := os.Symlink(victim, root); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureDirNoFollowUnderRoot(root, root, 0o755, 0, 0); err == nil {
+		t.Fatal("expected a refusal for a symlinked root even when path == root")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment is the
+// LEAD-REQUIRED table: path == root counts as under-root, but a sibling
+// path that merely shares root's own string prefix (not a real descendant)
+// must NOT — the fix for the root-itself case must not loosen containment
+// for anything that isn't genuinely root or beneath it.
+func TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "home")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "home-other" shares the string prefix "home" with root but is a
+	// sibling, not a descendant.
+	sibling := filepath.Join(parent, "home-other")
+	if err := os.Mkdir(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"root itself is under root", root, true},
+		{"sibling sharing a string prefix is not under root", sibling, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			underRoot, err := EnsureDirNoFollowUnderRoot(root, tt.path, 0o755, 0, 0)
+			if err != nil {
+				t.Fatalf("EnsureDirNoFollowUnderRoot: %v", err)
+			}
+			if underRoot != tt.want {
+				t.Errorf("underRoot = %v, want %v", underRoot, tt.want)
+			}
+		})
+	}
+}
