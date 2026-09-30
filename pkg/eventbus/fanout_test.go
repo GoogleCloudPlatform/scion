@@ -672,8 +672,9 @@ func newSaturatedUserTopicInproc(t *testing.T) (*InProcessEventBus, string, *mes
 	msg := messages.NewInstruction("agent:a", "user:alice", "hi")
 
 	// Prime the dispatch goroutine so it is blocked inside the handler,
-	// then fill the channel buffer behind it (mirrors
-	// TestInProcessEventBus_UserTopicBufferFullReturnsError).
+	// then fill the channel buffer behind it. Shared by
+	// TestInProcessEventBus_UserTopicBufferFullReturnsError and the
+	// fan-out tests below.
 	if err := b.Publish(context.Background(), topic, msg); err != nil {
 		t.Fatalf("unexpected error priming dispatch goroutine: %v", err)
 	}

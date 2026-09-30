@@ -1139,11 +1139,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
 					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
 				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
-					// The recipient's dispatch queue is backed up, so hub
-					// persistence did not happen for this delivery. Other
-					// fan-out spokes (for example an external chat channel)
-					// may already have received the message, so a retry can
-					// duplicate it there (ptone/scion#2311).
+					// The in-process bus could not queue this delivery for at
+					// least one matching subscriber, normally the per-project
+					// persistence subscriber, so hub persistence most likely did
+					// not happen. At-least-once caveats (ptone/scion#2311): other
+					// fan-out spokes (e.g. an external chat channel) may already
+					// have the message, so a retry can duplicate it there; if the
+					// drop hit a non-delivering pattern subscriber, the message may
+					// in fact be persisted; attachments ingested above are
+					// re-ingested on retry.
 					writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
 					return
