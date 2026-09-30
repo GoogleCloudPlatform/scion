@@ -193,7 +193,7 @@ echo "$SVC" | jq -e --arg rev "$REVISION" '
     .status.latestReadyRevisionName == $rev
     and .status.latestCreatedRevisionName == $rev
     and .metadata.generation == .status.observedGeneration' >/dev/null \
-  || echo "STOP: traffic is pinned to a non-latest revision, or a deploy is in progress or failed; finish or revert the rollout, then restart §2"
+  || echo "STOP: traffic is pinned to a non-latest revision, or a deploy is in progress or failed; see §8 step 3 to resolve, then restart §2"
 REV_JSON=$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" --format=json)
 IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 ```
@@ -201,16 +201,16 @@ IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 Every other discovered value above (`SA`, network/subnet/egress, `CONN`, `HUB_ID`, the
 DSN version, the settings version) comes from `$SVC.spec.template` — the newest
 revision's template — while `REVISION`/`IMG` come from whichever revision has 100% of
-traffic. Those are normally the same revision, but two cases can split them: a rollback
-done by shifting traffic to an older revision (a supported path), and a deploy whose
-new revision fails to become ready or hasn't finished rolling out yet
-(`latestCreatedRevisionName` differs from `latestReadyRevisionName`, or
-`metadata.generation` is ahead of `status.observedGeneration`). In both, `spec.template`
-belongs to a revision that isn't the one serving traffic, so the job would run one
-revision's binary against another revision's settings and DSN versions. The check above
-stops all of these cases before it reaches job creation; if it prints `STOP`, resolve
-the rollout (finish or revert it) and restart from the top of this section before
-continuing.
+traffic. Those are normally the same revision, but two cases can split them: a
+traffic-only rollback to an older revision (a revert is never just a traffic pin — this
+stops here; see §8 step 3 to resolve it), and a deploy whose new revision fails to
+become ready or hasn't finished rolling out yet (`latestCreatedRevisionName` differs
+from `latestReadyRevisionName`, or `metadata.generation` is ahead of
+`status.observedGeneration`). In both, `spec.template` belongs to a revision that isn't
+the one serving traffic, so the job would run one revision's binary against another
+revision's settings and DSN versions. The check above stops all of these cases before
+it reaches job creation; if it prints `STOP`, see §8 step 3 to resolve the rollout, then
+restart from the top of this section before continuing.
 
 `.status.imageDigest` on a v1 Revision is already the resolved **full reference**
 (`<registry>/<path>@sha256:<hex>`), not a bare `sha256:<hex>` — use it as-is for
@@ -345,8 +345,8 @@ tag with `echo "$FRESH_SVC" | jq '.status.traffic'`, and remove it with
 `gcloud run services update-traffic "$HUB" --project "$PROJECT" --region "$REGION"
 --remove-tags=<tag>`, then re-run the check.
 
-For any other `STOP`, resolve the rollout (finish or revert it), delete the job (§6),
-and restart from §2 so the job is re-pinned to the new serving digest. Never run a
+For any other `STOP`, see §8 step 3 to resolve the rollout and re-pin the job; it
+deletes any leftover job and restarts from §2 once traffic agrees again. Never run a
 non-dry pass from a job whose digest isn't the 100%-traffic revision's — retrying
 later from the same job won't help, since it's still pinned to the old digest.
 
@@ -590,18 +590,26 @@ runbook doesn't cover:
    non-latest revision on purpose, so §2's rollout guard will reject it by design
    (the job's config and image would otherwise come from two different revisions) —
    do not restart from §2 yet.
-3. **Resolve the rollout, then re-run from §2.** First delete any job left over from
-   the interrupted attempt and confirm it's gone (§6:
-   `gcloud run jobs delete "$JOB" --project "$PROJECT" --region "$REGION" --quiet`,
-   then `gcloud run jobs list --project "$PROJECT" --region "$REGION"
-   --filter="metadata.name=${JOB}"`). Then make the latest ready revision serve
-   100% again, once the underlying blocker (org policy, IAM, quota) is resolved:
-   either roll forward (`gcloud run services update-traffic "$HUB" --project
-   "$PROJECT" --region "$REGION" --to-latest`), or redeploy the known-good image
-   through the module's normal Terraform apply so it becomes the latest revision.
-   Only once traffic, `latestReadyRevisionName` and `latestCreatedRevisionName`
-   agree again, restart the whole procedure from §2, which creates a fresh job
-   re-pinned to whatever revision is now serving.
+3. **Resolve the rollout, then re-run from §2.** First check whether a job is left
+   over from the interrupted attempt — `gcloud run jobs describe
+   "${HUB}-migrate-names" --project "$PROJECT" --region "$REGION"` — and only if it
+   exists, delete it and confirm it's gone (§6: `gcloud run jobs delete
+   "${HUB}-migrate-names" --project "$PROJECT" --region "$REGION" --quiet`, then
+   `gcloud run jobs list --project "$PROJECT" --region "$REGION"
+   --filter="metadata.name=${HUB}-migrate-names"` should return no rows). Then make
+   the latest ready revision serve 100% again, once the underlying blocker (org
+   policy, IAM, quota) is resolved: roll forward (`gcloud run services
+   update-traffic "$HUB" --project "$PROJECT" --region "$REGION" --to-latest`) if
+   the revision itself wasn't at fault; if the revision itself was the problem,
+   redeploy a fixed or known-good image as a new revision first, through the
+   module's normal Terraform apply, then shift traffic to it the same way. Either
+   route ends with `update-traffic … --to-latest` — the module declares no
+   `traffic` block, so the apply alone leaves step 2's pin in place; it doesn't
+   reset traffic to the new revision on its own. Only once traffic,
+   `latestReadyRevisionName` and `latestCreatedRevisionName` agree and
+   `metadata.generation` equals `status.observedGeneration`, restart the whole
+   procedure from §2, which creates a fresh job re-pinned to whatever revision is
+   now serving.
 4. **Escalate** to the project owner if the job still cannot be created or run. No
    command in this procedure, and no ad hoc substitute for it, may read the DSN or
    the settings secret outside this job.
