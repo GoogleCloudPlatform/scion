@@ -134,6 +134,15 @@ type ProfilesSettings = map[string]config.V1ProfileConfig
 // The entire map is stored as a single JSONB document in hub_settings.
 type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 
+// QuotaSettings holds Layer-1 quota enforcement settings.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent. When false, usage is
+	// still counted (reservations, release, reconcile, backfill all run) —
+	// only the reject is skipped (design P1-D5).
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //
@@ -153,6 +162,14 @@ type MessagingSettings struct {
 	// across project boundaries on this Hub. Default false (off).
 	// This is a security-critical flag requiring revision/ETag concurrency.
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
+
+	// OffloadThresholdRunes is the rune-count threshold above which an
+	// agent-recipient DM body is replaced by a fetch stub at dispatch
+	// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Compiled
+	// default 0 (disabled); negative values are treated as 0. Nothing in
+	// Phase 1/2 wires `offload_fetch_by_id` — that setting is added in
+	// Phase 3.
+	OffloadThresholdRunes *int `json:"offload_threshold_runes,omitempty"`
 
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.

@@ -2174,6 +2174,14 @@ type projectProviderView struct {
 	// max_agents_per_broker definition exists, or resolution failed for
 	// this provider — a zero count is reported as 0, not omitted.
 	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
+	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
+	// "hub_default" (the limit definition's default value), or "unlimited"
+	// (resolved with no cap). Omitted whenever resolution didn't run or
+	// failed — the same conditions that leave AgentLimit and AgentCount
+	// unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // listProjectProviders returns all providers for a project.
@@ -2195,7 +2203,7 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 	views := make([]projectProviderView, len(providers))
 	for i, p := range providers {
 		views[i] = projectProviderView{ProjectProvider: p}
-		views[i].AgentLimit, views[i].AgentCount = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+		views[i].AgentLimit, views[i].AgentCount, views[i].AgentLimitSource = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2224,51 +2232,35 @@ func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDef
 	return limitDef
 }
 
-// resolveBrokerCapacity computes the effective max_agents_per_broker limit
-// and current active-reservation count for brokerID, mirroring exactly the
-// primitives checkAndReserveBrokerQuota uses to admit or reject an agent
-// start (pkg/hub/broker_quota.go): the same limit name, subject, and scope
-// (store.QuotaScopeBroker, scoped to the broker itself), and the same
-// "effectiveLimit <= 0 means unlimited" convention as
-// QuotaService.Reserve. This is a read: it never creates, updates, or
-// releases a reservation.
+// resolveBrokerCapacity is a thin wrapper over brokerCapacity
+// (broker_capacity.go) — the one read model shared by enforcement and every
+// read path (ptone/scion#2061 P2, design.md §5.9, AC-P2-10) — that adapts it
+// to the providers listing's pre-existing (agentLimit, agentCount, source)
+// field shape (ptone/scion#2161). It mirrors exactly the primitives
+// checkAndReserveBrokerQuota uses to admit or reject an agent start
+// (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself). This is a read: it
+// never creates, updates, or releases a reservation.
 //
 // limitDef is looked up once by the caller (lookupAgentLimitDefinition) and
-// shared across every provider in a listing. A nil limitDef means "no limit
-// defined — no enforcement", the same convention QuotaService.Reserve uses
-// (quota.go).
+// shared across every provider in a listing.
 //
-// Returns (nil, nil) whenever either value can't be determined — no quota
-// service configured, no limit definition, or a store error — so that a
-// failure for one provider never fails the whole providers listing (per
-// ptone/scion#2161). Failures other than "no limit configured" are logged.
-//
-// This is the single capacity helper for the providers listing; keep it
-// that way — other work builds on it.
-func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64) {
-	if s.quotaService == nil || limitDef == nil {
-		return nil, nil
+// The listing's pre-existing contract is all-or-nothing per provider: if
+// either half of BrokerCapacity couldn't be resolved, both agentLimit and
+// agentCount come back nil (never "an agentLimit with no matching count to
+// compare it against") — so that a failure for one provider never fails the
+// whole providers listing (per ptone/scion#2161), while also never reporting
+// half a picture for that provider. Count is nil exactly when either the
+// limit or the count resolution failed, or nothing is configured at all
+// (brokerCapacity skips counting when there's no limitDef/quotaService) —
+// all three collapse to the listing's existing "leave both unset" case here.
+// Failures are logged inside brokerCapacity, not duplicated here.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64, source string) {
+	bc := s.brokerCapacity(ctx, brokerID, limitDef)
+	if bc.Count == nil {
+		return nil, nil, ""
 	}
-
-	effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
-	if err != nil {
-		slog.WarnContext(ctx, "providers: failed to resolve effective agent limit",
-			"broker_id", brokerID, "error", err)
-		return nil, nil
-	}
-
-	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
-	if err != nil {
-		slog.WarnContext(ctx, "providers: failed to count active reservations",
-			"broker_id", brokerID, "error", err)
-		return nil, nil
-	}
-
-	agentCount = &count
-	if effectiveLimit > 0 {
-		agentLimit = &effectiveLimit
-	}
-	return agentLimit, agentCount
+	return bc.Limit, bc.Count, bc.Source
 }
 
 // addProjectProvider adds a broker as a provider to a project.

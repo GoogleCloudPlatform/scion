@@ -689,24 +689,45 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 // deliverToAgent dispatches a message to a specific agent via the existing
 // DispatchAgentMessage path. ObserverOnly messages are skipped — they were
 // already delivered directly and are only published for plugin observers.
+//
+// Raw forwarding note (ptone/scion#2192 inventory): this function and its
+// siblings fanOutToProject/fanOutGlobal forward msg.Raw unchanged with no
+// guard. That is intentional and safe here: after ptone/scion#2192, no Hub
+// publisher places a raw message on this bus at all. Broadcast and group
+// forms reject raw upstream before they would ever publish, the
+// still-supported single-agent raw shape is dispatched directly through the
+// dispatcher (never through this bus), and the agent-to-agent observer
+// copies (agent_dm_operation.go, handlers_agent_messaging.go) are skipped
+// entirely for raw. Inbound traffic from plugin adapters never reaches this
+// bus either; it is delivered directly by handlers_broker_inbound.go /
+// _routed.go, which is where the raw guard for that ingress path lives. Do
+// not add a second guard here without first confirming a new Hub-originated
+// publisher can put a raw message on this bus — that would be duplicating
+// policy, not adding containment.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.ObserverOnly {
 		return
 	}
 
+	// msg may be a pointer shared across broker event-bus subscribers, so it
+	// is never mutated in place — a private copy is made once here (cheap:
+	// struct fields only, no deep copy needed unless a field below is
+	// reassigned) and both the "!" rewrite and the #2257 P2 metadata strip
+	// (design auto-offload-large-dm §4.2 item 1) apply to that copy.
+	copied := *msg
+	msg = &copied
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// A leading "!" in the message body acts as an inline interrupt signal:
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
-	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
 	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
-		stripped := *msg
 		content := strings.TrimSpace(trimmed[1:])
 		if content == "" {
 			content = "interrupt"
 		}
-		stripped.Msg = content
-		stripped.Urgent = true
-		msg = &stripped
+		msg.Msg = content
+		msg.Urgent = true
 	}
 
 	dispatcher := p.getDispatcher()

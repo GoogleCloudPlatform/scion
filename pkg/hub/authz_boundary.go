@@ -775,9 +775,9 @@ var validRealProjectScopeKinds = map[string][]string{
 	permissions.ResourceSkill:          {store.SkillScopeProject},
 	permissions.ResourceTemplate:       {store.TemplateScopeProject},
 	permissions.ResourceHarnessConfig:  {store.HarnessConfigScopeProject},
-	permissions.ResourceSecret:         {"project", "hub", "user", "runtime_broker"},
-	permissions.ResourceEnvVar:         {"project", "hub", "user", "runtime_broker"},
-	permissions.ResourceSkillInjection: {"project", "hub", "user", "runtime_broker"},
+	permissions.ResourceSecret:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
+	permissions.ResourceEnvVar:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
+	permissions.ResourceSkillInjection: {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
 }
 
 func registryResourceType(permissionID string) string {

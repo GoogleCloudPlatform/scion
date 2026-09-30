@@ -2654,21 +2654,30 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	initial := list[0]
-	<-disp.entered // worker has written the stopping and provisioning steps
+	recID := list[0].ID
 	defer close(disp.release)
+	select {
+	case <-disp.entered: // worker has written the stopping and provisioning steps
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for worker to reach DispatchAgentReprovision; it may have failed before reprovision")
+	}
 
-	time.Sleep(20 * time.Millisecond)
-	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
+	// Both provisioning writes (the record via tryAdvanceReincarnation, the
+	// agent row via updateReincarnationStep) finish before
+	// DispatchAgentReprovision and share one timestamp, which stays stable
+	// while the worker is held there.
+	cur, err := s.GetAgentReincarnation(context.Background(), recID)
 	require.NoError(t, err)
+	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
+		"the record's own state must track the worker's progress, not stay pending")
+
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	t.Logf("agent reincarnation_state=%q; record state=%q updated_at initial=%v now=%v",
-		a.ReincarnationState, cur.State, initial.UpdatedAt, cur.UpdatedAt)
-	assert.True(t, cur.UpdatedAt.After(initial.UpdatedAt),
-		"worker has passed the stopping and provisioning steps but the record's updated_at was never bumped")
-	assert.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
-		"the record's own state must track the worker's progress, not stay pending")
+	require.NotNil(t, a.ReincarnationUpdatedAt, "the provisioning step must have set ReincarnationUpdatedAt")
+	t.Logf("agent reincarnation_state=%q; record state=%q reincarnation_updated_at=%v record_updated_at=%v",
+		a.ReincarnationState, cur.State, *a.ReincarnationUpdatedAt, cur.UpdatedAt)
+	assert.False(t, cur.UpdatedAt.Before(*a.ReincarnationUpdatedAt),
+		"the worker's provisioning step must have bumped the record's updated_at, so it cannot predate that step")
 }
 
 // TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep exercises the same

@@ -1267,15 +1267,25 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 // the whole Instance it runs on, including the control plane in the
 // single-node tier, after already returning HTTP 201). Seeding it at 0 would
 // leave every new deployment exposed to that crash until an operator
-// discovers and sets the limit, which defeats the fix. The default below is
-// a conservative flat number safe for the smallest supported tier (4
-// CPU/8 GiB observed a ~17-18 agent ceiling); operators on larger tiers, or
-// running multiple brokers of different sizes, can raise it per broker via
-// the existing admin limits/entitlements API (scope_type=broker,
-// scope_id=<broker ID>) once they know their own headroom — the relationship
-// between host size and ceiling is not linear (see
-// .design/hosted/cloud-run-single-node.md §9.1), so no formula is offered
-// here, only an override.
+// discovers and sets the limit, which defeats the fix.
+//
+// The default below is ptone's ruling (2026-09-29): keep the global default
+// at 100 for now, matching what scion-next already runs, rather than the
+// old 12. No per-broker tuning until there is a proper UI (ptone/scion#2177,
+// folded into ptone/scion#2061 P2); until then this is one global value for
+// every broker on the hub.
+//
+// 100 is above the observed crash point of single-node Cloud Run (~19-20
+// idle agents on 4 CPU/8 GiB, ~51 idle on 8 CPU/32 GiB — see
+// .design/hosted/cloud-run-single-node.md §9.1), so a fresh single-node
+// Cloud Run deployment is effectively unguarded by this default alone; the
+// cap still stops an unbounded runaway loop. Operators deploying single-node
+// Cloud Run should lower this value right after deploying (about 16 is
+// recommended) via Admin → Quotas, or PUT /api/v1/admin/limits/{id} for the
+// max_agents_per_broker system limit definition (ptone/scion#2061 P1a,
+// ptone/scion#2063). Seeding is insert-only: it never overwrites an existing
+// row, so a hub that already has 12, 30, or any other deliberately-set value
+// keeps it across upgrades.
 func seedLimitDefinitions(ctx context.Context, s store.Store) {
 	systemLimits := []struct {
 		name         string
@@ -1287,7 +1297,7 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 		{store.LimitMaxAgentsPerProject, "agent", "count", "Maximum agents per project", 0},
 		{store.LimitMaxProjectsPerUser, "project", "count", "Maximum projects per user", 0},
 		{store.LimitMaxMembersPerGroup, "group", "count", "Maximum members per group", 0},
-		{store.LimitMaxAgentsPerBroker, "agent", "count", "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)", 12},
+		{store.LimitMaxAgentsPerBroker, "agent", "count", "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)", 100},
 	}
 
 	for _, lim := range systemLimits {

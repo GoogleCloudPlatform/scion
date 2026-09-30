@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -434,6 +435,30 @@ func init() {
 	brokersecretDescCreated := brokersecretFields[6].Descriptor()
 	// brokersecret.DefaultCreated holds the default value on creation for the created field.
 	brokersecret.DefaultCreated = brokersecretDescCreated.Default.(func() time.Time)
+	brokersettingFields := schema.BrokerSetting{}.Fields()
+	_ = brokersettingFields
+	// brokersettingDescBrokerID is the schema descriptor for broker_id field.
+	brokersettingDescBrokerID := brokersettingFields[1].Descriptor()
+	// brokersetting.BrokerIDValidator is a validator for the "broker_id" field. It is called by the builders before save.
+	brokersetting.BrokerIDValidator = brokersettingDescBrokerID.Validators[0].(func(string) error)
+	// brokersettingDescRevision is the schema descriptor for revision field.
+	brokersettingDescRevision := brokersettingFields[3].Descriptor()
+	// brokersetting.DefaultRevision holds the default value on creation for the revision field.
+	brokersetting.DefaultRevision = brokersettingDescRevision.Default.(int64)
+	// brokersettingDescCreateTime is the schema descriptor for create_time field.
+	brokersettingDescCreateTime := brokersettingFields[5].Descriptor()
+	// brokersetting.DefaultCreateTime holds the default value on creation for the create_time field.
+	brokersetting.DefaultCreateTime = brokersettingDescCreateTime.Default.(func() time.Time)
+	// brokersettingDescUpdateTime is the schema descriptor for update_time field.
+	brokersettingDescUpdateTime := brokersettingFields[6].Descriptor()
+	// brokersetting.DefaultUpdateTime holds the default value on creation for the update_time field.
+	brokersetting.DefaultUpdateTime = brokersettingDescUpdateTime.Default.(func() time.Time)
+	// brokersetting.UpdateDefaultUpdateTime holds the default value on update for the update_time field.
+	brokersetting.UpdateDefaultUpdateTime = brokersettingDescUpdateTime.UpdateDefault.(func() time.Time)
+	// brokersettingDescID is the schema descriptor for id field.
+	brokersettingDescID := brokersettingFields[0].Descriptor()
+	// brokersetting.DefaultID holds the default value on creation for the id field.
+	brokersetting.DefaultID = brokersettingDescID.Default.(func() uuid.UUID)
 	chatlinkcodeFields := schema.ChatLinkCode{}.Fields()
 	_ = chatlinkcodeFields
 	// chatlinkcodeDescCodeHash is the schema descriptor for code_hash field.

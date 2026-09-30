@@ -97,6 +97,13 @@ func init() {
 			New: func() any { return &AutoExposePortsSettings{} },
 		},
 		{
+			Name: "quotas",
+			KoanfPaths: []string{
+				"quotas.enforce_broker_quotas",
+			},
+			New: func() any { return &QuotaSettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -330,6 +337,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
 				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
+				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 			},
 			"additionalProperties": false,
 		},
@@ -337,6 +345,15 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"enabled": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// quotas schema is hand-written — like auto_expose_ports, it has no
+		// $defs in settings-v1.schema.json.
+		"quotas": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
 			},
 			"additionalProperties": false,
 		},
