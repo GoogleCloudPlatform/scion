@@ -371,6 +371,98 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	assert.NoError(t, err, "server start should not require image_registry")
 }
 
+// TestHubSecretMigrateNamesAndMigrateDoNotRequireProject is a regression test
+// for ptone/scion#2396: `scion hub secret migrate-names` (and its sibling
+// `scion hub secret migrate`) operate directly against the Hub DB and GCP
+// Secret Manager, never reading or resolving the current directory's scion
+// project, so they must not fail with "not in a scion project" when run
+// outside one — without requiring the --global workaround.
+func TestHubSecretMigrateNamesAndMigrateDoNotRequireProject(t *testing.T) {
+	origGlobalMode := globalMode
+	origProjectPath := projectPath
+	origNoHub := noHub
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	t.Cleanup(func() {
+		globalMode = origGlobalMode
+		projectPath = origProjectPath
+		noHub = origNoHub
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// Clear leaked SCION_* env vars that make config.IsHubContext() true and
+	// would otherwise let FindProjectRoot() synthesize a project path,
+	// masking the "not in a scion project" failure this test guards against.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+	// A directory with no .scion project anywhere above it.
+	require.NoError(t, os.Chdir(t.TempDir()))
+
+	globalMode = false
+	projectPath = ""
+	noHub = true
+	nonInteractive = true
+	autoConfirm = true
+
+	for _, cmd := range []*cobra.Command{hubSecretMigrateNamesCmd, hubSecretMigrateCmd} {
+		t.Run(cmd.CommandPath(), func(t *testing.T) {
+			err := rootCmd.PersistentPreRunE(cmd, []string{})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestOrdinaryCommandStillRequiresProject guards against the migrate-names
+// exemption (ptone/scion#2396) becoming too broad: a command that isn't in
+// any exemption list or subtree must still fail with "not in a scion
+// project" when run outside one and without --global.
+func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
+	origGlobalMode := globalMode
+	origProjectPath := projectPath
+	origNoHub := noHub
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	t.Cleanup(func() {
+		globalMode = origGlobalMode
+		projectPath = origProjectPath
+		noHub = origNoHub
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// See the comment in TestHubSecretMigrateNamesAndMigrateDoNotRequireProject:
+	// these leaked env vars would otherwise mask project-resolution failure.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("HOME", t.TempDir())
+
+	origWd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+	require.NoError(t, os.Chdir(t.TempDir()))
+
+	globalMode = false
+	projectPath = ""
+	noHub = true
+	nonInteractive = true
+	autoConfirm = true
+
+	ordinaryCmd := &cobra.Command{Use: "other"}
+	err = rootCmd.PersistentPreRunE(ordinaryCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+}
+
 func TestDevAuthWarning(t *testing.T) {
 	// Save and restore original flags
 	origNoHub := noHub
