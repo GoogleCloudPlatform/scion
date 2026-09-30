@@ -111,6 +111,64 @@ type Agent struct {
 	// A6.6) keys on this instead of Updated. Nil means no reincarnation has
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
+
+	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// These are the persisted launch_* columns. They are internal bookkeeping,
+	// not the client-facing shape — untagged (json:"-") so they never leak
+	// directly onto the wire. The client-facing computed view (AgentLaunch /
+	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	//
+	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
+	// caller's struct: they are absent from its Ent builder chain entirely.
+	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
+	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
+	// launch_error / end an active launch" rule inside UpdateAgent and
+	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	LaunchAsyncOptIn   bool      `json:"-"`
+	LaunchID           string    `json:"-"`
+	LaunchState        string    `json:"-"` // "" | "active" | "ended"
+	LaunchEndReason    string    `json:"-"`
+	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"
+	LaunchDeadline     time.Time `json:"-"`
+	LaunchLastReportAt time.Time `json:"-"`
+	LaunchOwner        string    `json:"-"`
+	LaunchSeq          int64     `json:"-"`
+	LaunchStep         string    `json:"-"`
+	LaunchError        string    `json:"-"`
+}
+
+// InFlightPhases are the agent phases considered "in flight" for a launch
+// (design §3.3 in-flight predicate). Used by the store-side predicates
+// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
+// P1a-ii scope.
+var InFlightPhases = map[string]bool{
+	"created":      true,
+	"provisioning": true,
+	"cloning":      true,
+	"starting":     true,
+}
+
+// IsInFlight reports whether a matches the in-flight predicate (design
+// §3.3): a launch is currently occupying the agent's pre-running phases.
+func (a *Agent) IsInFlight() bool {
+	return a.LaunchState == "active" && InFlightPhases[a.Phase] && a.DeletedAt.IsZero()
+}
+
+// IsIncompleteCreate reports whether a matches the incomplete-create
+// predicate (design §3.3, §0c Option R): a create launch that ended (or is
+// winding down) leaving the agent on a phase where it never ran. Only
+// applicable when LaunchKind == "create" — start/restart launches (P6) are
+// out of scope for P1a and never set this predicate true.
+func (a *Agent) IsIncompleteCreate() bool {
+	if a.LaunchKind != "create" || !a.DeletedAt.IsZero() {
+		return false
+	}
+	switch a.Phase {
+	case "suspended", "stopping", "stopped", "error":
+	default:
+		return false
+	}
+	return a.LaunchState == "active" || a.LaunchError != ""
 }
 
 // ReincarnationState values for Agent.ReincarnationState.
@@ -1098,7 +1156,31 @@ const (
 	MessageDispatchPending    = "pending"
 	MessageDispatchDispatched = "dispatched"
 	MessageDispatchFailed     = "failed"
+	// MessageDispatchDeferred marks a row persisted while the recipient was
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7, migration
+	// gate): the message is saved to history for catch-up but was
+	// deliberately never handed to a dispatcher. Distinct from "failed"
+	// (dispatch was attempted and rejected) and "pending" (dispatch is
+	// still outstanding) — deferred means dispatch was never attempted.
+	MessageDispatchDeferred = "deferred"
 )
+
+// MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
+// stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
+// when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
+// non-agent dispatch_state backfill (cmd/boot_non_agent_dispatch_state_backfill.go)
+// matches this exact string to identify rows the sweep mislabeled rather than
+// a genuine, differently-reasoned delivery failure. Both sites must use this
+// single constant — two independent literals can drift, silently breaking
+// the backfill's ability to find and repair swept rows.
+//
+// Do not change this value. Production messages.dispatch_failure_reason rows
+// already carry this exact string, written before this constant existed;
+// changing it would silently strand those rows outside the backfill's exact-
+// match predicate. Pinned by TestMessageExpiredStuckPendingReason_Value in
+// pkg/store/models_test.go — if this literal ever needs to change, that
+// change must ship together with a data migration for existing rows.
+const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
 
 // =============================================================================
 // Notifications (Agent Status Notification System)
@@ -1595,6 +1677,12 @@ type UserAccessToken struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"` // Required for UATs
 	LastUsed  *time.Time `json:"lastUsed,omitempty"`
 	Created   time.Time  `json:"created"`
+
+	// E.1 descriptive credential metadata. Immutable after issuance: there
+	// is no update path. nil/empty means no metadata was supplied (always
+	// true for tokens created before E.1).
+	Purpose *string           `json:"purpose,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // NormalizedCeiling returns t's FrozenPermissionCeiling. A row that has never

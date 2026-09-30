@@ -76,12 +76,9 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	ensureHubMembership(ctx, s, bob.ID)
 	ensureHubMembership(ctx, s, admin.ID)
 
-	// CO1: Grant runtime_broker.read to all users so they can access the
-	// GET /api/v1/runtime-brokers/:id endpoint (the inline authz check
-	// uses resource type "runtime_broker" rather than the canonical "broker").
-	grantUserRuntimeBrokerAccess(t, s, alice.ID)
-	grantUserRuntimeBrokerAccess(t, s, bob.ID)
-	grantUserRuntimeBrokerAccess(t, s, admin.ID)
+	// The hub-member role's broker.read (granted via ensureHubMembership
+	// above) already covers GET /api/v1/runtime-brokers/:id and its
+	// /projects sub-route — no extra grant needed here.
 
 	// Create a project owned by alice
 	project = &store.Project{

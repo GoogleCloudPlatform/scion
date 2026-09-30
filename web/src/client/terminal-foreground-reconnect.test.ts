@@ -122,21 +122,30 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 describe('terminal close codes classify without an auto attempt', () => {
   it.each([
-    [1000, 'detached'],
-    [4410, 'session-ended'],
-    [4404, 'not-found'],
+    [1000, undefined, 'detached'],
+    [4410, undefined, 'session-ended'],
+    [4410, 'session_ended', 'session-ended'],
+    [4410, 'container_removed', 'session-ended'],
+    // An unknown or malformed reason must never be mistaken for
+    // agent_stopped: empty string, wrong case, and a string that merely
+    // starts with the same prefix all stay the plain terminal outcome.
+    [4410, '', 'session-ended'],
+    [4410, 'unknown_reason', 'session-ended'],
+    [4410, 'AGENT_STOPPED', 'session-ended'],
+    [4410, 'agent_stopped_extra', 'session-ended'],
+    [4404, undefined, 'not-found'],
   ] as const)(
-    'close %d -> disconnectReason=%s, and frontmost never dials (terminal, not retriable)',
-    async (code, reason) => {
+    'close %d reason=%s -> disconnectReason=%s, and frontmost never dials (terminal, not retriable)',
+    async (code, reason, expected) => {
       const f = fixture();
       const session = f.registry.open(agentId, f.initialize);
       const socket = await connectAndOpen(session);
       session.setFrontmost(true);
       socket.readyState = 3;
-      socket.onclose?.({ code });
+      socket.onclose?.({ code, reason });
 
       expect(session.state.connection).toBe('disconnected');
-      expect(session.state.disconnectReason).toBe(reason);
+      expect(session.state.disconnectReason).toBe(expected);
       expect(FakeSocket.instances).toHaveLength(1);
     }
   );
@@ -435,6 +444,178 @@ describe('agent-stopped re-arms once the agent is running again', () => {
 
     session.setFrontmost(true);
     expect(session.reconnecting).toBe(true); // proves foregrounding, not connect(), dialed the attempt
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+});
+
+// ptone/scion#2096: a 4410 close with reason agent_stopped puts the session
+// in the same 'unavailable'/'agent-stopped' state markUnavailable() does, so
+// it can re-arm the same way — but only once SSE has independently observed
+// the agent actually down. The WebSocket close usually reaches the client
+// before SSE's own (polled) view of the agent catches up with the crash, so
+// a metadata snapshot that still says "running" right after this close is
+// not proof of a real restart; it dials and is immediately rejected again at
+// the broker's own open-time check. noteAgentDown() is the session's hook
+// for "SSE just independently confirmed the agent is down"; noteAgentAvailable()
+// requires it before treating a "running" signal as a real transition.
+describe('a 4410 close with reason agent_stopped only re-arms after an independent down observation', () => {
+  it('N stale "running" signals right after the close cause zero attempts', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+
+    // SSE has not caught up with the crash yet: every one of these still
+    // claims the agent is running, same as the close-racing metadata
+    // snapshot ptone/scion#2096 describes. None of them may dial.
+    for (let i = 0; i < 5; i++) session.noteAgentAvailable();
+
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('SSE confirming the agent down, then running again, re-arms with exactly one attempt', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    session.noteAgentDown(); // SSE independently reports the agent down (stopped/error)
+    expect(session.reconnecting).toBe(false); // the down observation itself never dials
+
+    session.noteAgentAvailable(); // SSE: phase running again
+    expect(session.reconnecting).toBe(true); // proves the down-then-up sequence, not the close, dialed it
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it('agent confirmed down, then running again while backgrounded, waits for the next foregrounding', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    session.noteAgentDown();
+    session.noteAgentAvailable(); // not frontmost: armed, no attempt yet
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(true); // proves foregrounding, not the close, dialed the attempt
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  // A fast crash-restart can complete before SSE ever reports the agent
+  // down — no 'stopped'/'error' snapshot is ever observed, only 'running'
+  // snapshots on either side of it. The session then never auto-re-arms for
+  // this cycle (safe: it never dials a doomed attempt either), but this must
+  // not disable the ordinary manual Reconnect path, which bypasses the
+  // automatic gate entirely.
+  it('a fast crash-restart with no observed down phase never auto-re-arms, but manual reconnect still works', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    for (let i = 0; i < 3; i++) session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    await session.connect(); // manual Reconnect click
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it('the down observation is consumed by the attempt it authorizes: a second crash needs its own noteAgentDown() before it re-arms', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    let socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+
+    // First crash/restart cycle.
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+    session.noteAgentDown();
+    session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(true);
+    await session.connect();
+    socket = FakeSocket.instances[1];
+    socket.open();
+    socket.data();
+    expect(session.state.connection).toBe('connected');
+
+    // Second crash: no fresh SSE down observation has arrived yet for THIS
+    // cycle, so a stale "running" signal must not reuse the first cycle's
+    // (already-consumed) arm.
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+    session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(2);
+
+    session.noteAgentDown();
+    session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(true);
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(3);
+  });
+
+  it('a manual reconnect consumes a pending down observation, so a later stale signal does not skip the gate', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    session.noteAgentDown(); // SSE confirms the agent down
+    await session.connect(); // the user clicks Reconnect before SSE reports running
+    expect(FakeSocket.instances).toHaveLength(2); // manual reconnect always dials, gate or not
+
+    // That manual attempt also fails: the agent is still actually down.
+    FakeSocket.instances[1].readyState = 3;
+    FakeSocket.instances[1].onclose?.({ code: 4410, reason: 'agent_stopped' });
+
+    // A stale "running" signal now must not dial: the manual reconnect above
+    // consumed the earlier down observation, and none has arrived since.
+    session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+});
+
+describe("an attempt's own fetch discovering the agent stopped counts as an observed-down signal", () => {
+  it('agent-phase from the attempt fetch, with no explicit noteAgentDown(), still re-arms on noteAgentAvailable()', async () => {
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    const socket = await connectAndOpen(session);
+    session.setFrontmost(true);
+
+    // The frontmost auto-attempt's own agent fetch is the only down
+    // observation for this cycle: noteAgentDown() is never called.
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'stopped' }));
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1006 });
+    await session.connect(); // awaits that attempt's settlement
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-phase');
+    expect(FakeSocket.instances).toHaveLength(1); // non-running agent: no WS dialed
+
+    f.fetcher.mockResolvedValue(json(agent)); // the re-armed attempt's own fetch, once it dials
+    session.noteAgentAvailable();
+    expect(session.reconnecting).toBe(true); // proves the fetch-observed down state alone re-armed it
     await session.connect();
     expect(FakeSocket.instances).toHaveLength(2);
   });

@@ -41,7 +41,11 @@ type UserAccessToken struct {
 	// LastUsed holds the value of the "last_used" field.
 	LastUsed *time.Time `json:"last_used,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Purpose holds the value of the "purpose" field.
+	Purpose *string `json:"purpose,omitempty"`
+	// Labels holds the value of the "labels" field.
+	Labels       *string `json:"labels,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -54,7 +58,7 @@ func (*UserAccessToken) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case useraccesstoken.FieldCeilingVersion:
 			values[i] = new(sql.NullInt64)
-		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldScopes, useraccesstoken.FieldCeilingPermissionIds:
+		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldScopes, useraccesstoken.FieldCeilingPermissionIds, useraccesstoken.FieldPurpose, useraccesstoken.FieldLabels:
 			values[i] = new(sql.NullString)
 		case useraccesstoken.FieldExpiresAt, useraccesstoken.FieldLastUsed, useraccesstoken.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -156,6 +160,20 @@ func (_m *UserAccessToken) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Created = value.Time
 			}
+		case useraccesstoken.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = new(string)
+				*_m.Purpose = value.String
+			}
+		case useraccesstoken.FieldLabels:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field labels", values[i])
+			} else if value.Valid {
+				_m.Labels = new(string)
+				*_m.Labels = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -232,6 +250,16 @@ func (_m *UserAccessToken) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.Purpose; v != nil {
+		builder.WriteString("purpose=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.Labels; v != nil {
+		builder.WriteString("labels=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

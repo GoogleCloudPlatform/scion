@@ -506,6 +506,13 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	assert.NotNil(t, backfillDone.CompletedAt,
 		"backfill marker should be written after backfill pass")
 
+	// nc-promote-busy: the non-agent dispatch_state backfill must actually
+	// be wired into runBootDataMigrations, not just independently testable.
+	nonAgentDispatchDone, err := IsMigrationComplete(ctx, s, MigrationNonAgentDispatchStateBackfill)
+	require.NoError(t, err)
+	assert.True(t, nonAgentDispatchDone,
+		"non-agent dispatch_state backfill marker should be written by runBootDataMigrations")
+
 	// M9: the unattributable message is now classified as permanent,
 	// so WARN should NOT fire. Instead, the permanent INFO should appear.
 	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",

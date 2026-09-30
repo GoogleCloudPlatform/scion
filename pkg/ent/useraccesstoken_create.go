@@ -144,6 +144,34 @@ func (_c *UserAccessTokenCreate) SetNillableCreated(v *time.Time) *UserAccessTok
 	return _c
 }
 
+// SetPurpose sets the "purpose" field.
+func (_c *UserAccessTokenCreate) SetPurpose(v string) *UserAccessTokenCreate {
+	_c.mutation.SetPurpose(v)
+	return _c
+}
+
+// SetNillablePurpose sets the "purpose" field if the given value is not nil.
+func (_c *UserAccessTokenCreate) SetNillablePurpose(v *string) *UserAccessTokenCreate {
+	if v != nil {
+		_c.SetPurpose(*v)
+	}
+	return _c
+}
+
+// SetLabels sets the "labels" field.
+func (_c *UserAccessTokenCreate) SetLabels(v string) *UserAccessTokenCreate {
+	_c.mutation.SetLabels(v)
+	return _c
+}
+
+// SetNillableLabels sets the "labels" field if the given value is not nil.
+func (_c *UserAccessTokenCreate) SetNillableLabels(v *string) *UserAccessTokenCreate {
+	if v != nil {
+		_c.SetLabels(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *UserAccessTokenCreate) SetID(v uuid.UUID) *UserAccessTokenCreate {
 	_c.mutation.SetID(v)
@@ -343,6 +371,14 @@ func (_c *UserAccessTokenCreate) createSpec() (*UserAccessToken, *sqlgraph.Creat
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(useraccesstoken.FieldCreated, field.TypeTime, value)
 		_node.Created = value
+	}
+	if value, ok := _c.mutation.Purpose(); ok {
+		_spec.SetField(useraccesstoken.FieldPurpose, field.TypeString, value)
+		_node.Purpose = &value
+	}
+	if value, ok := _c.mutation.Labels(); ok {
+		_spec.SetField(useraccesstoken.FieldLabels, field.TypeString, value)
+		_node.Labels = &value
 	}
 	return _node, _spec
 }
@@ -571,6 +607,12 @@ func (u *UserAccessTokenUpsertOne) UpdateNewValues() *UserAccessTokenUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(useraccesstoken.FieldCreated)
+		}
+		if _, exists := u.create.mutation.Purpose(); exists {
+			s.SetIgnore(useraccesstoken.FieldPurpose)
+		}
+		if _, exists := u.create.mutation.Labels(); exists {
+			s.SetIgnore(useraccesstoken.FieldLabels)
 		}
 	}))
 	return u
@@ -970,6 +1012,12 @@ func (u *UserAccessTokenUpsertBulk) UpdateNewValues() *UserAccessTokenUpsertBulk
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(useraccesstoken.FieldCreated)
+			}
+			if _, exists := b.mutation.Purpose(); exists {
+				s.SetIgnore(useraccesstoken.FieldPurpose)
+			}
+			if _, exists := b.mutation.Labels(); exists {
+				s.SetIgnore(useraccesstoken.FieldLabels)
 			}
 		}
 	}))

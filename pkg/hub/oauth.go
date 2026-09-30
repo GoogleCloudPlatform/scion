@@ -505,9 +505,14 @@ func (s *OAuthService) getGoogleUserInfo(ctx context.Context, accessToken string
 		return nil, fmt.Errorf("failed to decode user info: %w", err)
 	}
 
+	email, err := requireVerifiedEmail(hubclient.OAuthProviderGoogle, userInfo.Email, userInfo.VerifiedEmail)
+	if err != nil {
+		return nil, err
+	}
+
 	return &OAuthUserInfo{
 		ID:          userInfo.ID,
-		Email:       userInfo.Email,
+		Email:       email,
 		DisplayName: userInfo.Name,
 		AvatarURL:   userInfo.Picture,
 		Provider:    "google",
@@ -556,13 +561,19 @@ func (s *OAuthService) getGitHubUserInfo(ctx context.Context, accessToken string
 		return nil, fmt.Errorf("failed to decode user info: %w", err)
 	}
 
-	// If email is not public, fetch from emails endpoint
-	email := user.Email
-	if email == "" {
-		email, err = s.getGitHubPrimaryEmail(ctx, accessToken)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user email: %w", err)
-		}
+	// The profile's public email (if any) is not itself evidence of
+	// verification — GitHub's user endpoint documents it only as "the
+	// publicly visible email address", nothing more. Always consult the
+	// emails endpoint (requires the user:email scope, requested in every
+	// login flow that reaches this function) and let it settle whether the
+	// profile address, or a fallback, is actually usable.
+	emails, err := s.getGitHubEmails(ctx, accessToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	email, err := selectVerifiedGitHubEmail(emails, user.Email)
+	if err != nil {
+		return nil, err
 	}
 
 	displayName := user.Name
@@ -579,51 +590,75 @@ func (s *OAuthService) getGitHubUserInfo(ctx context.Context, accessToken string
 	}, nil
 }
 
-// getGitHubPrimaryEmail fetches the primary email from GitHub's emails endpoint.
-func (s *OAuthService) getGitHubPrimaryEmail(ctx context.Context, accessToken string) (string, error) {
+// getGitHubEmails fetches the caller's full email list from GitHub's emails
+// endpoint. Requires the user:email OAuth scope.
+func (s *OAuthService) getGitHubEmails(ctx context.Context, accessToken string) ([]githubEmail, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", githubEmailURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("failed to get emails: %s - %s", resp.Status, string(body))
+		return nil, fmt.Errorf("failed to get emails: %s - %s", resp.Status, string(body))
 	}
 
 	var emails []githubEmail
 	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
-		return "", fmt.Errorf("failed to decode emails: %w", err)
+		return nil, fmt.Errorf("failed to decode emails: %w", err)
 	}
+	return emails, nil
+}
 
-	// Find primary verified email
-	for _, e := range emails {
-		if e.Primary && e.Verified {
-			return e.Email, nil
+// selectVerifiedGitHubEmail chooses the email a GitHub login should use from
+// the caller's full email list, preferring (in order): the profile's public
+// email if the list itself marks that same address verified; else the
+// primary verified email; else any verified email. The result is gated
+// through requireVerifiedEmail — an empty list, a 403, or an all-unverified
+// list all end up there and are rejected the same way; this never returns
+// an address GitHub has not verified. profileEmail may be empty.
+func selectVerifiedGitHubEmail(emails []githubEmail, profileEmail string) (string, error) {
+	var candidate githubEmail
+	if profileEmail != "" {
+		for _, e := range emails {
+			if e.Verified && strings.EqualFold(e.Email, profileEmail) {
+				candidate = e
+				break
+			}
 		}
 	}
-
-	// Fall back to any verified email
-	for _, e := range emails {
-		if e.Verified {
-			return e.Email, nil
+	if candidate.Email == "" {
+		for _, e := range emails {
+			if e.Primary && e.Verified {
+				candidate = e
+				break
+			}
 		}
 	}
-
-	// Fall back to any email
-	if len(emails) > 0 {
-		return emails[0].Email, nil
+	if candidate.Email == "" {
+		for _, e := range emails {
+			if e.Verified {
+				candidate = e
+				break
+			}
+		}
+	}
+	if candidate.Email == "" && len(emails) > 0 {
+		// No verified candidate at all: fall through with GitHub's first
+		// listed address only so requireVerifiedEmail below can report a
+		// clear, consistent error. It never returns this unverified.
+		candidate = emails[0]
 	}
 
-	return "", fmt.Errorf("no email found")
+	return requireVerifiedEmail(hubclient.OAuthProviderGitHub, candidate.Email, candidate.Verified)
 }
 
 // DeviceCodeResponse holds the response from a device authorization request.
@@ -971,18 +1006,22 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 		return nil, fmt.Errorf("failed to decode OIDC userinfo response: %w", err)
 	}
 
-	// The "sub" claim is the primary user identifier in OIDC; it must be present.
+	// The "sub" claim is the primary user identifier in OIDC; it must be
+	// present. This is an OIDC-specific requirement, not part of the shared
+	// email-ownership invariant, so it stays a direct check here.
 	if userInfo.Sub == "" {
 		return nil, fmt.Errorf("OIDC provider did not return a 'sub' claim; the identity provider must include a subject identifier")
 	}
 
-	if userInfo.Email == "" {
-		return nil, fmt.Errorf("OIDC provider did not return an email claim; ensure the 'email' scope is requested and the user has an email address configured in the identity provider")
-	}
-
-	if !userInfo.EmailVerified {
-		return nil, fmt.Errorf("OIDC provider returned an unverified email address %q; "+
-			"the user must verify their email in the identity provider before logging in", userInfo.Email)
+	email, err := requireVerifiedEmail(hubclient.OAuthProviderOIDC, userInfo.Email, userInfo.EmailVerified)
+	if err != nil {
+		if strings.TrimSpace(userInfo.Email) == "" {
+			// The shared message only names what's missing; OIDC configuration
+			// is the one case here where an operator can readily fix the
+			// upstream cause, so keep pointing at it.
+			return nil, fmt.Errorf("%w; ensure the 'email' scope is requested and the user has an email address configured in the identity provider", err)
+		}
+		return nil, err
 	}
 
 	// Determine display name: prefer Name, fall back to PreferredUsername, then Email.
@@ -991,12 +1030,12 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 		displayName = userInfo.PreferredUsername
 	}
 	if displayName == "" {
-		displayName = userInfo.Email
+		displayName = email
 	}
 
 	return &OAuthUserInfo{
 		ID:          userInfo.Sub,
-		Email:       userInfo.Email,
+		Email:       email,
 		DisplayName: displayName,
 		AvatarURL:   userInfo.Picture,
 		Provider:    hubclient.OAuthProviderOIDC,

@@ -218,6 +218,7 @@ func (s *Server) autoApplyUpdate(ctx context.Context, result *ReleaseUpdateCheck
 		params := map[string]string{
 			"target_version": result.LatestVersion,
 			"download_url":   result.DownloadURL,
+			"checksums_url":  result.ChecksumsURL,
 		}
 
 		var buf bytes.Buffer

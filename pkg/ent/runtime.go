@@ -200,6 +200,42 @@ func init() {
 	agentDescReincarnationState := agentFields[41].Descriptor()
 	// agent.DefaultReincarnationState holds the default value on creation for the reincarnation_state field.
 	agent.DefaultReincarnationState = agentDescReincarnationState.Default.(string)
+	// agentDescLaunchAsyncOptIn is the schema descriptor for launch_async_opt_in field.
+	agentDescLaunchAsyncOptIn := agentFields[43].Descriptor()
+	// agent.DefaultLaunchAsyncOptIn holds the default value on creation for the launch_async_opt_in field.
+	agent.DefaultLaunchAsyncOptIn = agentDescLaunchAsyncOptIn.Default.(bool)
+	// agentDescLaunchID is the schema descriptor for launch_id field.
+	agentDescLaunchID := agentFields[44].Descriptor()
+	// agent.DefaultLaunchID holds the default value on creation for the launch_id field.
+	agent.DefaultLaunchID = agentDescLaunchID.Default.(string)
+	// agentDescLaunchState is the schema descriptor for launch_state field.
+	agentDescLaunchState := agentFields[45].Descriptor()
+	// agent.DefaultLaunchState holds the default value on creation for the launch_state field.
+	agent.DefaultLaunchState = agentDescLaunchState.Default.(string)
+	// agentDescLaunchEndReason is the schema descriptor for launch_end_reason field.
+	agentDescLaunchEndReason := agentFields[46].Descriptor()
+	// agent.DefaultLaunchEndReason holds the default value on creation for the launch_end_reason field.
+	agent.DefaultLaunchEndReason = agentDescLaunchEndReason.Default.(string)
+	// agentDescLaunchKind is the schema descriptor for launch_kind field.
+	agentDescLaunchKind := agentFields[47].Descriptor()
+	// agent.DefaultLaunchKind holds the default value on creation for the launch_kind field.
+	agent.DefaultLaunchKind = agentDescLaunchKind.Default.(string)
+	// agentDescLaunchOwner is the schema descriptor for launch_owner field.
+	agentDescLaunchOwner := agentFields[50].Descriptor()
+	// agent.DefaultLaunchOwner holds the default value on creation for the launch_owner field.
+	agent.DefaultLaunchOwner = agentDescLaunchOwner.Default.(string)
+	// agentDescLaunchSeq is the schema descriptor for launch_seq field.
+	agentDescLaunchSeq := agentFields[51].Descriptor()
+	// agent.DefaultLaunchSeq holds the default value on creation for the launch_seq field.
+	agent.DefaultLaunchSeq = agentDescLaunchSeq.Default.(int64)
+	// agentDescLaunchStep is the schema descriptor for launch_step field.
+	agentDescLaunchStep := agentFields[52].Descriptor()
+	// agent.DefaultLaunchStep holds the default value on creation for the launch_step field.
+	agent.DefaultLaunchStep = agentDescLaunchStep.Default.(string)
+	// agentDescLaunchError is the schema descriptor for launch_error field.
+	agentDescLaunchError := agentFields[53].Descriptor()
+	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
+	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
 	// agentDescID is the schema descriptor for id field.
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.

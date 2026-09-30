@@ -435,6 +435,38 @@ func TestBuildPod_ImagePullPolicy_Invalid(t *testing.T) {
 	}
 }
 
+// TestBuildPod_ImageAndPullPolicy_FromHubSettings pins the pod-spec end of
+// ptone/scion#2156: a RunConfig shaped the way pkg/agent's resolution chain
+// produces it for a Hub settings harness_configs.<h>.image /
+// .image_pull_policy value (no template/agent override) must reach the pod
+// spec's container image and pull policy unchanged. The settings-resolution
+// precedence itself is pinned in pkg/agent (run_test.go); this only pins
+// that once resolved, the values actually reach the pod the Kubernetes
+// runtime creates.
+func TestBuildPod_ImageAndPullPolicy_FromHubSettings(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+
+	config := RunConfig{
+		Name:         "test-agent",
+		Image:        "example.com/hub-settings-pinned:v1",
+		UnixUsername: "scion",
+		Kubernetes: &api.KubernetesConfig{
+			ImagePullPolicy: "Always",
+		},
+	}
+
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if got := pod.Spec.Containers[0].Image; got != "example.com/hub-settings-pinned:v1" {
+		t.Errorf("pod container image = %q, want %q", got, "example.com/hub-settings-pinned:v1")
+	}
+	if got := pod.Spec.Containers[0].ImagePullPolicy; got != corev1.PullAlways {
+		t.Errorf("pod container ImagePullPolicy = %q, want %q", got, corev1.PullAlways)
+	}
+}
+
 func TestImageExists_Validation(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 

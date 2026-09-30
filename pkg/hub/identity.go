@@ -93,6 +93,12 @@ type ScopedUserIdentity struct {
 	scopes       []string
 	credentialID string
 	ceiling      permissions.FrozenPermissionCeiling
+
+	// decoration holds descriptive credential metadata: populated only by
+	// UserAccessTokenService.ValidateToken from the server-validated token
+	// row, and never by any other caller. nil for identities not backed by
+	// a validated UAT row (e.g. constructed directly by older tests/callers).
+	decoration *CredentialDecoration
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity. The ceiling is derived
@@ -132,6 +138,48 @@ func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scope
 		credentialID: credentialID,
 		ceiling:      ceiling,
 	}
+}
+
+// NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
+// descriptive credential decoration alongside its credential ID. The
+// ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithCredentialID derives it; see
+// NewScopedUserIdentityWithCeilingAndDecoration for a constructor that takes
+// an explicit, already-normalized ceiling instead.
+func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	}, decoration)
+}
+
+// NewScopedUserIdentityWithCeilingAndDecoration creates a UAT-backed identity
+// carrying both an explicit, already-normalized FrozenPermissionCeiling and
+// descriptive credential decoration. UserAccessTokenService.ValidateToken —
+// the single point that has the server-validated token row in hand — uses
+// this to attach both pieces of derived state in one call, so a
+// CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return &ScopedUserIdentity{
+		UserIdentity: user,
+		projectID:    projectID,
+		scopes:       scopes,
+		credentialID: credentialID,
+		ceiling:      ceiling,
+		decoration:   decoration,
+	}
+}
+
+// Decoration returns a deep copy of the descriptive credential metadata
+// attached at authentication time, or nil if none was derived. Callers may
+// freely mutate the returned value (including its Labels map) without
+// affecting this identity's stored decoration.
+func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
+	if s.decoration == nil {
+		return nil
+	}
+	d := s.decoration.clone()
+	return &d
 }
 
 // ScopedProjectID returns the project this identity is restricted to.

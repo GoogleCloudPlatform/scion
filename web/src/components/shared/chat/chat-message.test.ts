@@ -639,4 +639,22 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).toContain('Failed');
     expect(state?.textContent).not.toContain('Agent unreachable');
   });
+
+  // F5 (p2a-r2 review): design agent-reincarnate §3.7 — a message to a
+  // migrating agent must show a receipt distinct from both "Delivered" and
+  // "Failed", telling the sender it was saved for catch-up.
+  it('shows a distinct "Deferred" indicator for dispatchState=deferred', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'deferred',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('deferred')).toBe(true);
+    expect(state?.classList.contains('failed')).toBe(false);
+    expect(state?.textContent).toContain('Deferred');
+    expect(state?.textContent).toContain('reincarnating');
+    const icon = state?.querySelector('sl-icon');
+    expect(icon?.getAttribute('name')).toBe('pause-circle');
+  });
 });

@@ -98,6 +98,74 @@ function safeJsonParse(value: unknown): unknown {
   }
 }
 
+/**
+ * localStorage key for persisted thread-group collapse state (#1698 follow-up).
+ *
+ * Group IDs (`generateGroupId`) mix `Math.random()` with a timestamp, so they
+ * are already unique across every space, not just within one — a flat set of
+ * IDs is enough and there is no need to nest the key under a project/space
+ * id.
+ */
+const GROUP_COLLAPSE_STORAGE_KEY = 'scion-chat-group-collapse';
+
+/**
+ * Hard cap on remembered collapsed-group entries. Stale entries (for groups
+ * that were since deleted) are pruned opportunistically once the rail knows
+ * the current set of groups, but this cap is the backstop in case pruning
+ * never runs for a given session.
+ */
+const GROUP_COLLAPSE_STORAGE_LIMIT = 500;
+
+/**
+ * The storage key, scoped to a user when one is known. `currentUserId` comes
+ * from the page's session data (see `ScionChatSpaceRail.currentUserId`) and
+ * is normally available by the time this is first read — but the fallback to
+ * the unscoped key (rather than, say, refusing to persist) means a moment
+ * without a known user degrades to "shared across whoever's signed in",
+ * not to losing the feature.
+ */
+function collapseStorageKey(userId: string): string {
+  return userId ? `${GROUP_COLLAPSE_STORAGE_KEY}:${userId}` : GROUP_COLLAPSE_STORAGE_KEY;
+}
+
+/**
+ * Read the persisted set of collapsed thread-group IDs. Missing storage,
+ * unavailable storage (private browsing), a JSON parse error, or an
+ * unexpected shape all fall back to an empty set silently — collapse state
+ * is a nicety, not something that should ever block the rail from loading.
+ */
+function loadCollapsedGroupIds(userId: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(collapseStorageKey(userId));
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Persist the given set of collapsed group IDs, bounded to the most
+ * recently added entries (`Set` preserves insertion order, so re-collapsing
+ * an ID that's already in the set doesn't move it — only a fresh add, after
+ * an expand or on first collapse, does). Failures (storage unavailable or
+ * full) are swallowed for the same reason the read side falls back silently.
+ */
+function saveCollapsedGroupIds(userId: string, ids: Set<string>): void {
+  try {
+    let list = [...ids];
+    if (list.length > GROUP_COLLAPSE_STORAGE_LIMIT) {
+      list = list.slice(list.length - GROUP_COLLAPSE_STORAGE_LIMIT);
+    }
+    localStorage.setItem(collapseStorageKey(userId), JSON.stringify(list));
+  } catch {
+    // Storage unavailable (private browsing) or full — collapse state just
+    // won't survive a reload this time.
+  }
+}
+
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
@@ -195,6 +263,15 @@ export class ScionChatSpaceRail extends LitElement {
   @property()
   selectedKey = '';
 
+  /**
+   * The signed-in user's ID, passed down by the chat page from its session
+   * data. Used only to scope the thread-group collapse localStorage key so
+   * switching accounts in the same browser doesn't prune one account's
+   * collapse state because it looks stale to the other's.
+   */
+  @property()
+  currentUserId = '';
+
   @state() private spaces: ChatSpace[] = [];
   @state() private threadsBySpace = new Map<string, ChatSpaceThread[]>();
   @state() private collapsedSpaces = new Set<string>();
@@ -232,8 +309,49 @@ export class ScionChatSpaceRail extends LitElement {
   @state() private dragOverThreadId: string | null = null;
 
   // --- Thread groups state ---
-  /** Set of collapsed group IDs. */
+  /**
+   * The user's real, persisted collapse preference. This is the only thing
+   * `saveCollapsedGroupIds`/`pruneCollapsedGroups` ever write — the deep-link
+   * auto-expand below must never add to or remove from it, or the override
+   * leaks into storage the next time anything else saves (round-2 review,
+   * R2).
+   */
   @state() private collapsedGroups = new Set<string>();
+  /**
+   * The `currentUserId` that `collapsedGroups` was last restored from
+   * storage for. `null` before the first restore. Compared against
+   * `currentUserId` directly (not against Lit's `changedProperties`) in
+   * `willUpdate`, so it's a single check that covers the normal case
+   * (already set before connect), a late-arriving ID, and a live switch
+   * from one user to another — see `willUpdate` (round-4 review, N7).
+   */
+  private _collapseLoadedFor: string | null = null;
+  /**
+   * Transient, render-only override: the one group forced open because it
+   * contains the selected/deep-linked thread, even though the user's real
+   * preference for it (in `collapsedGroups`) is collapsed. Never persisted.
+   * See `maybeAutoExpandGroupForSelectedKey`.
+   */
+  @state() private autoExpandedGroupId: string | null = null;
+  /**
+   * The `selectedKey` that `autoExpandedGroupId` was last computed for.
+   * `loadData` runs on every SSE-triggered reload with the *same* selected
+   * thread, and recomputing the override each time would silently pop the
+   * group back open right after the user collapses it — the override must
+   * be decided once per distinct thread selection, not once per reload
+   * (round-2 review, R3).
+   */
+  private _autoExpandComputedForKey: string | null = null;
+  /**
+   * Whether `loadPrefs` has completed successfully at least once. On a cold
+   * deep link, `selectedKey` is set as an attribute before `connectedCallback`
+   * (chat.ts binds it that way), so the very first `updated()` fires and
+   * would otherwise lock in "no override" while `prefs.threadGroups` is
+   * simply not loaded yet — not "this user has no groups". Gating on this
+   * flag, rather than on `threadGroups` being defined, avoids that false
+   * signal (round-3 review, R4).
+   */
+  private _prefsLoaded = false;
   /** Group header id the drag is hovering over. */
   @state() private dragOverGroupId: string | null = null;
   /** State for the group name prompt (inline input). */
@@ -708,16 +826,45 @@ export class ScionChatSpaceRail extends LitElement {
     // Restore persisted filter/sort from localStorage
     const savedFilter = localStorage.getItem('scion-chat-space-filter');
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    // Collapsed thread-groups are restored in willUpdate, not here — see its
+    // doc comment (round-4 review, N7).
     void this.loadData();
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
     document.addEventListener('click', this._outsideClickHandler);
   }
 
+  override willUpdate(_changedProperties: Map<string, unknown>): void {
+    // Single home for restoring collapsedGroups, run before every render so
+    // there is no expand-then-collapse flash. Comparing `currentUserId`
+    // against `_collapseLoadedFor` directly — rather than inspecting Lit's
+    // changedProperties old/new pair — covers every way the ID can arrive
+    // in one check: already set before connect (the normal chat.ts case,
+    // where the very first willUpdate sees `currentUserId !== null` and
+    // restores), a late-arriving ID after connect, and even a live switch
+    // from one signed-in user to another. An old version of this gated on
+    // `changedProperties.get('currentUserId') === ''`, which only caught
+    // the "was never set, now is" case and missed a same-tick post-append
+    // set (the old value reads as `undefined`, not `''`) and any u1-to-u2
+    // switch (round-4 review, N7).
+    if (this.currentUserId !== this._collapseLoadedFor) {
+      this._collapseLoadedFor = this.currentUserId;
+      this.collapsedGroups = loadCollapsedGroupIds(this.currentUserId);
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
-    // Auto-expand the space containing the selected thread (deep-link support)
-    if (changedProperties.has('selectedKey') && this.selectedKey) {
-      this.expandSpaceForSelectedKey();
+    if (changedProperties.has('selectedKey')) {
+      if (this.selectedKey) {
+        // Auto-expand the space and group containing the selected thread
+        // (deep-link support).
+        this.expandSpaceForSelectedKey();
+        this.maybeAutoExpandGroupForSelectedKey();
+      } else {
+        // Nothing selected — no group should be forced open on its behalf.
+        this.autoExpandedGroupId = null;
+        this._autoExpandComputedForKey = null;
+      }
     }
   }
 
@@ -743,6 +890,63 @@ export class ScionChatSpaceRail extends LitElement {
         this.collapsedSpaces = newSet;
         break;
       }
+    }
+  }
+
+  /**
+   * Decide, once per distinct `selectedKey`, whether the group containing
+   * the selected thread needs a transient auto-expand override (deep-link
+   * support): before persisted collapse existed, a group could never hide
+   * the active thread — it always started expanded. Now a reload can land
+   * on a thread inside a group the user left collapsed, so it is forced
+   * open for this view via `autoExpandedGroupId` — never by touching
+   * `collapsedGroups`, which stays exactly what the user last set it to.
+   *
+   * Idempotent per key: `loadData` calls this on every reload (SSE messages,
+   * topic changes, etc.), and re-deciding it each time would force the group
+   * back open right after the user collapses it, seconds later, with no way
+   * to keep it shut while the thread stays open (round-2 review, R3).
+   *
+   * Does not record a decision until `_prefsLoaded` is true — see that
+   * field's doc comment for why a cold deep link would otherwise lock in
+   * "no override" before the groups are even known (round-3 review, R4).
+   */
+  private maybeAutoExpandGroupForSelectedKey(): void {
+    if (!this._prefsLoaded) return;
+    if (this._autoExpandComputedForKey === this.selectedKey) return;
+    this._autoExpandComputedForKey = this.selectedKey;
+    this.autoExpandedGroupId = null;
+    if (!this.selectedKey || this.collapsedGroups.size === 0) return;
+    const allGroups = Object.values(this.prefs.threadGroups ?? {}).flat();
+    for (const group of allGroups) {
+      if (group.threadIds.includes(this.selectedKey) && this.collapsedGroups.has(group.id)) {
+        this.autoExpandedGroupId = group.id;
+        return;
+      }
+    }
+  }
+
+  /**
+   * Clear the auto-expand override if the group it names has since stopped
+   * containing the selected thread — e.g. the thread was moved to a
+   * different group, or the group itself was deleted, server-side. Called
+   * only after a successful `loadPrefs`, so "no longer contains" reflects
+   * the server's current state rather than a stale or failed fetch.
+   *
+   * Deliberately does *not* pick a new group for the thread's new location:
+   * `maybeAutoExpandGroupForSelectedKey` already declined to reconsider
+   * once `selectedKey` is set (that's the whole R3 fix), and re-picking
+   * here would reopen a group the user may have collapsed in the meantime.
+   * The stale group just stops being forced open — the user's real
+   * preference for every group, old and new, is left exactly as it was
+   * (round-3 review, N5).
+   */
+  private clearStaleAutoExpand(): void {
+    if (!this.autoExpandedGroupId) return;
+    const allGroups = Object.values(this.prefs.threadGroups ?? {}).flat();
+    const group = allGroups.find((g) => g.id === this.autoExpandedGroupId);
+    if (!group || !group.threadIds.includes(this.selectedKey)) {
+      this.autoExpandedGroupId = null;
     }
   }
 
@@ -786,7 +990,20 @@ export class ScionChatSpaceRail extends LitElement {
       this.loading = true;
     }
     try {
-      await Promise.all([this.loadSpaces(), this.loadPrefs()]);
+      const [spacesOk, prefsOk] = await Promise.all([this.loadSpaces(), this.loadPrefs()]);
+      // Pruning reads both this.spaces and this.prefs.threadGroups to decide
+      // what's stale, so it must not run unless both loaded cleanly in this
+      // pass — see pruneCollapsedGroups' doc comment for what goes wrong
+      // otherwise.
+      if (spacesOk && prefsOk) {
+        this.pruneCollapsedGroups();
+      }
+      if (prefsOk) {
+        this.clearStaleAutoExpand();
+      }
+      if (this.selectedKey) {
+        this.maybeAutoExpandGroupForSelectedKey();
+      }
     } finally {
       this.loading = false;
       // Notify parent that rail data is ready (for SSE scope setup)
@@ -816,7 +1033,8 @@ export class ScionChatSpaceRail extends LitElement {
   /** Track known space IDs so we can collapse only truly new spaces on reload. */
   private _knownSpaceIds = new Set<string>();
 
-  private async loadSpaces(): Promise<void> {
+  /** Loads spaces; returns whether the load succeeded (used to gate pruning). */
+  private async loadSpaces(): Promise<boolean> {
     try {
       const res = await apiFetch('/api/v1/chat/spaces');
       if (res.ok) {
@@ -846,9 +1064,12 @@ export class ScionChatSpaceRail extends LitElement {
         if (this.selectedKey) {
           this.expandSpaceForSelectedKey();
         }
+        return true;
       }
+      return false;
     } catch {
       // Silently fail
+      return false;
     }
   }
 
@@ -866,14 +1087,19 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private async loadPrefs(): Promise<void> {
+  /** Loads prefs; returns whether the load succeeded (used to gate pruning). */
+  private async loadPrefs(): Promise<boolean> {
     try {
       const res = await apiFetch('/api/v1/chat/user-prefs');
       if (res.ok) {
         this.prefs = parseRailPrefs(await res.json());
+        this._prefsLoaded = true;
+        return true;
       }
+      return false;
     } catch {
       // Use defaults
+      return false;
     }
   }
 
@@ -1217,6 +1443,14 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private toggleGroupCollapse(groupId: string): void {
+    if (groupId === this.autoExpandedGroupId) {
+      // This group is only *visually* expanded via the deep-link override —
+      // the user's real preference (in collapsedGroups) already has it
+      // collapsed. A click here means "collapse", and clearing the override
+      // is the entire action; there's nothing new to save.
+      this.autoExpandedGroupId = null;
+      return;
+    }
     const next = new Set(this.collapsedGroups);
     if (next.has(groupId)) {
       next.delete(groupId);
@@ -1224,6 +1458,34 @@ export class ScionChatSpaceRail extends LitElement {
       next.add(groupId);
     }
     this.collapsedGroups = next;
+    saveCollapsedGroupIds(this.currentUserId, next);
+  }
+
+  /**
+   * Drop stored collapse entries for groups that no longer exist (deleted,
+   * or belonging to a space the user lost access to).
+   *
+   * The caller (`loadData`) only invokes this after both `loadSpaces` and
+   * `loadPrefs` have succeeded in the same pass — `this.spaces` and
+   * `this.prefs.threadGroups` only reflect the *server's* current groups
+   * when both loaded cleanly. A failed `loadPrefs` in particular leaves
+   * `this.prefs` at its old (possibly still-default, all-undefined) value,
+   * which would make every stored ID look stale and wipe it permanently on
+   * the very first page load. The `this.spaces.length === 0` check here is
+   * an extra guard for the same failure mode, kept as defense in depth.
+   */
+  private pruneCollapsedGroups(): void {
+    if (this.spaces.length === 0 || this.collapsedGroups.size === 0) return;
+    const validIds = new Set<string>();
+    for (const space of this.spaces) {
+      for (const group of this.getGroups(space.projectId)) {
+        validIds.add(group.id);
+      }
+    }
+    const next = new Set([...this.collapsedGroups].filter((id) => validIds.has(id)));
+    if (next.size === this.collapsedGroups.size) return;
+    this.collapsedGroups = next;
+    saveCollapsedGroupIds(this.currentUserId, next);
   }
 
   /** Generate a simple unique id for a new group. */
@@ -2305,7 +2567,8 @@ export class ScionChatSpaceRail extends LitElement {
         const groupThreads = group.threadIds
           .map((id) => threadMap.get(id))
           .filter((t): t is ChatSpaceThread => t !== undefined);
-        const collapsed = this.collapsedGroups.has(group.id);
+        const collapsed =
+          this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
         return html`
           <div
             class="thread-group-header ${this.dragOverGroupId === group.id ? 'drag-over' : ''}"

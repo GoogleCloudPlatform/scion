@@ -156,6 +156,14 @@ func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context, u
 	return nil
 }
 
+// TokenMetadata carries optional, bounded, issuer-supplied descriptive
+// fields for a new token. Metadata is immutable after issuance: there is no
+// update path. Use TokenMetadata{} for no metadata.
+type TokenMetadata struct {
+	Purpose string
+	Labels  map[string]string
+}
+
 // CreateTokenParams collects the inputs for minting a token in one struct,
 // so a future field (e.g. a hub-vs-project boundary kind) can be added
 // without growing a positional argument list.
@@ -165,6 +173,7 @@ type CreateTokenParams struct {
 	ProjectID string
 	Scopes    []string
 	ExpiresAt *time.Time
+	Metadata  TokenMetadata
 }
 
 // CreateToken generates a new user access token with issuer ceiling,
@@ -177,6 +186,15 @@ type CreateTokenParams struct {
 func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
 	return s.CreateTokenWithParams(ctx, CreateTokenParams{
 		UserID: userID, Name: name, ProjectID: projectID, Scopes: scopes, ExpiresAt: expiresAt,
+	})
+}
+
+// CreateTokenWithMetadata is CreateToken plus bounded, issuer-supplied
+// purpose/labels. Retained as a thin wrapper over CreateTokenWithParams so
+// existing callers built against this positional shape are unaffected.
+func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time, metadata TokenMetadata) (string, *store.UserAccessToken, error) {
+	return s.CreateTokenWithParams(ctx, CreateTokenParams{
+		UserID: userID, Name: name, ProjectID: projectID, Scopes: scopes, ExpiresAt: expiresAt, Metadata: metadata,
 	})
 }
 
@@ -194,6 +212,11 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	}
 	if params.ProjectID == "" {
 		return "", nil, ErrUATProjectIDEmpty
+	}
+	// Bounded validation of name/purpose/labels at issuance. Metadata is
+	// immutable afterward, so this is the only place it is checked.
+	if err := ValidateCredentialMetadata(params.Name, params.Metadata.Purpose, params.Metadata.Labels); err != nil {
+		return "", nil, err
 	}
 
 	// Expand and validate scopes against the registry.
@@ -312,6 +335,14 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 			ExpiresAt:            expiresAt,
 			Created:              now,
 		}
+		// Descriptive credential metadata: set only when supplied.
+		trimmedPurpose := strings.TrimSpace(params.Metadata.Purpose)
+		if trimmedPurpose != "" {
+			token.Purpose = &trimmedPurpose
+		}
+		if len(params.Metadata.Labels) > 0 {
+			token.Labels = params.Metadata.Labels
+		}
 
 		if createErr := tx.CreateUserAccessToken(ctx, token); createErr != nil {
 			return fmt.Errorf("failed to create token: %w", createErr)
@@ -321,6 +352,12 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		scopesJSON, _ := json.Marshal(expanded)
 		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
 			token.ID, string(scopesJSON), params.ProjectID)
+		// Record that purpose/label metadata was set and which label keys
+		// were used, without recording label or purpose values in audit
+		// (values are issuer-supplied and unbounded-trust text).
+		if trimmedPurpose != "" || len(params.Metadata.Labels) > 0 {
+			afterSummary = appendCredentialMetadataAuditFields(afterSummary, trimmedPurpose != "", params.Metadata.Labels)
+		}
 
 		return s.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "credential_create",
@@ -379,12 +416,39 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, ErrUserSuspended
 	}
 
-	return NewScopedUserIdentityWithCeiling(
+	// Derive the descriptive credential decoration from the
+	// server-validated token row this function already loaded. This is the
+	// single trustworthy derivation point — no header, query parameter, or
+	// body field ever contributes to it.
+	//
+	// D.1 has not yet persisted a boundary column on the UAT row, so this
+	// builds TokenBoundary inline from the token's stored project ID (every
+	// UAT is project-scoped today). This is the one call site that changes
+	// when D.1 lands.
+	decoration := &CredentialDecoration{
+		Kind:      CredentialKindUAT,
+		TokenID:   token.ID,
+		TokenName: token.Name,
+		Boundary:  decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: token.ProjectID}),
+	}
+	if token.Purpose != nil {
+		decoration.Purpose = *token.Purpose
+	}
+	if len(token.Labels) > 0 {
+		labels := make(map[string]string, len(token.Labels))
+		for k, v := range token.Labels {
+			labels[k] = v
+		}
+		decoration.Labels = labels
+	}
+
+	return NewScopedUserIdentityWithCeilingAndDecoration(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
 		token.Scopes,
 		token.ID,
 		token.NormalizedCeiling(),
+		decoration,
 	), nil
 }
 

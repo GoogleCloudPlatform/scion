@@ -330,21 +330,29 @@ Examples:
 		var crossProjectTarget string
 		senderProjectPath := projectPath
 		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
-		if hasAgentTarget && os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
-			ownProjectSlug := os.Getenv("SCION_PROJECT")
-			ownProjectID := os.Getenv("SCION_PROJECT_ID")
-			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
-				(ownProjectID != "" && projectPath == ownProjectID)
-			if !isSameProject {
-				// The --project flag selects a DIFFERENT project.
-				crossProjectTarget = projectPath
+		if hasAgentTarget {
+			crossProjectTarget = detectCrossProjectTarget(cmd)
+			if crossProjectTarget != "" {
 				senderProjectPath = "" // let hub context resolve from agent's own config
 			}
 		}
 
+		// --raw cannot cross a project boundary: the deprecated keystroke
+		// path skips the wrapped envelope, so a cross-project send must
+		// refuse it the same way `scion keys` refuses cross-project targets
+		// outright. This CLI check is UX only; the authoritative refusal is
+		// hub-side (ExecuteAgentDM).
+		if crossProjectTarget != "" && msgRaw {
+			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
+		}
+
 		// conv:<id> with explicit --project mismatch in agent mode: reject.
 		// The conversation ID already identifies its project context;
-		// reinterpreting the sender context via --project would be silently wrong.
+		// reinterpreting the sender context via --project would be silently
+		// wrong. This intentionally does NOT reuse detectCrossProjectTarget:
+		// that helper treats an explicitly empty --project ("") as
+		// same-project, but this check must still reject it, matching
+		// pre-existing behavior.
 		if convRef != nil && convRef.Kind == messaging.RefConversation &&
 			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
 			ownProjectSlug := os.Getenv("SCION_PROJECT")
@@ -514,11 +522,15 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
+// raw, plain and urgent are passed explicitly (rather than read from the
+// message-command package globals) so non-`scion message` callers — e.g.
+// `scion keys`, which always wants Raw=true and never sets the message
+// package's flag globals — can reuse this helper without forking it.
+func buildStructuredMessage(sender, recipient, message string, attachments []string, raw, plain, urgent bool) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
-	msg.Plain = msgPlain
-	msg.Raw = msgRaw
-	msg.Urgent = msgInterrupt
+	msg.Plain = plain
+	msg.Raw = raw
+	msg.Urgent = urgent
 	if len(attachments) > 0 {
 		msg.Attachments = attachments
 	}
@@ -556,17 +568,24 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgRaw, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
-	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
+	result, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		if result != nil && result.Status == "deferred" {
+			// Design agent-reincarnate §3.7: the recipient is mid-`scion
+			// reincarnate`. The message was saved to history, not dropped.
+			fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, result.MessageID)
+		} else {
+			fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		}
 		if notify {
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}
@@ -612,7 +631,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 
 	// Step 2: Build the structured message with the sender's identity.
 	sender := resolveSenderIdentity(hubCtx)
-	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgRaw, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -677,15 +696,23 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
-			if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+			result, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+			if err != nil {
 				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
 			}
 			if !isJSONOutput() {
-				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+				if result != nil && result.Status == "deferred" {
+					// Design agent-reincarnate §3.7: the recipient is
+					// mid-`scion reincarnate`. The message was saved to
+					// history, not dropped.
+					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, result.MessageID)
+				} else {
+					fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+				}
 			}
 			return nil
 		}
@@ -728,14 +755,27 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		if !isJSONOutput() {
-			// Distinguish accepted dispatch from confirmed delivery.
-			if result.Status == "sent" {
-				fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+			// apiclient.DecodeResponse returns (nil, nil) on 204 No Content, so
+			// result can be nil with a nil err; print the minimal confirmation
+			// instead of dereferencing a nil result.
+			if result == nil {
+				fmt.Printf("Message dispatched to %s.\n", ref.Raw)
 			} else {
-				fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+				// Distinguish accepted dispatch from confirmed delivery.
+				switch result.Status {
+				case "sent":
+					fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+				case "deferred":
+					// Design agent-reincarnate §3.7: the recipient is mid-`scion
+					// reincarnate`. The message was saved to history, not dropped.
+					fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
+				default:
+					fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+				}
 			}
 		} else {
-			// JSON output with full result
+			// JSON output with full result. outputJSON encodes a nil *OutboundMessageResult
+			// as JSON null, which is valid output and does not panic.
 			return outputJSON(result)
 		}
 		return nil
@@ -755,7 +795,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -878,6 +918,12 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		Error     string `json:"error,omitempty"`
 	}
 
+	// A25.6 F2: the group[] fan-out prints its per-recipient status from the
+	// send response, not an assumption. Report-7-gteam-2a: while a target
+	// was reincarnating, the human CLI printed "Delivered" for it anyway —
+	// the response was discarded. Mirror the single-recipient path's own
+	// "Status == deferred" check (see sendMessageViaHub above).
+
 	results := make([]recipientResult, len(recipients))
 	var wg sync.WaitGroup
 
@@ -892,14 +938,22 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgRaw, msgPlain, interrupt)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if _, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
+				sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+				if err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				if sendResp != nil && sendResp.Status == "deferred" {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "deferred"}
+					if !isJSONOutput() {
+						fmt.Printf("  Deferred: %s (agent is reincarnating; saved)\n", recipStr)
 					}
 					return
 				}
@@ -948,13 +1002,30 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 	wg.Wait()
 
 	delivered := 0
+	deferred := 0
+	failed := 0
 	for _, r := range results {
-		if r.Status == "delivered" {
+		switch r.Status {
+		case "delivered":
 			delivered++
+		case "deferred":
+			deferred++
+		default:
+			failed++
 		}
 	}
 
-	if !isJSONOutput() {
+	// A25.7 O1: honour --json for group sends the same way the
+	// single-recipient paths do (outputJSON(result)) — the per-recipient
+	// status, including "deferred", was previously only ever printed as
+	// human text; --json produced no output at all.
+	if isJSONOutput() {
+		if err := outputJSON(results); err != nil {
+			return err
+		}
+	} else if deferred > 0 {
+		fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
+	} else {
 		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
@@ -994,11 +1065,22 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		}
 	}
 
-	if delivered == 0 {
-		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
+	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
+	// §3.7 — the message is saved for catch-up, not dropped), so it must not
+	// trip the partial-failure error below on its own.
+	//
+	// A25.7 O2: report delivered, deferred and failed counts explicitly. The
+	// previous "%d/%d delivered" wording folded deferred into "delivered" for
+	// this message only (the counts above were already separated), which
+	// could describe e.g. 1 delivered + 1 deferred + 1 failed as "2/3
+	// delivered" — technically true of the denominator, but it hides that a
+	// real failure occurred.
+	succeeded := delivered + deferred
+	if succeeded == 0 {
+		return fmt.Errorf("group delivery failed: 0 delivered, 0 deferred, %d failed (of %d total)", failed, len(recipients))
 	}
-	if delivered < len(recipients) {
-		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
+	if succeeded < len(recipients) {
+		return fmt.Errorf("group delivery partially failed: %d delivered, %d deferred, %d failed (of %d total)", delivered, deferred, failed, len(recipients))
 	}
 
 	return nil

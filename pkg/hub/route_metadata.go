@@ -922,9 +922,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 
 	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
+	//
+	// These routes are RouteBrokerHMAC (route-guard pass-through) because
+	// several of them (join, inbound, callback) are broker-credentialed or
+	// unauthenticated by design, not because none of them need a permission
+	// check. POST /api/v1/brokers is user-credentialed and enforces
+	// broker.create itself, in-handler, via authorizeBrokerCreate
+	// (handlers_brokers.go) — see createBrokerRegistration and its
+	// ptone/scion#2138 gate. It is not RoutePolicy because the same path
+	// also carries the additional target owner/super-admin re-registration
+	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {
-		Pattern: "/api/v1/brokers", RouteID: "brokers.list",
+		Pattern: "/api/v1/brokers", RouteID: "brokers.create",
 		Classification: RouteBrokerHMAC,
 	},
 	"/api/v1/brokers/join": {

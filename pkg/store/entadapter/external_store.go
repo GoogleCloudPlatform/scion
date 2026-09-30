@@ -597,6 +597,16 @@ func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 	if e.LastUsed != nil {
 		t.LastUsed = e.LastUsed
 	}
+	// E.1 descriptive credential metadata.
+	if e.Purpose != nil {
+		t.Purpose = e.Purpose
+	}
+	if e.Labels != nil && *e.Labels != "" {
+		var labels map[string]string
+		if err := json.Unmarshal([]byte(*e.Labels), &labels); err == nil {
+			t.Labels = labels
+		}
+	}
 	return t
 }
 
@@ -639,6 +649,15 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 	}
 	if token.LastUsed != nil {
 		create.SetLastUsed(*token.LastUsed)
+	}
+	// E.1 descriptive credential metadata.
+	if token.Purpose != nil {
+		create.SetPurpose(*token.Purpose)
+	}
+	if len(token.Labels) > 0 {
+		if labelsJSON, err := json.Marshal(token.Labels); err == nil {
+			create.SetLabels(string(labelsJSON))
+		}
 	}
 
 	if _, err := create.Save(ctx); err != nil {

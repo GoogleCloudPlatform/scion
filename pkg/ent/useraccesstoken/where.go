@@ -115,6 +115,16 @@ func Created(v time.Time) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldCreated, v))
 }
 
+// Purpose applies equality check predicate on the "purpose" field. It's identical to PurposeEQ.
+func Purpose(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldPurpose, v))
+}
+
+// Labels applies equality check predicate on the "labels" field. It's identical to LabelsEQ.
+func Labels(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldLabels, v))
+}
+
 // UserIDEQ applies the EQ predicate on the "user_id" field.
 func UserIDEQ(v uuid.UUID) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldUserID, v))
@@ -718,6 +728,156 @@ func CreatedLT(v time.Time) predicate.UserAccessToken {
 // CreatedLTE applies the LTE predicate on the "created" field.
 func CreatedLTE(v time.Time) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldLTE(FieldCreated, v))
+}
+
+// PurposeEQ applies the EQ predicate on the "purpose" field.
+func PurposeEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldPurpose, v))
+}
+
+// PurposeNEQ applies the NEQ predicate on the "purpose" field.
+func PurposeNEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNEQ(FieldPurpose, v))
+}
+
+// PurposeIn applies the In predicate on the "purpose" field.
+func PurposeIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIn(FieldPurpose, vs...))
+}
+
+// PurposeNotIn applies the NotIn predicate on the "purpose" field.
+func PurposeNotIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotIn(FieldPurpose, vs...))
+}
+
+// PurposeGT applies the GT predicate on the "purpose" field.
+func PurposeGT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGT(FieldPurpose, v))
+}
+
+// PurposeGTE applies the GTE predicate on the "purpose" field.
+func PurposeGTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGTE(FieldPurpose, v))
+}
+
+// PurposeLT applies the LT predicate on the "purpose" field.
+func PurposeLT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLT(FieldPurpose, v))
+}
+
+// PurposeLTE applies the LTE predicate on the "purpose" field.
+func PurposeLTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLTE(FieldPurpose, v))
+}
+
+// PurposeContains applies the Contains predicate on the "purpose" field.
+func PurposeContains(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContains(FieldPurpose, v))
+}
+
+// PurposeHasPrefix applies the HasPrefix predicate on the "purpose" field.
+func PurposeHasPrefix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasPrefix(FieldPurpose, v))
+}
+
+// PurposeHasSuffix applies the HasSuffix predicate on the "purpose" field.
+func PurposeHasSuffix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasSuffix(FieldPurpose, v))
+}
+
+// PurposeIsNil applies the IsNil predicate on the "purpose" field.
+func PurposeIsNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIsNull(FieldPurpose))
+}
+
+// PurposeNotNil applies the NotNil predicate on the "purpose" field.
+func PurposeNotNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotNull(FieldPurpose))
+}
+
+// PurposeEqualFold applies the EqualFold predicate on the "purpose" field.
+func PurposeEqualFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEqualFold(FieldPurpose, v))
+}
+
+// PurposeContainsFold applies the ContainsFold predicate on the "purpose" field.
+func PurposeContainsFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContainsFold(FieldPurpose, v))
+}
+
+// LabelsEQ applies the EQ predicate on the "labels" field.
+func LabelsEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldLabels, v))
+}
+
+// LabelsNEQ applies the NEQ predicate on the "labels" field.
+func LabelsNEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNEQ(FieldLabels, v))
+}
+
+// LabelsIn applies the In predicate on the "labels" field.
+func LabelsIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIn(FieldLabels, vs...))
+}
+
+// LabelsNotIn applies the NotIn predicate on the "labels" field.
+func LabelsNotIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotIn(FieldLabels, vs...))
+}
+
+// LabelsGT applies the GT predicate on the "labels" field.
+func LabelsGT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGT(FieldLabels, v))
+}
+
+// LabelsGTE applies the GTE predicate on the "labels" field.
+func LabelsGTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGTE(FieldLabels, v))
+}
+
+// LabelsLT applies the LT predicate on the "labels" field.
+func LabelsLT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLT(FieldLabels, v))
+}
+
+// LabelsLTE applies the LTE predicate on the "labels" field.
+func LabelsLTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLTE(FieldLabels, v))
+}
+
+// LabelsContains applies the Contains predicate on the "labels" field.
+func LabelsContains(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContains(FieldLabels, v))
+}
+
+// LabelsHasPrefix applies the HasPrefix predicate on the "labels" field.
+func LabelsHasPrefix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasPrefix(FieldLabels, v))
+}
+
+// LabelsHasSuffix applies the HasSuffix predicate on the "labels" field.
+func LabelsHasSuffix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasSuffix(FieldLabels, v))
+}
+
+// LabelsIsNil applies the IsNil predicate on the "labels" field.
+func LabelsIsNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIsNull(FieldLabels))
+}
+
+// LabelsNotNil applies the NotNil predicate on the "labels" field.
+func LabelsNotNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotNull(FieldLabels))
+}
+
+// LabelsEqualFold applies the EqualFold predicate on the "labels" field.
+func LabelsEqualFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEqualFold(FieldLabels, v))
+}
+
+// LabelsContainsFold applies the ContainsFold predicate on the "labels" field.
+func LabelsContainsFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContainsFold(FieldLabels, v))
 }
 
 // And groups predicates with the AND operator between them.
