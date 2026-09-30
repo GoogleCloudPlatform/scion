@@ -124,8 +124,9 @@ type usageReservationView struct {
 	// override, "entitlement"/"hub_default" for a 0 binding or default).
 	// "unlimited" itself needs a nil limitDef or a nil quotaService in
 	// effectiveBrokerLimit; neither can occur here: def is this request's
-	// limit definition (never nil — see getUsageByLimit/getUsageSummary),
-	// and s.quotaService is always constructed in NewServer (server.go).
+	// limit definition (never nil — see getUsageByLimit, the only builder of
+	// usageReservationView), and s.quotaService is always constructed in
+	// NewServer (server.go).
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
