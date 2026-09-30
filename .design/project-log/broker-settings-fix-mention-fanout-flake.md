@@ -2,8 +2,8 @@
 
 Branch `scion/broker-settings-fix-mention-fanout-flake`, cut from `upstream-main`
 (`GoogleCloudPlatform/scion` main) and rebased onto its later tip `169540efc` before opening the PR.
-PR `ptone/scion` (see message to EM for the number), not draft. Part of `ptone/scion#2061`. Task
-brief: investigate the order-dependent MentionFanout flake, `ptone/scion#2418`.
+PR `ptone/scion#2434`, not draft. Part of `ptone/scion#2061`. Task brief: investigate the
+order-dependent MentionFanout flake, `ptone/scion#2418`.
 
 ## Summary
 
@@ -102,16 +102,18 @@ services themselves via their own `t.Cleanup`.
    `events.Close()` and `commandBus.Close()`. Separately, `previewService.Close()` is called by
    neither `Shutdown()` nor `CleanupResources()` in production code at all.
 
-Both filed as fork issues on `ptone/scion`, referencing this PR and `ptone/scion#2418`.
+Both filed as fork issues on `ptone/scion`: `ptone/scion#2432` (the 17 files) and
+`ptone/scion#2433` (the Shutdown production gap), each referencing this PR and `ptone/scion#2418`.
 
 ## Gates run
 
 - `go vet ./pkg/hub/`: clean.
 - `golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...`: 0 issues.
 - `gofmt -l pkg/hub/handlers_test.go`: clean.
-- `go test -race -run 'TestMentionFanout|TestProcessMentions' -count=1 ./pkg/hub/`: see PR/message
-  for result.
-- `go test -p 2 -timeout 30m ./pkg/hub/...` (full package, fixed branch): see PR/message for result.
+- `go test -race -run 'TestMentionFanout|TestProcessMentions' -count=1 ./pkg/hub/`: PASS, 58/58,
+  0 FAIL.
+- `go test -p 2 -timeout 30m ./pkg/hub/...` (full package, fixed branch): all green (921.2s for
+  pkg/hub itself; auth/authzop/githubapp/imagecheck/permissions subpackages also green).
 - Full `-race` neighborhood evidence (4 unfixed attempts, 4 fixed attempts) recorded in
   `/scion-volumes/scratchpad/projects/broker-settings/reviews/fix-mention-fanout-evidence.md`.
 
