@@ -171,6 +171,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"hub.lifecycle_hooks.update": {TargetClassKindHubResource}, "hub.allow_list.read": {TargetClassKindHubResource},
 	"hub.allow_list.update": {TargetClassKindHubResource}, "hub.project_defaults.read": {TargetClassKindHubResource},
 	"hub.project_defaults.update": {TargetClassKindHubResource}, "hub.messaging.update": {TargetClassKindHubResource},
+	"hub.experiments.update": {TargetClassKindHubResource},
 	"hub.auth_reset.execute": {TargetClassKindHubResource}, "hub.scheduler.read": {TargetClassKindHubResource},
 	"hub.scheduler.update": {TargetClassKindHubResource}, "hub.federation.read": {TargetClassKindHubResource},
 	"hub.federation.update": {TargetClassKindHubResource}, "hub.teams_manifest.read": {TargetClassKindHubResource},

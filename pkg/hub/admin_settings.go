@@ -247,6 +247,18 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// The "experiments" section has its own compare-and-set reset with a
+	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
+	// hub.experiments.update. This generic route has no compare-and-set and
+	// is gated on hub.config.update, so it must not be a second way to clear
+	// every experiment override (ptone/scion#2217). Rejected before any
+	// store call.
+	if sectionName == "experiments" {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use DELETE /api/v1/admin/experiments", nil)
+		return
+	}
+
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
 		writeError(w, http.StatusNotFound, ErrCodeNotFound,

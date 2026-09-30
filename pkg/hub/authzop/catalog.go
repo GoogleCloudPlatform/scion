@@ -1207,6 +1207,25 @@ var Catalog = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "hub.experiments.update",
+		Domain:      "hub",
+		Description: "Read and update hub-wide experiment overrides",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/experiments", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.experiments.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+	{
 		ID:          "hub.maintenance.execute",
 		Domain:      "hub",
 		Description: "Execute maintenance operations including migrations and restarts",
@@ -2597,6 +2616,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/pre-start-hooks", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks; GET is open, POST/PUT/DELETE require hub-admin (enforced in handler via requireAdmin). Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/pre-start-hooks/", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks by ID; admin enforcement in handler via requireAdmin. Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/usage/me", Kind: ExemptionAuthenticationOnly, Reason: "Own usage statistics, self-service", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
 
 	// Workstation endpoints — workstation token authentication
 	{Pattern: "/api/v1/system/identity", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},

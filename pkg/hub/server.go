@@ -4961,6 +4961,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.guarded("/api/v1/admin/server-config", s.handleAdminServerConfig))
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
+	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
@@ -5053,6 +5054,9 @@ func (s *Server) registerRoutes() {
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
+
+	// Resolved experiments map for signed-in callers (ptone/scion#2217).
+	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))
 
 	// GitHub App integration endpoints: method-aware permission enforcement.
 	// Read operations use hub.github_app.read; mutations use hub.github_app.update.
