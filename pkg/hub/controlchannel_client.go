@@ -334,8 +334,10 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 	if err := checkBodySize(agentkeys.BrokerRouteMethod, path, body); err != nil {
 		// Too large to tunnel safely: a Hub-side, pre-send capability limit,
 		// not a broker decision, and keys has no HTTP-fallback path to retry
-		// through (unlike MessageAgent/HybridBrokerClient).
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+		// through (unlike MessageAgent/HybridBrokerClient). err is a
+		// *ErrPayloadTooLarge; wrap with %w (not %v) so a caller can still
+		// errors.As it out from underneath the ErrNotDispatched wrap.
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	// Build and sign the envelope directly here rather than going through
@@ -347,7 +349,7 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 	// one call whose error is genuinely uncertain rather than ErrNotDispatched.
 	headers, err := c.buildRequestHeaders(ctx, brokerID, agentkeys.BrokerRouteMethod, path, query, body)
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	envelope := wsprotocol.NewRequestEnvelope(uuid.New().String(), agentkeys.BrokerRouteMethod, path, query, headers, body)

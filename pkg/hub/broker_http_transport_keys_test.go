@@ -176,6 +176,49 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_BrokerDecision(t *testing.T) {
 	}
 }
 
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_ResponseBodyIsBounded proves a
+// misbehaving or compromised broker cannot make ExecuteKeys read an
+// unbounded response body: agentkeys.BrokerResult is a small, fixed-shape
+// JSON value, so a response many times larger than maxKeysResponseBodyBytes
+// must still be read promptly and truncated, and — since the truncated body
+// no longer parses as a well-formed BrokerResult — must classify as an
+// honest "outcome unknown" rather than a false success or a crash.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_ResponseBodyIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// A well-formed-looking success body, padded with far more bytes
+		// than the response ceiling allows, via a long "message" value.
+		_, _ = w.Write([]byte(`{"operation_id":"op-1","outcome":"dispatched","message":"`))
+		padding := make([]byte, 10*maxKeysResponseBodyBytes)
+		for i := range padding {
+			padding[i] = 'a'
+		}
+		_, _ = w.Write(padding)
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		defer close(done)
+		_, err = client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ExecuteKeys did not return promptly reading an oversized response body")
+	}
+
+	if err == nil {
+		t.Fatal("expected an error: the truncated body cannot parse as a well-formed BrokerResult")
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q (err=%v)", got, agentkeys.OutcomeKeysOutcomeUnknown, err)
+	}
+}
+
 // TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes proves malformed or
 // disagreeing responses classify as outcome_unknown rather than being
 // guessed at — never a false "definitely didn't happen" or "delivered" — and,

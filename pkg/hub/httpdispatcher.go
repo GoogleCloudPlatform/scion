@@ -2783,16 +2783,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 	// broker's mux would answer with a path-clean redirect, which keysClient
 	// correctly does not follow, so this would otherwise surface as an
 	// uncertain "may have run" outcome for a request that never reached a
-	// handler. An empty AgentID or ProjectID are caller bugs too — task 2.2
-	// always passes these three fields from an already-resolved *store.Agent
-	// — and are proven-empty before any request is built, the same standard
-	// as the deadline and operation-ID guards above. (An empty
-	// RuntimeBrokerID already fails at getBrokerEndpoint below.) This is an
+	// handler. An empty AgentID, ProjectID or RuntimeBrokerID are caller bugs
+	// too — task 2.2 always passes these fields from an already-resolved
+	// *store.Agent — and are proven-empty before any request is built, the
+	// same standard as the deadline and operation-ID guards above. Checking
+	// RuntimeBrokerID here too (rather than only implicitly via the
+	// getBrokerEndpoint call below) fails fast and avoids an unnecessary
+	// store read for an already-known-invalid target. This is an
 	// input-shape check, not re-resolution or re-authorization of target, so
 	// it does not conflict with the "Dispatcher does not re-resolve" rule in
 	// contract §4.4.
-	if target.AgentSlug == "" || target.AgentID == "" || target.ProjectID == "" {
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: target agent slug, agent ID and project ID are all required", agentkeys.ErrNotDispatched)
+	if target.AgentSlug == "" || target.AgentID == "" || target.ProjectID == "" || target.RuntimeBrokerID == "" {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: target agent slug, agent ID, project ID and runtime broker ID are all required", agentkeys.ErrNotDispatched)
 	}
 
 	keysClient, ok := d.client.(agentkeys.BrokerClient)
@@ -2802,7 +2804,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 
 	endpoint, err := d.getBrokerEndpoint(ctx, target.RuntimeBrokerID)
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	req := agentkeys.BrokerRequest{

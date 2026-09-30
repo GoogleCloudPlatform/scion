@@ -387,6 +387,17 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	return nil
 }
 
+// maxKeysResponseBodyBytes bounds how much of a broker's keys response body
+// ExecuteKeys will read. agentkeys.BrokerResult is a small, fixed-shape JSON
+// value (operation_id, outcome, an optional human-readable message that must
+// never carry key content); this ceiling gives generous headroom over that
+// shape's realistic worst case while bounding memory use against a
+// misbehaving or compromised broker that returns an arbitrarily large
+// response. A response that is truncated by this limit will simply fail to
+// parse as a BrokerResult, which decodeBrokerKeysResponse already treats as
+// an honest "outcome unknown" rather than a false success or a crash.
+const maxKeysResponseBodyBytes = 64 * 1024
+
 // ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
 // keys route directly over HTTP. It is single-attempt (no retry, no redirect
 // following via keysClient) and returns agentkeys.ErrNotDispatched only for
@@ -404,7 +415,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	body, err := json.Marshal(req)
 	if err != nil {
 		// Proven before anything was sent: no request was ever constructed.
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to marshal keys request: %v", agentkeys.ErrNotDispatched, err)
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to marshal keys request: %w", agentkeys.ErrNotDispatched, err)
 	}
 
 	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
@@ -413,7 +424,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 
 	httpReq, err := http.NewRequestWithContext(ctx, agentkeys.BrokerRouteMethod, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to create request: %v", agentkeys.ErrNotDispatched, err)
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to create request: %w", agentkeys.ErrNotDispatched, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if t.signer != nil {
@@ -423,7 +434,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 			}
 			// A signing failure (e.g. missing/expired broker secret) never
 			// puts a byte on the wire.
-			return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
+			return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %w", agentkeys.ErrNotDispatched, err)
 		}
 	}
 
@@ -458,7 +469,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxKeysResponseBodyBytes))
 	if err != nil {
 		return agentkeys.BrokerResult{}, fmt.Errorf("keys: failed to read broker response: %w", err)
 	}
@@ -479,7 +490,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 func classifyKeysSendError(err error) error {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+		return fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 	return fmt.Errorf("keys: uncertain dispatch outcome: %w", err)
 }

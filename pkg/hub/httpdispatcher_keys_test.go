@@ -226,6 +226,10 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnInvalidInput(t *test
 			tg.ProjectID = ""
 			return tg
 		}},
+		{"empty runtime broker ID", "op-1", time.Now().Add(time.Minute), func(tg agentkeys.Target) agentkeys.Target {
+			tg.RuntimeBrokerID = ""
+			return tg
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
