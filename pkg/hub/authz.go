@@ -168,6 +168,14 @@ type AuthzRequest struct {
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
 
+	// Actor and Purpose describe who initiated the operation and why, when
+	// that differs from Principal (for example a delivery performed for a
+	// target agent). They are recorded on every decision (and in its
+	// provenance when present) for audit and never contribute to the
+	// decision.
+	Actor   *DecisionActor
+	Purpose string
+
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
 	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
@@ -177,6 +185,12 @@ type AuthzRequest struct {
 	// body that only learns this partway through evaluation. It never
 	// changes the authorization result.
 	AlwaysAudit bool
+}
+
+// DecisionActor identifies the initiator of an operation. Audit-only.
+type DecisionActor struct {
+	Kind PrincipalKind `json:"kind,omitempty"`
+	ID   string        `json:"id"`
 }
 
 // AuthzRequestFromContext builds a request from authentication middleware
@@ -216,6 +230,11 @@ type Decision struct {
 	CredentialType string
 	CredentialKind string
 	ExplainTrace   []DecisionStep `json:"explainTrace,omitempty"`
+
+	// Actor and Purpose echo AuthzRequest.Actor/Purpose on every decision.
+	// Audit-only: they never contribute to Allowed.
+	Actor   *DecisionActor `json:"actor,omitempty"`
+	Purpose string         `json:"purpose,omitempty"`
 
 	// PermissionID is the caller-supplied AuthzRequest.Permission, recorded
 	// only when it is a canonical ID present in the permissions registry.
@@ -304,6 +323,10 @@ type AuthzService struct {
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
+
+	// progenyAdapters holds progeny sharing-source adapters registered
+	// through RegisterProgenyAdapter.
+	progenyAdapters progenyAdapterRegistry
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -352,11 +375,11 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
 	principal := request.Principal
 	if principal.Identity == nil {
-		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, principal, request.Credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "missing principal"}, request, principal, request.Credential, auditPermissionID(request))
 	}
 	derivedPrincipal := principalContextForIdentity(principal.Identity)
 	if principal.Kind != "" && principal.Kind != derivedPrincipal.Kind {
-		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, derivedPrincipal, request.Credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "principal kind does not match identity"}, request, derivedPrincipal, request.Credential, auditPermissionID(request))
 	}
 	principal.Kind = derivedPrincipal.Kind
 	if principal.ID == "" {
@@ -371,16 +394,34 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, principal, credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, request, principal, credential, auditPermissionID(request))
 	case PrincipalKindBroker:
-		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, principal, credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, request, principal, credential, auditPermissionID(request))
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
-	// use it; otherwise derive from resource type + action.
+	// use it; otherwise resolve it from resource type + action. A pair that
+	// does not name exactly one permission is denied.
 	permissionID := request.Permission
 	if permissionID == "" {
-		permissionID = derivePermissionID(request.Resource.Type, request.Action)
+		resolved, err := resolveResourcePermission(request.Resource.Type, request.Action)
+		if err != nil {
+			a.logger.Warn("authorization request has no resolvable permission",
+				"resource_type", request.Resource.Type, "action", string(request.Action), "error", err)
+			d := Decision{Allowed: false, Reason: unresolvablePermissionReason}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Errors:          []string{err.Error()},
+					DenyReasons:     []string{unresolvablePermissionReason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		}
+		permissionID = resolved
 	}
 
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
@@ -391,7 +432,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if user, ok := principal.Identity.(UserIdentity); ok {
 			if scoped, ok := user.(*ScopedUserIdentity); ok {
 				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, principal, credential, auditPermissionID(request))
+					return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 				}
 			}
 		}
@@ -421,7 +462,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, auditPermissionID(request))
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 	}
 
 	// Build typed principal closure map (O2: type:id composite keys).
@@ -464,7 +505,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, auditPermissionID(request))
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
@@ -489,7 +530,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				MembershipPaths: []MembershipPathDetail{},
 			}
 		}
-		return decorateDecision(d, principal, credential, auditPermissionID(request))
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
 	}
 
 	// ── Step 5: Convert to CandidateBindings ──────────────────────────
@@ -588,24 +629,34 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	kernelResult := Evaluate(kernelReq)
 
-	// ── Step 9: Relationship grants (checked alongside kernel) ────────
-	// If the kernel denied, check named relationship grants. These
-	// replace the legacy bypasses (owner, ancestor, progeny) with
-	// documented, traceable grant paths.
+	// ── Step 9: Relationship candidates ───────────────────────────────
+	// On a kernel deny, named relationships (owner, ancestor, progeny,
+	// hub-member assign, creator user skill) are evaluated as typed
+	// candidates through the common stages in authz_relationship_rules.go:
+	// relationship policy, hub-attested ancestry, relationship fact, source
+	// activity, and the same restrictions the kernel applied (7a/7b/7c).
+	// With Explain, candidates are also evaluated on a kernel allow so the
+	// provenance lists them.
 	decision := kernelDecisionToDecision(kernelResult, permissionID)
-	if !kernelResult.Allowed {
-		if relDecision, ok := a.checkRelationshipGrants(ctx, principal, request.Resource, request.Action, permissionID, credential); ok {
-			// Apply credential restrictions to relationship grants too.
-			for _, r := range restrictions {
-				if r.Check == nil || !r.Check(permissionID) {
-					relDecision.Allowed = false
-					relDecision.Reason = "relationship grant restricted by " + r.Kind
-					break
+	if !kernelResult.Allowed || request.Explain {
+		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		if !kernelResult.Allowed {
+			if rel.accepted != nil {
+				kernelProvenance := decision.Provenance
+				decision = *rel.accepted
+				if request.Explain && kernelProvenance != nil {
+					kernelProvenance.DenyReasons = nil
+					decision.Provenance = kernelProvenance
+				}
+			} else if rel.restrictedBy != "" {
+				decision.Reason = "relationship grant restricted by " + rel.restrictedBy
+				if decision.Provenance != nil {
+					decision.Provenance.DenyReasons = append([]string{decision.Reason}, decision.Provenance.DenyReasons...)
 				}
 			}
-			if relDecision.Allowed {
-				decision = relDecision
-			}
+		}
+		if request.Explain && decision.Provenance != nil {
+			decision.Provenance.Relationships = rel.results
 		}
 	}
 
@@ -654,7 +705,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	return decorateDecision(decision, principal, credential, auditPermissionID(request))
+	return decorateDecision(decision, request, principal, credential, auditPermissionID(request))
 }
 
 // DecideFromContext evaluates a request using the authenticated principal and
@@ -1021,102 +1072,8 @@ func formatBoundaryScope(scopeType, scopeID string) string {
 // Relationship grants (replacing legacy bypasses)
 // =============================================================================
 
-// checkRelationshipGrants evaluates named relationship grants. These replace
-// the legacy owner, ancestor, and progeny bypasses with documented, traceable
-// grant paths. Returns (decision, true) if a relationship grant applied,
-// (zero, false) otherwise.
-func (a *AuthzService) checkRelationshipGrants(
-	ctx context.Context,
-	principal PrincipalContext,
-	resource Resource,
-	action Action,
-	permissionID string,
-	credential CredentialContext,
-) (Decision, bool) {
-	// 1. Ancestry-based transitive access.
-	// Any principal (user or agent) in the resource's creation chain has
-	// access. This replaces the old canAccessAsAncestor bypass with a named
-	// relationship grant. Hub-attested ancestry is enforced for agents.
-	if canAccessAsAncestor(principal.ID, resource) {
-		// For agents, verify ancestry is hub-attested.
-		if isAgentPrincipal(principal.Kind) {
-			if !AncestryIsHubAttested(principal.Identity) {
-				return Decision{}, false
-			}
-		}
-		return Decision{
-			Allowed:      true,
-			Reason:       "relationship grant: ancestor access",
-			Scope:        ScopeTypeRelationship,
-			MatchedGrant: "ancestor",
-		}, true
-	}
-
-	// 2. Resource owner access.
-	// The resource creator retains access to their own resources. This
-	// replaces the old owner bypass. Exception: ActionAssign on hub-scoped
-	// gcp_service_account requires current hub membership (D7 constraint).
-	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID {
-		if action == ActionAssign && resource.Type == "gcp_service_account" &&
-			resource.ParentType == "" && resource.ParentID == "" {
-			// Hub-scoped SA assign: owner bypass suppressed, fall through to
-			// hub membership check below.
-		} else {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: resource owner",
-				Scope:        ScopeTypeRelationship,
-				MatchedGrant: "owner",
-			}, true
-		}
-	}
-
-	// 3. Hub-scoped service-account assign for current hub members.
-	// Current hub members may assign hub-scoped SAs. This is a narrow
-	// code-defined grant that replaces the old hub-member baseline.
-	if isUserPrincipal(principal.Kind) &&
-		action == ActionAssign && resource.Type == "gcp_service_account" &&
-		resource.ParentType == "" && resource.ParentID == "" {
-		if a.isCurrentHubMember(ctx, principal.ID) {
-			return Decision{
-				Allowed:      true,
-				Reason:       "relationship grant: hub member hub-scoped assign",
-				Scope:        "hub",
-				MatchedGrant: "hub-member-assign",
-			}, true
-		}
-	}
-
-	// 4. Creator user-skill read (agents only).
-	// An agent may read its creator's own user-scoped skills; see
-	// agentCreatorUserSkillGrant. The origin user must also still exist and
-	// be active. The agent JWT restriction and access constraints (applied
-	// by the caller) and the delegation ceiling still apply on top.
-	if d, ok := agentCreatorUserSkillGrant(principal, resource, action); ok && a.originUserActive(ctx, principal) {
-		return d, true
-	}
-
-	// 5. Progeny relationship grants (agents only).
-	// Agent reads on secrets, env vars, and skill injections via the
-	// creator-progeny ancestry chain. Replaces the old DelegatedFrom
-	// policy pattern.
-	if isAgentPrincipal(principal.Kind) {
-		if agent, ok := principal.Identity.(AgentIdentity); ok {
-			result := a.relationshipResolver.CheckProgenyAccess(ctx, agent, resource, action)
-			if result.Allowed {
-				return Decision{
-					Allowed:      true,
-					Reason:       "relationship grant: " + string(result.RelationshipType),
-					Scope:        ScopeTypeRelationship,
-					MatchedGrant: result.Provenance.RoleName,
-					BindingID:    result.Provenance.BindingID,
-				}, true
-			}
-		}
-	}
-
-	return Decision{}, false
-}
+// Relationship grants are evaluated by evaluateRelationshipCandidates
+// (authz_relationship_rules.go).
 
 // =============================================================================
 // Agent synthetic binding construction
@@ -1432,20 +1389,8 @@ func normalizeClosureTypes(closure map[string]struct{}) map[string]struct{} {
 // Permission resolution
 // =============================================================================
 
-// derivePermissionID derives a canonical permission ID from a resource type
-// and action string. Falls back to "resourceType.action" format when no
-// registry match exists.
-func derivePermissionID(resourceType string, action Action) string {
-	actionStr := string(action)
-	// Look for an exact match in the permissions registry.
-	for _, p := range permissions.Registry {
-		if p.Resource == resourceType && p.Action == actionStr {
-			return p.ID
-		}
-	}
-	// Fallback: construct from resource type and action.
-	return resourceType + "." + actionStr
-}
+// Permission resolution for requests without an explicit permission lives
+// in authz_permission_resolver.go (resolveResourcePermission).
 
 // =============================================================================
 // Helper functions
@@ -1515,10 +1460,19 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	}
 }
 
-// decorateDecision finalizes a Decision with principal/credential attribution
-// and the audit-recorded permission ID. permID is a value from
-// auditPermissionID(request), never independently derived here.
-func decorateDecision(decision Decision, principal PrincipalContext, credential CredentialContext, permID string) Decision {
+// decorateDecision finalizes a Decision with principal/credential attribution,
+// the audit-recorded permission ID, and the request's Actor and Purpose.
+// Every decide return path goes through it, so Actor and Purpose are
+// recorded on every decision (and on its provenance when present). permID
+// is a value from auditPermissionID(request), never independently derived
+// here.
+func decorateDecision(decision Decision, request AuthzRequest, principal PrincipalContext, credential CredentialContext, permID string) Decision {
+	decision.Actor = request.Actor
+	decision.Purpose = request.Purpose
+	if decision.Provenance != nil {
+		decision.Provenance.Actor = request.Actor
+		decision.Provenance.Purpose = request.Purpose
+	}
 	decision.PrincipalKind = principal.Kind
 	decision.CredentialID = credential.ID
 	decision.CredentialType = credential.Type

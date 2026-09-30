@@ -3578,8 +3578,19 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
+		// Log the recorded initiator alongside the executor context set by
+		// the caller (fireEvent / executeSchedule), so a scheduled message is
+		// distinguishable in logs from a live send without changing the live
+		// authorization identity above (cutover rule).
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
-			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
+			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
+			"initiator_principal_kind", initiator.PrincipalKind,
+			"initiator_credential_kind", initiator.CredentialKind,
+			"initiator_credential_id", initiator.CredentialID,
+			"executor_kind", executor.Kind,
+			"executor_id", executor.ID)
 		return nil
 	}
 }
@@ -4073,6 +4084,42 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
 
+		// E.2b: success-path audit for scheduled dispatch. The deny-path
+		// records for this same CanDelegate check are in
+		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
+		// that deny-audit convention (the resolved creator/execution
+		// identity, required non-empty by the ent schema) — the cutover rule
+		// keeps the fire-time execution/authorization identity as CreatedBy,
+		// so the deny and allow audits for the same check agree on who the
+		// actor is.
+		//
+		// The recorded initiator's credential is copied onto the audit ONLY
+		// when the initiator is the same principal as the creator: after an
+		// update or resume by a different user, the initiator is not the
+		// creator, and ApplyActor exists specifically to prevent naming
+		// principal A with principal B's credential. When it does match, the
+		// value is mapped back to hub.CredentialKind's vocabulary
+		// (uat/agent_jwt/interactive), since actor_credential_type is a
+		// column every other writer fills from that domain, not
+		// InitiatorAttribution's smaller one.
+		scheduledDispatchAudit := &store.MutationAuditRecord{
+			MutationType:       "agent_delegation",
+			ActorPrincipalKind: creatorIdentity.Type(),
+			ActorPrincipalID:   creatorIdentity.ID(),
+			TargetType:         "agent",
+			TargetID:           agent.ID,
+			CanDelegateResult:  "allow",
+		}
+		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		if !initiator.LegacyUnknown &&
+			initiator.PrincipalKind == creatorIdentity.Type() && initiator.PrincipalID == creatorIdentity.ID() {
+			if hubKind := hubCredentialKindForInitiator(initiator.CredentialKind); hubKind != "" {
+				scheduledDispatchAudit.ActorCredentialType = hubKind
+				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
+			}
+		}
+		s.emitMutationAudit(ctx, scheduledDispatchAudit)
+
 		// Record delegation edge (Phase 1G) from the schedule creator to the
 		// dispatched agent. Best-effort: log errors but do not fail dispatch.
 		// Determine delegator type by looking up whether the creator is an agent.
@@ -4090,12 +4137,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
+		dispatchExecutor, _ := ExecutorContextFromContext(ctx)
 		dispatcher := s.GetDispatcher()
 		if dispatcher == nil {
 			slog.Warn("Scheduler: no dispatcher available, agent created but not started",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
-				"agentName", agent.Name)
+				"agentName", agent.Name,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return nil
 		}
 
@@ -4104,13 +4154,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"agentName", agent.Name,
-				"error", err)
+				"error", err,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"project_id", evt.ProjectID)
+			"project_id", evt.ProjectID,
+			"executor_kind", dispatchExecutor.Kind,
+			"executor_id", dispatchExecutor.ID)
 		return nil
 	}
 }
@@ -4169,6 +4223,12 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		Status:     store.ScheduledEventPending,
 		CreatedBy:  sched.CreatedBy,
 		ScheduleID: sched.ID,
+		// E.2b: every recurrence copies the schedule's current initiator
+		// attribution verbatim (plan §3.5) — a single struct assignment,
+		// since Schedule and ScheduledEvent share the same mixin. The
+		// materialized event then keeps this snapshot unchanged even if the
+		// schedule is later re-attributed.
+		InitiatorAttribution: sched.InitiatorAttribution,
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
@@ -4185,7 +4245,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		errMsg = fmt.Sprintf("unknown event type: %s", sched.EventType)
 		log.Error("schedule-evaluator: unknown event type", "event_type", sched.EventType)
 	} else {
-		handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// E.2b: mark this as deferred execution of the schedule, distinct
+		// from the initiator attribution just copied onto evt above.
+		handlerCtx, cancel := context.WithTimeout(
+			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
+			30*time.Second)
 		if handlerErr := handler(handlerCtx, evt); handlerErr != nil {
 			errMsg = handlerErr.Error()
 			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)

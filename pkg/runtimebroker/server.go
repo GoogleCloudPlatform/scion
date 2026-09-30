@@ -1173,6 +1173,13 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	}
 	agents = agentsForProject(agents, projectID)
 
+	// listUnavailable tracks whether any consulted runtime's List call itself
+	// failed (as opposed to succeeding with zero matches). A failure here must
+	// not be indistinguishable from "no such agent": callers (execCommand,
+	// resetAuth, projectScopedTarget) need to tell a genuinely missing agent
+	// (404) from a runtime that briefly could not answer (503, retry).
+	var listUnavailable bool
+
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
 		s.auxiliaryRuntimesMu.RLock()
@@ -1184,10 +1191,12 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 		for rtName, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
-			if auxErr == nil {
-				auxAgents = agentsForProject(auxAgents, projectID)
+			if auxErr != nil {
+				listUnavailable = true
+				continue
 			}
-			if auxErr == nil && len(auxAgents) > 0 {
+			auxAgents = agentsForProject(auxAgents, projectID)
+			if len(auxAgents) > 0 {
 				agents = auxAgents
 				slog.Debug("Agent found via auxiliary runtime", "slug", slug, "runtime", rtName)
 				break
@@ -1202,8 +1211,11 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
+		if err != nil {
+			return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
 		agents = agentsWithoutProjectLabel(agents)
-		if err == nil && len(agents) == 0 {
+		if len(agents) == 0 {
 			s.auxiliaryRuntimesMu.RLock()
 			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
 			for k, v := range s.auxiliaryRuntimes {
@@ -1213,10 +1225,12 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 			for rtName, aux := range auxRuntimes {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-				if auxErr == nil {
-					auxAgents = agentsWithoutProjectLabel(auxAgents)
+				if auxErr != nil {
+					listUnavailable = true
+					continue
 				}
-				if auxErr == nil && len(auxAgents) > 0 {
+				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				if len(auxAgents) > 0 {
 					agents = auxAgents
 					slog.Debug("Agent found via auxiliary runtime (fallback)", "slug", slug, "runtime", rtName)
 					break
@@ -1226,6 +1240,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	}
 
 	if len(agents) == 0 {
+		if listUnavailable {
+			return "", fmt.Errorf("%w: an auxiliary runtime failed to list agents while resolving '%s'", ErrAgentListUnavailable, slug)
+		}
 		return "", &agentNotFoundError{slug: slug}
 	}
 
