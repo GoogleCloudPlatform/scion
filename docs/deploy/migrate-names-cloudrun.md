@@ -1,4 +1,4 @@
-# Runbook: Running migrate-names on Cloud Run Hubs
+# Running migrate-names on Cloud Run hubs deployed with the terraform-ha modules
 
 Run `scion hub secret migrate-names` against a Cloud Run hub deployed with the
 hub-cloudrun Terraform module, using a one-off Cloud Run job.
@@ -9,23 +9,28 @@ legacy naming scheme to the hub-prefixed scheme (see
 The command opens the hub's own database directly from a DSN.
 
 **Scope:** this runbook is for Cloud Run hubs deployed with the hub-cloudrun
-Terraform module, whether the module's Cloud SQL instance has a public or a private
-IP — the DSN delivered as the `SCION_SERVER_DATABASE_URL` secret env var and
-`settings.yaml` mounted from a secret volume are the same either way. Direct VPC
-egress (`--network`/`--subnet`/`--vpc-egress` in §3) is needed only for a private-IP
-instance, which is reachable only from inside the VPC; a public-IP instance needs
-none of that wiring, because the Cloud SQL Auth Proxy that Cloud Run manages via
-`--set-cloudsql-instances` reaches a public IP directly. No hub in this scope is ever
-operated from a workstation for this: this job is the only supported way to run
-`migrate-names` against it, regardless of the instance's IP type. Other Cloud Run
-layouts (including one wired up by hand rather than by that module) will need the
-discovery steps in §2 adapted to their own service definition.
+Terraform module (one of the terraform-ha modules). Private-IP Cloud SQL, Direct VPC
+egress, and an explicit `hub_id` are prerequisites this module provides
+unconditionally: its Cloud SQL submodule hard-codes `ipv4_enabled = false`, so there
+is no public-IP variant of this module to support. The DSN is delivered as the
+`SCION_SERVER_DATABASE_URL` secret env var, and `settings.yaml` is mounted from a
+secret volume. No hub in this scope is ever operated from a workstation for this:
+this job is the only supported way to run `migrate-names` against it. Other Cloud
+Run layouts wired up by hand (not by this module) will need the discovery steps in
+§2 adapted to their own service definition.
 
-This runbook avoids handing the database credential to a human, and (for a
-private-IP instance) works around the lack of any network path from a workstation,
-with a **one-off Cloud Run job**: an ephemeral job that borrows the running service's
-own identity, VPC wiring (if any) and Cloud SQL connection to reach the database, runs
-the migration, and is deleted afterward. It is **not** Terraform-managed — there is no
+Hubs deployed with the manual [Deploy on GCP](/scion/hosted/ha/setup-gcp/) guide are
+**not** covered by this runbook. That guide's hub uses a public-IP Cloud SQL
+instance with no Direct VPC egress, and keeps its DSN inside `settings.yaml` rather
+than a separate secret env var — none of which this runbook's discovery steps
+assume.
+
+This runbook avoids handing the database credential to a human, and works around
+the lack of any network path from a workstation to the private-IP Cloud SQL
+instance, with a **one-off Cloud Run job**: an ephemeral job that borrows the
+running service's own identity, VPC wiring and Cloud SQL connection to reach the
+database, runs the migration, and is deleted afterward. It is **not**
+Terraform-managed — there is no
 `google_cloud_run_v2_job` resource for this. The job is created ad hoc with `gcloud`,
 used for the five migration passes below, and deleted. A permanent resource isn't
 worth it for a one-time migration that `--delete-legacy` (and a later removal of the
@@ -47,7 +52,7 @@ against `cmd/hub_secret_migrate_names.go`:
 | Service has it for... | migrate-names needs it? | Included in the job? |
 | :--- | :--- | :--- |
 | The service's runtime service account | Yes — it's the identity used for both Cloud SQL and Secret Manager access; no new IAM is created for the job. | Yes, `--service-account` |
-| Direct VPC egress (network/subnet, `PRIVATE_RANGES_ONLY`) | Only for a private-IP instance — it's reachable only from inside the VPC. A public-IP instance needs none of this; `--set-cloudsql-instances` reaches it without any VPC wiring. | Yes, `--network`/`--subnet`/`--vpc-egress` — omit all three for a public-IP instance |
+| Direct VPC egress (network/subnet, `PRIVATE_RANGES_ONLY`) | Yes — every hub in this runbook's scope has a private-IP-only Cloud SQL instance, reachable only from inside the VPC. | Yes, `--network`/`--subnet`/`--vpc-egress` |
 | `/cloudsql` Cloud SQL volume | Yes — the DSN embeds `?host=/cloudsql/<connection name>`; without the volume the socket path doesn't exist and the connection fails. | Yes, `--set-cloudsql-instances` |
 | `SCION_SERVER_DATABASE_URL` secret env (the DSN) | Yes — this is the only way the command opens the database. | Yes, `--set-secrets` |
 | `settings.yaml` secret, mounted as a file | Yes, but only for one field: **`server.database.driver: postgres`**. Without the settings file (or `SCION_SERVER_DATABASE_DRIVER`), the driver resolves to sqlite — `openMigrateNamesStore`'s `switch` treats an empty/default driver as `"sqlite"` (the legacy loader's own default), so the job would silently try to open the Postgres DSN as a sqlite file. `--config` pointed at the mounted file is what makes the command see `driver: postgres`. Its `server.hub.hub_id` is not read when `--hub-id` is passed. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml` |
@@ -132,10 +137,8 @@ SA=$(echo "$SVC" | jq -r '.spec.template.spec.serviceAccountName')
 ```
 
 **Network, subnet, VPC egress** (Direct VPC egress is expressed as annotations on the
-revision template — present only for a private-IP instance; on a public-IP instance
-these annotations are absent, so skip this block, the corresponding
-`--network`/`--subnet`/`--vpc-egress` flags in §3, and `NETWORK`/`SUBNET`/`EGRESS` in
-the validation loop below):
+revision template — every hub in scope has them, since the module's Cloud SQL
+instance is always private-IP):
 
 ```bash
 NET_JSON=$(echo "$SVC" | jq -r '.spec.template.metadata.annotations["run.googleapis.com/network-interfaces"]')
@@ -246,9 +249,8 @@ to read a secret value, which this whole procedure is designed to avoid.
 
 ## 3. Create the job
 
-Include `--network`/`--subnet`/`--vpc-egress` only if the discovery step found a
-private-IP instance with Direct VPC egress configured; drop all three flags for a
-public-IP instance, which `--set-cloudsql-instances` reaches on its own.
+`--network`/`--subnet`/`--vpc-egress` are always required in this runbook's scope,
+since the module's Cloud SQL instance is private-IP only.
 
 ```bash
 gcloud run jobs create "${HUB}-migrate-names" \
@@ -301,7 +303,9 @@ BASE_ARGS="hub,secret,migrate-names,--gcp-project=${PROJECT},--hub-id=${HUB_ID},
 `--global` is required: the root command's `PersistentPreRunE` demands a scion
 project for `hub secret ...` subcommands unless `--global` is passed, and this job's
 container has none. `migrate-names` never uses a project path (it resolves everything
-through `--config`/`LoadGlobalConfig`), so `--global` is safe here.
+through `--config`/`LoadGlobalConfig`), so `--global` is safe here. (Whether
+`hub secret` subcommands should be exempted from that requirement outright is
+tracked separately in ptone/scion#2396.)
 
 The **rollout check** below re-appears before passes 2, 3, and 4 — it always fetches
 live state, so it can't be fooled by a stale `$SVC` captured back in §2:
@@ -318,7 +322,7 @@ echo "$FRESH_SVC" \
       and .status.latestCreatedRevisionName == $rev
       and .metadata.generation == .status.observedGeneration' \
   && echo "OK: 100% on $REVISION" \
-  || echo "STOP: rollout not complete, revision changed, or traffic is pinned to a non-latest revision"
+  || echo "STOP: rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists"
 ```
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
@@ -327,11 +331,20 @@ the job to in §2, and that revision must also be both `latestReadyRevisionName`
 `status.observedGeneration` — otherwise the job's config (read from the service
 template) and its image (read from the traffic revision) could belong to two different
 revisions: a rollback with traffic pinned to an older revision, or a new deploy that
-failed to become ready or hasn't finished rolling out yet. If the check reports `STOP`,
-resolve the rollout (finish or revert it), delete the job (§6), and restart from §2 so
-the job is re-pinned to the new serving digest. Never run a non-dry pass from a job
-whose digest isn't the 100%-traffic revision's — retrying later from the same job
-won't help, since it's still pinned to the old digest.
+failed to become ready or hasn't finished rolling out yet.
+
+The check also stops while **any** traffic tag is present on **any** revision, even
+the one serving 100% — the `length == 1` and empty-`tag` terms both require it. A
+tagged revision still serves requests at its own tag URL, so it's a live writer under
+the legacy naming scheme, which is exactly what `--delete-legacy` must rule out. Find
+a tag with `echo "$FRESH_SVC" | jq '.status.traffic'`, and remove it with
+`gcloud run services update-traffic "$HUB" --project "$PROJECT" --region "$REGION"
+--remove-tags=<tag>`, then re-run the check.
+
+For any other `STOP`, resolve the rollout (finish or revert it), delete the job (§6),
+and restart from §2 so the job is re-pinned to the new serving digest. Never run a
+non-dry pass from a job whose digest isn't the 100%-traffic revision's — retrying
+later from the same job won't help, since it's still pinned to the old digest.
 
 ### Pass 1 — dry run
 
@@ -557,13 +570,22 @@ legacy grant first means `migrate-names` can no longer even read the legacy name
 "zero pending" result measured after removal only proves IAM was narrowed, not that
 migration finished.
 
-## 8. Break-glass alternative
+## 8. Break-glass
 
-If the Cloud Run job approach is unavailable (for example, `gcloud` job creation is
-blocked by an org policy), a bastion host or pod placed inside the same VPC can run the
-CLI directly: fetch the DSN secret value, impersonate the hub SA for Secret Manager
-access, and run `scion hub secret migrate-names` from there. This works, but it
-requires a human (or a script running as a human's credentials) to read the DSN and to
-impersonate the hub SA — both of which the Cloud Run job path in this runbook avoids
-entirely. Use this only as a fallback, and treat the DSN as compromised once it has
-been read onto a bastion — rotate it afterward if policy requires that.
+No human ever fetches the DSN or the settings secret outside this job — that
+includes when something goes wrong. There is no bastion or workstation fallback that
+reads either of them. If the Cloud Run job approach is unavailable (for example,
+`gcloud` job creation is blocked by an org policy) or a pass fails in a way this
+runbook doesn't cover:
+
+1. **Stop.** Do not improvise a workaround that reads the DSN or the settings
+   secret's contents from a workstation, a bastion, or anywhere outside this job.
+2. **Roll traffic back** to the prior revision if the currently-serving revision is
+   implicated: `gcloud run services update-traffic "$HUB" --project "$PROJECT"
+   --region "$REGION" --to-revisions=<prior-revision>=100`.
+3. **Re-run the job** from §2 once the underlying blocker (org policy, IAM, quota) is
+   resolved — the job is deleted and recreated fresh, re-pinned to whatever revision
+   is serving at that point.
+4. **Escalate** to the project owner if the job still cannot be created or run. No
+   command in this procedure, and no ad hoc substitute for it, may read the DSN or
+   the settings secret outside this job.
