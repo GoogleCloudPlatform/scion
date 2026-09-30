@@ -966,40 +966,52 @@ func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 	}
 }
 
-// TestChatV2_ConversationRead_RejectsMessageFromOtherConversation verifies
-// the ThreadID-membership check: a real, persisted message ID from a
-// different topic must not be usable to advance this topic's watermark.
-func TestChatV2_ConversationRead_RejectsMessageFromOtherConversation(t *testing.T) {
+// TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID
+// pins the round-2 review R-A fix: the watermark guard checks existence
+// only, not same-conversation membership by ThreadID. A real, persisted
+// message with a ConversationID set but a ThreadID that doesn't match `key`
+// (the API-reachable shape review R-A identified: an agent API call with an
+// explicit conversation_id and an unrelated/absent thread_id) must still be
+// usable as a read watermark. Rejecting it would make the guard stricter
+// than handleConversationHistory's ConversationID-based filter — a 400
+// followed by a permanently stuck unread for a message the client can
+// already see.
+func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(t *testing.T) {
 	srv, s, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
 
-	for _, id := range []string{"topic-a", "topic-b"} {
-		if err := wcs.CreateTopic(ctx, WebChatTopic{
-			ID: id, ProjectID: proj.ID, Name: id, CreatedBy: "dev", CreatedAt: time.Now().UTC(),
-		}); err != nil {
-			t.Fatalf("CreateTopic(%s): %v", id, err)
-		}
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-a", ProjectID: proj.ID, Name: "topic-a", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	otherMsg := &store.Message{ID: tid("other-topic-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-b", Msg: "hi from B", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-b", CreatedAt: time.Now().UTC()}
-	if err := s.CreateMessage(ctx, otherMsg); err != nil {
+	msg := &store.Message{ID: tid("mismatched-thread-real-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
+		ThreadID: "some-other-thread", ConversationID: tid("conv-topic-a"), CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-a/read",
-		map[string]string{"messageId": otherMsg.ID})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for a message belonging to a different topic, got %d: %s", rec.Code, rec.Body.String())
+		map[string]string{"messageId": msg.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a real message with a mismatched ThreadID, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-a")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != msg.ID {
+		t.Errorf("watermark not advanced: got %+v, want LastReadMessageID = %q", rs, msg.ID)
 	}
 }
 
-// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed pins the deliberate
-// tolerance in the ThreadID check: native agent replies can persist with
-// ThreadID == "" and only ConversationID set (see
-// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). Such a message
-// must remain usable as a read watermark for the topic it was actually
-// delivered into — the membership guard added for R1 must not regress this.
+// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed: native agent replies
+// can persist with ThreadID == "" and only ConversationID set (see
+// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The existence-only
+// guard must not reject such a message as a read watermark.
 func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
 	srv, s, wcs, proj, _ := setupSendTest(t)
 	ctx := context.Background()
@@ -1073,6 +1085,72 @@ func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
 	}
 	if rs == nil || rs.LastReadMessageID != newer.ID {
 		t.Errorf("watermark rolled back: got %+v, want LastReadMessageID = %q", rs, newer.ID)
+	}
+}
+
+// TestChatV2_ConversationRead_MonotonicTieBreaksByID pins the round-2 review
+// R-A order fix: two messages with an identical CreatedAt must resolve the
+// tie the same way ListMessages does (ByCreated, ByID, entadapter/message_store.go) —
+// the higher-ID row, which sorts later in the history listing, counts as
+// newer. Comparing CreatedAt alone (the pre-fix behaviour) left this
+// order-dependent: whichever of the two was POSTed second lost, regardless
+// of which one history shows last.
+func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
+	srv, s, wcs, proj, _ := setupSendTest(t)
+	ctx := context.Background()
+
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: "topic-tie", ProjectID: proj.ID, Name: "tie", CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+
+	tied := time.Now().UTC()
+	a := &store.Message{ID: tid("tie-msg-a"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-tie", Msg: "a", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+	b := &store.Message{ID: tid("tie-msg-b"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-tie", Msg: "b", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+	if err := s.CreateMessage(ctx, a); err != nil {
+		t.Fatalf("CreateMessage(a): %v", err)
+	}
+	if err := s.CreateMessage(ctx, b); err != nil {
+		t.Fatalf("CreateMessage(b): %v", err)
+	}
+
+	// Determine which of the two sorts later (higher ID) without assuming
+	// tid()'s output order — the test must hold regardless.
+	lo, hi := a, b
+	if lo.ID > hi.ID {
+		lo, hi = b, a
+	}
+	if lo.ID >= hi.ID {
+		t.Fatalf("test fixture invariant broken: lo.ID (%q) must be < hi.ID (%q)", lo.ID, hi.ID)
+	}
+
+	// Advance to the lower-ID row first.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": lo.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to lo: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A same-timestamp POST for the higher-ID row — the one that sorts later
+	// in the history listing — must be accepted as newer via the ID
+	// tie-break, not skipped as "not strictly After". Comparing CreatedAt
+	// alone (the pre-R-A behaviour) would incorrectly no-op this, since
+	// neither timestamp is After the other.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-tie/read",
+		map[string]string{"messageId": hi.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("advance to hi (tie-break): expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rs, err := wcs.GetReadState(ctx, DevUserID, "topic-tie")
+	if err != nil {
+		t.Fatalf("GetReadState: %v", err)
+	}
+	if rs == nil || rs.LastReadMessageID != hi.ID {
+		t.Errorf("tie-break resolved wrong way: got %+v, want LastReadMessageID = %q (the higher ID)", rs, hi.ID)
 	}
 }
 

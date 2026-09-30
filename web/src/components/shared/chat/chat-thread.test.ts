@@ -955,25 +955,63 @@ describe('scion-chat-thread read watermark', () => {
    * temp UUID; the server would now reject it (handleConversationRead), but
    * the client must not even try.
    */
-  it('never POSTs the optimistic send id as the read watermark when no SSE echo has arrived', async () => {
+  it('POSTs the last real message as the read watermark, not the optimistic send id, when no SSE echo has arrived', async () => {
     vi.useFakeTimers();
     try {
+      // mount() resolves with empty history, so no message exists yet and
+      // the initial-open watermark timer is never scheduled (messages.length
+      // is 0 in initialLoadV2's finally block) — isolating this test to the
+      // maybeAdvanceReadWatermark debounce path under test, below.
       const el = await mount();
+      // mount() only waits for the initial history GET to have been *called*,
+      // not for initialLoadV2's post-fetch tail (mergeMessages,
+      // scrollToBottomAfterRender, the messages.length check that decides
+      // whether to schedule the initial-open watermark timer) to have
+      // *settled*. Flush that tail now, before seeding the real message
+      // below — otherwise that tail can observe the real message this test
+      // adds next and schedule its own (correctly-implemented) initial-open
+      // advance, which would mask a regression in the debounce path this
+      // test exists to catch.
+      await vi.advanceTimersByTimeAsync(0);
+
       el.currentUserId = 'user-me';
       const internals = el as unknown as {
         messageMap: Map<string, Message>;
+        mergeMessages(messages: Message[]): void;
         handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
         maybeAdvanceReadWatermark(): void;
       };
 
+      // Seed one real, already-persisted message — a legitimate watermark
+      // candidate distinct from the optimistic send below, so the test can
+      // tell "skipped the pending id and posted the real one" apart from
+      // "posted nothing".
+      internals.mergeMessages([
+        {
+          id: 'real-msg-1',
+          projectId: '',
+          sender: 'them@example.com',
+          senderId: 'user-them',
+          recipient: '',
+          msg: 'hi',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ]);
+
       // The send's own POST never resolves within this test — models a slow
       // sendAgentRouted dispatch, or a send that simply outlives the 1s
       // debounce. No SSE echo is emitted either.
-      apiFetch.mockImplementation((url: string) =>
-        String(url).endsWith('/messages')
-          ? new Promise<Response>(() => {})
-          : Promise.resolve(emptyHistory())
-      );
+      apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/messages') && init?.method === 'POST') {
+          return new Promise<Response>(() => {});
+        }
+        if (init?.method === 'POST' && String(url).endsWith('/read')) {
+          return Promise.resolve({ ok: true, status: 200 } as unknown as Response);
+        }
+        return Promise.resolve(emptyHistory());
+      });
 
       void internals.handleChatSendV2(
         new CustomEvent<ChatSendDetail>('chat-send', {
@@ -992,7 +1030,6 @@ describe('scion-chat-thread read watermark', () => {
         (m) => m.dispatchState === 'pending'
       );
       expect(optimistic).toBeDefined();
-      const idempotencyKey = optimistic!.id;
 
       // Models the scroll event scrollToBottomAfterRender triggers in a real
       // browser (review R1, ~L2524): the only trigger that would otherwise
@@ -1004,11 +1041,10 @@ describe('scion-chat-thread read watermark', () => {
         (c) =>
           String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
       );
-      expect(readCalls).toHaveLength(0);
-
-      // Guard against a vacuous pass: confirm the temp ID really was the
-      // candidate that would have been posted, had the guard not been there.
-      expect(idempotencyKey).not.toBe('');
+      expect(readCalls).toHaveLength(1);
+      expect(JSON.parse(String((readCalls[0][1] as RequestInit).body))).toEqual({
+        messageId: 'real-msg-1',
+      });
     } finally {
       vi.useRealTimers();
     }

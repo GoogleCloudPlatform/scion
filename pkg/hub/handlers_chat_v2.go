@@ -2829,36 +2829,24 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Defence in depth against a client-side bug class (nc-self-unread R1):
-	// the watermark must name a real, persisted message, never a client-local
-	// placeholder such as an optimistic send's temporary idempotency-key ID.
-	// Rejected outright (not silently ignored) so a client bug surfaces as a
-	// visible 400 instead of a watermark that quietly never advances.
-	// Membership is checked by ThreadID when the row has one; native
-	// envelope-only agent replies persist only ConversationID (see
-	// TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed), so an empty ThreadID is
-	// not treated as a mismatch — same tolerance handlers_chat_v2.go already
-	// applies at the edit/delete ThreadID checks and the `around` anchor check.
+	// The watermark must name a real, persisted message — existence only,
+	// not same-conversation membership (see the investigation doc for why).
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil || targetMsg == nil {
-		ValidationError(w, "messageId does not refer to a message in this conversation", nil)
+		ValidationError(w, "messageId does not refer to a known message", nil)
 		return
 	}
-	if targetMsg.ThreadID != "" && targetMsg.ThreadID != key {
-		ValidationError(w, "messageId does not refer to a message in this conversation", nil)
-		return
-	}
-
-	// Monotonic: never let a stale advance — e.g. an in-flight POST for an
-	// earlier message that lands after a newer auto-advance already ran —
-	// roll the watermark backward and re-mark an already-read conversation
-	// unread (nc-self-unread FYI 2).
+	// Monotonic: a stale advance must never roll the watermark backward;
+	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
 	if existing, rsErr := wcs.GetReadState(ctx, user.ID(), key); rsErr == nil &&
 		existing != nil && existing.LastReadMessageID != "" && existing.LastReadMessageID != body.MessageID {
-		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil &&
-			currentMsg != nil && !targetMsg.CreatedAt.After(currentMsg.CreatedAt) {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			return
+		if currentMsg, curErr := s.store.GetMessage(ctx, existing.LastReadMessageID); curErr == nil && currentMsg != nil {
+			newer := targetMsg.CreatedAt.After(currentMsg.CreatedAt) ||
+				(targetMsg.CreatedAt.Equal(currentMsg.CreatedAt) && targetMsg.ID > currentMsg.ID)
+			if !newer {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
+			}
 		}
 	}
 

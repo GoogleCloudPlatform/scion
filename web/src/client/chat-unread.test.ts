@@ -275,18 +275,8 @@ describe('ChatUnreadCounter', () => {
     }
   });
 
-  // nc-self-unread round 2, R3: this file previously carried two tests
-  // claiming self-send-unread coverage. Neither did — ChatUnreadCounter has
-  // no sender-identity logic (`senderId` in the event detail is never read;
-  // see onNotification/scheduleRefresh above) and the first of the two
-  // always mocked the server to return zero unread, so it passed identically
-  // on unpatched `main` and could not have caught the bug this PR fixes.
-  // The real regression coverage for R1 (optimistic-send temp ID reaching
-  // the read-watermark POST) lives in chat-thread.test.ts, where that logic
-  // actually runs. The one test below that exercised genuine, failable
-  // behaviour of this module — an inbound event driving a real 0→unread
-  // transition through a full refetch — is kept, with the misleading
-  // "self-send guard" wording removed.
+  // ChatUnreadCounter has no sender-identity logic — this just pins that an
+  // inbound event drives a real 0→unread transition through a full refetch.
   it('updates the badge to a real unread count after a chat-message-received event', async () => {
     vi.useFakeTimers();
     let serverDMs: UnreadDM[] = [{ hasUnread: false }];
