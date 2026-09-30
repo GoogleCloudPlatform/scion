@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -151,9 +151,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (ptone/scion#2348)
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test')
+# Catches build breaks in integration-tagged files that other vet/lint
+# targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags integration ./...
+	@go vet -tags 'integration volume_test' ./...
 
 ## compat-literals: Check legacy grove literals stay in compatibility surfaces
 compat-literals:
@@ -279,7 +281,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint check-custom golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint vet-integration check-custom golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
