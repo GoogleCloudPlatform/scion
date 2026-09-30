@@ -576,6 +576,22 @@ export class ScionFileBrowser extends LitElement {
   private _searchAbortController: AbortController | null = null;
   private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The data source instance an initial load has already been requested for.
+   * Reset on disconnect so reconnecting triggers exactly one fresh load, but
+   * left set across the connectedCallback → first updated() pair so that
+   * pairing does not issue a second request for the same source.
+   */
+  private _requestedSource: FileBrowserDataSource | null = null;
+
+  /**
+   * Monotonically increasing token identifying the most recently started
+   * load. Incremented on every loadFiles() call (initial or explicit
+   * refresh) so a superseded in-flight request can recognize it is stale
+   * and avoid overwriting newer results.
+   */
+  private _loadToken = 0;
+
   static override styles = css`
     :host {
       display: block;
@@ -799,30 +815,53 @@ export class ScionFileBrowser extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (this.dataSource) {
-      void this.loadFiles();
-    }
+    this._requestInitialLoad();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cancelSearch();
+    // Reset so a future reconnect (e.g. tab hidden/shown while cached) issues
+    // exactly one fresh load rather than being treated as already-requested.
+    this._requestedSource = null;
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('dataSource') && this.dataSource) {
-      void this.loadFiles();
+    if (changed.has('dataSource')) {
+      this._requestInitialLoad();
     }
+  }
+
+  /**
+   * Issue the single initial listing request for the current data source.
+   *
+   * Both connectedCallback() and the first updated() pass observe the same
+   * property assignment (Lit applies `dataSource` before the element is
+   * connected, then reports it as changed on the first post-connect update).
+   * Tracking the source we've already requested collapses that pair into
+   * one request while still reloading when the data source genuinely
+   * changes (e.g. switching tabs) or the component reconnects.
+   */
+  private _requestInitialLoad(): void {
+    if (!this.dataSource) return;
+    if (this._requestedSource === this.dataSource) return;
+    this._requestedSource = this.dataSource;
+    void this.loadFiles();
   }
 
   /** Public method to trigger a file list reload. */
   async loadFiles(): Promise<void> {
     if (!this.dataSource) return;
+    const source = this.dataSource;
+    const token = ++this._loadToken;
     this.loading = true;
     this.error = null;
 
     try {
-      const result = await this.dataSource.listFiles({ limit: this.initialLimit });
+      const result = await source.listFiles({ limit: this.initialLimit });
+      // A newer load (data-source change or explicit refresh) superseded
+      // this one while it was in flight — discard these stale results.
+      if (token !== this._loadToken) return;
       this.files = result.files || [];
       this.totalSize = result.totalSize || 0;
       this.totalCount = result.totalCount || 0;
@@ -833,10 +872,13 @@ export class ScionFileBrowser extends LitElement {
       this.backendError = false;
       this.backendHasMore = false;
     } catch (err) {
+      if (token !== this._loadToken) return;
       console.error('Failed to load files:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load files';
     } finally {
-      this.loading = false;
+      if (token === this._loadToken) {
+        this.loading = false;
+      }
     }
   }
 
