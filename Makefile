@@ -103,10 +103,10 @@ test-hub-sqlite:
 #
 # The -run regex also includes the broker-settings compare-and-set and
 # row-lock tests (TestPutBrokerSettings_*, TestDeleteBrokerSettings*,
-# TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert dialect-
-# dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1 tests do,
-# so they belong in this job's Postgres coverage rather than running only
-# against SQLite.
+# TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert
+# dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
+# tests do, so they belong in this job's Postgres coverage rather than running
+# only against SQLite.
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
