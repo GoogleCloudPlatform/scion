@@ -1438,6 +1438,21 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if scoped == nil {
+			// A typed-nil *ScopedUserIdentity satisfies this type assertion
+			// (ok == true, scoped == nil) even though identity == nil above
+			// was false, so this is reachable only through that Go
+			// interface/pointer distinction, never through a plain nil
+			// Identity. Keep Kind == CredentialKindUAT rather than falling
+			// through to the zero CredentialContext: callers key the UAT
+			// ceiling restriction (Decide step 7a) on Kind ==
+			// CredentialKindUAT, and a zero Kind reads as "no credential
+			// restriction," which would authorize the request exactly as an
+			// unrestricted principal. The zero-value Ceiling denies every
+			// permission (FrozenPermissionCeiling.Allows), so this stays
+			// fail-closed instead.
+			return CredentialContext{Kind: CredentialKindUAT}
+		}
 		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;

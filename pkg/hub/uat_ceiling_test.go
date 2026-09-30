@@ -550,3 +550,60 @@ func TestValidateToken_UsesPersistedCeiling(t *testing.T) {
 	assert.True(t, ceiling.Allows("agent.read"), "ceiling must come from the persisted CeilingPermissionIDs")
 	assert.False(t, ceiling.Allows("agent.attach"), "ceiling must NOT be re-derived from Scopes, which normalize to a different permission")
 }
+
+// TestCredentialContextForIdentity_TypedNilScopedUserIdentityFailsClosed pins
+// a guard against a Go interface footgun: a typed-nil *ScopedUserIdentity
+// satisfies identity.(*ScopedUserIdentity) with ok == true and scoped == nil,
+// even though the identity interface value itself is not nil. Calling this
+// function must not panic dereferencing the nil scoped pointer, and must not
+// silently drop CredentialKindUAT down to the zero Kind — the zero Kind
+// reads downstream as "no credential restriction," which would authorize a
+// request exactly as if it carried no UAT credential at all (see the
+// Decide-level test below, which pins that distinction through the kernel).
+func TestCredentialContextForIdentity_TypedNilScopedUserIdentityFailsClosed(t *testing.T) {
+	var nilScoped *ScopedUserIdentity
+	var cc CredentialContext
+	require.NotPanics(t, func() {
+		cc = credentialContextForIdentity(nilScoped)
+	})
+	assert.Equal(t, CredentialKindUAT, cc.Kind)
+	assert.False(t, cc.Ceiling.Allows("agent.read"), "a typed-nil scoped identity must deny every permission, never carry an unrestricted ceiling")
+	assert.False(t, cc.Ceiling.Allows(""), "an empty permission ID must also deny")
+}
+
+// TestUATCeiling_Decide_TypedNilScopedIdentityCredentialDeniesRatherThanLiftingRestriction
+// proves the fail-closed property through the real kernel: a Credential
+// built from a broken (typed-nil) scoped identity must not authorize a
+// request that an ordinary, unrestricted principal would be allowed. The
+// positive control shows the same principal IS allowed without this
+// credential attached; reverting credentialContextForIdentity's guard to the
+// zero CredentialContext (Kind == "") would make credential.Kind ==
+// CredentialKindUAT false, skip Decide step 7a's ceiling restriction
+// entirely, and allow this request — the fail-open regression this test
+// pins against.
+func TestUATCeiling_Decide_TypedNilScopedIdentityCredentialDeniesRatherThanLiftingRestriction(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	ownerID := tid("typed-nil-cred-owner")
+	project := &store.Project{ID: tid("typed-nil-cred-project"), Name: "p", Slug: "typed-nil-cred-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	createTestUserWithProjectRole(t, s, ownerID, "tnc@example.com", project.ID, store.ProjectRoleOwner)
+	agent := &store.Agent{ID: tid("typed-nil-cred-agent"), Slug: "a", Name: "a", ProjectID: project.ID, OwnerID: ownerID}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	identity := NewAuthenticatedUser(ownerID, "tnc@example.com", "Owner", "member", "api")
+	principal := principalContextForIdentity(identity)
+	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: project.ID}
+
+	control := authz.Decide(ctx, AuthzRequest{
+		Principal: principal, Credential: credentialContextForIdentity(identity), Resource: resource, Action: ActionRead,
+	})
+	require.True(t, control.Allowed, "positive control: the owner must be allowed without a UAT credential")
+
+	var nilScoped *ScopedUserIdentity
+	decision := authz.Decide(ctx, AuthzRequest{
+		Principal: principal, Credential: credentialContextForIdentity(nilScoped), Resource: resource, Action: ActionRead,
+	})
+	assert.False(t, decision.Allowed, "a credential built from a broken (typed-nil) scoped identity must deny, not fall back to an unrestricted request")
+}
