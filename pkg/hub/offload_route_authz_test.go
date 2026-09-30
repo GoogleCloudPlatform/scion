@@ -250,14 +250,10 @@ func TestRouteAuthz_Nit4_ListingPredicate_DeletedPeerFollowsFlag(t *testing.T) {
 	assert.True(t, srv.isCrossProjectReadAllowed(ctx, conv, bIdent))
 }
 
-// mustDMKey is a small test helper wrapping messages.DMConversationKey with
-// require.NoError, to keep call sites in this file terse.
-func mustDMKey(t *testing.T, kindA, idA, kindB, idB string) string {
-	t.Helper()
-	key, err := messages.DMConversationKey(kindA, idA, kindB, idB)
-	require.NoError(t, err)
-	return key
-}
+// mustDMKey is defined in handlers_outbound_dm_thread_recipient_test.go
+// (added by an upstream commit merged into this branch); both files wrap
+// messages.DMConversationKey identically, so this file reuses that one
+// instead of redeclaring it.
 
 // ---------------------------------------------------------------------------
 // U12: ExecuteAgentDM performs no GetConversation for a message that does
