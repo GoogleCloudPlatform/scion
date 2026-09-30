@@ -421,6 +421,15 @@ raw-body limit `sciontool substrate-serve`'s bootstrap handler enforces
 cap fails the run with an error naming only the cap and the total size,
 never a path or file content.
 
+**A separate, in-actor secrets path has its own symlink refusal.**
+Independent of the `POST /scion/v1/bootstrap` delivery above, `sciontool
+init` also decodes and writes any `SCION_STAGED_SECRETS` payload directly
+inside the actor (`pkg/stagedsecrets`) — the mechanism every runtime, not
+just substrate, uses to stage file and variable secrets without bind-mounting
+them from the host. On this path too, a staged secret's path under the
+agent home must not traverse a symlink at any component: init refuses the
+write rather than following one.
+
 ## Verification commands (once applied to a real cluster)
 
 ```sh
