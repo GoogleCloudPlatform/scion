@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from typing import Any
 from unittest import mock
@@ -542,6 +543,312 @@ class TestStripTomlSections(unittest.TestCase):
         content = "[regular]\nkey = val\n"
         result = sh.strip_toml_sections(content, lambda h: h == "[nonexistent]")
         self.assertEqual(result, content)
+
+    # --- Regression tests for the generalization-findings repro cases -----
+    # (ptone/scion#2426 / generalization-findings.md "Reproduction of the
+    # TOML fragility"). Each case pins one specific hardening the naive,
+    # exact-string-match strip_toml_sections used to get wrong.
+
+    def test_repro_1_header_with_trailing_comment_is_recognized(self):
+        # Case 1: a header with a trailing comment (as a user or template
+        # overlay might write) must still be recognized so re-appending the
+        # same table doesn't produce a duplicate.
+        content = '[mcp_servers.foo] # added by user\ncommand = "a"\n'
+        result = sh.strip_toml_sections(
+            content, lambda h: h.startswith("[mcp_servers.") and h.endswith("]")
+        )
+        appended = result.rstrip() + '\n\n[mcp_servers.foo]\ncommand = "b"\n'
+        data = tomllib.loads(appended)
+        self.assertEqual(data["mcp_servers"]["foo"]["command"], "b")
+
+    def test_repro_2_nested_array_element_line_is_not_mistaken_for_header(self):
+        # Case 2: a single-line nested array (e.g. `["a", "b"]`) inside a
+        # multi-line array being stripped must not be mistaken for the next
+        # table header — that used to stop the strip early, leaving
+        # orphaned lines behind.
+        content = (
+            '[model.vertex-grok]\nmodel = "x"\nextra = [\n  ["a", "b"]\n]\n'
+            'base_url = "u"\n\n[other]\nk = 1\n'
+        )
+        result = sh.strip_toml_sections(content, lambda h: h == "[model.vertex-grok]")
+        data = tomllib.loads(result)
+        self.assertNotIn("model", data)
+        self.assertEqual(data["other"]["k"], 1)
+
+    def test_repro_3_header_shaped_line_in_multiline_string_not_fixed_by_strip_alone(self):
+        # Case 3: a header-shaped line inside a top-level multi-line string
+        # is a known, documented residual gap of the line-oriented
+        # strip_toml_sections (it isn't a full TOML tokenizer) — the file
+        # can come out invalid. This is caught by the tomllib backstop
+        # (toml_edit_preserves / write_toml_if_preserves), not by
+        # strip_toml_sections itself; see TestWriteTomlIfPreserves below
+        # for the end-to-end version that confirms the backstop rejects it.
+        content = 'note = """\n[cli]\nhello\n"""\n[cli]\nauto_update = true\n'
+        result = sh.strip_toml_sections(content, lambda h: h == "[cli]")
+        with self.assertRaises(tomllib.TOMLDecodeError):
+            tomllib.loads(result)
+
+    def test_repro_4_header_whitespace_variant_is_recognized(self):
+        # Case 4: legal header whitespace (`[ models ]`) must match a
+        # predicate written against the canonical spelling (`[models]`).
+        content = '[ models ]\ndefault = "mine"\n'
+        result = sh.strip_toml_sections(content, lambda h: h == "[models]")
+        appended = result.rstrip() + '\n\n[models]\ndefault = "vertex-grok"\n'
+        data = tomllib.loads(appended)
+        self.assertEqual(data["models"]["default"], "vertex-grok")
+
+
+class TestTomlMaskStringsAndComments(unittest.TestCase):
+    def test_blanks_basic_string(self):
+        self.assertEqual(sh.toml_mask_strings_and_comments('hint = "press [ to go"'), 'hint = ""')
+
+    def test_blanks_literal_string(self):
+        self.assertEqual(sh.toml_mask_strings_and_comments("hint = 'press [ to go'"), 'hint = ""')
+
+    def test_strips_trailing_comment(self):
+        self.assertEqual(sh.toml_mask_strings_and_comments("# temperature range [0, 1)"), "")
+
+    def test_leaves_structural_brackets_alone(self):
+        self.assertEqual(sh.toml_mask_strings_and_comments("[features]"), "[features]")
+
+
+class TestTomlEnteringArrayDepths(unittest.TestCase):
+    def test_flat_lines_stay_at_zero(self):
+        lines = ["a = 1", "[table]", "b = 2"]
+        self.assertEqual(sh.toml_entering_array_depths(lines), [0, 0, 0])
+
+    def test_multiline_array_increases_depth_for_body_lines(self):
+        lines = ["extra = [", '  "a",', '  "b"', "]", "next = 2"]
+        self.assertEqual(sh.toml_entering_array_depths(lines), [0, 1, 1, 1, 0])
+
+    def test_unbalanced_bracket_in_comment_does_not_leak_depth(self):
+        # ptone/scion#2365 review round 3 regression: a stray "[" inside a
+        # comment or string must not be counted, or it would poison the
+        # depth for the rest of the file.
+        lines = ["# temperature range [0, 1)", "[table]", "k = 1"]
+        self.assertEqual(sh.toml_entering_array_depths(lines), [0, 0, 0])
+
+    def test_unbalanced_bracket_in_string_does_not_leak_depth(self):
+        lines = ['hint = "press [ to go"', "[table]", "k = 1"]
+        self.assertEqual(sh.toml_entering_array_depths(lines), [0, 0, 0])
+
+
+class TestIsTomlTableHeader(unittest.TestCase):
+    def test_recognizes_simple_header_at_depth_zero(self):
+        self.assertTrue(sh.is_toml_table_header("[cli]", 0))
+
+    def test_rejects_header_shape_when_depth_nonzero(self):
+        # A `["x"]`-shaped line is indistinguishable from a header by shape
+        # alone; depth tracking is what tells them apart.
+        self.assertFalse(sh.is_toml_table_header('["x"]', 1))
+
+    def test_rejects_non_header_line(self):
+        self.assertFalse(sh.is_toml_table_header('key = "value"', 0))
+
+    def test_rejects_array_continuation_line_with_trailing_comma(self):
+        self.assertFalse(sh.is_toml_table_header('  ["x"],', 1))
+
+    def test_accepts_double_bracket_header(self):
+        self.assertTrue(sh.is_toml_table_header("[[hooks]]", 0))
+
+    def test_accepts_quoted_key_containing_equals_and_bracket(self):
+        # ptone/scion#2365 review round 3 (N1): a quoted table-header key
+        # may itself contain `=` or `]` (e.g. a filesystem path).
+        self.assertTrue(sh.is_toml_table_header('[projects."/a=b]c"]', 0))
+
+
+class TestNormalizeTomlHeader(unittest.TestCase):
+    def test_returns_none_for_non_header(self):
+        self.assertIsNone(sh.normalize_toml_header('key = "value"'))
+
+    def test_strips_trailing_comment(self):
+        self.assertEqual(
+            sh.normalize_toml_header("[mcp_servers.foo] # added by user"),
+            "[mcp_servers.foo]",
+        )
+
+    def test_strips_whitespace_around_bracket_and_dots(self):
+        self.assertEqual(sh.normalize_toml_header("[ models ]"), "[models]")
+
+    def test_preserves_whitespace_inside_quoted_key(self):
+        self.assertEqual(sh.normalize_toml_header('["a b"]'), '["a b"]')
+
+    def test_preserves_double_bracket(self):
+        self.assertEqual(sh.normalize_toml_header("[[ hooks ]]"), "[[hooks]]")
+
+    def test_preserves_quoted_key_with_special_chars(self):
+        self.assertEqual(
+            sh.normalize_toml_header('[projects."/a=b]c"]'),
+            '[projects."/a=b]c"]',
+        )
+
+
+class TestStripTomlTopLevelKey(unittest.TestCase):
+    def test_removes_top_level_key(self):
+        content = 'model = "old"\nother = 1\n'
+        result = sh.strip_toml_top_level_key(content, "model")
+        self.assertNotIn('model = "old"', result)
+        self.assertIn("other = 1", result)
+
+    def test_leaves_table_scoped_key_of_same_name_alone(self):
+        content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
+        result = sh.strip_toml_top_level_key(content, "reasoning_effort")
+        self.assertIn('reasoning_effort = "low"', result)
+
+    def test_does_not_match_prefixed_key(self):
+        content = 'reasoning_effort = "low"\nreasoning_effort_extended = "yes"\n'
+        result = sh.strip_toml_top_level_key(content, "reasoning_effort")
+        self.assertNotIn('reasoning_effort = "low"', result)
+        self.assertIn('reasoning_effort_extended = "yes"', result)
+
+    def test_ignores_nested_array_line_that_looks_like_a_header(self):
+        # Mirrors the insert_toml_top_level_line regression below: a
+        # top-level key placed after a multi-line array (but before any
+        # real table header) must still be recognized and stripped.
+        content = 'notify = [\n  "sh",\n  ["x"],\n]\nmodel = "stale"\n[features]\nhooks = true\n'
+        result = sh.strip_toml_top_level_key(content, "model")
+        data = tomllib.loads(result)
+        self.assertNotIn("model", data)
+        self.assertEqual(data["notify"], ["sh", ["x"]])
+        self.assertEqual(data["features"], {"hooks": True})
+
+
+class TestInsertTomlTopLevelLine(unittest.TestCase):
+    def test_appends_when_no_table_header(self):
+        result = sh.insert_toml_top_level_line('other_key = "value"\n', 'model = "x"')
+        self.assertEqual(result, 'other_key = "value"\n\nmodel = "x"')
+
+    def test_lands_before_first_table_header(self):
+        content = 'other_key = "value"\n[features]\nhooks = true\n'
+        result = sh.insert_toml_top_level_line(content, 'model = "x"')
+        lines = result.split("\n")
+        self.assertLess(lines.index('model = "x"'), lines.index("[features]"))
+
+    def test_ignores_nested_array_line_with_trailing_comma(self):
+        # ptone/scion#2365 review round 2 (N2): a top-level multi-line array
+        # whose element is itself an array on its own line (`["x"],`) is
+        # syntactically indistinguishable by shape alone from a quoted-key
+        # table header (`["x"]`). Without bracket-depth tracking, this line
+        # was misidentified as a header and the inserted key landed inside
+        # the array, breaking the file.
+        content = 'notify = [\n  "sh",\n  ["x"],\n]\n[features]\nhooks = true\n'
+        result = sh.insert_toml_top_level_line(content, 'model = "y"')
+        data = tomllib.loads(result)
+        self.assertEqual(data["model"], "y")
+        self.assertEqual(data["notify"], ["sh", ["x"]])
+        self.assertEqual(data["features"], {"hooks": True})
+
+    def test_ignores_nested_array_line_without_trailing_comma(self):
+        content = 'notify = [\n  "sh",\n  ["x"]\n]\n[features]\nhooks = true\n'
+        result = sh.insert_toml_top_level_line(content, 'model = "y"')
+        data = tomllib.loads(result)
+        self.assertEqual(data["model"], "y")
+        self.assertEqual(data["notify"], ["sh", ["x"]])
+        self.assertEqual(data["features"], {"hooks": True})
+
+
+class TestTomlEditPreserves(unittest.TestCase):
+    def test_accepts_valid_content_with_managed_keys_changed(self):
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                "other_key = 1\n",
+                'other_key = 1\nmodel = "x"\n',
+                {"model"},
+            )
+        )
+
+    def test_rejects_invalid_toml(self):
+        self.assertFalse(sh.toml_edit_preserves("", "model = [unterminated\n"))
+
+    def test_true_when_original_unparseable(self):
+        # No parseable baseline to diff against — only "does content parse"
+        # applies.
+        self.assertTrue(sh.toml_edit_preserves("not [valid toml", 'model = "x"\n'))
+
+    def test_rejects_unmanaged_key_changed(self):
+        self.assertFalse(
+            sh.toml_edit_preserves(
+                'other_key = "before"\n',
+                'other_key = "after"\nmodel = "x"\n',
+                {"model"},
+            )
+        )
+
+    def test_default_managed_keys_is_empty(self):
+        # With no managed_keys supplied, every top-level key must be
+        # unchanged for the edit to be considered safe.
+        self.assertFalse(sh.toml_edit_preserves('k = 1\n', 'k = 1\nnew_key = 2\n'))
+        self.assertTrue(sh.toml_edit_preserves('k = 1\n', 'k = 1\n'))
+
+    def test_ignores_nested_contents_of_a_managed_key(self):
+        # Managed-ness is checked at top-level-key granularity: a nested
+        # table under a managed top-level key can change freely.
+        self.assertTrue(
+            sh.toml_edit_preserves(
+                '[model.a]\nx = 1\n',
+                '[model.a]\nx = 1\n[model.b]\ny = 2\n',
+                {"model"},
+            )
+        )
+
+
+class TestWriteTomlIfPreserves(unittest.TestCase):
+    def _ctx(self) -> tuple["sh.ProvisionContext", list[str]]:
+        ctx = sh.ProvisionContext("test", {})
+        warnings: list[str] = []
+        ctx.warn = warnings.append  # type: ignore[method-assign]
+        return ctx, warnings
+
+    def test_writes_when_edit_preserves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(
+                ctx, path, "", 'model = "x"\n', managed_keys={"model"}
+            )
+            self.assertTrue(wrote)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), 'model = "x"\n')
+            self.assertEqual(warnings, [])
+
+    def test_leaves_file_untouched_and_warns_on_rejected_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            original = 'other_key = "before"\n'
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(original)
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(
+                ctx,
+                path,
+                original,
+                'other_key = "corrupted"\nmodel = "x"\n',
+                managed_keys={"model"},
+            )
+            self.assertFalse(wrote)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn(path, warnings[0])
+
+    def test_repro_3_end_to_end_multiline_string_rejected_not_corrupted(self):
+        # End-to-end version of the case-3 repro above: strip_toml_sections
+        # alone produces invalid TOML for a header-shaped line inside a
+        # multi-line string, but the write_toml_if_preserves backstop must
+        # catch that (via toml_edit_preserves failing to parse) and leave
+        # the original file on disk untouched rather than write garbage.
+        original = 'note = """\n[cli]\nhello\n"""\n[cli]\nauto_update = true\n'
+        content = sh.strip_toml_sections(original, lambda h: h == "[cli]")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.toml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(original)
+            ctx, warnings = self._ctx()
+            wrote = sh.write_toml_if_preserves(ctx, path, original, content, managed_keys={"cli"})
+            self.assertFalse(wrote)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+            self.assertEqual(len(warnings), 1)
 
 
 # ---------------------------------------------------------------------------

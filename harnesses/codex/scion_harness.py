@@ -27,17 +27,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
-from typing import Any
+import tomllib
+from typing import Any, Iterable
 
 # ---------------------------------------------------------------------------
 # Version contract (§3.3)
 # ---------------------------------------------------------------------------
 
 INTERFACE_VERSION = 2
-LIB_VERSION = "2026-07-05"
+LIB_VERSION = "2026-09-30"
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -913,24 +915,157 @@ def toml_string_array(items: list[str]) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
+# Matches a table header ([table] / [[table]]) with an optional trailing
+# comment, and nothing else on the line. The header's inner content allows
+# quoted segments (which may themselves contain `=`, `]`, `#`, or `[`, e.g.
+# `[projects."/a=b"]`) as well as ordinary bare-key characters, but rejects
+# anything else — in particular a trailing `,` (an array element, not a
+# header) or an unquoted `=`/`]` (which would make it a key assignment, not
+# a header). Used together with toml_entering_array_depths: a line can only
+# be a genuine header if it also has zero open-bracket depth entering it —
+# see that function's docstring for why the shape check alone isn't enough.
+#
+# In valid TOML outside a multi-line string, "depth == 0 and starts with
+# '['" is already sufficient on its own — this shape check mostly overlaps
+# with depth tracking (ptone/scion#2365 review round 4 mutation testing:
+# reverting this regex to a bare `startswith("[")` while keeping depth
+# tracking still passes the full suite). It's kept anyway as a second,
+# independent line of defense: the one case where it earns its keep is a
+# line *inside* a top-level multi-line string that happens to look like a
+# header, e.g. `[projects."/a=b"]` in prose — there, toml_edit_preserves
+# (the tomllib round-trip/preservation backstop below) is what actually
+# fails the edit safely either way, but rejecting the shape earlier means
+# fewer edits need that backstop to save them.
+#
+# Groups: (1) the opening bracket(s), (2) the inner content, (3) the
+# closing bracket(s), (4) an optional trailing comment. Grouping doesn't
+# change what the regex matches (only what's captured), so callers that
+# only care whether a line is a header can keep using a plain `.match(...)
+# is not None`; normalize_toml_header additionally uses groups 1-3 to build
+# a canonical form for predicate matching.
+TOML_TABLE_HEADER_RE = re.compile(
+    r'^\s*(\[\[?)\s*((?:[^\[\]="\'#]|"(?:\\.|[^"\\])*"|\'[^\']*\')+)(\]\]?)\s*(#.*)?$'
+)
+
+# Matches a single-line basic ("...") or literal ('...') string, or a
+# trailing comment, for masking before bracket-counting (see
+# toml_mask_strings_and_comments). Does not match triple-quoted
+# (multi-line) strings — that gap is closed separately by
+# toml_edit_preserves validating the finished file with tomllib rather than
+# trying to make the masking itself fully TOML-aware.
+_TOML_STR_OR_COMMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*')
+
+# Tokenizes a table header's inner content into alternating quoted/unquoted
+# spans, for normalize_toml_header: whitespace is only insignificant in the
+# unquoted spans.
+_TOML_HEADER_TOKEN_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|[^"\']+')
+
+
+def toml_mask_strings_and_comments(line: str) -> str:
+    """Blank out string literals and strip trailing comments so bracket
+    counting on the result only sees TOML structure, not `[`/`]` characters
+    that happen to appear inside a string value or a comment (e.g. `#
+    temperature range [0, 1)` or `hint = "press [ to go"`, neither of which
+    opens a real array)."""
+    return _TOML_STR_OR_COMMENT_RE.sub(
+        lambda m: "" if m.group(0).startswith("#") else '""', line
+    )
+
+
+def toml_entering_array_depths(lines: list[str]) -> list[int]:
+    """Per-line count of unmatched `[` brackets carried in from prior lines.
+
+    A line inside a multi-line array can itself be a bracketed value (e.g.
+    a nested single-element array `["x"]`, syntactically indistinguishable
+    by shape alone from a table header spelled with a quoted key, `["x"]`)
+    — so a naive "line starts with `[`" check misidentifies an array
+    continuation line as a table header. Tracking bracket depth resolves
+    the ambiguity: a `[`-shaped line only means "table header" when depth
+    is zero entering it, i.e. no multi-line array is still open.
+
+    Brackets are counted after masking out string literals and comments
+    (toml_mask_strings_and_comments), so a stray `[`/`]` inside either one
+    doesn't throw off the whole file's section tracking — an earlier
+    version of this function counted raw brackets and could silently
+    delete table-scoped keys (e.g. `[profiles.fast]`'s `model`) after a
+    single unbalanced bracket in an unrelated comment (ptone/scion#2365
+    review round 3). This is still line-oriented rather than a full
+    tokenizer, so it does not understand triple-quoted (multi-line)
+    strings; that residual gap is caught by toml_edit_preserves validating
+    the finished file with tomllib, not by making this counter fully
+    TOML-aware.
+    """
+    depths = []
+    depth = 0
+    for line in lines:
+        depths.append(depth)
+        code = toml_mask_strings_and_comments(line)
+        depth = max(0, depth + code.count("[") - code.count("]"))
+    return depths
+
+
+def is_toml_table_header(line: str, depth: int) -> bool:
+    """True if `line` is a top-level table header, given the bracket-nesting
+    `depth` entering it (0 means no multi-line array is currently open)."""
+    return depth == 0 and TOML_TABLE_HEADER_RE.match(line) is not None
+
+
+def normalize_toml_header(line: str) -> str | None:
+    """Canonical form of a TOML table-header line, for matching against a
+    header_predicate without being tripped up by cosmetic differences: a
+    trailing comment (`[cli] # note`) is dropped, and whitespace around the
+    brackets or a dotted key (`[ models ]`) is removed. Whitespace *inside*
+    a quoted key (`["a b"]`) is left alone, since it's part of the key's
+    value rather than formatting. Returns None if `line` isn't shaped like
+    a table header at all — callers should generally gate on
+    is_toml_table_header (which also checks bracket-nesting depth) before
+    trusting this.
+    """
+    m = TOML_TABLE_HEADER_RE.match(line)
+    if m is None:
+        return None
+    open_br, inner, close_br = m.group(1), m.group(2), m.group(3)
+    cleaned = "".join(
+        token if token[:1] in ("'", '"') else re.sub(r"\s+", "", token)
+        for token in _TOML_HEADER_TOKEN_RE.findall(inner)
+    )
+    return f"{open_br}{cleaned}{close_br}"
+
+
 def strip_toml_sections(content: str, header_predicate: Any) -> str:
     """Remove TOML sections whose header line matches the predicate.
 
-    header_predicate(stripped_line) -> bool
+    header_predicate(normalized_header) -> bool, where normalized_header is
+    the header's canonical form (see normalize_toml_header): a trailing
+    comment is dropped and whitespace inside the brackets or around a
+    dotted key is removed, so a predicate written as `line == "[cli]"` also
+    matches `[ cli ] # note`.
 
-    Also consumes blank lines immediately preceding the header.
+    Header detection tracks bracket-nesting depth (see
+    toml_entering_array_depths), so a line that is really a nested-array
+    element on its own line (e.g. `["a", "b"]` inside a still-open
+    multi-line array) is never mistaken for a table header.
+
+    This is still line-oriented, not a full TOML tokenizer: a header-shaped
+    line inside a top-level multi-line string is not recognized as being
+    "inside a string" (see toml_mask_strings_and_comments' docstring).
+    Callers that write the result back to disk should validate it with
+    toml_edit_preserves (or write_toml_if_preserves) before persisting, so
+    that residual gap is caught rather than silently corrupting the file.
+
+    Also consumes blank lines immediately preceding a removed header.
     """
     lines = content.split("\n")
+    depths = toml_entering_array_depths(lines)
     keep = [True] * len(lines)
     i = 0
     while i < len(lines):
-        stripped = lines[i].strip()
-        if stripped.startswith("[") and stripped.endswith("]") and header_predicate(stripped):
+        header = normalize_toml_header(lines[i]) if is_toml_table_header(lines[i], depths[i]) else None
+        if header is not None and header_predicate(header):
             section_start = i
             section_end = len(lines)
             for j in range(i + 1, len(lines)):
-                t = lines[j].strip()
-                if t.startswith("[") and t.endswith("]"):
+                if is_toml_table_header(lines[j], depths[j]):
                     section_end = j
                     break
             trim_start = section_start
@@ -942,6 +1077,118 @@ def strip_toml_sections(content: str, header_predicate: Any) -> str:
         else:
             i += 1
     return "\n".join(line for line, k in zip(lines, keep) if k)
+
+
+def _is_toml_key_line(line: str, key: str) -> bool:
+    """True if line is a top-level TOML assignment for exactly `key`."""
+    s = line.strip()
+    if not s.startswith(key):
+        return False
+    rest = s[len(key):]
+    return len(rest) > 0 and rest[0] in (" ", "=", "\t")
+
+
+def strip_toml_top_level_key(content: str, key: str) -> str:
+    """Remove a top-level TOML key = value line from content."""
+    lines = content.split("\n")
+    depths = toml_entering_array_depths(lines)
+    kept = []
+    in_section = False
+    for line, depth in zip(lines, depths):
+        if is_toml_table_header(line, depth):
+            in_section = True
+        if not in_section and _is_toml_key_line(line, key):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def insert_toml_top_level_line(content: str, line: str) -> str:
+    """Insert a top-level `key = value` line before the first table header.
+
+    TOML requires top-level keys to precede every `[table]`/`[[array-of-
+    tables]]` header; a key appended after one is parsed as belonging to
+    that table instead of being a top-level key. Appending at EOF used to
+    land keys inside whatever table happened to be last in the file, both
+    having no effect on the harness reading them and producing a
+    duplicate-key TOML parse error on the next provision, since
+    strip_toml_top_level_key only looks at top-level lines and can't find
+    (or remove) the misplaced copy (ptone/scion#2365). Inserting here keeps
+    the reconcile idempotent: the next call's strip finds this line at top
+    level and removes it cleanly before a fresh copy is inserted in the
+    same place.
+    """
+    lines = content.split("\n")
+    depths = toml_entering_array_depths(lines)
+    insert_at = len(lines)
+    for i, (existing, depth) in enumerate(zip(lines, depths)):
+        if is_toml_table_header(existing, depth):
+            insert_at = i
+            break
+    lines.insert(insert_at, line)
+    return "\n".join(lines)
+
+
+def toml_edit_preserves(original: str, content: str, managed_keys: Iterable[str] = ()) -> bool:
+    """True if `content` is a safe top-level edit of `original`.
+
+    "Safe" means: `content` parses as TOML, and every top-level key it
+    doesn't own (i.e. not in `managed_keys`) is unchanged from `original`.
+
+    This is the backstop for this module's line-oriented TOML editing
+    (strip_toml_sections, strip_toml_top_level_key,
+    insert_toml_top_level_line), which — despite the string/comment masking
+    and bracket-depth tracking they use — are still not a full TOML
+    tokenizer. A header- or key-shaped line inside a top-level multi-line
+    string can get spliced into or deleted from that string's body while
+    the file stays valid TOML; comparing every top-level key the caller
+    doesn't own closes that whole class of edit, not just one shape.
+    Callers should leave the existing file untouched (logging a warning)
+    when this returns False — see write_toml_if_preserves.
+
+    If `original` doesn't parse (missing, empty, or already-invalid file),
+    there's no baseline to diff against, so only "does `content` parse" is
+    checked.
+    """
+    try:
+        after = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return False
+    try:
+        before = tomllib.loads(original)
+    except tomllib.TOMLDecodeError:
+        return True
+    managed = set(managed_keys)
+
+    def _unmanaged(data: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in data.items() if k not in managed}
+
+    return _unmanaged(before) == _unmanaged(after)
+
+
+def write_toml_if_preserves(
+    ctx: "ProvisionContext",
+    path: str,
+    original: str,
+    content: str,
+    managed_keys: Iterable[str] = (),
+    *,
+    mode: int | None = None,
+) -> bool:
+    """Validate `content` against `original` with toml_edit_preserves, and
+    atomically write it to `path` only if it passes. On failure, leaves
+    `path` untouched and logs a warning via `ctx.warn`. Returns whether the
+    write happened.
+    """
+    if not toml_edit_preserves(original, content, managed_keys):
+        ctx.warn(
+            f"generated TOML for {path} did not preserve existing unmanaged "
+            "content when round-tripped through tomllib; leaving the file "
+            "untouched"
+        )
+        return False
+    atomic_write_text(path, content, mode=mode)
+    return True
 
 
 def atomic_write_text(path: str, content: str, *, mode: int | None = None) -> None:

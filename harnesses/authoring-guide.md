@@ -532,8 +532,32 @@ Key API surface:
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
   `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
-  `toml_escape`, `toml_inline_table`, `toml_string_array`,
-  `strip_toml_sections` (tomllib is read-only, so TOML editing is manual).
+  `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
+  read-only, so TOML editing is manual, line-oriented text surgery).
+  `strip_toml_sections(content, header_predicate)` removes whole
+  `[table]`/`[[table]]` sections whose (comment-stripped,
+  whitespace-normalized) header matches the predicate; it tracks
+  bracket-nesting depth so a nested-array element line isn't mistaken for a
+  header, but it is still not a full TOML tokenizer — a header-shaped line
+  inside a *multi-line* string is a known residual gap. That gap (and any
+  other line-oriented editing mistake) is why every TOML writer must
+  validate before persisting: parse the original and the edited content
+  with `tomllib` and require every top-level key you don't own to be
+  unchanged. Use `toml_edit_preserves(original, content, managed_keys)` for
+  the check alone, or `write_toml_if_preserves(ctx, path, original,
+  content, managed_keys)` to check-and-write-or-warn-and-leave-untouched in
+  one call — pass the set of top-level table/key names your write is
+  allowed to add, remove, or change (e.g. `{"mcp_servers"}` for an MCP
+  writer). `strip_toml_top_level_key(content, key)` and
+  `insert_toml_top_level_line(content, line)` do the equivalent surgery for
+  bare top-level `key = value` lines rather than whole sections (codex uses
+  these for `model`/`model_reasoning_effort`). See
+  `harnesses/scion_harness_test.py`'s `TestStripTomlSections` /
+  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` for worked examples,
+  including the fragility repro cases (trailing comments on headers, nested
+  arrays, header-shaped lines in multi-line strings, header whitespace
+  variants like `[ models ]`) this API was hardened against
+  (ptone/scion#2426).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).
