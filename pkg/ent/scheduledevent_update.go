@@ -29,6 +29,160 @@ func (_u *ScheduledEventUpdate) Where(ps ...predicate.ScheduledEvent) *Scheduled
 	return _u
 }
 
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *ScheduledEventUpdate) SetInitiatorPrincipalKind(v string) *ScheduledEventUpdate {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableInitiatorPrincipalKind(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *ScheduledEventUpdate) ClearInitiatorPrincipalKind() *ScheduledEventUpdate {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *ScheduledEventUpdate) SetInitiatorPrincipalID(v string) *ScheduledEventUpdate {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableInitiatorPrincipalID(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *ScheduledEventUpdate) ClearInitiatorPrincipalID() *ScheduledEventUpdate {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *ScheduledEventUpdate) SetInitiatorCredentialKind(v string) *ScheduledEventUpdate {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableInitiatorCredentialKind(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *ScheduledEventUpdate) ClearInitiatorCredentialKind() *ScheduledEventUpdate {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *ScheduledEventUpdate) SetInitiatorCredentialID(v string) *ScheduledEventUpdate {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableInitiatorCredentialID(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *ScheduledEventUpdate) ClearInitiatorCredentialID() *ScheduledEventUpdate {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (_u *ScheduledEventUpdate) SetInitiatorCredentialSnapshot(v string) *ScheduledEventUpdate {
+	_u.mutation.SetInitiatorCredentialSnapshot(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableInitiatorCredentialSnapshot(v *string) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetInitiatorCredentialSnapshot(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (_u *ScheduledEventUpdate) ClearInitiatorCredentialSnapshot() *ScheduledEventUpdate {
+	_u.mutation.ClearInitiatorCredentialSnapshot()
+	return _u
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (_u *ScheduledEventUpdate) SetAttributionVersion(v int) *ScheduledEventUpdate {
+	_u.mutation.ResetAttributionVersion()
+	_u.mutation.SetAttributionVersion(v)
+	return _u
+}
+
+// SetNillableAttributionVersion sets the "attribution_version" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAttributionVersion(v *int) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAttributionVersion(*v)
+	}
+	return _u
+}
+
+// AddAttributionVersion adds value to the "attribution_version" field.
+func (_u *ScheduledEventUpdate) AddAttributionVersion(v int) *ScheduledEventUpdate {
+	_u.mutation.AddAttributionVersion(v)
+	return _u
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (_u *ScheduledEventUpdate) ClearAttributionVersion() *ScheduledEventUpdate {
+	_u.mutation.ClearAttributionVersion()
+	return _u
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (_u *ScheduledEventUpdate) SetAuthorizationRevision(v int) *ScheduledEventUpdate {
+	_u.mutation.ResetAuthorizationRevision()
+	_u.mutation.SetAuthorizationRevision(v)
+	return _u
+}
+
+// SetNillableAuthorizationRevision sets the "authorization_revision" field if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableAuthorizationRevision(v *int) *ScheduledEventUpdate {
+	if v != nil {
+		_u.SetAuthorizationRevision(*v)
+	}
+	return _u
+}
+
+// AddAuthorizationRevision adds value to the "authorization_revision" field.
+func (_u *ScheduledEventUpdate) AddAuthorizationRevision(v int) *ScheduledEventUpdate {
+	_u.mutation.AddAuthorizationRevision(v)
+	return _u
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (_u *ScheduledEventUpdate) ClearAuthorizationRevision() *ScheduledEventUpdate {
+	_u.mutation.ClearAuthorizationRevision()
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ScheduledEventUpdate) SetProjectID(v uuid.UUID) *ScheduledEventUpdate {
 	_u.mutation.SetProjectID(v)
@@ -238,6 +392,54 @@ func (_u *ScheduledEventUpdate) sqlSave(ctx context.Context) (_node int, err err
 			}
 		}
 	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialSnapshot(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialSnapshot, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialSnapshotCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialSnapshot, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttributionVersion(); ok {
+		_spec.SetField(scheduledevent.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttributionVersion(); ok {
+		_spec.AddField(scheduledevent.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if _u.mutation.AttributionVersionCleared() {
+		_spec.ClearField(scheduledevent.FieldAttributionVersion, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorizationRevision(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorizationRevision(); ok {
+		_spec.AddField(scheduledevent.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if _u.mutation.AuthorizationRevisionCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorizationRevision, field.TypeInt)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(scheduledevent.FieldProjectID, field.TypeUUID, value)
 	}
@@ -295,6 +497,160 @@ type ScheduledEventUpdateOne struct {
 	fields   []string
 	hooks    []Hook
 	mutation *ScheduledEventMutation
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (_u *ScheduledEventUpdateOne) SetInitiatorPrincipalKind(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetInitiatorPrincipalKind(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalKind sets the "initiator_principal_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableInitiatorPrincipalKind(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalKind clears the value of the "initiator_principal_kind" field.
+func (_u *ScheduledEventUpdateOne) ClearInitiatorPrincipalKind() *ScheduledEventUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalKind()
+	return _u
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (_u *ScheduledEventUpdateOne) SetInitiatorPrincipalID(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetInitiatorPrincipalID(v)
+	return _u
+}
+
+// SetNillableInitiatorPrincipalID sets the "initiator_principal_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableInitiatorPrincipalID(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetInitiatorPrincipalID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorPrincipalID clears the value of the "initiator_principal_id" field.
+func (_u *ScheduledEventUpdateOne) ClearInitiatorPrincipalID() *ScheduledEventUpdateOne {
+	_u.mutation.ClearInitiatorPrincipalID()
+	return _u
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (_u *ScheduledEventUpdateOne) SetInitiatorCredentialKind(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetInitiatorCredentialKind(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialKind sets the "initiator_credential_kind" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableInitiatorCredentialKind(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialKind(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialKind clears the value of the "initiator_credential_kind" field.
+func (_u *ScheduledEventUpdateOne) ClearInitiatorCredentialKind() *ScheduledEventUpdateOne {
+	_u.mutation.ClearInitiatorCredentialKind()
+	return _u
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (_u *ScheduledEventUpdateOne) SetInitiatorCredentialID(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetInitiatorCredentialID(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialID sets the "initiator_credential_id" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableInitiatorCredentialID(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialID clears the value of the "initiator_credential_id" field.
+func (_u *ScheduledEventUpdateOne) ClearInitiatorCredentialID() *ScheduledEventUpdateOne {
+	_u.mutation.ClearInitiatorCredentialID()
+	return _u
+}
+
+// SetInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field.
+func (_u *ScheduledEventUpdateOne) SetInitiatorCredentialSnapshot(v string) *ScheduledEventUpdateOne {
+	_u.mutation.SetInitiatorCredentialSnapshot(v)
+	return _u
+}
+
+// SetNillableInitiatorCredentialSnapshot sets the "initiator_credential_snapshot" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableInitiatorCredentialSnapshot(v *string) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetInitiatorCredentialSnapshot(*v)
+	}
+	return _u
+}
+
+// ClearInitiatorCredentialSnapshot clears the value of the "initiator_credential_snapshot" field.
+func (_u *ScheduledEventUpdateOne) ClearInitiatorCredentialSnapshot() *ScheduledEventUpdateOne {
+	_u.mutation.ClearInitiatorCredentialSnapshot()
+	return _u
+}
+
+// SetAttributionVersion sets the "attribution_version" field.
+func (_u *ScheduledEventUpdateOne) SetAttributionVersion(v int) *ScheduledEventUpdateOne {
+	_u.mutation.ResetAttributionVersion()
+	_u.mutation.SetAttributionVersion(v)
+	return _u
+}
+
+// SetNillableAttributionVersion sets the "attribution_version" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAttributionVersion(v *int) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAttributionVersion(*v)
+	}
+	return _u
+}
+
+// AddAttributionVersion adds value to the "attribution_version" field.
+func (_u *ScheduledEventUpdateOne) AddAttributionVersion(v int) *ScheduledEventUpdateOne {
+	_u.mutation.AddAttributionVersion(v)
+	return _u
+}
+
+// ClearAttributionVersion clears the value of the "attribution_version" field.
+func (_u *ScheduledEventUpdateOne) ClearAttributionVersion() *ScheduledEventUpdateOne {
+	_u.mutation.ClearAttributionVersion()
+	return _u
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (_u *ScheduledEventUpdateOne) SetAuthorizationRevision(v int) *ScheduledEventUpdateOne {
+	_u.mutation.ResetAuthorizationRevision()
+	_u.mutation.SetAuthorizationRevision(v)
+	return _u
+}
+
+// SetNillableAuthorizationRevision sets the "authorization_revision" field if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableAuthorizationRevision(v *int) *ScheduledEventUpdateOne {
+	if v != nil {
+		_u.SetAuthorizationRevision(*v)
+	}
+	return _u
+}
+
+// AddAuthorizationRevision adds value to the "authorization_revision" field.
+func (_u *ScheduledEventUpdateOne) AddAuthorizationRevision(v int) *ScheduledEventUpdateOne {
+	_u.mutation.AddAuthorizationRevision(v)
+	return _u
+}
+
+// ClearAuthorizationRevision clears the value of the "authorization_revision" field.
+func (_u *ScheduledEventUpdateOne) ClearAuthorizationRevision() *ScheduledEventUpdateOne {
+	_u.mutation.ClearAuthorizationRevision()
+	return _u
 }
 
 // SetProjectID sets the "project_id" field.
@@ -535,6 +891,54 @@ func (_u *ScheduledEventUpdateOne) sqlSave(ctx context.Context) (_node *Schedule
 				ps[i](selector)
 			}
 		}
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalKind(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorPrincipalKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalKindCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorPrincipalKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorPrincipalID(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorPrincipalID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorPrincipalIDCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorPrincipalID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialKind(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialKind, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialKindCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialID(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialIDCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.InitiatorCredentialSnapshot(); ok {
+		_spec.SetField(scheduledevent.FieldInitiatorCredentialSnapshot, field.TypeString, value)
+	}
+	if _u.mutation.InitiatorCredentialSnapshotCleared() {
+		_spec.ClearField(scheduledevent.FieldInitiatorCredentialSnapshot, field.TypeString)
+	}
+	if value, ok := _u.mutation.AttributionVersion(); ok {
+		_spec.SetField(scheduledevent.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttributionVersion(); ok {
+		_spec.AddField(scheduledevent.FieldAttributionVersion, field.TypeInt, value)
+	}
+	if _u.mutation.AttributionVersionCleared() {
+		_spec.ClearField(scheduledevent.FieldAttributionVersion, field.TypeInt)
+	}
+	if value, ok := _u.mutation.AuthorizationRevision(); ok {
+		_spec.SetField(scheduledevent.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAuthorizationRevision(); ok {
+		_spec.AddField(scheduledevent.FieldAuthorizationRevision, field.TypeInt, value)
+	}
+	if _u.mutation.AuthorizationRevisionCleared() {
+		_spec.ClearField(scheduledevent.FieldAuthorizationRevision, field.TypeInt)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(scheduledevent.FieldProjectID, field.TypeUUID, value)

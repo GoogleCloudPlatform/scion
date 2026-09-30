@@ -1001,6 +1001,91 @@ func TestLookupContainerID_ListingErrorIsListUnavailable(t *testing.T) {
 	}
 }
 
+// TestLookupContainerID_AuxiliaryListErrorSurfacesUnavailable is the
+// LookupContainerID analogue of
+// TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable (ptone/scion#2165):
+// an auxiliary runtime's List failure must not be folded into "not
+// found" — execCommand/resetAuth (both of which resolve their target via
+// LookupContainerID) must see ErrAgentListUnavailable and respond 503, not
+// 404, for the same underlying condition the PTY attach path (LookupAgent)
+// already handles correctly.
+func TestLookupContainerID_AuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &mockManager{listErr: errors.New("docker ps: connection refused")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	_, err := srv.LookupContainerID(context.Background(), "ghost", "")
+	if err == nil {
+		t.Fatal("expected an error when the auxiliary runtime's List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
+// TestLookupContainerID_FallbackListErrorSurfacesUnavailable is the
+// LookupContainerID analogue of
+// TestLookupAgent_PrimaryManagerFallbackListErrorSurfacesUnavailable: the
+// primary manager's project-less fallback List call (the backward-
+// compatibility retry for unlabeled legacy containers) must propagate its
+// error rather than dropping it and falling through to "not found". Before
+// the fix, this fallback assigned the error to `err` and never checked it,
+// so `agents` stayed nil and execution fell straight into the
+// agentNotFoundError branch.
+func TestLookupContainerID_FallbackListErrorSurfacesUnavailable(t *testing.T) {
+	mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	_, err := srv.LookupContainerID(context.Background(), "ghost", "some-project")
+	if err == nil {
+		t.Fatal("expected an error when the primary manager's fallback List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
+// TestLookupContainerID_FallbackAuxiliaryListErrorSurfacesUnavailable is the
+// LookupContainerID analogue of
+// TestLookupAgent_AuxiliaryListErrorInProjectFallbackSurfacesUnavailable,
+// isolated to the project-scoped backward-compatibility fallback's own
+// auxiliary loop (the second aux loop in LookupContainerID): the auxiliary
+// runtime succeeds (empty) for the first, project-scoped aux loop, so only
+// the fallback loop's List failure can be the source of the
+// ErrAgentListUnavailable this test requires.
+func TestLookupContainerID_FallbackAuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &scopedThenFailManager{failErr: errors.New("apiserver: context deadline exceeded")}
+
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	_, err := srv.LookupContainerID(context.Background(), "ghost", "some-project")
+	if err == nil {
+		t.Fatal("expected an error when the fallback aux runtime's List call fails")
+	}
+	if !errors.Is(err, ErrAgentListUnavailable) {
+		t.Errorf("expected ErrAgentListUnavailable, got: %v", err)
+	}
+}
+
 // TestLookupAgent_PhaseIsRawRuntimeNotMerged proves that AgentLookupResult's
 // Phase comes from the runtime's own listing (rawRuntimePhase), not from
 // agent.Manager's merged view (which overlays agent-info.json and can lag

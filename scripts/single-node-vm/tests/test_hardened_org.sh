@@ -669,6 +669,6 @@ test_hardened_org_teardown_deletes_8080_rule() {
     "teardown must delete the proxy-to-VM firewall rule exactly once"
   assert_false "$([[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${FW_8080_RULE_NAME}.json" ]] && echo true)" \
     "the proxy-to-VM firewall-rule fixture should be gone after teardown"
-  assert_contains "$DEPLOY_LOG" "Deleted firewall rule:     ${FW_8080_RULE_NAME}" \
+  assert_contains "$DEPLOY_LOG" "Deleted firewall rule:      ${FW_8080_RULE_NAME}" \
     "the summary must report the proxy-to-VM firewall rule as deleted"
 }
