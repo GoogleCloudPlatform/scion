@@ -449,17 +449,26 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 	// Migrate runs, and the backfill must not touch it — rewriting it to
 	// version 0 would turn a denying row into an allowing one (the bug this
 	// sub-test pins).
+	//
+	// Each case uses its own client/store, not the outer cs: Migrate's
+	// completion marker is per-client, so sharing cs across cases would make
+	// every case after the first a no-op (the marker already set) rather
+	// than a real exercise of the backfill query.
 	for _, version := range []int32{int32(permissions.CeilingVersionV1), 9} {
 		version := version
 		t.Run(fmt.Sprintf("versioned row with NULL ids is left as is by Migrate, version %d", version), func(t *testing.T) {
+			caseClient := enttest.NewClient(t)
+			caseCS := NewCompositeStore(caseClient)
+			caseUserID, caseProjectID := seedProjectAndUser(t, caseCS)
+
 			id := uuid.New()
-			_, err := client.UserAccessToken.Create().
+			_, err := caseClient.UserAccessToken.Create().
 				SetID(id).
-				SetUserID(uuid.MustParse(userID)).
+				SetUserID(uuid.MustParse(caseUserID)).
 				SetName(fmt.Sprintf("v%d-null-ids", version)).
 				SetPrefix(fmt.Sprintf("scion_pat_v%dnull", version)).
 				SetKeyHash(uuid.NewString()).
-				SetProjectID(uuid.MustParse(projectID)).
+				SetProjectID(uuid.MustParse(caseProjectID)).
 				SetScopes(marshalScopes([]string{"agent:read"})).
 				SetCeilingVersion(version).
 				SetRevoked(false).
@@ -467,15 +476,15 @@ func TestBackfillUATCeilings_MalformedOrUnknownCeilingDenies(t *testing.T) {
 				Save(ctx)
 			require.NoError(t, err)
 
-			before, err := cs.GetUserAccessToken(ctx, id.String())
+			before, err := caseCS.GetUserAccessToken(ctx, id.String())
 			require.NoError(t, err)
 			require.Equal(t, permissions.CeilingVersion(version), before.CeilingVersion)
 			require.Nil(t, before.CeilingPermissionIDs)
 			assert.False(t, before.NormalizedCeiling().Allows("agent.read"), "a versioned row with NULL ids must deny before Migrate, even though Scopes would otherwise resolve to agent.read")
 
-			require.NoError(t, cs.Migrate(ctx))
+			require.NoError(t, caseCS.Migrate(ctx))
 
-			after, err := cs.GetUserAccessToken(ctx, id.String())
+			after, err := caseCS.GetUserAccessToken(ctx, id.String())
 			require.NoError(t, err)
 			assert.Equal(t, permissions.CeilingVersion(version), after.CeilingVersion, "the backfill must not rewrite a versioned row's version")
 			assert.Nil(t, after.CeilingPermissionIDs, "the backfill must not populate a versioned row's permission ids")
