@@ -1930,6 +1930,9 @@ export class ScionChatThread extends LitElement {
       | undefined;
     const eventData: ReadStateData | undefined = detail?.data ?? detail;
     if (!eventData || eventData.conversationKey !== this.conversationKey) return;
+    // selfUserId() (defined below), not the public currentUserId field directly:
+    // it lazily resolves the ID from the chat scope for threads mounted before
+    // the scope is configured, falling back to currentUserId once set.
     if (eventData.userId && eventData.userId === this.selfUserId()) {
       if (eventData.unread === true) {
         this.handleOwnReadStateChanged();
