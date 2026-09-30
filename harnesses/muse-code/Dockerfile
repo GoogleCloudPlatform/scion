@@ -19,11 +19,13 @@ FROM ${BASE_IMAGE}
 # Image is immutable; update muse by rebuilding, not by runtime auto-update.
 ENV MUSE_NO_AUTO_UPDATE=1
 
-# Installer is bash-only ([[ ]]); env vars must be on the bash side of the
-# pipe. Installs straight into /usr/local/bin (on PATH for scion) via the
+# Installer is bash-only ([[ ]]); download to a file rather than piping to
+# bash so a failed curl aborts the build instead of silently running nothing.
+# Installs straight into /usr/local/bin (on PATH for scion) via the
 # installer's supported MUSE_INSTALL_DIR override.
-RUN curl -fsSL https://dev.meta.ai/install.sh | \
-      MUSE_INSTALL_DIR=/usr/local/bin MUSE_NO_MODIFY_PATH=1 bash && \
+RUN curl -fsSL -o /tmp/muse-install.sh https://dev.meta.ai/install.sh && \
+    MUSE_INSTALL_DIR=/usr/local/bin MUSE_NO_MODIFY_PATH=1 bash /tmp/muse-install.sh && \
+    rm /tmp/muse-install.sh && \
     muse --version
 
 # Create config and data directories owned by agent user
