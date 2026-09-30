@@ -295,7 +295,8 @@ type DenyCause string
 const (
 	// DenyCauseCeilingOrphaned marks a delegation-ceiling deny where the
 	// delegator (the principal that created the agent, directly or
-	// transitively) no longer resolves at all — e.g. its user was deleted.
+	// transitively) does not resolve, is deleted (including a retained
+	// soft-deleted agent), or is the migration sentinel.
 	DenyCauseCeilingOrphaned DenyCause = "ceiling_orphaned"
 
 	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
