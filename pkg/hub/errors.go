@@ -319,8 +319,9 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	// Log 5xx errors with the underlying error for debugging. Most 4xx stay
 	// at DEBUG with the underlying error attached; a narrow set (see
 	// elevatedClientErrorStatus) is promoted to INFO, logging only the
-	// public message rather than the underlying error so the elevated log
-	// line never carries more detail than the response already returned.
+	// public message there so the elevated log line never carries more
+	// detail than the response already returned. The raw error remains
+	// available at DEBUG for that same narrow set.
 	switch {
 	case statusCode >= 500:
 		slog.Error("API Error from Go error",
@@ -335,6 +336,12 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 			"code", code,
 			"message", message,
 			"requestID", requestID,
+		)
+		slog.Debug("API client error from Go error (underlying)",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
 		)
 	case statusCode >= 400:
 		slog.Debug("API client error from Go error",

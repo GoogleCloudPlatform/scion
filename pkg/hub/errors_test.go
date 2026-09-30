@@ -42,11 +42,14 @@ func errorsHelperCaptureLogs(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
-// errorsHelperLastRecord returns the last JSON log record in buf, or nil if
-// there are none.
-func errorsHelperLastRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
+// errorsHelperRecordAtLevel returns the first JSON log record in buf at the
+// given level whose msg starts with "API ", or nil if there is none.
+// Filtering by prefix, rather than taking the last line in the buffer,
+// avoids picking up an unrelated log line that a background goroutine left
+// over from an earlier test could still write into the process-global
+// logger while this test runs.
+func errorsHelperRecordAtLevel(t *testing.T, buf *bytes.Buffer, level string) map[string]any {
 	t.Helper()
-	var last map[string]any
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if line == "" {
 			continue
@@ -55,9 +58,12 @@ func errorsHelperLastRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			continue
 		}
-		last = rec
+		msg, _ := rec["msg"].(string)
+		if rec["level"] == level && strings.HasPrefix(msg, "API ") {
+			return rec
+		}
 	}
-	return last
+	return nil
 }
 
 func TestWriteErrorFromErr_PermissionError(t *testing.T) {
@@ -150,80 +156,97 @@ func TestWriteErrorFromErr_GenericError_Still500(t *testing.T) {
 	}
 }
 
-// TestWriteError_LogLevel_ElevatedStatus covers ptone/scion#2352: 422 (the
-// no-runtime-broker-available case on agent create) must log at INFO, not
-// DEBUG, so operators see it without turning up global log verbosity.
-func TestWriteError_LogLevel_ElevatedStatus(t *testing.T) {
-	buf := errorsHelperCaptureLogs(t)
-
-	rr := httptest.NewRecorder()
-	writeError(rr, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker, "no runtime brokers available", nil)
-
-	rec := errorsHelperLastRecord(t, buf)
-	if rec == nil {
-		t.Fatal("expected a log record, got none")
+// TestWriteError_LogLevel covers ptone/scion#2352's rule for writeError over
+// the full set of statuses it applies to: 400/409/422 promoted to INFO so
+// operators see them without turning up global log verbosity, 401/403/404/429
+// left at DEBUG since promoting them would flood logs on routine client
+// errors, and 500 kept at ERROR.
+func TestWriteError_LogLevel(t *testing.T) {
+	tests := []struct {
+		status int
+		level  string
+	}{
+		{http.StatusBadRequest, "INFO"},
+		{http.StatusConflict, "INFO"},
+		{http.StatusUnprocessableEntity, "INFO"},
+		{http.StatusUnauthorized, "DEBUG"},
+		{http.StatusForbidden, "DEBUG"},
+		{http.StatusNotFound, "DEBUG"},
+		{http.StatusTooManyRequests, "DEBUG"},
+		{http.StatusInternalServerError, "ERROR"},
 	}
-	if rec["level"] != "INFO" {
-		t.Errorf("expected level INFO for status 422, got %v", rec["level"])
-	}
-	if got := rec["message"]; got != "no runtime brokers available" {
-		t.Errorf("expected logged message to match the public message, got %v", got)
-	}
-}
 
-// TestWriteError_LogLevel_ExcludedStatus covers the other side of the rule:
-// a 404 (and, by the same reasoning, 401/403/429) must stay at DEBUG since
-// promoting it would flood logs on routine client errors.
-func TestWriteError_LogLevel_ExcludedStatus(t *testing.T) {
-	buf := errorsHelperCaptureLogs(t)
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%d", tt.status), func(t *testing.T) {
+			buf := errorsHelperCaptureLogs(t)
 
-	rr := httptest.NewRecorder()
-	writeError(rr, http.StatusNotFound, ErrCodeNotFound, "agent not found", nil)
+			rr := httptest.NewRecorder()
+			writeError(rr, tt.status, "test_code", "test message", nil)
 
-	rec := errorsHelperLastRecord(t, buf)
-	if rec == nil {
-		t.Fatal("expected a log record, got none")
-	}
-	if rec["level"] != "DEBUG" {
-		t.Errorf("expected level DEBUG for status 404, got %v", rec["level"])
+			rec := errorsHelperRecordAtLevel(t, buf, tt.level)
+			if rec == nil {
+				t.Fatalf("expected a %s record for status %d, got none", tt.level, tt.status)
+			}
+		})
 	}
 }
 
-// TestWriteErrorFromErr_LogLevel_ElevatedStatus covers the second motivating
-// case from ptone/scion#2352: a 400/409-class Go error (here, a version
-// conflict) must log at INFO, with only the public message attached — never
-// the raw underlying error, which may carry more detail than the response.
-func TestWriteErrorFromErr_LogLevel_ElevatedStatus(t *testing.T) {
-	buf := errorsHelperCaptureLogs(t)
-
-	rr := httptest.NewRecorder()
-	writeErrorFromErr(rr, store.ErrVersionConflict, "test-req-2")
-
-	rec := errorsHelperLastRecord(t, buf)
-	if rec == nil {
-		t.Fatal("expected a log record, got none")
+// TestWriteErrorFromErr_LogLevel covers the same rule for writeErrorFromErr,
+// mapped to the store sentinels that actually drive its status mapping.
+// It also covers the R1 regression: on the elevated path, the INFO line must
+// carry only the public message while the raw underlying error remains
+// available at DEBUG, exactly as it did before this PR.
+func TestWriteErrorFromErr_LogLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		status   int
+		level    string
+		elevated bool
+	}{
+		{"invalid_input_400", fmt.Errorf("detail: %w", store.ErrInvalidInput), http.StatusBadRequest, "INFO", true},
+		{"version_conflict_409", fmt.Errorf("detail: %w", store.ErrVersionConflict), http.StatusConflict, "INFO", true},
+		{"forbidden_403", fmt.Errorf("detail: %w", &secret.PermissionError{Operation: "create secret", Err: fmt.Errorf("denied")}), http.StatusForbidden, "DEBUG", false},
+		{"not_found_404", fmt.Errorf("detail: %w", store.ErrNotFound), http.StatusNotFound, "DEBUG", false},
+		{"generic_500", fmt.Errorf("boom"), http.StatusInternalServerError, "ERROR", false},
 	}
-	if rec["level"] != "INFO" {
-		t.Errorf("expected level INFO for a version-conflict (409) error, got %v", rec["level"])
-	}
-	if _, present := rec["error"]; present {
-		t.Errorf("expected no raw error field on the elevated log line, got %v", rec["error"])
-	}
-}
 
-// TestWriteErrorFromErr_LogLevel_ExcludedStatus asserts a not-found Go error
-// (404) still logs at DEBUG.
-func TestWriteErrorFromErr_LogLevel_ExcludedStatus(t *testing.T) {
-	buf := errorsHelperCaptureLogs(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := errorsHelperCaptureLogs(t)
 
-	rr := httptest.NewRecorder()
-	writeErrorFromErr(rr, store.ErrNotFound, "test-req-3")
+			rr := httptest.NewRecorder()
+			writeErrorFromErr(rr, tt.err, "test-req")
 
-	rec := errorsHelperLastRecord(t, buf)
-	if rec == nil {
-		t.Fatal("expected a log record, got none")
-	}
-	if rec["level"] != "DEBUG" {
-		t.Errorf("expected level DEBUG for a not-found (404) error, got %v", rec["level"])
+			if rr.Code != tt.status {
+				t.Fatalf("status = %d, want %d", rr.Code, tt.status)
+			}
+
+			rec := errorsHelperRecordAtLevel(t, buf, tt.level)
+			if rec == nil {
+				t.Fatalf("expected a %s record, got none", tt.level)
+			}
+
+			if !tt.elevated {
+				if _, present := rec["error"]; !present {
+					t.Errorf("expected the raw error field on the %s line, got none", tt.level)
+				}
+				return
+			}
+
+			// Elevated (400/409): the INFO line must not carry the raw
+			// error, but a DEBUG line with the raw error must still exist.
+			if _, present := rec["error"]; present {
+				t.Errorf("expected no raw error field on the elevated INFO line, got %v", rec["error"])
+			}
+			debugRec := errorsHelperRecordAtLevel(t, buf, "DEBUG")
+			if debugRec == nil {
+				t.Fatal("expected a DEBUG record carrying the underlying error, got none")
+			}
+			got, _ := debugRec["error"].(string)
+			if !strings.Contains(got, tt.err.Error()) {
+				t.Errorf("expected DEBUG error field to contain %q, got %q", tt.err.Error(), got)
+			}
+		})
 	}
 }
