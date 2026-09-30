@@ -121,3 +121,109 @@ that PR has since landed upstream as GoogleCloudPlatform/scion#2097, and this br
   branch is rebased onto `upstream-main` on top of it.
 - This log entry.
 - `scion message` to `broker-settings-em` with PR number, head SHA, and the test evidence above.
+
+## Upstream review: GoogleCloudPlatform/scion#2126
+
+`ptone/scion#2275` is tracked upstream as `GoogleCloudPlatform/scion#2126`. gemini-code-assist
+opened two review threads there, both on `pkg/store/entadapter/brokersetting_store.go`'s
+`usesRowLocks`:
+
+- discussion_r4144103907 (line 38)
+- discussion_r4144103949 (line 55)
+
+**Claim.** The old implementation cached the dialect with a `sync.Once`:
+
+```go
+func (s *BrokerSettingStore) usesRowLocks(ctx context.Context) bool {
+	s.dialectOnce.Do(func() {
+		_, _ = s.client.BrokerSetting.Query().
+			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
+			Exist(ctx)
+	})
+	return s.dialectName == dialect.Postgres
+}
+```
+
+Gemini's claim: if the first probe fails (a transient DB error, or a cancelled `ctx`), `sync.Once`
+permanently caches an empty `dialectName`, so `usesRowLocks` reports `false` forever afterwards —
+on Postgres, that means `PutBrokerSettings` silently stops taking `ForUpdate()` (a lost row lock,
+i.e. a correctness bug on the CAS path), not just a retriable failure.
+
+**Evaluation (done before writing any fix, per the brief).** Traced ent v0.14.5's actual query path
+rather than assuming: `Exist(ctx)` → `FirstID(ctx)` → `sqlAll` → `sqlgraph.QueryNodes`. The
+predicate `Where(...)` callback that captures `sel.Dialect()` runs inside `query.selector(ctx)`,
+which builds the SQL selector as a pure in-memory string-building step — no I/O. `query.nodes` only
+calls `drv.Query(ctx, ...)` (the actual network round trip) *after* `selector(ctx)` returns. So:
+
+- A **transient DB error** can only surface from `drv.Query`, which runs strictly after the
+  predicate already set `s.dialectName`. It cannot prevent the capture.
+- A **cancelled ctx** is likewise only observed by the driver during the round trip (`database/sql`
+  checks `ctx.Err()` around the actual query execution); `query.selector` never inspects `ctx` at
+  all in this codepath.
+- The only way the predicate would *not* run is an SQL-builder-level error inside `selector(ctx)`
+  itself (`selector.Err()`) or a registered ent interceptor short-circuiting earlier — neither of
+  which is a "transient DB error" or "cancelled ctx" in Gemini's framing. Also checked: no ent
+  interceptors are registered on any client anywhere in this codebase.
+
+**Conclusion: the claim's two named triggers (transient DB error, cancelled ctx) do not reach the
+failure mode described.** The `sync.Once` was not, in fact, capable of caching an empty
+`dialectName` from either of those causes in this codebase's actual call path. That said, the
+probe-query machinery was doing real work (a throwaway `Exist` query per process lifetime) for a
+value that never needs a query at all.
+
+**Chosen fix: construction-time dialect, no query.** `client.Driver().Dialect()` is a property of
+the already-constructed `*ent.Client`, fixed at startup — never a query result, so there is no probe
+to fail and nothing to cache. This is exactly the "preferred" option in the brief, and it isn't a
+new pattern: `CompositeStore.isPostgres()` (`locking.go`) already does the same read, and
+`role_store.go`, `external_store.go`, `skill_registry_store.go`, and `project_store.go` all compare
+`client.Driver().Dialect() == dialect.Postgres` directly. `usesRowLocks` now does the same:
+
+```go
+func (s *BrokerSettingStore) usesRowLocks(context.Context) bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
+}
+```
+
+The `sync.Once`/`dialectName` fields and the `sync`/`entsql` imports were removed; the method still
+takes a `context.Context` parameter (unused) so both call sites in `PutBrokerSettings` are
+unchanged.
+
+**Why not the fallback (cache-only-on-success, or a mutex+retry)?** The brief's own fallback branch
+only applies "if a query probe must remain." Since a query-free read is both possible and already
+the established local idiom, keeping any probe at all (Gemini's suggested `sync.Mutex` + retry, or
+a success-only cache) would be strictly more complex for no benefit, so neither was implemented.
+
+**Scope check for other stores.** `git diff --name-only $(git merge-base HEAD upstream-main)...HEAD`
+shows only `brokersetting_store.go` (among files using the `dialectOnce`/cached-probe pattern) was
+added or changed by P2.1. `access_constraint_store.go`, `lifecyclehook_store.go`, `launch_store.go`,
+`agent_store.go`, and `hubsetting_store.go` all use the same older probe pattern, but they predate
+this PR and are untouched by it (confirmed via the diff), so per the brief's own scoping — "every
+other store or helper added or changed in P2.1" — they are out of scope here and were left as-is.
+(`launch_store.go`'s `dialect(ctx)` helper even documents, in its own comment, that it deliberately
+*reuses* `AgentStore`'s cached probe so the launch store and the row-lock gating share one cache
+instead of two — a cross-method sharing reason that doesn't apply to `BrokerSettingStore`, which has
+no sibling method to share a cache with.)
+
+**Tests.** Added `TestUsesRowLocks_ReflectsBackend` to
+`pkg/store/entadapter/brokersetting_store_test.go`: it asserts `usesRowLocks` against the actual
+active test backend (`enttest.Active()`) rather than re-deriving the expected value from the same
+`client.Driver().Dialect()` expression the implementation uses, so a wrong dialect-constant
+comparison in the implementation would still be caught. Ran green on both:
+
+- SQLite (default `go test ./pkg/store/entadapter/...`): `usesRowLocks` → `false`.
+- Postgres (`-tags integration` with `SCION_TEST_POSTGRES_URL` pointed at the local Postgres 15
+  instance): `usesRowLocks` → `true`.
+
+All 12 pre-existing `BrokerSetting`/`DeleteRuntimeBroker` CAS tests remain green, unchanged, on both
+backends (13 total including the new test).
+
+**Fixing commit:** `store(brokersettings): read dialect from the driver, not a probe query`.
+
+**Gates re-run after the fix:** `go build ./...`; `go vet ./pkg/store/... ./pkg/hub/`, plus
+`-tags no_sqlite`; targeted `go test ./pkg/store/... ./pkg/hub/... -run 'BrokerSetting|Broker|Quota|Capacity'`;
+`make test-hub-sqlite`; Postgres `entadapter` suite (`-tags integration`); `golangci-lint run
+--new-from-rev=upstream-main ./pkg/store/entadapter/...` (0 new issues; the 3 pre-existing
+`staticcheck` findings are unrelated deprecated-API usage in `access_constraint_store.go`, untouched
+by this PR). All `SCION_*`/`CLAUDE_*` environment variables were unset for every gate invocation.
+See the response note for the exact commands and full output:
+`/scion-volumes/scratchpad/projects/broker-settings/notes/p2-1-upstream-2126-fix.md`.
