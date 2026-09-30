@@ -19,13 +19,23 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Identity represents an authenticated identity (user or agent).
 type Identity interface {
 	ID() string
-	Type() string // "user", "agent", "dev"
+	// Type returns a human-readable identity kind, e.g. "user", "agent",
+	// "dev", "federated_user", "federated_agent", "federated_service", or
+	// "broker". It is informational only — new concrete types are free to
+	// return any string, including one already used by another type — and
+	// must never be trusted for authorization classification. Principal and
+	// credential kind, and ancestry attestation, are decided through
+	// explicit type assertions and opt-in markers (principalContextForIdentity,
+	// credentialContextForIdentity, AncestryIsHubAttested), which fail closed
+	// on any identity they don't explicitly recognize.
+	Type() string
 }
 
 // UserIdentity represents an authenticated user.
@@ -73,6 +83,12 @@ func (u *AuthenticatedUser) ID() string { return u.id }
 // Type returns the identity type ("user").
 func (u *AuthenticatedUser) Type() string { return "user" }
 
+// localAncestryProvenance reports that a local user is the root of its own
+// ancestry chain: it opts AuthenticatedUser into AncestryIsHubAttested.
+func (u *AuthenticatedUser) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
 // Email returns the user email.
 func (u *AuthenticatedUser) Email() string { return u.email }
 
@@ -92,40 +108,80 @@ type ScopedUserIdentity struct {
 	projectID    string
 	scopes       []string
 	credentialID string
+	ceiling      permissions.FrozenPermissionCeiling
 
-	// E.1 descriptive credential metadata: populated only by
+	// decoration holds descriptive credential metadata: populated only by
 	// UserAccessTokenService.ValidateToken from the server-validated token
 	// row, and never by any other caller. nil for identities not backed by
 	// a validated UAT row (e.g. constructed directly by older tests/callers).
 	decoration *CredentialDecoration
 }
 
-// NewScopedUserIdentity creates a ScopedUserIdentity.
+// NewScopedUserIdentity creates a ScopedUserIdentity. The ceiling is derived
+// from scopes via the frozen legacy normalization (permissions.
+// NormalizeLegacyUATScopes) — the same interpretation a real
+// CeilingVersionUnspecified token gets — so callers that construct an
+// identity directly from raw scope strings (most test fixtures) exercise
+// the same permission-ID-based restriction that production applies. A
+// caller minting a real token should use NewScopedUserIdentityWithCeiling
+// with the token's actual store.UserAccessToken.NormalizedCeiling() instead,
+// so a CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
 func NewScopedUserIdentity(user UserIdentity, projectID string, scopes []string) *ScopedUserIdentity {
 	return NewScopedUserIdentityWithCredentialID(user, projectID, scopes, "")
 }
 
 // NewScopedUserIdentityWithCredentialID creates a UAT-backed identity with
 // its persisted credential ID available for authorization audit context.
+// See NewScopedUserIdentity for how the ceiling is derived.
 func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, scopes []string, credentialID string) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeiling(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	})
+}
+
+// NewScopedUserIdentityWithCeiling creates a UAT-backed identity carrying an
+// explicit, already-normalized FrozenPermissionCeiling — the production
+// path (UserAccessTokenService.ValidateToken) uses this so a stored token's
+// real ceiling (legacy-normalized or CeilingVersionV1+, per
+// store.UserAccessToken.NormalizedCeiling) drives authorization, not a
+// re-derivation from raw scopes.
+func NewScopedUserIdentityWithCeiling(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
 		credentialID: credentialID,
+		ceiling:      ceiling,
 	}
 }
 
 // NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
-// E.1's descriptive credential decoration alongside its credential ID. Only
-// UserAccessTokenService.ValidateToken should call this: it is the single
-// point that has the server-validated token row in hand.
+// descriptive credential decoration alongside its credential ID. The
+// ceiling is derived from scopes the same way
+// NewScopedUserIdentityWithCredentialID derives it; see
+// NewScopedUserIdentityWithCeilingAndDecoration for a constructor that takes
+// an explicit, already-normalized ceiling instead.
 func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return NewScopedUserIdentityWithCeilingAndDecoration(user, projectID, scopes, credentialID, permissions.FrozenPermissionCeiling{
+		Version:       permissions.CeilingVersionUnspecified,
+		PermissionIDs: permissions.NormalizeLegacyUATScopes(scopes),
+	}, decoration)
+}
+
+// NewScopedUserIdentityWithCeilingAndDecoration creates a UAT-backed identity
+// carrying both an explicit, already-normalized FrozenPermissionCeiling and
+// descriptive credential decoration. UserAccessTokenService.ValidateToken —
+// the single point that has the server-validated token row in hand — uses
+// this to attach both pieces of derived state in one call, so a
+// CeilingVersionV1+ ceiling is not silently reinterpreted as legacy.
+func NewScopedUserIdentityWithCeilingAndDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, ceiling permissions.FrozenPermissionCeiling, decoration *CredentialDecoration) *ScopedUserIdentity {
 	return &ScopedUserIdentity{
 		UserIdentity: user,
 		projectID:    projectID,
 		scopes:       scopes,
 		credentialID: credentialID,
+		ceiling:      ceiling,
 		decoration:   decoration,
 	}
 }
@@ -150,6 +206,31 @@ func (s *ScopedUserIdentity) ScopedScopes() []string { return s.scopes }
 
 // CredentialID returns the persisted ID of the UAT that authenticated this identity.
 func (s *ScopedUserIdentity) CredentialID() string { return s.credentialID }
+
+// localAncestryProvenance reports that a UAT-backed identity is still a local
+// user: the wrapped UserIdentity is the root of its own ancestry chain. It is
+// declared directly (not inherited through the embedded UserIdentity field)
+// because Go only promotes methods declared by an embedded interface's own
+// method set, and localAncestryProvenance is not part of UserIdentity.
+//
+// This method's mere presence is what AncestryIsHubAttested tests for, so it
+// cannot itself refuse to be "implemented" when the wrapped identity turns
+// out to be federated — see AncestryIsHubAttested's explicit unwrap check for
+// where that case is actually rejected. Production only ever wraps
+// *AuthenticatedUser (useraccesstoken.go), so this path is not reachable
+// today; it exists so a future caller cannot silently attest a UAT issued
+// against a federated identity.
+func (s *ScopedUserIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
+// Ceiling returns the normalized, frozen permission ceiling this identity's
+// credential carries. Every credential-scope restriction (Decide step 7a,
+// CanDelegate's intersectCredentialCaveats) reads this instead of
+// re-deriving permission IDs from raw scopes, so legacy and current-version
+// tokens are evaluated through the exact same "empty/malformed/unknown
+// denies" rule (FrozenPermissionCeiling.Allows).
+func (s *ScopedUserIdentity) Ceiling() permissions.FrozenPermissionCeiling { return s.ceiling }
 
 // IsScopedUserIdentity reports whether an identity is backed by a scoped UAT.
 // Scoped credentials must not use role-only administrative bypasses.
@@ -181,27 +262,101 @@ func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
 	return !federated
 }
 
-// AncestryIsHubAttested returns true when the identity's ancestry chain
-// was signed by this hub and can be trusted for delegation decisions.
-// Federated agent ancestry is a remote claim about local principal IDs
-// and must not be used for delegation matching or ceiling evaluation.
+// ancestryProvenance names the recognized source of an identity's local
+// ancestry chain, for explain/audit and tests. It is unexported: the value
+// itself carries no authority, only the presence of a
+// localAncestryProvenanceIdentity implementation does.
+type ancestryProvenance string
+
+const (
+	// ancestryProvenanceLocalUser marks a local user (interactive or
+	// UAT-backed) as the root of its own ancestry chain.
+	ancestryProvenanceLocalUser ancestryProvenance = "local_user"
+	// ancestryProvenanceAgentJWT marks an ancestry chain carried in a hub-signed
+	// agent JWT.
+	ancestryProvenanceAgentJWT ancestryProvenance = "agent_jwt"
+	// ancestryProvenanceStoreAgent marks an ancestry chain read back from a
+	// hub-persisted agent record (not from the JWT that authenticated the
+	// request).
+	ancestryProvenanceStoreAgent ancestryProvenance = "store_agent"
+)
+
+// localAncestryProvenanceIdentity is implemented only by identity wrappers
+// whose ancestry chain has recognized local provenance: signed by this hub
+// (agent JWT) or persisted by this hub (store-derived wrappers), or is
+// itself the root of the chain (a local user). The method is unexported so
+// that a type outside package hub cannot implement it, and so that a type
+// inside package hub — including a test fake — must opt in explicitly
+// rather than acquiring attestation by accident (e.g. by merely returning
+// Type() == "agent").
+type localAncestryProvenanceIdentity interface {
+	localAncestryProvenance() ancestryProvenance
+}
+
+// AncestryIsHubAttested returns true when the identity's ancestry chain has
+// recognized local provenance: signed by this hub (agent JWT) or persisted
+// by this hub (store-derived wrappers), or is itself the root of the chain
+// (a local user). Federated agent ancestry is a remote claim about local
+// principal IDs and must not be used for delegation matching or ceiling
+// evaluation, so FederatedIdentity is rejected first, before any local
+// allow path.
 //
 // This is the single predicate for ancestry trust. There will be more
 // consumers of ancestry after F1.7, and each one must answer this
 // question the same way — not via scattered Type() comparisons.
 //
 // The parameter is typed as Identity (not interface{}) so that callers
-// cannot accidentally pass an unrelated type. Unknown identity types
-// return false (fail closed — unknown is not attested).
+// cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
+// identity types all return false (fail closed): an identity is attested
+// only if it implements localAncestryProvenanceIdentity, which — unlike
+// Type() — cannot be satisfied by an arbitrary or future type string.
 func AncestryIsHubAttested(identity Identity) bool {
 	if identity == nil {
 		return false
 	}
 	// All FederatedIdentity types (FederatedAgentIdentity,
 	// FederatedUserIdentity, FederatedServiceIdentity) are NOT
-	// hub-attested. Test the interface, not a single concrete type.
-	_, isFederated := identity.(FederatedIdentity)
-	return !isFederated
+	// hub-attested. Test the interface, not a single concrete type. This
+	// check comes first: federated ancestry must never reach the local
+	// allow path below, however it is packaged.
+	if _, isFederated := identity.(FederatedIdentity); isFederated {
+		return false
+	}
+	// A *ScopedUserIdentity is attested unconditionally by the marker check
+	// below, whatever UserIdentity it wraps — because IssuerURL is not part
+	// of the UserIdentity interface's method set, Go does not promote it
+	// through the embedded field, so a ScopedUserIdentity wrapping a
+	// FederatedUserIdentity would not satisfy the FederatedIdentity check
+	// above. Unwrap explicitly instead of trusting the outer type's marker.
+	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if _, wrappedFederated := scoped.UserIdentity.(FederatedIdentity); wrappedFederated {
+			return false
+		}
+	}
+	_, ok := identity.(localAncestryProvenanceIdentity)
+	return ok
+}
+
+// explicitIdentityClassification is an opt-in marker for identity types that
+// need a PrincipalKind/CredentialKind from principalContextForIdentity and
+// credentialContextForIdentity without being one of the explicitly classified
+// concrete production types those functions switch on directly
+// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
+// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
+// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
+// FederatedServiceIdentity). Its only current implementers are package-hub
+// test fakes that stand in for one of those types (ptone/scion#2123). The
+// method is unexported for the same reason localAncestryProvenance is: no
+// type outside package hub can implement it, so classification can never be
+// forged by an external caller, and a package-hub test fake must opt in with
+// an explicit, classified method rather than acquiring a kind by accident —
+// in particular, never by returning a Type() string that happens to match a
+// recognized one. A type that does not implement this interface, and is not
+// one of the concrete types above, is classified with an empty
+// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
+// denies.
+type explicitIdentityClassification interface {
+	authzClassification() (PrincipalKind, CredentialKind)
 }
 
 // HasScope returns true if this identity has the given scope.
@@ -224,6 +379,12 @@ func (a *agentIdentityWrapper) ID() string { return a.Subject }
 
 // Type returns the identity type ("agent").
 func (a *agentIdentityWrapper) Type() string { return "agent" }
+
+// localAncestryProvenance reports that this ancestry chain came from a
+// hub-signed agent JWT.
+func (a *agentIdentityWrapper) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 
 // ProjectID returns the project ID.
 func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }
@@ -316,6 +477,37 @@ func GetCredentialContextFromContext(ctx context.Context) CredentialContext {
 // contextWithCredentialContext records credential caveats for request-based authorization.
 func contextWithCredentialContext(ctx context.Context, credential CredentialContext) context.Context {
 	return context.WithValue(ctx, credentialContextKey{}, credential)
+}
+
+// BrokerOnBehalfOf is the hub-set marker proving that a broker-authenticated
+// request's effective identity was substituted by BrokerAuthMiddleware (or
+// its audited variant) after HMAC verification and a successful
+// X-Scion-On-Behalf-Of resolution — never merely by the presence of the
+// header or a caller-supplied broker credential. BrokerID duplicates
+// Broker.ID() so a compatibility check can bind Credential.ID to it without
+// re-deriving it from the interface value.
+type BrokerOnBehalfOf struct {
+	Broker   BrokerIdentity
+	BrokerID string
+}
+
+// brokerOnBehalfOfContextKey is the context key for the BrokerOnBehalfOf marker.
+type brokerOnBehalfOfContextKey struct{}
+
+// contextWithBrokerOnBehalfOf records the BrokerOnBehalfOf marker. It is
+// unexported: the only caller is the shared authenticated-broker/OBO context
+// helper in brokerauth.go, invoked only after HMAC verification and a
+// successful resolveOnBehalfOf. An invalid HMAC or a bare/unresolved header
+// must never reach this function.
+func contextWithBrokerOnBehalfOf(ctx context.Context, obo BrokerOnBehalfOf) context.Context {
+	return context.WithValue(ctx, brokerOnBehalfOfContextKey{}, obo)
+}
+
+// BrokerOnBehalfOfFromContext returns the BrokerOnBehalfOf marker set by the
+// broker authentication middleware, and whether one was set at all.
+func BrokerOnBehalfOfFromContext(ctx context.Context) (BrokerOnBehalfOf, bool) {
+	obo, ok := ctx.Value(brokerOnBehalfOfContextKey{}).(BrokerOnBehalfOf)
+	return obo, ok
 }
 
 // ExecutorContext identifies what is currently executing a request, as

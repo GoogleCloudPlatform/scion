@@ -52,6 +52,17 @@ type bindableFederatedAdmin struct {
 func (f *bindableFederatedAdmin) Type() string      { return "federated_user" }
 func (f *bindableFederatedAdmin) IssuerURL() string { return f.issuerURL }
 
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification as a federated user: those
+// functions key on concrete type, and this fake is a distinct Go type from
+// the production FederatedUserIdentity. This keeps these tests exercising
+// IsUnscopedLocalPlatformAdmin's FederatedIdentity-specific denial rather
+// than an unrelated "unrecognized identity" denial that would happen to
+// carry the same HTTP status.
+func (f *bindableFederatedAdmin) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindFederatedUser, CredentialKindFederation
+}
+
 func newBindableFederatedAdmin(id string) *bindableFederatedAdmin {
 	return &bindableFederatedAdmin{
 		UserIdentity: NewAuthenticatedUser(id, "admin@example.com", "Admin", "admin", "api"),

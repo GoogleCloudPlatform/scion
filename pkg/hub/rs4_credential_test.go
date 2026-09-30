@@ -1575,10 +1575,11 @@ func TestRS4_CrossProjectMembershipDenied(t *testing.T) {
 // permissions could theoretically be revoked. This is acceptable because:
 //
 // 1. The TOCTOU window is microseconds on a single-node SQLite backend.
-// 2. Use-time enforcement (enforceUATConstraints → uatScopeRestriction) narrows
-//    every token request to the intersection of token scopes and the user's
-//    current effective permissions. A token minted during the TOCTOU window is
-//    immediately ineffective if the user's authority was truly revoked.
+// 2. Use-time enforcement (enforceUATConstraints and the ceilingRestriction
+//    built from the token's permission ceiling) narrows every token request
+//    to the intersection of token scopes and the user's current effective
+//    permissions. A token minted during the TOCTOU window is immediately
+//    ineffective if the user's authority was truly revoked.
 // 3. The RS1 pattern (authorization inside tx with LockProjectForMembership) is
 //    designed for mutual-exclusion of membership mutations, which can conflict
 //    structurally. Token minting does not mutate authority state — it only reads

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1207,6 +1208,20 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg); err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
 					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
+					// The in-process bus could not queue this delivery for at
+					// least one matching subscriber, normally the per-project
+					// persistence subscriber, so hub persistence most likely did
+					// not happen. At-least-once caveats (ptone/scion#2311): other
+					// fan-out spokes (e.g. an external chat channel) may already
+					// have the message, so a retry can duplicate it there; if the
+					// drop hit a non-delivering pattern subscriber, the message may
+					// in fact be persisted; attachments ingested above are
+					// re-ingested on retry.
+					writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
+					return
+				}
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
 					"Message delivery failed: "+err.Error(), nil)
 				return
@@ -1704,6 +1719,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.messageLog.Error("raw guard: sender agent lookup failed",
 					"sender_id", senderAgent.ID(), "error", senderErr)
 				writeErrorFromErr(w, senderErr, "")
+				return
+			}
+			if senderAgentRecord == nil {
+				s.messageLog.Error("raw guard: sender agent lookup returned nil record",
+					"sender_id", senderAgent.ID())
+				writeErrorFromErr(w, store.ErrNotFound, "")
 				return
 			}
 			if crossProjectRawUnsupported(senderAgentRecord.ProjectID, agent.ProjectID) {
@@ -3141,7 +3162,7 @@ type BroadcastMessageRequest struct {
 // which fans out to all running agents in the project.
 func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

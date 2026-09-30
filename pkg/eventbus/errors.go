@@ -18,3 +18,12 @@ import "errors"
 
 // ErrEventBusClosed is returned when attempting to publish or subscribe on a closed event bus.
 var ErrEventBusClosed = errors.New("event bus is closed")
+
+// ErrSubscriberBufferFull is returned by InProcessEventBus.Publish when a
+// message addressed to a user-message topic could not be queued because the
+// matching subscriber's buffer was full. Other topics keep the historical
+// fire-and-forget behaviour (the message is dropped and Publish returns nil)
+// because those callers already tolerate silent drops; the user-message path
+// does not, since nothing else re-delivers or surfaces the loss
+// (ptone/scion#2311).
+var ErrSubscriberBufferFull = errors.New("event bus: subscriber buffer full")

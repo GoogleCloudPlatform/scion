@@ -630,9 +630,12 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				return
 			}
 
-			// Set broker-specific identity context and resolve on-behalf-of
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx, userIdent, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			// Install the authenticated broker/on-behalf-of context through
+			// the same shared helper BrokerAuthMiddleware uses, so both
+			// variants install an identical broker identity, effective user
+			// (when OBO resolves), OBO marker, and broker credential for the
+			// same request.
+			ctx, userIdent, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return
 			}

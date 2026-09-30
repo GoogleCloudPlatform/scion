@@ -87,7 +87,7 @@ func (s *Server) handleProjectMembers(w http.ResponseWriter, r *http.Request, pr
 	case http.MethodPost:
 		s.addProjectMember(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -99,7 +99,7 @@ func (s *Server) handleProjectMemberByID(w http.ResponseWriter, r *http.Request,
 	case http.MethodDelete:
 		s.removeProjectMember(w, r, projectID, bindingID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -466,7 +466,7 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 // handleTransferOwnership handles the atomic ownership transfer endpoint.
 func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

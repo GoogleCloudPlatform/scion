@@ -34,7 +34,7 @@ type brokerProject struct {
 // validated by BrokerAuthMiddleware).
 func (s *Server) handleBrokerProjects(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

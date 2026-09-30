@@ -36,10 +36,20 @@ skills_dir: .codex/skills
 interrupt_key: C-c
 instructions_file: .codex/AGENTS.md
 system_prompt_mode: prepend_to_instructions
+# Default model for agents started without an explicit --model. Resolved
+# through model_aliases below broker-side only (pkg/agent/provision.go,
+# from the broker's own cached harness-config) rather than a static value,
+# so it tracks alias updates instead of drifting like the old hardcoded
+# home/.codex/config.toml `model` did (ptone/scion#2365). This default
+# depends on the broker having a current harness-config cache; the hub does
+# not read this field for defaults (pkg/hub/harness_capabilities.go's
+# resolveModelAliasForAgent only resolves an explicit size alias like
+# "large", it doesn't supply one when the request has none).
+model: medium
 model_aliases:
-  small: gpt-5.6-luna
-  medium: gpt-5.6-terra
-  large: gpt-5.6-sol
+  small: gpt-6-luna
+  medium: gpt-6.1-sol
+  large: gpt-6.1-sol
   extra-large: gpt-6-astra
 command:
   base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]

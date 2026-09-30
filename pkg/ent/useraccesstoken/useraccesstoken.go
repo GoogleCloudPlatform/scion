@@ -26,6 +26,10 @@ const (
 	FieldProjectID = "project_id"
 	// FieldScopes holds the string denoting the scopes field in the database.
 	FieldScopes = "scopes"
+	// FieldCeilingVersion holds the string denoting the ceiling_version field in the database.
+	FieldCeilingVersion = "ceiling_version"
+	// FieldCeilingPermissionIds holds the string denoting the ceiling_permission_ids field in the database.
+	FieldCeilingPermissionIds = "ceiling_permission_ids"
 	// FieldRevoked holds the string denoting the revoked field in the database.
 	FieldRevoked = "revoked"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
@@ -51,6 +55,8 @@ var Columns = []string{
 	FieldKeyHash,
 	FieldProjectID,
 	FieldScopes,
+	FieldCeilingVersion,
+	FieldCeilingPermissionIds,
 	FieldRevoked,
 	FieldExpiresAt,
 	FieldLastUsed,
@@ -78,6 +84,8 @@ var (
 	KeyHashValidator func(string) error
 	// ScopesValidator is a validator for the "scopes" field. It is called by the builders before save.
 	ScopesValidator func(string) error
+	// DefaultCeilingVersion holds the default value on creation for the "ceiling_version" field.
+	DefaultCeilingVersion int32
 	// DefaultRevoked holds the default value on creation for the "revoked" field.
 	DefaultRevoked bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -122,6 +130,16 @@ func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
 // ByScopes orders the results by the scopes field.
 func ByScopes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldScopes, opts...).ToFunc()
+}
+
+// ByCeilingVersion orders the results by the ceiling_version field.
+func ByCeilingVersion(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingVersion, opts...).ToFunc()
+}
+
+// ByCeilingPermissionIds orders the results by the ceiling_permission_ids field.
+func ByCeilingPermissionIds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCeilingPermissionIds, opts...).ToFunc()
 }
 
 // ByRevoked orders the results by the revoked field.

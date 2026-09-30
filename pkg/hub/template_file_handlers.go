@@ -184,7 +184,7 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 		case http.MethodPost:
 			s.handleTemplateFileUpload(w, r, template)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -198,7 +198,7 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 	case http.MethodDelete:
 		s.handleTemplateFileDelete(w, r, template, filePath)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 

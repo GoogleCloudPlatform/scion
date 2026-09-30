@@ -117,7 +117,7 @@ func (s *Server) handleProjectImportResources(
 	options projectImportOptions,
 ) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -216,7 +216,7 @@ type ImportResourcesResponse struct {
 // (no workspace mode) — matching the hub-level import design.
 func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -476,7 +476,7 @@ func (s *Server) handleProjectDiscoverResources(
 	storageLabel string,
 ) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -567,7 +567,7 @@ type DiscoverResourcesUnifiedRequest struct {
 // without importing them.
 func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

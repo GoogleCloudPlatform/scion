@@ -102,7 +102,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		case http.MethodPost:
 			authzAction = ActionCreate
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
 	} else {
@@ -121,18 +121,18 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			case http.MethodDelete:
 				authzAction = ActionDelete
 			default:
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 				return
 			}
 		case "pause", "resume":
 			if r.Method != http.MethodPost {
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodPost)
 				return
 			}
 			authzAction = ActionUpdate
 		case "history":
 			if r.Method != http.MethodGet {
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodGet)
 				return
 			}
 			authzAction = ActionRead
@@ -406,13 +406,11 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		effectivePayload := schedule.Payload
 		if req.Payload != "" {
 			effectivePayload = req.Payload
-		}
-		// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw" key
-		// in the advanced Payload JSON. Only checked when the caller is
-		// setting/changing Payload in this request — an update that leaves
-		// Payload untouched must not retroactively fail on an existing
-		// stored value.
-		if req.Payload != "" {
+			// Phase 0.2 (ptone/scion#2192): tombstone a caller-supplied "raw"
+			// key in the advanced Payload JSON. Only checked when the caller
+			// is setting/changing Payload in this request — an update that
+			// leaves Payload untouched must not retroactively fail on an
+			// existing stored value.
 			if err := rejectRawScheduledPayload(req.Payload); err != nil {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
 					map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
