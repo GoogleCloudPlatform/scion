@@ -87,11 +87,12 @@ The operator needs, on the project (or a custom role with just these permissions
 
 - `run.jobs.create`, `run.jobs.get`, `run.jobs.update`, `run.jobs.run`,
   `run.jobs.delete`, `run.jobs.list`, `run.executions.get`, `run.executions.list`,
-  `run.revisions.get` — to create, configure, execute, read the results of, and
-  clean up the job (the executions/revisions permissions cover `execute --wait`,
-  §5's executions list, §6's cleanup, and §2's revision lookup).
-  `roles/run.developer` covers all of these, plus `run.services.get` (needed for
-  discovery, below).
+  `run.revisions.get`, `run.services.get`, `run.services.update` — to create,
+  configure, execute, read the results of, and clean up the job (the
+  executions/revisions permissions cover `execute --wait`, §5's executions list,
+  §6's cleanup, and §2's revision lookup); `run.services.get` for §2's discovery
+  and the §4 gate; `run.services.update` for `update-traffic` (tag removal in §4,
+  and §8's roll-back and roll-forward). `roles/run.developer` covers all of these.
 - `iam.serviceAccounts.actAs` on the hub's service account specifically — grant
   `roles/iam.serviceAccountUser` scoped to that one service account resource, not
   project-wide. This is what lets the job run *as* the hub SA.
@@ -335,26 +336,37 @@ tracked separately in
 
 The **rollout check** below re-appears before passes 2, 3, and 4 — it always fetches
 live state, so it can't be fooled by a stale `$SVC` captured back in §2, and it reuses
-`$ROLLOUT_OK_JQ` from §2 verbatim, so this gate and that guard can't disagree:
+`$ROLLOUT_OK_JQ` from §2 verbatim, so this gate and that guard can't disagree. It also
+fetches the job's own image and compares it against the serving revision's digest, so
+the check doesn't depend on the shell's `$REVISION` still being the current one:
 
 ```bash
 FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json) \
-  && [ -n "$FRESH_SVC" ] && [ -n "${REVISION:-}" ] && [ -n "${ROLLOUT_OK_JQ:-}" ] \
+  && JOB_IMG=$(gcloud run jobs describe "$JOB" --project "$PROJECT" --region "$REGION" \
+       --format='value(spec.template.spec.template.spec.containers[0].image)') \
+  && [ -n "$FRESH_SVC" ] && [ -n "${REVISION:-}" ] && [ -n "${ROLLOUT_OK_JQ:-}" ] && [ -n "$JOB_IMG" ] \
   && echo "$FRESH_SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
-  && echo "OK: 100% on $REVISION" \
-  || echo "STOP: services describe failed or returned nothing, REVISION/ROLLOUT_OK_JQ are empty, rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists; remove any traffic tag (see below), otherwise see §8 step 3"
+  && [ "$JOB_IMG" = "$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" \
+       --format='value(status.imageDigest)')" ] \
+  && echo "OK: 100% on $REVISION, job image matches" \
+  || echo "STOP: services/jobs describe failed or returned nothing, REVISION/ROLLOUT_OK_JQ/JOB_IMG are empty, rollout not complete, revision changed, traffic is pinned to a non-latest revision, a traffic tag exists, or the job's image no longer matches the serving revision's digest; remove any traffic tag (see below), otherwise see §8 step 3 — delete the job and restart from §2, don't hand-patch the image"
 ```
 
 The `[ -n ... ]` checks keep this gate fail-closed on every `jq` version: jq 1.6
 treats a missing or empty program as `.` and exits 0 under `-e` even with no input,
 so without these checks a failed `describe` or an empty
-`$REVISION`/`$ROLLOUT_OK_JQ` would print `OK` instead of `STOP`. If `REVISION` or
-`ROLLOUT_OK_JQ` come back empty, this shell lost §2's state (a new terminal, a Cloud
-Shell timeout, or leaving the `bash` subshell §1 asks for) — see §8 step 3: delete
-the job and restart from §2. Don't just re-export the placeholders and re-run §2's
-discovery by hand; that re-derives `REVISION` from live traffic while the existing
-job stays pinned to the old digest, so the gate would then check the wrong revision
-against the right one.
+`$REVISION`/`$ROLLOUT_OK_JQ`/`$JOB_IMG` would print `OK` instead of `STOP`. The
+`$JOB_IMG` comparison makes the gate check the job's actual pin instead of trusting
+the shell's `$REVISION`: the job resource outlives the shell, so a lost-and-resumed
+session (a new terminal, a Cloud Shell timeout, or leaving the `bash` subshell §1
+asks for) can otherwise re-derive `REVISION` from live traffic while the job stays
+pinned to an older digest — the gate would then check the wrong revision against
+the right one and print a false `OK`. If `REVISION`, `ROLLOUT_OK_JQ`, or `JOB_IMG`
+come back empty, or the job's image doesn't match the serving revision's digest —
+see §8 step 3: delete the job and restart from §2. Don't hand-patch the job's image
+to make it match; the whole point of the digest pin (§2) is that the job runs the
+exact binary the service does, and hand-patching only hides a mismatch that means
+something else already went wrong.
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
 the job to in §2, and that revision must also be both `latestReadyRevisionName` and
