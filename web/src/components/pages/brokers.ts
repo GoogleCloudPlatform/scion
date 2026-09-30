@@ -267,13 +267,8 @@ export class ScionPageBrokers extends LitElement {
    * hover to learn the cap doesn't apply).
    */
   private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
-    // Loose equality is deliberate here (GoogleCloudPlatform/scion#2141 review): agentCount and
-    // agentLimit are typed as optional (`?:`), and the Go side's omitempty
-    // means the wire format omits the key rather than sending `null`, so in
-    // practice this is only ever undefined — but `== null`/`!= null` also
-    // catches an explicit `null` defensively, matching the same pattern
-    // already used for analogous optional numeric fields elsewhere (e.g.
-    // diagnostics.ts's brokerCount/agentCount).
+    // == null: these fields are omitempty on the wire (Go omits, never sends
+    // null), but the loose check tolerates an explicit null too.
     if (broker.agentCount == null) {
       return html`<span class="meta-text">—</span>`;
     }

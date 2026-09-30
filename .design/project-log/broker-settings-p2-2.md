@@ -539,7 +539,7 @@ diffs byte-identical. Clean, no conflicts.
    the identical callee and accesses `res.ResourceID` with no nil check. Adding one here would be
    inconsistent with the established pattern for guarding against a case the contract rules out.
 2. **DECLINED** — `handlers_quota.go:774` (`for _, broker := range brokers.Items`), nil `brokers` from
-   `ListRuntimeBrokers`. Contract: `pkg/store/entadapter/project_store.go:1043-1060` — every error path
+   `ListRuntimeBrokers`. Contract: `pkg/store/entadapter/project_store.go:968-1060` — every error path
    returns `(nil, err)` with a non-nil `err`; the success path always constructs and returns a non-nil
    `*store.ListResult`. `listBrokerScopedActiveReservations` already returns early on `err != nil`
    (`:769-771`), so by the time `brokers.Items` is reached, `err == nil` and `brokers` cannot be nil.
@@ -550,8 +550,9 @@ diffs byte-identical. Clean, no conflicts.
      brokers is acceptable. Already reviewed and accepted: round-1 F3 (this same log, "Review round 1")
      declined a fix for the identical bound on the identical helper, on the EM's ruling that it mirrors
      `ReconcileStaleBrokerQuotaReservations`'s own established bound exactly and is correct at today's
-     scale, with a single-query store method logged as a follow-up rather than a blocker. No new
-     disposition needed; restated here since GoogleCloudPlatform/scion#2141 asked about it directly.
+     scale, with a single-query store method tracked in ptone/scion#2314 ("hub: single-query store
+     method for broker-scoped active reservations") rather than a blocker. No new disposition needed;
+     restated here since GoogleCloudPlatform/scion#2141 asked about it directly.
 3. **FIXED** — `brokers.ts` `renderAgentCapacity`: `broker.agentCount === undefined` →
    `broker.agentCount == null`, `broker.agentLimit !== undefined` → `broker.agentLimit != null`.
 4. **FIXED** — `brokers.ts` grid stat guard: `broker.agentCount !== undefined` → `broker.agentCount !=
@@ -580,3 +581,36 @@ stated 7-error/44-warning baseline (0 new — the 1 fixable/prettier hit is the 
 `GoogleCloudPlatform/scion/pull/2141#discussion_r...` URLs, not bare `#N`).
 
 Reply drafts: `/scion-volumes/scratchpad/projects/broker-settings/reviews/upstream-replies-2141.md`.
+
+### Review round up2141-1: APPROVE
+
+Report: `/scion-volumes/scratchpad/projects/broker-settings/reviews/broker-settings-rev-up2141-1.md`
+(reviewed at `513ca071`). All five dispositions confirmed correct — both declines rest on the actual
+store contract and a full sweep of the call sites, and the three fixes change no behavior. No Critical or
+Required findings; the only problems were stale or over-narrow line citations and comment length in the
+reply drafts, none of it code. Disposition:
+
+- **R1 (fixed):** the reply-draft headers for items 3-5 claimed lines had shifted "after an intervening
+  rebase" — false; all three threads were posted on the pre-fix head (`9aa4e56b`) itself, and no rebase
+  happened between the review and the fix. The thread's `original_line` is simply the last line of a
+  multi-line suggestion range. Reworded all three headers to state that plainly, and corrected item 3's
+  "current head" lines to `:272`/`:275` (they had drifted again due to N2's comment trim, from the
+  `:277`/`:280` the reviewer observed before that trim).
+- **R2 (fixed):** item 2's reply text cited `project_store.go:1043-1060` for "`ListRuntimeBrokers` only
+  ever returns nil alongside a non-nil error" — too narrow; that range covers only the last of six error
+  returns plus the success path. Corrected to `:968-1060` (the whole function), matching what the
+  decline-evidence section and this log already had right. Also corrected the log's own copy of this
+  citation, which had the identical narrow range and wasn't flagged by the reviewer but had the same
+  defect.
+- **N1 (fixed):** "tracked as a follow-up" in item 2's reply named no issue. Asked the EM rather than
+  guessing, per their instruction — confirmed as ptone/scion#2314. Cited fully qualified in the decline
+  evidence and in this log's item 2 entry; the reply text itself now drops the volunteered `Limit: 10000`
+  aside entirely (the bot didn't raise it, so the reply stays scoped to the thread) rather than needing
+  the issue ref inline. Not added to the code comment in this commit, per the EM.
+- **N2 (fixed):** the 7-line explanatory comment on `brokers.ts`'s `== null` check was trimmed to 2 lines
+  stating the why (omitempty means the wire never sends `null`; the loose check tolerates one anyway).
+
+Gates re-run after these wording-only fixes: `tsc --noEmit` clean; `vitest run` on both test files, 5/5
+pass; `eslint` on the three web files at the stated 7/44 baseline (0 new); bare-`#N` grep on the commit,
+this log section and the reply draft: clean (all numeric refs are fully qualified). No Go changes in this
+round.
