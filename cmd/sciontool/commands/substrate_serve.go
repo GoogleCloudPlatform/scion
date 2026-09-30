@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -485,6 +486,39 @@ func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) in
 	)
 }
 
+// newSubstrateHTTPServer builds the *http.Server substrate-serve listens
+// with. Extracted so a test can assert the timeout wiring directly, without
+// starting a real listener.
+//
+// ReadHeaderTimeout/ReadTimeout/IdleTimeout guard against a client that
+// opens a connection and then trickles bytes (or none at all) — without
+// them, http.Server has no bound on how long it will hold a connection open
+// waiting on a slow or stalled peer, letting a handful of such connections
+// exhaust the actor's file descriptors. Every route (healthz has no body;
+// bootstrap and exec both fully decode a size-bounded body via
+// http.MaxBytesReader/io.LimitReader before doing any work —
+// pkg/sciontool/substrate/server.go) reads its whole request before
+// responding, so ReadTimeout (which bounds header-through-body) cannot cut
+// off a route that is still streaming a request body to the handler as it
+// arrives.
+//
+// WriteTimeout is deliberately NOT set: handleExec runs the requested
+// command (bounded by its own timeout_s, up to maxExecTimeout = 10 minutes —
+// pkg/sciontool/substrate/exec.go) before writing any response, so a
+// WriteTimeout shorter than that would sever a legitimate long-running
+// exec's response after the command already completed, and one longer than
+// it would guard nothing WriteTimeout doesn't already leave exposed for
+// slow response writes.
+func newSubstrateHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+}
+
 func runSubstrateServe(addr string) int {
 	// substrate-serve is PID 1 inside the actor: reap reparented zombies the
 	// same way `sciontool init` does. RunInit (invoked after bootstrap)
@@ -529,11 +563,7 @@ func runSubstrateServe(addr string) int {
 	}
 
 	srv := newSubstrateServeServer(RunInit)
-
-	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: srv.Handler(),
-	}
+	httpServer := newSubstrateHTTPServer(addr, srv.Handler())
 
 	// substrate-runtime.md §5.6: log SIGTERM and keep running. Do not forward
 	// it to the harness and do not exit — an evicting worker sends SIGTERM

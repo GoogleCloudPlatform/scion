@@ -260,6 +260,73 @@ func TestSubstrateServeCommand_AddrFlagDefault(t *testing.T) {
 	}
 }
 
+// TestNewSubstrateHTTPServer_SetsReadTimeoutsNotWriteTimeout proves
+// substrate-serve's http.Server bounds how long it will wait on a slow or
+// stalled client (ReadHeaderTimeout, ReadTimeout, IdleTimeout), while
+// leaving WriteTimeout at its zero value (unbounded) — a legitimate
+// `sciontool substrate-serve exec` response can take up to maxExecTimeout
+// (10 minutes, pkg/sciontool/substrate/exec.go) to be written after the
+// command it ran completes, so a WriteTimeout would sever that response.
+func TestNewSubstrateHTTPServer_SetsReadTimeoutsNotWriteTimeout(t *testing.T) {
+	srv := newSubstrateHTTPServer(":80", http.NotFoundHandler())
+
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Error("ReadHeaderTimeout is unset (<=0), want a positive bound")
+	}
+	if srv.ReadTimeout <= 0 {
+		t.Error("ReadTimeout is unset (<=0), want a positive bound")
+	}
+	if srv.IdleTimeout <= 0 {
+		t.Error("IdleTimeout is unset (<=0), want a positive bound")
+	}
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want 0 (unbounded) — a long-running exec's response must not be cut off", srv.WriteTimeout)
+	}
+	if srv.Addr != ":80" {
+		t.Errorf("Addr = %q, want %q", srv.Addr, ":80")
+	}
+}
+
+// TestSubstrateHTTPServer_ReadHeaderTimeoutClosesSlowClient proves
+// ReadHeaderTimeout actually cuts off a client that never finishes sending
+// its request headers — not just that the field is set (the field-value
+// assertion above), but that the mechanism it wires up behaves. Uses its own
+// short timeout, not newSubstrateHTTPServer's production value, so the test
+// itself stays fast; the value in production is asserted separately above.
+func TestSubstrateHTTPServer_ReadHeaderTimeoutClosesSlowClient(t *testing.T) {
+	srv := &http.Server{
+		Handler:           http.NotFoundHandler(),
+		ReadHeaderTimeout: 100 * time.Millisecond,
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("net.Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// Send nothing: a real client that opens the connection and never
+	// finishes (or never starts) its request line.
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	start := time.Now()
+	_, err = conn.Read(make([]byte, 1))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the connection to be closed by ReadHeaderTimeout, got a successful read")
+	}
+	if elapsed > time.Second {
+		t.Errorf("connection stayed open for %v, want it closed near the 100ms ReadHeaderTimeout", elapsed)
+	}
+}
+
 // TestSubstrateServeCommand_Integration_SIGTERMNotForwarded is a real
 // subprocess integration test (mirrors TestInitCommand_Integration's
 // pattern) proving the requirement from substrate-runtime.md §5.6:
