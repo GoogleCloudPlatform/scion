@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -349,6 +350,26 @@ func TestApplySettingsUpdates_QuotasSectionGenericZeroCheck(t *testing.T) {
 	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enabled}})
 	if _, ok := raw2["quotas"]; !ok {
 		t.Error("expected quotas to be kept when a field of QuotaSettings is set")
+	}
+}
+
+// TestSingleFieldSettingsStructsGuard fails when AutoExposePortsSettings or
+// QuotaSettings gains a field, since the section zero-check tests above
+// (TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck and
+// TestApplySettingsUpdates_QuotasSectionGenericZeroCheck) only ever exercise
+// the current single field of each struct: a new field would go unverified
+// by those "any field set" cases.
+func TestSingleFieldSettingsStructsGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"config.AutoExposePortsSettings", reflect.TypeOf(config.AutoExposePortsSettings{})},
+		{"config.QuotaSettings", reflect.TypeOf(config.QuotaSettings{})},
+	} {
+		if n := tc.typ.NumField(); n != 1 {
+			t.Errorf("%s has %d fields, want 1: add a case that sets only the new field to the section zero-check tests, then update the expected field count in TestSingleFieldSettingsStructsGuard", tc.name, n)
+		}
 	}
 }
 
