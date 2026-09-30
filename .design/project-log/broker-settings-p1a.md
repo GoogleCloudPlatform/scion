@@ -85,33 +85,44 @@ seeded definition, per the design.
 
 - `go build ./...` — clean.
 - `go test -tags no_sqlite ./pkg/hub/...` (targeted) and `make test-hub-sqlite`
-  (covers the `//go:build !no_sqlite` quota/broker-quota suite) — pass, aside
-  from `pkg/hub/authzop` `TestMutationClassificationBidirectional`, which is
-  pre-existing on the base branch (an unrelated rename in
-  `pkg/hub/useraccesstoken.go` left the mutation classification registry
-  stale) and tracked upstream as `GoogleCloudPlatform/scion#2105`.
+  (covers the `//go:build !no_sqlite` quota/broker-quota suite) — pass.
+  `pkg/hub/authzop` `TestMutationClassificationBidirectional` (a stale
+  mutation-classification registry entry for a rename in
+  `pkg/hub/useraccesstoken.go`, unrelated to this PR) failed on earlier,
+  older bases during this PR's review; it was fixed upstream by
+  `GoogleCloudPlatform/scion#2105`, which has since merged, and `authzop`
+  passes as of the current base.
 - `make test-fast` initially also showed failures in `pkg/runtimebroker` and
   `pkg/sciontool/supervisor`. The round-2 independent reviewer
   (`broker-settings-rev-p1a-2`) re-ran those packages, plus `pkg/agent`,
   `pkg/config`, `pkg/harness`, `cmd`, and `pkg/runtime`, with a scrubbed
   environment (`env -i` keeping only `HOME`/`PATH`/`USER`/`TMPDIR`/Go vars)
   and all passed on both base and this PR's head. The failures were caused
-  by ambient `SCION_*`/`CLAUDE_*` environment variables leaking into the test
-  process from this container, not a base-branch bug and not caused by this
-  PR.
+  by ambient `SCION_*`/`CLAUDE_*` environment variables leaking into local
+  `make test-fast` runs in the review containers, not a base-branch bug and
+  not caused by this PR, and not something that showed up in CI.
 - `golangci-lint run --new-from-rev=upstream-main ./pkg/hub/...` — 0 issues
   (originally flagged 2 unchecked `s.Close()` errors in the new test file,
   fixed).
-- `go vet -tags no_sqlite ./...` (`make lint`) — clean.
+- `go vet -tags no_sqlite ./...` (`make lint`) — clean on this PR's own
+  files. On the current base, this same command fails repo-wide on
+  `pkg/hub/authz_relationship_{characterization,policy,rules}_test.go`
+  (`undefined: authzTestSetup`/`newGoldenFixture`), from
+  `GoogleCloudPlatform/scion#2088` — not this PR, and not yet fixed
+  upstream as of this note. This is what currently makes CI's "Build &
+  Test" check red on this PR (at the "Vet Code" / `make lint` step),
+  independent of anything in this diff.
 - `cd web && npx tsc --noEmit` — clean. No `web/src/shared/types.ts` changes
   were needed: `LimitDefinition.system` is a local interface field in
   `admin-quotas.ts` already present before this change, and the JSON shape
   of the PUT request/response is unchanged.
 - CI on `ptone/scion#2268`: golangci-lint, shellcheck, T1 Postgres,
-  single-node-vm harness, and Mergeability Gate all passed. "Build & Test"
-  and "pkg/hub SQLite Tests" failed solely on the same pre-existing
-  `TestMutationClassificationBidirectional` (`GoogleCloudPlatform/scion#2105`).
-  "Lint 405 Allow header" (reporting-only) failed pre-existing and
+  single-node-vm harness, and Mergeability Gate all passed. "pkg/hub SQLite
+  Tests" passes on the current base (it only failed on older bases, before
+  `GoogleCloudPlatform/scion#2105` merged). "Build & Test" fails solely on
+  the unrelated `GoogleCloudPlatform/scion#2088` vet break described above.
+  "Lint 405 Allow header" (reporting-only) and reporting-only
+  `internal/fixturegen TestFixtureCoverage` both fail pre-existing and
   repo-wide, unrelated to this PR.
 
 ## Surprises / notes for reviewers
@@ -178,3 +189,18 @@ seeded definition, per the design.
     base-branch break, `GoogleCloudPlatform/scion#2088`'s `no_sqlite` vet
     failure (`authzTestSetup` undefined), on top of the already-known
     `GoogleCloudPlatform/scion#2105`. Both are listed in the PR body now.
+- **Round 4** (`broker-settings-rev-p1a-4`, fresh/independent): APPROVE,
+  metadata-only findings, all addressed with no code changes:
+  - F1: by round 4, `GoogleCloudPlatform/scion#2105` had merged and
+    `pkg/hub/authzop` passed again on the current base, but the PR body and
+    this file's Verification section still listed it as a current failure.
+    Reworded both (see Verification above) to say it's fixed upstream, and
+    that the sole remaining "Build & Test" failure is
+    `GoogleCloudPlatform/scion#2088`'s vet break.
+  - F2: commit `206af3143`'s body had a bare `#2168` (should be
+    `ptone/scion#2168`, the fully-qualified form every other ref in this PR
+    uses). Reworded via `git filter-branch --msg-filter` at the next rebase
+    (this round), which also changes that commit's hash.
+  - F3: the PR body said the `pkg/runtimebroker`/`pkg/sciontool/supervisor`
+    env-leakage failures were seen "in earlier CI runs"; they were actually
+    local `make test-fast` runs, never a CI failure. Reworded.
