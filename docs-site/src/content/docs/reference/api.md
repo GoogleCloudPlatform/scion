@@ -62,6 +62,44 @@ The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/grov
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
+#### Broker Settings (`/api/v1/runtime-brokers/:id/settings`)
+
+A general per-broker settings mechanism. `maxAgents`, a per-broker override of the `max_agents_per_broker` cap, is the first registered key.
+
+- `GET /:id/settings`: Read the broker's stored settings document plus the effective (resolved) value for each key. Requires `broker.read`. `404` if the broker doesn't exist. If the broker has no settings row yet, `settings` is `{}` and `revision` is `0`.
+- `PUT /:id/settings`: Replace the settings document. Body: `{"settings": {"maxAgents": 30}, "expectedRevision": 3}`. This is a full replace, not a merge: a key omitted from `settings` (or sent as `null`) is cleared back to "inherit". Each key's own permission gates writing it — `maxAgents` requires `quota.update` — checked only against keys whose value actually changes, so re-sending the current document needs no permission at all.
+
+Response shape (both verbs):
+
+```json
+{
+  "brokerId": "…",
+  "settings": { "maxAgents": 30 },
+  "effective": {
+    "maxAgents": {
+      "value": 30,
+      "source": "broker",
+      "count": 7,
+      "inherited": { "value": 100, "source": "hub_default" }
+    }
+  },
+  "revision": 3,
+  "updatedBy": "admin@example.com",
+  "updated": "2026-01-01T00:00:00Z",
+  "_capabilities": { "update": true }
+}
+```
+
+`effective.maxAgents.source` is one of `broker` (this broker's own setting), `entitlement` (an entitlement binding), `hub_default` (the limit definition's default value), or `unlimited` (no limit definition exists, or no quota service is configured); it is `null`/`""` only if resolution itself fails. `inherited` reports what the value and source would be if the broker's own setting were cleared, so the UI can always show what "use the default" means without having to clear it first to find out. `count` is the current active-reservation count against the same limit `Reserve` counts.
+
+Status codes: `400` for an unknown key or an invalid value (`maxAgents` must be `>= 0`; `0` means unlimited); `403` if the caller lacks the permission a changed key requires; `404` if the broker doesn't exist; `409` on a stale `expectedRevision` (the response body carries the current record under `current`, same shape as a normal `GET`).
+
+**Precedence for `max_agents_per_broker`** (most specific wins): a broker's own `maxAgents` setting, if set, is the effective limit — it can be lower than the hub-wide default *and* lower than any system-scoped entitlement binding. Otherwise, the existing entitlement-engine resolution applies: bindings (most generous wins), falling back to the limit definition's hub-wide default value. In both layers, `0` means unlimited.
+
+**Migration from entitlement bindings.** Earlier releases had no per-broker settings API, so operators worked around it with a broker-scoped entitlement binding on `max_agents_per_broker` — either a `system_default` binding with a non-empty `subjectId`, or a user binding whose `subjectId` is set to the broker's own ID (the "user-subject hack" — see [`ptone/scion#2063`](https://github.com/ptone/scion/issues/2063)). On upgrade, a one-shot migration copies **every** broker-scoped binding on this limit into a `maxAgents` setting (`0` if any binding was `0`, otherwise the largest value), regardless of subject — including bindings the entitlement engine never actually enforced (a `system_default` row needed an *empty* subject to be picked up, so a non-empty-subject row was previously a silent no-op; a user binding scoped to the broker but owned by some other user was likewise never matched). Sweeping these up anyway restores what the operator evidently intended when they scoped a binding to that broker. **This means an upgrade can newly impose, or tighten, a broker's effective cap** for a broker that previously had no effective per-broker limit at all (or was really being capped by a more generous system-scoped binding, since the engine used to merge broker- and system-scoped bindings with "most generous wins" — the migrated setting no longer merges with anything). The migration is attributed as `updatedBy: "migration:ptone/scion#2061"`, and it only fills in brokers that don't already have a `maxAgents` setting.
+It never deletes the old bindings — they are shadowed by the new setting per the precedence above, and their IDs are logged at migration time so an operator can find and remove them. **Removing them matters**: if the migrated `maxAgents` setting is later cleared ("use hub default"), the precedence rule falls through to the entitlement engine, and any leftover binding the entitlement engine matches (a user binding with `subjectId` equal to the broker ID, or a `system_default` binding with an empty subject — i.e. the shapes the migration actually inherited enforcement from) becomes live again. The never-enforced shapes described above stay inert either way. Clearing the setting does not by itself restore the hub-wide default if a matching binding is still there. Legacy broker-scoped bindings can still be deleted (`DELETE /entitlements/:id`) or read normally; they just can't be created fresh or edited while staying broker-scoped — see the 400 below.
+Because of this, creating a **new** broker-scoped binding on `max_agents_per_broker`, or editing an existing one while keeping it broker-scoped (`POST` on `/limits/:id/entitlements`, or `PUT` on `/entitlements/:id` with `scopeType: "broker"`), now returns `400` with the message `per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings`. System-scoped bindings for this limit are unaffected and continue to work as the hub-wide override.
+
 #### Chat Attachments (`/api/v1/chat/attachments`)
 - `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each. Text files containing unusual control characters (e.g., vertical tab `0x0B`) are supported and correctly identified as text.
 - `GET /:id`: Download a stored attachment. Responses carry `X-Content-Type-Options: nosniff`, and `Content-Disposition: inline` only for image types — everything else is served as an `attachment`.
@@ -112,7 +150,7 @@ The stored MIME type is derived from the file's content plus its extension; the 
 - `GET /gcp-quota`: View GCP quota status.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).
 
-The Hub seeds a `max_agents_per_broker` limit (default **100**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. This default is a single hub-wide value shared by every broker on the hub; there is currently no supported way to set a different cap for one broker (per-broker values are coming in `ptone/scion#2061` P2).
+The Hub seeds a `max_agents_per_broker` limit (default **100**) that caps how many agents can be running on a single runtime broker. It is checked before an agent is created, and again when an agent is started, resumed, or restarted. Only running agents count: stop, suspend, and exit release an agent's slot. The Hub reconciles stale reservations at startup and hourly. This default is a single hub-wide value shared by every broker on the hub; to override it for one broker, set that broker's `maxAgents` setting instead — see [Broker Settings](#broker-settings-apiv1runtime-brokersidsettings) above.
 
 To change the hub-wide value, `PUT /limits/:id` on the `max_agents_per_broker` limit definition. `PUT` replaces the whole definition, so send the current `name`, `resourceType`, `unit`, and `description` (for example, from `GET /limits/:id`) along with the new `defaultValue` — omitting `description` clears it. For this system-seeded limit, `name`, `resourceType`, and `unit` must be sent unchanged; changing any of them returns `403`. This is also the recommended step after deploying a single-node Cloud Run hub — see the Cloud Run operator docs for the recommended value for that tier.
 

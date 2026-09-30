@@ -295,12 +295,14 @@ func isInAncestry(ancestry []string, principalID string) bool {
 }
 
 // relationshipTypeForResource maps a resource type string to the corresponding
-// RelationshipType. Returns an empty string for unsupported types.
+// RelationshipType. Both the registry type "env_var" and the original
+// "envvar" map to the env var relationship. Returns an empty string for
+// unsupported types.
 func relationshipTypeForResource(resourceType string) RelationshipType {
 	switch resourceType {
 	case "secret":
 		return RelProgenySecretRead
-	case "envvar":
+	case "envvar", "env_var":
 		return RelProgenyEnvVarRead
 	case "skill_injection":
 		return RelProgenySkillInjectionRead

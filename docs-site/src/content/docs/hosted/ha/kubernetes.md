@@ -120,7 +120,7 @@ When running on GKE Autopilot, Scion automatically detects the environment and a
 | EmptyDir (workspace) | Supported | Default workspace volume, always created |
 | GCS FUSE CSI | Supported | Requires `gcsfuse.csi.storage.gke.io` CSI driver; GKE only |
 | Local/bind-mount | Not supported | Logged as warning, skipped. Use tar sync instead |
-| PersistentVolumeClaim | Not supported | Future enhancement |
+| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `workspace_storage` backend; requires a pre-provisioned PV/PVC (for example, Filestore-backed) and `workspace_storage.backend: nfs` in `settings.yaml` |
 
 ### Secret Modes
 

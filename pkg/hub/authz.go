@@ -448,6 +448,28 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		permissionID = resolved
 	}
 
+	// ── Step 0: Delivery credential gate (ptone/scion#2228) ───────────
+	// Deliver permissions are admitted only for a delivery credential kind.
+	// The gate precedes every grant stage, so a role binding, synthetic
+	// agent binding or relationship grant cannot admit deliver for any
+	// other credential kind. Passing the gate is necessary, not
+	// sufficient: see authz_delivery_gate.go for the contract a delivery
+	// credential kind must meet before it joins the set.
+	if !deliveryCredentialAdmitted(permissionID, request.Action, credential.Kind) {
+		d := Decision{Allowed: false, Reason: deliveryGateReason}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				DenyReasons:     []string{deliveryGateReason},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+	}
+
 	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
 	// UAT tokens are project-scoped. Resources outside the token's project
 	// are denied before kernel evaluation. This is a credential constraint,
@@ -1445,6 +1467,21 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
+		if scoped == nil {
+			// A typed-nil *ScopedUserIdentity satisfies this type assertion
+			// (ok == true, scoped == nil) even though identity == nil above
+			// was false, so this is reachable only through that Go
+			// interface/pointer distinction, never through a plain nil
+			// Identity. Keep Kind == CredentialKindUAT rather than falling
+			// through to the zero CredentialContext: callers key the UAT
+			// ceiling restriction (Decide step 7a) on Kind ==
+			// CredentialKindUAT, and a zero Kind reads as "no credential
+			// restriction," which would authorize the request exactly as an
+			// unrestricted principal. The zero-value Ceiling denies every
+			// permission (FrozenPermissionCeiling.Allows), so this stays
+			// fail-closed instead.
+			return CredentialContext{Kind: CredentialKindUAT}
+		}
 		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes(), Ceiling: scoped.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
