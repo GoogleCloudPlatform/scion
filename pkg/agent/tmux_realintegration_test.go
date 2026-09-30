@@ -80,6 +80,20 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 		return out
 	}
 
+	// Best-effort cleanup: once cat exits below (via C-d), tmux's default
+	// exit-empty behavior tears the server down on its own, so a later
+	// kill-server legitimately finds nothing left to kill. Registered as
+	// t.Cleanup rather than defer, and before the new-session call below,
+	// so it still runs even if that mustTmux call fails: t.Fatal ends this
+	// goroutine immediately, skipping any defer that hasn't been reached
+	// yet, but t.Cleanup callbacks are tracked by the test framework itself
+	// and always run. t.Cleanup order is LIFO, so registering this after
+	// the MkdirTemp cleanup above means the server is killed before the
+	// socket directory is removed.
+	t.Cleanup(func() {
+		_, _ = runTmux("kill-server")
+	})
+
 	// A pane running "cat" redirected to a file stands in for the agent's
 	// terminal input: whatever is pasted into the pane arrives on cat's
 	// stdin, and cat writes it back out verbatim. The session is named
@@ -89,12 +103,6 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 	// remain-on-exit, a default-command) and make the test environment-
 	// dependent; it only needs to be on the call that starts the server.
 	mustTmux("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "220", "-y", "50", "cat > "+outFile)
-	// Best-effort cleanup: once cat exits below (via C-d), tmux's default
-	// exit-empty behavior tears the server down on its own, so a later
-	// kill-server legitimately finds nothing left to kill.
-	defer func() {
-		_, _ = runTmux("kill-server")
-	}()
 
 	// Build a payload well past the 16 KB argv cap that broke set-buffer,
 	// containing newlines, quotes and angle brackets.
