@@ -235,7 +235,7 @@ The load-bearing choices are §3.2 (names, labels, temporality: Cloud descriptor
 | copilot | native metrics (delta) | metric `gen_ai.client.token.usage` (histogram, delta): tokens[type]+=sum; calls+=count where `gen_ai.token.type=input`; model=`gen_ai.request.model`/`gen_ai.response.model` | `input`→input, `output`→output | 3a | in scope, fixture-gated |
 | grok-build | hooks (unchanged) | none | — | 0 (routing fix only, D8) | usage deferred (D6) |
 | muse-code | hooks | hook tokens land in `scion.usage.tokens` via §3.5 | hook fields | 2 (automatic) | runtime verification is follow-up |
-| antigravity | hooks | `PostInvocation` → model-end (calls); tokens from payload if present | dialect fields if present | 3d | in scope, fixture-gated; calls-only if payload lacks usage (D9) |
+| antigravity | hooks | `PostInvocation` → model-end (calls), confirmed one per main-loop model request, not per turn (auxiliary calls such as title generation fire no hook: known undercount) | none: a real capture from `agy` 1.2.12 shows `PreInvocation`/`PostInvocation` never carry a usage or token field | 3d | in scope, fixture-gated; calls-only (confirmed no usage in the hook payload, D9); tokens filed as a follow-up |
 | opencode | hooks (bridge rewritten onto the `event` hook) | model-end per `step-finish` part, deduped on (sessionID, messageID, part.id), fork replays excluded, model from parent message | input→input, output+reasoning→output, reasoning→reasoning, cache.read→cache_read, cache.write→cache_write (exclusive values, `session.ts:338-377`) | 3b | in scope; source-vetted, fixture-gated |
 | hermes | none | — | — | — | out of scope |
 
