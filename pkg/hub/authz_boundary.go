@@ -504,7 +504,6 @@ func (a *AuthzService) loadPrincipalClosure(ctx context.Context, principal Princ
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, "", nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
 	}
-	err = nil
 	for _, gid := range groupIDs {
 		refs = append(refs, store.PrincipalRef{Type: "group", ID: gid})
 		groupKeys["group:"+gid] = true

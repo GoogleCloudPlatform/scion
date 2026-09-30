@@ -161,6 +161,183 @@ harness_configs:
 	}
 }
 
+// TestProvisionAgent_ImageAndPullPolicyPrecedence pins the full precedence
+// order for ptone/scion#2156 (settings win over the harness-config file's
+// own default, but an explicit template override still outranks settings):
+// harness-config file default < Hub settings harness_configs.<h>
+// (profile harness_overrides outranking the base entry) < explicit
+// template/agent config. kubernetes.imagePullPolicy is new to both the
+// harness-config file (config.yaml `image_pull_policy:`) and Hub settings,
+// and follows the identical rule.
+func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
+	tests := []struct {
+		name                  string
+		fileDefaultPolicy     string
+		settingsImage         string
+		settingsPolicy        string
+		profileOverrideImage  string
+		profileOverridePolicy string
+		templateImage         string
+		templatePolicy        string
+		wantImage             string
+		wantPolicy            string
+	}{
+		{
+			name:      "no settings, no template override: falls back to the harness-config file default",
+			wantImage: "test-image:latest",
+		},
+		{
+			name:              "harness-config file's own image_pull_policy is the lowest tier",
+			fileDefaultPolicy: "Never",
+			wantImage:         "test-image:latest",
+			wantPolicy:        "Never",
+		},
+		{
+			name:          "settings image overrides the harness-config file default",
+			settingsImage: "example.com/settings-pinned:v1",
+			wantImage:     "example.com/settings-pinned:v1",
+		},
+		{
+			name:          "explicit template image still outranks settings",
+			settingsImage: "example.com/settings-pinned:v1",
+			templateImage: "example.com/template-pinned:v2",
+			wantImage:     "example.com/template-pinned:v2",
+		},
+		{
+			name:           "settings image_pull_policy applies with no template override",
+			settingsPolicy: "Always",
+			wantImage:      "test-image:latest",
+			wantPolicy:     "Always",
+		},
+		{
+			name:           "explicit template imagePullPolicy still outranks settings",
+			settingsPolicy: "Always",
+			templatePolicy: "Never",
+			wantImage:      "test-image:latest",
+			wantPolicy:     "Never",
+		},
+		{
+			name:                  "profile harness_overrides outranks the base settings entry",
+			settingsImage:         "example.com/settings-pinned:v1",
+			settingsPolicy:        "IfNotPresent",
+			profileOverrideImage:  "example.com/profile-pinned:v3",
+			profileOverridePolicy: "Always",
+			wantImage:             "example.com/profile-pinned:v3",
+			wantPolicy:            "Always",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+			_ = os.MkdirAll(globalTemplatesDir, 0755)
+			seedTestHarnessConfig(t, globalScionDir, "test-harness", "test-harness")
+			if tt.fileDefaultPolicy != "" {
+				hcConfigPath := filepath.Join(globalScionDir, "harness-configs", "test-harness", "config.yaml")
+				existing, err := os.ReadFile(hcConfigPath)
+				if err != nil {
+					t.Fatalf("read seeded harness-config: %v", err)
+				}
+				updated := string(existing) + "image_pull_policy: " + tt.fileDefaultPolicy + "\n"
+				if err := os.WriteFile(hcConfigPath, []byte(updated), 0644); err != nil {
+					t.Fatalf("append image_pull_policy to harness-config: %v", err)
+				}
+			}
+
+			tplFields := map[string]any{"default_harness_config": "test-harness"}
+			if tt.templateImage != "" {
+				tplFields["image"] = tt.templateImage
+			}
+			if tt.templatePolicy != "" {
+				tplFields["kubernetes"] = map[string]any{"imagePullPolicy": tt.templatePolicy}
+			}
+			tplDir := filepath.Join(globalTemplatesDir, "test-tpl")
+			_ = os.MkdirAll(tplDir, 0755)
+			tplJSON, err := json.Marshal(tplFields)
+			if err != nil {
+				t.Fatalf("marshal template config: %v", err)
+			}
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), tplJSON, 0644)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			projectScionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(projectScionDir, 0755)
+
+			profileName := ""
+			if tt.settingsImage != "" || tt.settingsPolicy != "" {
+				var sb strings.Builder
+				sb.WriteString("schema_version: \"1\"\nharness_configs:\n  test-harness:\n    harness: test-harness\n")
+				if tt.settingsImage != "" {
+					sb.WriteString("    image: " + tt.settingsImage + "\n")
+				}
+				if tt.settingsPolicy != "" {
+					sb.WriteString("    image_pull_policy: " + tt.settingsPolicy + "\n")
+				}
+				if tt.profileOverrideImage != "" || tt.profileOverridePolicy != "" {
+					profileName = "test-profile"
+					sb.WriteString("profiles:\n  test-profile:\n    runtime: docker\n    harness_overrides:\n      test-harness:\n")
+					if tt.profileOverrideImage != "" {
+						sb.WriteString("        image: " + tt.profileOverrideImage + "\n")
+					}
+					if tt.profileOverridePolicy != "" {
+						sb.WriteString("        image_pull_policy: " + tt.profileOverridePolicy + "\n")
+					}
+				}
+				_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(sb.String()), 0644)
+			}
+
+			agentName := "test-agent"
+			_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, profileName, "", "", "")
+			if err != nil {
+				t.Fatalf("ProvisionAgent failed: %v", err)
+			}
+			if cfg.Image != tt.wantImage {
+				t.Errorf("cfg.Image = %q, want %q", cfg.Image, tt.wantImage)
+			}
+			gotPolicy := ""
+			if cfg.Kubernetes != nil {
+				gotPolicy = cfg.Kubernetes.ImagePullPolicy
+			}
+			if gotPolicy != tt.wantPolicy {
+				t.Errorf("cfg.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPolicy)
+			}
+
+			// The "created" response (ProvisionOnly dispatch path) reads the
+			// persisted scion-agent.json directly, so the same values must
+			// round-trip through disk.
+			agentScionJSON := filepath.Join(projectScionDir, "agents", agentName, "scion-agent.json")
+			data, err := os.ReadFile(agentScionJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted api.ScionConfig
+			if err := json.Unmarshal(data, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Image != tt.wantImage {
+				t.Errorf("persisted image = %q, want %q", persisted.Image, tt.wantImage)
+			}
+			persistedPolicy := ""
+			if persisted.Kubernetes != nil {
+				persistedPolicy = persisted.Kubernetes.ImagePullPolicy
+			}
+			if persistedPolicy != tt.wantPolicy {
+				t.Errorf("persisted imagePullPolicy = %q, want %q", persistedPolicy, tt.wantPolicy)
+			}
+		})
+	}
+}
+
 func TestProvisionGeminiAgentSettings(t *testing.T) {
 	mockRuntimeForTest(t)
 	tmpDir := t.TempDir()

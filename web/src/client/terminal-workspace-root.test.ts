@@ -435,7 +435,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     static instances: FakeSocket[] = [];
     readyState = 0;
     onopen: (() => void) | null = null;
-    onclose: ((event: { code: number }) => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
     onmessage: ((event: { data: unknown }) => void) | null = null;
     send = vi.fn();
     close = vi.fn();
@@ -606,5 +606,107 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     );
     expect(session.reconnecting).toBe(false);
     expect(session.state.connection).toBe('unavailable');
+  });
+
+  it('a crashed agent (SSE phase error, not stopped) still re-arms once it reports running again (ptone/scion#2096)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-error-phase',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket();
+    socket.open();
+    socket.data();
+    expect(session.state.connection).toBe('connected');
+
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    source.onopen?.();
+
+    // The container crashes: SSE reports phase 'error', not 'stopped'. The
+    // bridge's markUnavailable branch must treat the two the same.
+    agentPhase = 'error';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'error' } }),
+      })
+    );
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false); // still crashed: foregrounding alone never dials
+
+    // The agent restarts and SSE reports it running again.
+    agentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
+  });
+
+  it('a 4410 agent_stopped close racing stale SSE "running" snapshots does not re-arm until SSE independently confirms the agent down (ptone/scion#2096)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-stale-running-race',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket();
+    socket.open();
+    socket.data();
+    session.setFrontmost(true);
+
+    // The broker's own open-time check already knows the container is down
+    // and closes with 4410 agent_stopped, but SSE's polled view has not
+    // caught up: agentPhase (what the next fetch/status event reports)
+    // stays 'running' for now.
+    socket.readyState = 3;
+    socket.onclose?.({ code: 4410, reason: 'agent_stopped' });
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+
+    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
+    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    source.onopen?.();
+    session.setFrontmost(true);
+
+    // N stale snapshots, still reporting the pre-crash phase: none may dial.
+    for (let i = 0; i < 3; i++) {
+      source.dispatchEvent(
+        new MessageEvent('update', {
+          data: JSON.stringify({
+            subject: `agent.${agentId}.status`,
+            data: { phase: 'running', activity: i % 2 === 0 ? 'working' : 'idle' },
+          }),
+        })
+      );
+    }
+    expect(session.reconnecting).toBe(false);
+    expect(FakeSocket.instances.filter((s) => s.url.includes(agentId))).toHaveLength(1);
+
+    // SSE catches up and reports the agent actually down. This alone must
+    // not dial either — it is the observation, not the re-arm trigger.
+    agentPhase = 'error';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'error' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(false);
+    expect(session.state.connection).toBe('unavailable');
+
+    // Only now does a genuine transition back to running re-arm, with
+    // exactly one attempt.
+    agentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
   });
 });

@@ -455,9 +455,18 @@ func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Tim
 // created timestamp is before cutoff. Returns the number of messages removed.
 // Unlike PurgeOldMessages, this filters strictly on dispatch_state so
 // successfully delivered (dispatched) message history is never touched.
+// Scoped to agent recipients only (message.RecipientHasPrefix "agent:"):
+// only a message addressed to an agent can have genuinely and irrecoverably
+// failed dispatch. A "user:" recipient row reaching "failed" only ever came
+// from ExpireStuckPendingMessages sweeping a writer bug (nc-promote-busy);
+// deleting it would destroy real chat history the user never saw fail.
 func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
 	n, err := s.client.Message.Delete().
-		Where(message.DispatchStateEQ(store.MessageDispatchFailed), message.CreatedLT(cutoff)).
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchFailed),
+			message.CreatedLT(cutoff),
+			message.RecipientHasPrefix("agent:"),
+		).
 		Exec(ctx)
 	if err != nil {
 		return 0, mapError(err)

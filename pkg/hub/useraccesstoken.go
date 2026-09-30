@@ -177,6 +177,21 @@ func (s *UserAccessTokenService) enforceSessionCredential(ctx context.Context, u
 // target-project authorization, atomic audit, and concurrency-safe cap.
 // Returns the plaintext token (shown only once) and the stored metadata.
 func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time) (string, *store.UserAccessToken, error) {
+	return s.CreateTokenWithMetadata(ctx, userID, name, projectID, scopes, expiresAt, TokenMetadata{})
+}
+
+// TokenMetadata carries E.1's optional, bounded, issuer-supplied descriptive
+// fields for a new token. Metadata is immutable after issuance: there is no
+// update path (E.1 ruling Q1). Use TokenMetadata{} for no metadata.
+type TokenMetadata struct {
+	Purpose string
+	Labels  map[string]string
+}
+
+// CreateTokenWithMetadata is CreateToken plus E.1's bounded, issuer-supplied
+// purpose/labels. CreateToken is kept as a thin wrapper over this method so
+// existing callers are unaffected.
+func (s *UserAccessTokenService) CreateTokenWithMetadata(ctx context.Context, userID, name, projectID string, scopes []string, expiresAt *time.Time, metadata TokenMetadata) (string, *store.UserAccessToken, error) {
 	// A1: Credential caveat at service boundary.
 	if err := s.enforceSessionCredential(ctx, userID); err != nil {
 		return "", nil, err
@@ -188,6 +203,11 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 	}
 	if projectID == "" {
 		return "", nil, ErrUATProjectIDEmpty
+	}
+	// E.1: bounded validation of name/purpose/labels at issuance. Metadata
+	// is immutable afterward, so this is the only place it is checked.
+	if err := ValidateCredentialMetadata(name, metadata.Purpose, metadata.Labels); err != nil {
+		return "", nil, err
 	}
 
 	// Expand and validate scopes against the registry.
@@ -300,6 +320,14 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 			ExpiresAt: expiresAt,
 			Created:   now,
 		}
+		// E.1 descriptive credential metadata: set only when supplied.
+		trimmedPurpose := strings.TrimSpace(metadata.Purpose)
+		if trimmedPurpose != "" {
+			token.Purpose = &trimmedPurpose
+		}
+		if len(metadata.Labels) > 0 {
+			token.Labels = metadata.Labels
+		}
 
 		if createErr := tx.CreateUserAccessToken(ctx, token); createErr != nil {
 			return fmt.Errorf("failed to create token: %w", createErr)
@@ -309,6 +337,12 @@ func (s *UserAccessTokenService) CreateToken(ctx context.Context, userID, name, 
 		scopesJSON, _ := json.Marshal(expanded)
 		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
 			token.ID, string(scopesJSON), projectID)
+		// E.1: record that purpose/label metadata was set and which label
+		// keys were used, without recording label or purpose values in
+		// audit (values are issuer-supplied and unbounded-trust text).
+		if trimmedPurpose != "" || len(metadata.Labels) > 0 {
+			afterSummary = appendCredentialMetadataAuditFields(afterSummary, trimmedPurpose != "", metadata.Labels)
+		}
 
 		return s.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "credential_create",
@@ -367,11 +401,38 @@ func (s *UserAccessTokenService) ValidateToken(ctx context.Context, key string) 
 		return nil, ErrUserSuspended
 	}
 
-	return NewScopedUserIdentityWithCredentialID(
+	// E.1: derive the descriptive credential decoration from the
+	// server-validated token row this function already loaded. This is the
+	// single trustworthy derivation point — no header, query parameter, or
+	// body field ever contributes to it.
+	//
+	// D.1 has not yet persisted a boundary column on the UAT row, so this
+	// builds A.1's TokenBoundary inline from the token's stored project ID
+	// (every UAT is project-scoped today). This is the one call site that
+	// changes when D.1 lands, per the E.1 handoff note.
+	decoration := &CredentialDecoration{
+		Kind:      CredentialKindUAT,
+		TokenID:   token.ID,
+		TokenName: token.Name,
+		Boundary:  decorationBoundaryFromToken(TokenBoundary{Kind: BoundaryKindProject, ProjectID: token.ProjectID}),
+	}
+	if token.Purpose != nil {
+		decoration.Purpose = *token.Purpose
+	}
+	if len(token.Labels) > 0 {
+		labels := make(map[string]string, len(token.Labels))
+		for k, v := range token.Labels {
+			labels[k] = v
+		}
+		decoration.Labels = labels
+	}
+
+	return NewScopedUserIdentityWithDecoration(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
 		token.ProjectID,
 		token.Scopes,
 		token.ID,
+		decoration,
 	), nil
 }
 

@@ -224,6 +224,43 @@ func TestDelivery_DispatchSuccess_MarkedDispatched(t *testing.T) {
 		"DispatchedAt must be set after successful dispatch")
 }
 
+func TestDelivery_DispatchedStructuredMessage_HasVersionAndTimestamp(t *testing.T) {
+	// The StructuredMessage built inside ExecuteAgentDM (independent of any
+	// client-supplied structured_message) must carry the current wire
+	// Version and a non-empty, parseable RFC3339 Timestamp — matching the
+	// web-chat, broker-inbound routing and messages.NewMention/NewSystemMessage
+	// construction sites.
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	before := time.Now().Truncate(time.Second)
+	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "version-timestamp-check"))
+	require.Nil(t, dmErr, "dispatch must succeed")
+	require.Equal(t, AgentDMAccepted, result.Outcome)
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1, "expected exactly one dispatch call")
+	structuredMsg := calls[0].StructuredMessage
+	require.NotNil(t, structuredMsg, "dispatch call must carry a structured message")
+
+	assert.Equal(t, messages.Version, structuredMsg.Version,
+		"dispatched StructuredMessage must carry the current wire Version")
+
+	require.NotEmpty(t, structuredMsg.Timestamp,
+		"dispatched StructuredMessage must have a non-empty Timestamp")
+	parsed, err := time.Parse(time.RFC3339, structuredMsg.Timestamp)
+	require.NoError(t, err, "Timestamp must be RFC3339-parseable")
+	now := time.Now()
+	assert.False(t, parsed.Before(before), "Timestamp must not predate the dispatch call: got %s, before %s", parsed, before)
+	assert.False(t, parsed.After(now), "Timestamp must not be in the future: got %s, now %s", parsed, now)
+
+	persisted, err := s.GetMessage(ctx, result.MessageID)
+	require.NoError(t, err, "persisted message must be retrievable")
+	assert.True(t, parsed.UTC().Truncate(time.Second).Equal(persisted.CreatedAt.UTC().Truncate(time.Second)),
+		"dispatched Timestamp must equal the persisted row's CreatedAt at second granularity: got %s, want %s",
+		parsed, persisted.CreatedAt)
+}
+
 func TestDelivery_DispatchSuccess_PendingBeforeDispatch(t *testing.T) {
 	// Verify that the message is in "pending" state when the dispatcher is
 	// called, and transitions to "dispatched" after dispatch completes.

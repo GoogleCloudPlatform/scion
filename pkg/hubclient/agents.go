@@ -497,6 +497,10 @@ type MessageResponse struct {
 	Status     string `json:"status"`
 	Agent      string `json:"agent"`
 	AgentPhase string `json:"agent_phase"`
+	// Deferred is set when Status is "deferred": the recipient is
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
+	// was saved to conversation history but not dispatched.
+	Deferred string `json:"deferred,omitempty"`
 }
 
 // SendStructuredMessage sends a structured message to an agent.
@@ -557,6 +561,8 @@ type OutboundMessageResult struct {
 	Recipient string `json:"recipient"`
 	// RecipientID is the recipient's UUID.
 	RecipientID string `json:"recipient_id"`
+	// Deferred is set only when Status == "deferred".
+	Deferred string `json:"deferred,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.

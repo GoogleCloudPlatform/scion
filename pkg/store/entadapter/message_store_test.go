@@ -237,6 +237,40 @@ func TestPurgeFailedMessages(t *testing.T) {
 	require.NoError(t, err, "delivered message history is never purged by this sweep")
 }
 
+// TestPurgeFailedMessages_SkipsUserRecipients is a regression test for
+// nc-promote-busy round 2 (R1): only a message addressed to an agent can
+// have genuinely and irrecoverably failed dispatch. A "user:" recipient row
+// reaching dispatch_state "failed" only ever got there because
+// ExpireStuckPendingMessages swept a writer bug that left it "pending"
+// (nc-promote-busy); hard-deleting it here would destroy real chat history
+// the user never saw fail.
+func TestPurgeFailedMessages_SkipsUserRecipients(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	oldFailedUser := newTestMessage(projectID, "user-alice")
+	oldFailedUser.Recipient = "user:alice"
+	oldFailedUser.DispatchState = store.MessageDispatchFailed
+	oldFailedUser.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldFailedUser))
+
+	oldFailedAgent := newTestMessage(projectID, "agent-1")
+	oldFailedAgent.DispatchState = store.MessageDispatchFailed
+	oldFailedAgent.CreatedAt = time.Now().Add(-10 * 24 * time.Hour).UTC().Truncate(time.Second)
+	require.NoError(t, s.CreateMessage(ctx, oldFailedAgent))
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	n, err := s.PurgeFailedMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the agent-recipient failed message is purged")
+
+	_, err = s.GetMessage(ctx, oldFailedUser.ID)
+	require.NoError(t, err, "user-recipient failed row must survive — it is never a real dispatch failure")
+	_, err = s.GetMessage(ctx, oldFailedAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 // fakePublisher records PublishUserMessage calls to verify the LISTEN/NOTIFY
 // design-in hook fires on create.
 type fakePublisher struct {

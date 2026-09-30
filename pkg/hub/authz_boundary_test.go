@@ -1019,16 +1019,14 @@ func TestProjectAdmissionCache_LiteralWithoutMapUsable(t *testing.T) {
 
 // TestProjectAdmissionCache_ZeroValueConcurrentSafe proves the lazy map
 // initialization in put is safe under concurrent first use: many goroutines
-// racing to put into the same zero-value cache must neither panic (double
-// map creation) nor lose the mutex's guarantee that only one goroutine wins
-// the map allocation.
+// racing to put into the same zero-value cache must not lose any write, and
+// must not race on the map itself.
 func TestProjectAdmissionCache_ZeroValueConcurrentSafe(t *testing.T) {
 	var memo ProjectAdmissionCache
 	const n = 50
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		i := i
 		go func() {
 			defer wg.Done()
 			key := projectAdmissionCacheKey{
@@ -1042,6 +1040,19 @@ func TestProjectAdmissionCache_ZeroValueConcurrentSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
+	for i := 0; i < 26; i++ {
+		key := projectAdmissionCacheKey{
+			principalKind: PrincipalKindUser,
+			principalID:   "u",
+			projectID:     "p",
+			permissionID:  string(rune('a' + i)),
+		}
+		got, ok := memo.get(key)
+		if !ok || !got.Admitted {
+			t.Errorf("get(%q) after concurrent puts = %+v, ok=%v, want the stored value", key.permissionID, got, ok)
+		}
+	}
 }
 
 func TestProjectAdmissionForClass_MembershipPath(t *testing.T) {

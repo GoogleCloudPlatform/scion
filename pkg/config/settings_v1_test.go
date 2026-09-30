@@ -1316,6 +1316,39 @@ func TestResolveHarnessConfig_ProfileEnvFieldRemoved(t *testing.T) {
 		"harness_configs.<hc>.env must survive — it is the migration path for the removed profile env")
 }
 
+// TestResolveHarnessConfig_ImagePullPolicy pins ptone/scion#2156: a Hub
+// settings harness_configs.<h>.image_pull_policy value resolves the same way
+// .image already does, including the profile-level harness_overrides rank.
+func TestResolveHarnessConfig_ImagePullPolicy(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "staging",
+		HarnessConfigs: map[string]HarnessConfigEntry{
+			"claude": {
+				Harness:         "claude",
+				Image:           "example.com/claude:latest",
+				ImagePullPolicy: "IfNotPresent",
+			},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"staging": {
+				Runtime: "docker",
+				HarnessOverrides: map[string]V1HarnessOverride{
+					"claude": {ImagePullPolicy: "Always"},
+				},
+			},
+			"local": {Runtime: "docker"},
+		},
+	}
+
+	hc, err := vs.ResolveHarnessConfig("local", "claude")
+	require.NoError(t, err)
+	assert.Equal(t, "IfNotPresent", hc.ImagePullPolicy, "base harness-config value with no profile override")
+
+	hc, err = vs.ResolveHarnessConfig("staging", "claude")
+	require.NoError(t, err)
+	assert.Equal(t, "Always", hc.ImagePullPolicy, "profile harness_overrides must outrank the base harness-config value")
+}
+
 func TestResolveHarnessConfig_NotFound(t *testing.T) {
 	vs := &VersionedSettings{
 		ActiveProfile: "local",

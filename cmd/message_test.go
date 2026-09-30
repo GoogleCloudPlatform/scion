@@ -38,6 +38,7 @@ type messageTestState struct {
 	bcastChanged bool
 	allChanged   bool
 	bodyFile     string
+	raw          bool
 }
 
 func saveMessageTestState() messageTestState {
@@ -47,6 +48,7 @@ func saveMessageTestState() messageTestState {
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
 		bodyFile:     msgBodyFile,
+		raw:          msgRaw,
 	}
 }
 
@@ -56,6 +58,7 @@ func (s messageTestState) restore() {
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
 	msgBodyFile = s.bodyFile
+	msgRaw = s.raw
 }
 
 // messageMockServer creates a mock Hub server that handles project-scoped
@@ -435,7 +438,7 @@ func TestBuildStructuredMessage(t *testing.T) {
 	msgInterrupt = true
 	msgAttach = []string{"file1.go", "file2.go"}
 
-	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach)
+	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach, msgRaw, msgPlain, msgInterrupt)
 
 	assert.Equal(t, messages.Version, msg.Version)
 	assert.Equal(t, "user:alice", msg.Sender)
@@ -1929,6 +1932,218 @@ func TestSendGroupMessageViaHub_MentionFanOut(t *testing.T) {
 	assert.Equal(t, messages.TypeMention, mentionMsgs[0].StructuredMsg.Type)
 }
 
+// TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered is
+// report-7-gteam-2a F2 / design.md A25.6: while a group[] recipient is
+// mid-`scion reincarnate`, the server reports it "deferred" (the message was
+// saved to history for catch-up, not dropped, per §3.7), but the human CLI's
+// group fan-out discarded SendStructuredMessage's response and always
+// printed "Delivered". The status must come from the send response.
+func TestSendGroupMessageViaHub_A256_F2_DeferredRecipientNotReportedDelivered(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-group-deferred"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-migrating/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred",
+				"status":      "deferred",
+				"agent":       "agent-migrating",
+				"agent_phase": "stopping",
+				"deferred":    "agent is reincarnating",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-running/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-delivered",
+				"status":      "delivered",
+				"agent":       "agent-running",
+				"agent_phase": "running",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-running"},
+		{Kind: messages.RecipientAgent, Name: "agent-migrating"},
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	err = sendGroupMessageViaHub(hubCtx, recipients, "group hello mid-migration", false)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, err, "a deferred recipient is not a failure and must not error the group send")
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	assert.Contains(t, output, "Deferred: agent:agent-migrating (agent is reincarnating; saved)",
+		"the migrating recipient must be reported deferred, not delivered; got: %s", output)
+	assert.NotContains(t, output, "Delivered: agent:agent-migrating",
+		"a deferred recipient must never be printed as delivered; got: %s", output)
+	assert.Contains(t, output, "Delivered: agent:agent-running",
+		"the non-migrating recipient must still be reported delivered; got: %s", output)
+	assert.Contains(t, output, "1/2 delivered, 1 deferred",
+		"the summary line must separate deferred from delivered; got: %s", output)
+}
+
+// TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus is
+// design.md A25.7 O1: group[] sends must honour --json the same way the
+// single-recipient paths do. Before this, --json mode for a group send
+// printed nothing at all — the per-recipient results (including a
+// "deferred" status) were computed but never serialized.
+func TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	projectID := "project-msg-group-json"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-migrating/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred-json",
+				"status":      "deferred",
+				"agent":       "agent-migrating",
+				"agent_phase": "stopping",
+				"deferred":    "agent is reincarnating",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-running/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-delivered-json",
+				"status":      "delivered",
+				"agent":       "agent-running",
+				"agent_phase": "running",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-running"},
+		{Kind: messages.RecipientAgent, Name: "agent-migrating"},
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	sendErr := sendGroupMessageViaHub(hubCtx, recipients, "group hello via json", false)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, sendErr, "a deferred recipient is not a failure and must not error the group send")
+
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	var got []struct {
+		Recipient string `json:"recipient"`
+		Status    string `json:"status"`
+		Error     string `json:"error,omitempty"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(output), &got), "output must be valid JSON; got: %s", output)
+	require.Len(t, got, 2)
+
+	byRecipient := map[string]string{}
+	for _, r := range got {
+		byRecipient[r.Recipient] = r.Status
+	}
+	assert.Equal(t, "deferred", byRecipient["agent:agent-migrating"], "JSON output must carry status:\"deferred\"; got: %s", output)
+	assert.Equal(t, "delivered", byRecipient["agent:agent-running"])
+}
+
+// TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly
+// is design.md A25.7 O2: the partial-failure error must report delivered,
+// deferred and failed counts explicitly, rather than folding a genuine
+// failure into "%d/%d delivered" (which could describe 1 delivered + 1
+// failed as "1/2 delivered" without ever using the word "failed").
+func TestSendGroupMessageViaHub_A257_O2_PartialFailureReportsCountsExplicitly(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-group-partial"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-ok/message"):
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": "m1", "status": "delivered", "agent": "agent-ok",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent-bad/message"):
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]string{"code": "INTERNAL", "message": "boom"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	recipients := []messages.GroupRecipient{
+		{Kind: messages.RecipientAgent, Name: "agent-ok"},
+		{Kind: messages.RecipientAgent, Name: "agent-bad"},
+	}
+
+	sendErr := sendGroupMessageViaHub(hubCtx, recipients, "partial failure test", false)
+	require.Error(t, sendErr)
+	assert.Contains(t, sendErr.Error(), "1 delivered, 0 deferred, 1 failed (of 2 total)",
+		"got: %v", sendErr)
+}
+
 func TestCCFlagValidation(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
@@ -2383,6 +2598,190 @@ func TestCrossProjectMismatchRejection(t *testing.T) {
 	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
 }
 
+// TestMessageCmd_RunE_CrossProjectRaw_Refused verifies that `scion message
+// --raw` refuses a cross-project target at the CLI layer, mirroring
+// TestKeysCmd_RunE_CrossProjectTarget_Refused. It is hermetic on unmutated
+// code: the --raw guard returns before any hub work, so it never reaches
+// the network. It still points at a mock hub (rather than the ambient one)
+// so a regression that lets the guard fall through fails on an assertion
+// instead of a real network round trip.
+func TestMessageCmd_RunE_CrossProjectRaw_Refused(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	server, sent := crossProjectMockServer(t, "target-uuid-raw", "target-agent", "other-project-uuid", "other-project")
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	require.NoError(t, cmd.Flags().Set("project", "other-project"))
+	msgRaw = true
+
+	err := messageCmd.RunE(cmd, []string{"target-agent", "hello"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--raw cannot be used with a cross-project target")
+	assert.Empty(t, *sent, "the --raw refusal must fire before any hub request is made")
+}
+
+// TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub is the companion to
+// TestMessageCmd_RunE_CrossProjectRaw_Refused: with msgRaw=false, the same
+// cross-project target must not trip the --raw refusal. Unlike a plain
+// "no error" check, this asserts positively that the send actually reaches
+// the mock hub's cross-project resolve/send endpoints, proving the guard let
+// it through rather than merely not erroring for an unrelated reason.
+//
+// The test is hermetic: HOME and the working directory are redirected to
+// scratch dirs (so project-root discovery can't find this container's real
+// .scion project) and SCION_HUB_ENDPOINT points at the mock server, so it
+// cannot reach the ambient hub.
+func TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	targetAgentID := "target-uuid-nonraw"
+	targetAgentSlug := "target-agent"
+	targetProjectID := "other-project-uuid"
+	targetProjectSlug := "other-project"
+
+	server, sent := crossProjectMockServer(t, targetAgentID, targetAgentSlug, targetProjectID, targetProjectSlug)
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	require.NoError(t, cmd.Flags().Set("project", targetProjectSlug))
+	msgRaw = false
+
+	err := messageCmd.RunE(cmd, []string{targetAgentSlug, "hello"})
+	require.NoError(t, err)
+
+	require.Len(t, *sent, 1, "the cross-project send must reach the mock hub")
+	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
+	assert.Equal(t, "hello", (*sent)[0].Message)
+}
+
+// TestMessageCmd_RunE_ConvRefCrossProjectMismatch pins the conv: + --project
+// mismatch check (message.go, just after the --raw cross-project refusal).
+// This check intentionally keeps its own inline same-project comparison
+// rather than calling detectCrossProjectTarget: that helper treats an
+// explicitly empty --project ("") as same-project, but this branch must
+// still reject it — an explicit --project="" alongside a conv: reference is
+// still an attempt to reinterpret the sender's project context, and this
+// check's behavior must match the pre-existing behavior. Table covers all 7 cases.
+//
+// Hermetic: noHub=true short-circuits before any hub call is attempted, and
+// hub env vars are cleared, so only the conv: error string is asserted.
+func TestMessageCmd_RunE_ConvRefCrossProjectMismatch(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	const convErr = "--project cannot be used with conv: references"
+	const convRef = "conv:11111111-1111-1111-1111-111111111111"
+
+	tests := []struct {
+		name        string
+		agentName   string
+		ownSlug     string
+		ownID       string
+		projectFlag string
+		setProject  bool
+		wantReject  bool
+	}{
+		{
+			name:        "agent, --project other project",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "other-project",
+			setProject:  true,
+			wantReject:  true,
+		},
+		{
+			name:        "agent, --project own slug",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "own-project",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:        "agent, --project own ID",
+			agentName:   "sender-agent",
+			ownID:       "own-project-id",
+			projectFlag: "own-project-id",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:        "human caller, --project other project",
+			agentName:   "",
+			projectFlag: "other-project",
+			setProject:  true,
+			wantReject:  false,
+		},
+		{
+			name:       "agent, --project not set",
+			agentName:  "sender-agent",
+			ownSlug:    "own-project",
+			setProject: false,
+			wantReject: false,
+		},
+		{
+			name:        "agent, --project explicitly empty (still rejected)",
+			agentName:   "sender-agent",
+			ownSlug:     "own-project",
+			projectFlag: "",
+			setProject:  true,
+			wantReject:  true,
+		},
+		{
+			name:        "agent, no SCION_PROJECT/_ID set, --project x",
+			agentName:   "sender-agent",
+			projectFlag: "x",
+			setProject:  true,
+			wantReject:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_HUB_ENDPOINT", "")
+			t.Setenv("SCION_HUB_URL", "")
+			t.Setenv("SCION_AGENT_NAME", tc.agentName)
+			t.Setenv("SCION_PROJECT", tc.ownSlug)
+			t.Setenv("SCION_PROJECT_ID", tc.ownID)
+			noHub = true
+
+			cmd := newProjectFlagCommand(t)
+			if tc.setProject {
+				require.NoError(t, cmd.Flags().Set("project", tc.projectFlag))
+			}
+
+			err := messageCmd.RunE(cmd, []string{convRef, "hello"})
+			if tc.wantReject {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), convErr)
+			} else if err != nil {
+				assert.NotContains(t, err.Error(), convErr)
+			}
+		})
+	}
+}
+
 // TestCrossProjectSameProjectBypass verifies that --project matching the
 // agent's own project (by slug or ID) does NOT trigger cross-project
 // detection, preserving normal same-project sending even when CPM is disabled.
@@ -2526,4 +2925,58 @@ func TestConvRefAttachWakeSupported(t *testing.T) {
 
 	// Verify no messages went through the agent message path
 	assert.Len(t, *sent, 0, "conv: should not go through agent message path")
+}
+
+// TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice covers the
+// CLI half of the migration gate (design agent-reincarnate §3.7, Amendment
+// A25 2a.2): when the hub responds with status "deferred" (the recipient is
+// mid-`scion reincarnate`), `scion message @agent` must print the deferred
+// notice, not a generic "delivered" message, and must not treat it as an
+// error.
+func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":  "msg-deferred-1",
+				"status":      "deferred",
+				"deferred":    "agent is reincarnating",
+				"agent":       "my-agent",
+				"agent_phase": "starting",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaHub(hubCtx, "my-agent", "hello during migration", false, false, false)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent my-agent is reincarnating; message saved to history and will be seen on catch-up",
+		"the CLI must print the deferred notice, not a generic delivered message")
+	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
+	assert.NotContains(t, output, "Message delivered to agent",
+		"the generic delivered message must not also print for a deferred outcome")
 }
