@@ -427,7 +427,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		RuntimeError(w, runtimeOpError("list agents", err).Error())
 		return
 	}
 
@@ -809,7 +809,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
 					span.SetStatus(codes.Error, sce.Message)
-					writeStartContextError(w, sce)
+					writeStartContextError(w, sce, "create agent")
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -1049,7 +1049,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		status := writeStartContextError(w, err)
+		status := writeStartContextError(w, err, "create agent")
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -1199,7 +1199,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
-			RuntimeError(w, "Failed to provision agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("provision agent", err).Error())
 			return
 		}
 
@@ -1308,7 +1308,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
 		default:
-			RuntimeError(w, "Failed to create agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("create agent", err).Error())
 		}
 		return
 	}
@@ -1742,7 +1742,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		RuntimeError(w, runtimeOpError("list agents", err).Error())
 		return
 	}
 
@@ -1806,7 +1806,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			return
 		}
 		if errors.Is(err, errDeleteTargetUnknown) {
-			RuntimeError(w, "Failed to delete agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("delete agent", err).Error())
 			return
 		}
 		if errors.Is(err, errAgentIdentityUnknown) {
@@ -1889,7 +1889,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		RuntimeError(w, "Failed to delete agent: "+err.Error())
+		RuntimeError(w, runtimeOpError("delete agent", err).Error())
 		return
 	}
 	if target.containerID == "" {
@@ -2148,7 +2148,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		writeStartContextError(w, err)
+		writeStartContextError(w, err, "start agent")
 		return
 	}
 	opts := sc.Opts
@@ -2183,7 +2183,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce)
+		writeStartContextError(w, sce, "start agent")
 		return
 	}
 
@@ -2213,7 +2213,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			Conflict(w, err.Error())
 		} else {
-			RuntimeError(w, "Failed to start agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("start agent", err).Error())
 		}
 		return
 	}
@@ -2493,7 +2493,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				"phase", string(state.PhaseStopped))
 		} else {
 			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to stop agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("stop agent", err).Error())
 			return
 		}
 	} else {
@@ -2571,7 +2571,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		Operation:                opHTTPRestart,
 	})
 	if err != nil {
-		writeStartContextError(w, err)
+		writeStartContextError(w, err, "restart agent")
 		return
 	}
 	opts := sc.Opts
@@ -2589,7 +2589,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce)
+		writeStartContextError(w, sce, "restart agent")
 		return
 	}
 
@@ -2632,7 +2632,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			NotFound(w, "Agent")
 			return
 		}
-		RuntimeError(w, "Failed to restart agent: "+err.Error())
+		RuntimeError(w, runtimeOpError("restart agent", err).Error())
 		return
 	}
 
@@ -2699,7 +2699,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, "Failed to send raw message: "+err.Error())
+			RuntimeError(w, runtimeOpError("send message to agent", err).Error())
 			return
 		}
 	} else {
@@ -2730,7 +2730,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, "Failed to send message: "+err.Error())
+			RuntimeError(w, runtimeOpError("send message to agent", err).Error())
 			return
 		}
 	}
@@ -3123,7 +3123,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 			})
 			return
 		}
-		RuntimeError(w, "Failed to execute command: "+err.Error())
+		RuntimeError(w, runtimeOpError("execute command on agent", err).Error())
 		return
 	}
 
@@ -3198,7 +3198,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 
 	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
 		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to write token file: "+err.Error())
+		RuntimeError(w, runtimeOpError("write token file on agent", err).Error())
 		return
 	}
 
@@ -3237,7 +3237,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	// Try to read agent.log from the filesystem first (preferred source).
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		RuntimeError(w, runtimeOpError("list agents", err).Error())
 		return
 	}
 
@@ -3287,7 +3287,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
 			return
 		}
-		RuntimeError(w, "Failed to get logs: "+err.Error())
+		RuntimeError(w, runtimeOpError("get logs for agent", err).Error())
 		return
 	}
 
@@ -3316,7 +3316,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 	// Find the agent to get its project path
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		RuntimeError(w, runtimeOpError("list agents", err).Error())
 		return
 	}
 

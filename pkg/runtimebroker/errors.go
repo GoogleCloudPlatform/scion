@@ -195,6 +195,41 @@ func RuntimeError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, message, nil)
 }
 
+// OpaqueError wraps a runtime-op failure (a container/pod runtime backend —
+// Docker, Podman, Kubernetes, substrate — declining a lifecycle operation)
+// with a fixed, identity-free message: Error() never returns the wrapped
+// error's own text, since a real backend error routinely embeds a
+// container ID, pod name, namespace, node name, image reference, or file
+// path — internal infrastructure identity a broker client has no
+// entitlement to see, whether or not it's authorized for the agent itself.
+// The wrapped error stays reachable via Unwrap for server-side telemetry
+// (span.SetStatus) and logging, neither of which is the HTTP response
+// body.
+type OpaqueError struct {
+	msg string
+	err error
+}
+
+// NewOpaqueError returns an OpaqueError whose Error() is exactly msg,
+// wrapping err for telemetry/logging only.
+func NewOpaqueError(msg string, err error) *OpaqueError {
+	return &OpaqueError{msg: msg, err: err}
+}
+
+func (e *OpaqueError) Error() string { return e.msg }
+func (e *OpaqueError) Unwrap() error { return e.err }
+
+// runtimeOpError builds the OpaqueError a broker runtime-op handler
+// (start, stop, restart, delete, exec, message, logs, list) writes to its
+// client on failure: op names the operation in the fixed message (e.g.
+// "stop agent", "list agents"), never anything about the specific agent,
+// runtime, or backend involved. Callers keep passing the real err to
+// span.SetStatus/logging themselves; this only ever governs what reaches
+// the HTTP response body.
+func runtimeOpError(op string, err error) *OpaqueError {
+	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+}
+
 // RuntimeUnavailable writes a 503 error for a transient container-runtime
 // failure (e.g. `docker ps` still failing after internal retries). Unlike
 // RuntimeError, this signals the caller should retry rather than treating
@@ -313,22 +348,37 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // hardcoding one.
 //
 // A Hub-connectivity failure (IsHubError) keeps its existing, more specific
-// handling — a retryable 503 hub_unreachable, or a 500 template_error for
-// any other hydration failure — ahead of the generic Status check; neither
-// of those was the 500-collapsing bug this helper fixes. err need not be a
-// *startContextError at all (any error buildStartContext could return,
-// including ones from other call sites in this package): a plain error
-// still gets the pre-existing generic 500 behavior.
+// handling — a retryable 503 hub_unreachable, or a redacted 500
+// template_error for any other hydration failure — ahead of the generic
+// Status check; neither of those was the 500-collapsing bug this helper
+// fixes. err need not be a *startContextError at all (any error
+// buildStartContext could return, including ones from other call sites in
+// this package): a plain error still gets the pre-existing generic 500
+// behavior.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
 // means as a client error, so collapsing just one 4xx (400) into the generic
 // 500 path while honoring others would be an arbitrary distinction, not a
-// deliberate one.
-func writeStartContextError(w http.ResponseWriter, err error) int {
+// deliberate one. sce.Message is written to the client verbatim here (never
+// through runtimeOpError's redaction) since buildStartContext composes it
+// itself as client-safe text for exactly this case.
+//
+// Every other path writes a client-safe, op-labeled message built by
+// runtimeOpError (see its own doc comment for why) instead of err's own
+// text, which can carry a container ID, pod name, namespace, node name,
+// image reference, or file path a broker client has no entitlement to see —
+// template hydration's own error text is no exception (it can carry a
+// template path or a storage bucket/object name). Each such path logs the
+// real error server-side first (preferring a *startContextError's
+// OriginalErr, the actual underlying failure, over its own curated Message)
+// so the detail reaches the broker's own diagnostics before being redacted
+// out of the response body.
+func writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	sce, ok := err.(*startContextError)
 	if !ok {
-		RuntimeError(w, err.Error())
+		slog.Warn("buildStartContext failed", "op", op, "error", err)
+		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
 	if sce.IsHubError {
@@ -336,13 +386,30 @@ func writeStartContextError(w http.ResponseWriter, err error) int {
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable
 		}
-		TemplateError(w, err.Error())
+		slog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
 		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
 		return sce.Status
 	}
-	RuntimeError(w, err.Error())
+	slog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+	RuntimeError(w, runtimeOpError(op, err).Error())
 	return http.StatusInternalServerError
+}
+
+// startContextDiagnostic returns the real, underlying error a
+// *startContextError's own Message may have been built from: its
+// OriginalErr when set (the actual failure buildStartContext composed
+// Message around), or sce itself when OriginalErr is nil (Message IS the
+// whole story — e.g. an unpinned image or an unrecognized GCP metadata
+// mode — so there is nothing more specific to log). Used so a server-side
+// log line records the real detail, not just the client-safe Message the
+// caller is about to redact out of the response body.
+func startContextDiagnostic(sce *startContextError) error {
+	if sce.OriginalErr != nil {
+		return sce.OriginalErr
+	}
+	return sce
 }

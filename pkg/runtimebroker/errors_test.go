@@ -15,8 +15,10 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,7 +101,7 @@ func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
 			w := httptest.NewRecorder()
 			sce := &startContextError{Status: tt.status, Message: "test message"}
 
-			gotStatus := writeStartContextError(w, sce)
+			gotStatus := writeStartContextError(w, sce, "test_op")
 
 			if gotStatus != tt.wantStatus {
 				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
@@ -171,6 +173,95 @@ func TestSkillResolutionFailed_StatusMapping(t *testing.T) {
 			}
 			if resp.Error.Details["cause"] != tt.code {
 				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// startContextSentinel stands in for identity-bearing detail a real
+// buildStartContext failure's error text can carry: a hydration failure's
+// own error can name a template path or a storage bucket/object name, and a
+// generic failure can carry anything a lower layer's error wraps (a
+// container ID, a node name, a namespace). None of this is something a
+// broker HTTP client is entitled to see in the response body, but it must
+// still reach the server's own log so the failure is diagnosable.
+const startContextSentinel = "gs://acme-templates-bucket/tenant-7f3/template.tar.gz"
+
+// TestWriteStartContextError_RedactsAndLogsEachFallbackBranch is the
+// RED/GREEN proof for the three branches writeStartContextError redacts: a
+// sentinel carrying identity-bearing detail must never reach the HTTP
+// response body, but must reach the server-side log first. The two branches
+// writeStartContextError does NOT redact (the Hub-connectivity 503 and the
+// 4xx client-validation passthrough) are proven unchanged by
+// TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch and
+// TestWriteStartContextError_Honors4xxStatus respectively — both continue
+// to pass unmodified by this change, so they are not duplicated here.
+func TestWriteStartContextError_RedactsAndLogsEachFallbackBranch(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "non-startContextError falls back to a redacted generic 500",
+			err:        errors.New(startContextSentinel),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
+		},
+		{
+			name: "IsHubError but not a connectivity failure redacts the template error",
+			err: &startContextError{
+				Message:     "Failed to hydrate template: " + startContextSentinel,
+				IsHubError:  true,
+				OriginalErr: errors.New(startContextSentinel),
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeTemplateError,
+		},
+		{
+			name: "a *startContextError with no 4xx Status falls back to a redacted generic 500",
+			err: &startContextError{
+				Message:     startContextSentinel,
+				OriginalErr: errors.New(startContextSentinel),
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   ErrCodeRuntimeError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			oldLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(oldLogger)
+
+			w := httptest.NewRecorder()
+			gotStatus := writeStartContextError(w, tt.err, "redact_test_op")
+
+			if gotStatus != tt.wantStatus {
+				t.Errorf("writeStartContextError returned %d, want %d", gotStatus, tt.wantStatus)
+			}
+			if w.Code != tt.wantStatus {
+				t.Errorf("response status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != tt.wantCode {
+				t.Errorf("error code = %q, want %q", resp.Error.Code, tt.wantCode)
+			}
+			if strings.Contains(w.Body.String(), startContextSentinel) {
+				t.Errorf("response body must not leak the sentinel, got: %s", w.Body.String())
+			}
+			if resp.Error.Message != "Failed to redact_test_op" {
+				t.Errorf("response message = %q, want the fixed, op-labeled message", resp.Error.Message)
+			}
+			logged := logBuf.String()
+			if !strings.Contains(logged, startContextSentinel) {
+				t.Errorf("server log must contain the sentinel so the failure stays diagnosable, got: %s", logged)
 			}
 		})
 	}
