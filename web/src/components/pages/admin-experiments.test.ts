@@ -129,7 +129,10 @@ describe('scion-admin-experiments', () => {
   });
 
   it('renders the normal state: title, description, badges, issue link, switch', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse(makeResponse()))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse(makeResponse())))
+    );
     element = await createElement();
     await activate(element);
 
@@ -153,7 +156,10 @@ describe('scion-admin-experiments', () => {
   });
 
   it('403 state: shows the permission message and no switches', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse({}, 403))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({}, 403)))
+    );
     element = await createElement();
     await activate(element);
 
@@ -166,7 +172,9 @@ describe('scion-admin-experiments', () => {
       'fetch',
       vi.fn(() =>
         Promise.resolve(
-          jsonResponse(makeResponse({ updated_at: '2026-09-01T00:00:00Z', updated_by: 'admin@x.com' }))
+          jsonResponse(
+            makeResponse({ updated_at: '2026-09-01T00:00:00Z', updated_by: 'admin@x.com' })
+          )
         )
       )
     );
@@ -176,7 +184,10 @@ describe('scion-admin-experiments', () => {
   });
 
   it('does not show attribution when there is no stored row', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse(makeResponse()))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse(makeResponse())))
+    );
     element = await createElement();
     await activate(element);
     expect(shadowText(element)).not.toContain('Last changed by');
@@ -211,7 +222,9 @@ describe('scion-admin-experiments', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
-        Promise.resolve(jsonResponse(makeResponse({ experiments: [makeEntry({ review_overdue: true })] })))
+        Promise.resolve(
+          jsonResponse(makeResponse({ experiments: [makeEntry({ review_overdue: true })] }))
+        )
       )
     );
     element = await createElement();
@@ -223,7 +236,9 @@ describe('scion-admin-experiments', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
-        Promise.resolve(jsonResponse(makeResponse({ unknown_overrides: { 'hub.future_thing': true } })))
+        Promise.resolve(
+          jsonResponse(makeResponse({ unknown_overrides: { 'hub.future_thing': true } }))
+        )
       )
     );
     element = await createElement();
@@ -233,7 +248,7 @@ describe('scion-admin-experiments', () => {
   });
 
   it('toggling a switch sends a PUT with the current revision and applies the response optimistically then authoritatively', async () => {
-    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
         const body = JSON.parse(init.body as string);
         expect(body).toEqual({
@@ -268,7 +283,71 @@ describe('scion-admin-experiments', () => {
     expect(shadowText(element)).toContain('Reset to default');
   });
 
-  it('while a write is pending, every switch is disabled and a click has no effect', async () => {
+  it('a toggle on a second row made after the first write resolves carries the revision the first write returned', async () => {
+    const rowA = makeEntry({ name: 'web.terminal_workspace' });
+    const rowB = makeEntry({
+      name: 'hub.test_gate',
+      title: 'Test gate',
+      layers: ['server'],
+    });
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        const body = JSON.parse(init.body as string) as {
+          overrides: Record<string, boolean | null>;
+          expected_revision: number;
+        };
+        if ('web.terminal_workspace' in body.overrides) {
+          expect(body.expected_revision).toBe(1);
+          return Promise.resolve(
+            jsonResponse(
+              makeResponse({
+                revision: 2,
+                experiments: [rowA, rowB].map((e) =>
+                  e.name === 'web.terminal_workspace'
+                    ? { ...e, override: false, enabled: false }
+                    : e
+                ),
+              })
+            )
+          );
+        }
+        expect(body.expected_revision).toBe(2);
+        return Promise.resolve(
+          jsonResponse(
+            makeResponse({
+              revision: 3,
+              experiments: [rowA, rowB].map((e) =>
+                e.name === 'hub.test_gate' ? { ...e, override: false, enabled: false } : e
+              ),
+            })
+          )
+        );
+      }
+      return Promise.resolve(jsonResponse(makeResponse({ experiments: [rowA, rowB] })));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    element = await createElement();
+    await activate(element);
+
+    const switches = queryAll(element, 'sl-switch');
+    expect(switches).toHaveLength(2);
+
+    (switches[0] as HTMLElement).dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+
+    (switches[1] as HTMLElement).dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+
+    const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT');
+    expect(putCalls).toHaveLength(2);
+  });
+
+  it('while a write is pending, every switch and the reset button are disabled and a click has no effect', async () => {
     let resolvePut!: (r: Response) => void;
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
@@ -276,7 +355,11 @@ describe('scion-admin-experiments', () => {
           resolvePut = r;
         });
       }
-      return Promise.resolve(jsonResponse(makeResponse()));
+      return Promise.resolve(
+        jsonResponse(
+          makeResponse({ experiments: [makeEntry({ override: false, enabled: false })] })
+        )
+      );
     });
     vi.stubGlobal('fetch', fetchMock);
 
@@ -284,20 +367,30 @@ describe('scion-admin-experiments', () => {
     await activate(element);
 
     const sw = query(element, 'sl-switch') as HTMLElement;
+    const resetButton = queryAll(element, 'sl-button').find((b) =>
+      (b.textContent ?? '').includes('Reset to default')
+    ) as HTMLElement;
+    expect(resetButton).toBeTruthy();
+
     sw.dispatchEvent(new CustomEvent('sl-change'));
     await element.updateComplete;
 
     expect(sw.hasAttribute('disabled')).toBe(true);
-    const putCallsBefore = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
-      .length;
+    expect(resetButton.hasAttribute('disabled')).toBe(true);
+    const putCallsBefore = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'PUT'
+    ).length;
     sw.dispatchEvent(new CustomEvent('sl-change'));
     await element.updateComplete;
-    const putCallsAfter = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT')
-      .length;
+    const putCallsAfter = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit)?.method === 'PUT'
+    ).length;
     expect(putCallsAfter).toBe(putCallsBefore);
 
     resolvePut(
-      jsonResponse(makeResponse({ revision: 2, experiments: [makeEntry({ override: false, enabled: false })] }))
+      jsonResponse(
+        makeResponse({ revision: 2, experiments: [makeEntry({ override: false, enabled: false })] })
+      )
     );
     await new Promise((r) => setTimeout(r, 0));
     await element.updateComplete;
@@ -309,10 +402,13 @@ describe('scion-admin-experiments', () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
         return Promise.resolve(
-          new Response(JSON.stringify({ error: { code: 'revision_conflict', message: 'conflict' } }), {
-            status: 409,
-            headers: { 'Content-Type': 'application/json' },
-          })
+          new Response(
+            JSON.stringify({ error: { code: 'revision_conflict', message: 'conflict' } }),
+            {
+              status: 409,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          )
         );
       }
       getCount++;
@@ -331,12 +427,48 @@ describe('scion-admin-experiments', () => {
 
     expect(shadowText(element)).toContain('another administrator');
     expect(sw.hasAttribute('checked')).toBe(true); // reverted to enabled: true
+    expect(getCount).toBeGreaterThanOrEqual(2); // initial load + reload after the 409
+  });
+
+  it('on a PUT 409 experiments_malformed, reloads into the malformed state', async () => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: 'experiments_malformed', message: 'unreadable, reset all' },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(
+        jsonResponse(
+          makeResponse({ malformed: true, experiments: [makeEntry({ enabled: false })] })
+        )
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    element = await createElement();
+    await activate(element);
+
+    const sw = query(element, 'sl-switch') as HTMLElement;
+    sw.dispatchEvent(new CustomEvent('sl-change'));
+    await element.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+
+    expect(shadowText(element)).toContain('unreadable');
+    expect(sw.hasAttribute('disabled')).toBe(true);
   });
 
   it('on a non-409 write failure, reverts and reloads with GET', async () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
-        return Promise.resolve(jsonResponse({ error: { code: 'internal_error', message: 'boom' } }, 500));
+        return Promise.resolve(
+          jsonResponse({ error: { code: 'internal_error', message: 'boom' } }, 500)
+        );
       }
       return Promise.resolve(jsonResponse(makeResponse()));
     });
@@ -360,10 +492,13 @@ describe('scion-admin-experiments', () => {
   it('malformed state: disables switches and offers Reset all to defaults with confirmation', async () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'DELETE') {
+        expect(JSON.parse(init.body as string)).toEqual({ confirm_reset_malformed: true });
         return Promise.resolve(jsonResponse(makeResponse({ malformed: false, revision: 9 })));
       }
       return Promise.resolve(
-        jsonResponse(makeResponse({ malformed: true, experiments: [makeEntry({ enabled: false })] }))
+        jsonResponse(
+          makeResponse({ malformed: true, experiments: [makeEntry({ enabled: false })] })
+        )
       );
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -385,7 +520,10 @@ describe('scion-admin-experiments', () => {
     const dialog = query(element, 'sl-dialog');
     expect(dialog?.getAttribute('open')).not.toBeNull();
 
-    const confirmButton = queryAll(element, 'sl-dialog sl-button[variant="danger"]')[0] as HTMLElement;
+    const confirmButton = queryAll(
+      element,
+      'sl-dialog sl-button[variant="danger"]'
+    )[0] as HTMLElement;
     confirmButton.dispatchEvent(new Event('click'));
     await new Promise((r) => setTimeout(r, 0));
     await element.updateComplete;

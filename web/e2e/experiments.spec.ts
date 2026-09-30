@@ -44,7 +44,10 @@ interface AdminExperimentsResponse {
   experiments: AdminExperimentEntry[];
 }
 
-async function getAdminExperiments(baseURL: string, devToken: string): Promise<AdminExperimentsResponse> {
+async function getAdminExperiments(
+  baseURL: string,
+  devToken: string
+): Promise<AdminExperimentsResponse> {
   const res = await fetch(`${baseURL}/api/v1/admin/experiments`, {
     headers: { Authorization: `Bearer ${devToken}` },
   });
@@ -101,7 +104,7 @@ test.describe('Experiments tab', () => {
       await page.getByRole('tab', { name: 'Experiments' }).click();
 
       // Only one experiment is registered as of this phase
-      // (web.terminal_workspace, ptone/scion#2217 §3.2), so the tab has a
+      // (web.terminal_workspace, ptone/scion#2217), so the tab has a
       // single row and a single switch.
       const toggleSwitch = page.locator('scion-admin-experiments sl-switch').first();
 

@@ -69,7 +69,7 @@ const shadowLogged = new Set<string>();
  *
  * Keys already present in `window.__SCION_FEATURES__` before the first call
  * ("pinned") are left untouched, so E2E-pinned and `setFeatureFlag`-written
- * values keep beating the server (§3.5 precedence row 1).
+ * values keep beating the server.
  */
 export function setServerFlags(flags: Record<string, boolean>): void {
   const current = window.__SCION_FEATURES__ ?? {};
@@ -128,7 +128,7 @@ export function isFeatureEnabled(name: string): boolean {
  * Logs one `console.info` per flag per page load when a localStorage dev
  * override exists for a name that the bag (pinned or server) already
  * resolves, so a developer relying on a stale devtools override is not left
- * confused about why it no longer applies (§3.5).
+ * confused about why it no longer applies.
  */
 function warnIfShadowed(name: string): void {
   if (shadowLogged.has(name)) return;

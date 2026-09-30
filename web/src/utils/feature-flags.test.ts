@@ -199,7 +199,7 @@ describe('setFeatureFlag', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TERMINAL_WORKSPACE_FLAG (ptone/scion#2217 §3.9)
+// TERMINAL_WORKSPACE_FLAG (ptone/scion#2217)
 // ---------------------------------------------------------------------------
 
 describe('TERMINAL_WORKSPACE_FLAG', () => {
@@ -210,7 +210,7 @@ describe('TERMINAL_WORKSPACE_FLAG', () => {
 
 // ---------------------------------------------------------------------------
 // setServerFlags / resetServerFlagStateForTests — precedence matrix
-// (ptone/scion#2217 §3.4, §3.5)
+// (ptone/scion#2217)
 // ---------------------------------------------------------------------------
 
 describe('setServerFlags: precedence', () => {

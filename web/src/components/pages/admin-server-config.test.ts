@@ -1010,7 +1010,7 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
-  // ── Experiments tab (ptone/scion#2217 §3.8) ──
+  // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
     function showTab(el: HTMLElement, name: string): void {
@@ -1039,7 +1039,9 @@ describe('scion-page-admin-server-config', () => {
 
     it('renders <scion-admin-experiments> in its panel', async () => {
       element = await createComponent(createFetchHandler(makeBaseConfig()));
-      expect(query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')).not.toBeNull();
+      expect(
+        query(element, 'sl-tab-panel[name="experiments"] scion-admin-experiments')
+      ).not.toBeNull();
     });
 
     it('hides the actions bar and the harness-config error message while the Experiments tab is active', async () => {

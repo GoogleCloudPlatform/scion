@@ -15,22 +15,14 @@
  */
 
 /**
- * Covers `applyServerFeatureFlags()` (ptone/scion#2217 §3.4): the boot-time
+ * Covers `applyServerFeatureFlags()` (ptone/scion#2217): the boot-time
  * parallel fetch of `/api/v1/settings/public` and `/api/v1/experiments`, and
  * its failure handling.
- *
- * `main.ts` calls `init()` itself when the module loads and
- * `document.readyState !== 'loading'` (see the bottom of that file), which
- * would otherwise run a full app boot as a side effect of importing it here.
- * Setting `readyState` to `'loading'` before the import makes `init()` wait
- * for a `DOMContentLoaded` event that this file never dispatches, so only
- * the re-exported `applyServerFeatureFlagsForTests` is exercised directly.
  */
-
-Object.defineProperty(document, 'readyState', { value: 'loading', configurable: true });
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resetServerFlagStateForTests, isFeatureEnabled } from '../utils/feature-flags.js';
+import { applyServerFeatureFlags } from './server-feature-flags.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -39,9 +31,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-let applyServerFeatureFlagsForTests: () => Promise<void>;
-
-beforeEach(async () => {
+beforeEach(() => {
   resetServerFlagStateForTests();
   delete window.__SCION_FEATURES__;
   try {
@@ -49,8 +39,6 @@ beforeEach(async () => {
   } catch {
     // ignore
   }
-  const mod = await import('./main.js');
-  applyServerFeatureFlagsForTests = mod.applyServerFeatureFlagsForTests;
 });
 
 afterEach(() => {
@@ -80,7 +68,7 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
       })
     );
 
-    const done = applyServerFeatureFlagsForTests();
+    const done = applyServerFeatureFlags();
 
     // Both fetch() calls must have been issued immediately — before either
     // response arrives — proving the requests race in parallel rather than
@@ -115,26 +103,29 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
       })
     );
 
-    await applyServerFeatureFlagsForTests();
+    await applyServerFeatureFlags();
 
     expect(isFeatureEnabled('web.native_chat')).toBe(false);
     // Compiled default for terminal_workspace (ON) still applies.
     expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
   });
 
-  it.each([401, 404])('a %i experiments response falls back to compiled defaults', async (status) => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        if (url.includes('/api/v1/experiments')) return Promise.resolve(jsonResponse({}, status));
-        return Promise.resolve(jsonResponse({ nativeChatEnabled: true }));
-      })
-    );
+  it.each([401, 404])(
+    'a %i experiments response falls back to compiled defaults',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((url: string) => {
+          if (url.includes('/api/v1/experiments')) return Promise.resolve(jsonResponse({}, status));
+          return Promise.resolve(jsonResponse({ nativeChatEnabled: true }));
+        })
+      );
 
-    await applyServerFeatureFlagsForTests();
+      await applyServerFeatureFlags();
 
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
-  });
+      expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+    }
+  );
 
   it('a 200 response with a non-JSON body is treated as a failure', async () => {
     vi.stubGlobal(
@@ -149,7 +140,7 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
       })
     );
 
-    await applyServerFeatureFlagsForTests();
+    await applyServerFeatureFlags();
 
     expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
   });
@@ -160,12 +151,14 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
       vi.fn((url: string) => {
         if (url.includes('/api/v1/settings/public')) return Promise.reject(new Error('down'));
         if (url.includes('/api/v1/experiments'))
-          return Promise.resolve(jsonResponse({ experiments: { 'web.terminal_workspace': false } }));
+          return Promise.resolve(
+            jsonResponse({ experiments: { 'web.terminal_workspace': false } })
+          );
         throw new Error(`unexpected fetch: ${url}`);
       })
     );
 
-    await applyServerFeatureFlagsForTests();
+    await applyServerFeatureFlags();
 
     expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
     // Native chat flags are untouched by the failed settings/public fetch.
