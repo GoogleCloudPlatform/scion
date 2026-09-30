@@ -251,8 +251,12 @@ export class ScionPageBrokers extends LitElement {
       return html`<span class="meta-text">—</span>`;
     }
     const capLabel = broker.agentLimit !== undefined ? String(broker.agentLimit) : 'unlimited';
+    // mono-cell only applies inside .resource-table-container (the table
+    // view); stat-value is unscoped, so it styles the grid card's value too.
+    // Shared between the table cell and the grid stat (review round 2, F2)
+    // so the two can't drift out of sync.
     return html`
-      <span class="mono-cell" title="Source: ${broker.agentLimitSource || 'unknown'}"
+      <span class="mono-cell stat-value" title="Source: ${broker.agentLimitSource || 'unknown'}"
         >${broker.agentCount} / ${capLabel}</span
       >
     `;
@@ -376,12 +380,7 @@ export class ScionPageBrokers extends LitElement {
             ? html`
                 <div class="stat">
                   <span class="stat-label">Agents / Cap</span>
-                  <span
-                    class="stat-value"
-                    title=${`Source: ${broker.agentLimitSource || 'unknown'}`}
-                    >${broker.agentCount} /
-                    ${broker.agentLimit !== undefined ? broker.agentLimit : 'unlimited'}</span
-                  >
+                  ${this.renderAgentCapacity(broker)}
                 </div>
               `
             : ''}
