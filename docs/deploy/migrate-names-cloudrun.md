@@ -71,7 +71,10 @@ the DSN and the driver.
 
 ### Tools
 
-`gcloud` (authenticated as the operator) and `jq`.
+`gcloud` (authenticated as the operator) and `jq` — 1.7 or newer is recommended
+(Debian 12 and Ubuntu 22.04 still ship 1.6). The §2 guard and §4 gate below are
+written to fail closed on either version; the version bump alone isn't a substitute
+for those guards.
 
 Run every command in this runbook with **bash**, not `zsh` — zsh's `echo` can mangle
 embedded JSON (its handling of backslashes and quoting differs from bash's), which
@@ -82,12 +85,13 @@ subshell first (`bash`) before pasting any of the commands below.
 
 The operator needs, on the project (or a custom role with just these permissions):
 
-- `run.jobs.create`, `run.jobs.get`, `run.jobs.update`, `run.jobs.run`, `run.jobs.delete`,
-  `run.jobs.list`, `run.executions.get`, `run.executions.list`, `run.revisions.get` — to
-  create, configure, execute, read the results of, and clean up the job (the
-  executions/revisions permissions cover `execute --wait`, §5's executions list, §6's
-  cleanup, and §2's revision lookup). `roles/run.developer` covers all of these, plus
-  `run.services.get` (needed for discovery, below).
+- `run.jobs.create`, `run.jobs.get`, `run.jobs.update`, `run.jobs.run`,
+  `run.jobs.delete`, `run.jobs.list`, `run.executions.get`, `run.executions.list`,
+  `run.revisions.get` — to create, configure, execute, read the results of, and
+  clean up the job (the executions/revisions permissions cover `execute --wait`,
+  §5's executions list, §6's cleanup, and §2's revision lookup).
+  `roles/run.developer` covers all of these, plus `run.services.get` (needed for
+  discovery, below).
 - `iam.serviceAccounts.actAs` on the hub's service account specifically — grant
   `roles/iam.serviceAccountUser` scoped to that one service account resource, not
   project-wide. This is what lets the job run *as* the hub SA.
@@ -130,7 +134,11 @@ annotations and env lists are awkward to reach with `--format=value()` alone:
 
 ```bash
 SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
+SVC_STATUS=$?
 ```
+
+`$SVC_STATUS` is checked below, at the guard — a failed `describe` (token expiry,
+network, a typo in `$HUB`) must not be swallowed by the command substitution.
 
 **Service account:**
 
@@ -199,8 +207,9 @@ ROLLOUT_OK_JQ='
     and .status.latestReadyRevisionName == $rev
     and .status.latestCreatedRevisionName == $rev
     and .metadata.generation == .status.observedGeneration'
-echo "$SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
-  || echo "STOP: traffic is pinned to a non-latest revision, a deploy is in progress or failed, or a traffic tag exists; remove any tag (§4) or see §8 step 3, then restart §2"
+[ "$SVC_STATUS" -eq 0 ] && [ -n "$SVC" ] && [ -n "$REVISION" ] && [ -n "$ROLLOUT_OK_JQ" ] \
+  && echo "$SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
+  || echo "STOP: services describe failed or returned nothing, no revision has 100% of traffic, a deploy is in progress or failed, or a traffic tag exists; remove any tag (§4) or see §8 step 3, then restart §2"
 REV_JSON=$(gcloud run revisions describe "$REVISION" --project "$PROJECT" --region "$REGION" --format=json)
 IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 ```
@@ -208,19 +217,21 @@ IMG=$(echo "$REV_JSON" | jq -r '.status.imageDigest')
 Every other discovered value above (`SA`, network/subnet/egress, `CONN`, `HUB_ID`, the
 DSN version, the settings version) comes from `$SVC.spec.template` — the newest
 revision's template — while `REVISION`/`IMG` come from whichever revision has 100% of
-traffic. Those are normally the same revision, but three things can split them: a
+traffic. Those are normally the same revision, but two things can split them: a
 traffic-only rollback to an older revision — including §8 step 2's, which is a
 temporary mitigation, not a completed revert, and stops here until §8 step 3 makes the
-latest revision serve 100% again — a deploy whose new revision fails to become ready
-or hasn't finished rolling out yet (`latestCreatedRevisionName` differs from
+latest revision serve 100% again — and a deploy whose new revision fails to become
+ready or hasn't finished rolling out yet (`latestCreatedRevisionName` differs from
 `latestReadyRevisionName`, or `metadata.generation` is ahead of
-`status.observedGeneration`), and any traffic tag, on any revision: a tagged revision
-is a live legacy-name writer that `--delete-legacy` must rule out (see §4). In the
-first two, `spec.template` belongs to a revision that isn't the one serving traffic,
-so the job would run one revision's binary against another revision's settings and
-DSN versions. The check above stops all of these cases before it reaches job creation;
-if it prints `STOP`, remove any traffic tag (§4) or see §8 step 3 to resolve the
-rollout, then restart from the top of this section before continuing.
+`status.observedGeneration`). In both cases, `spec.template` belongs to a revision
+that isn't the one serving traffic, so the job would run one revision's binary
+against another revision's settings and DSN versions. Separately, the check also
+stops on any traffic tag, on any revision — not because a tag splits `spec.template`
+from the traffic revision, but because a tag on an older revision keeps a
+legacy-name writer live at that tag's own URL (see §4). The check above stops all of
+these cases before it reaches job creation; if it prints `STOP`, remove any traffic
+tag (§4) or see §8 step 3 to resolve the rollout, then restart from the top of this
+section before continuing.
 
 `.status.imageDigest` on a v1 Revision is already the resolved **full reference**
 (`<registry>/<path>@sha256:<hex>`), not a bare `sha256:<hex>` — use it as-is for
@@ -305,7 +316,9 @@ Each pass follows the same two-step shape: set the args (they **replace the whol
 list**, so always restate `--gcp-project` and `--hub-id`), then execute and wait.
 Passes 1, 3 and 5 are dry runs: `migrate-names` opens Postgres with
 `default_transaction_read_only=on`, skips `cs.Migrate`, and calls only read-only
-Secret Manager methods for a dry run, which is why they need no traffic gate.
+Secret Manager methods. Passes 1 and 5 need no gate. Pass 3 is a dry run too, but it's
+gated anyway, because its plan is meaningful only under the same precondition that
+governs pass 4.
 
 ```bash
 JOB="${HUB}-migrate-names"
@@ -325,11 +338,23 @@ live state, so it can't be fooled by a stale `$SVC` captured back in §2, and it
 `$ROLLOUT_OK_JQ` from §2 verbatim, so this gate and that guard can't disagree:
 
 ```bash
-FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
-echo "$FRESH_SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
+FRESH_SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json) \
+  && [ -n "$FRESH_SVC" ] && [ -n "${REVISION:-}" ] && [ -n "${ROLLOUT_OK_JQ:-}" ] \
+  && echo "$FRESH_SVC" | jq -e --arg rev "$REVISION" "$ROLLOUT_OK_JQ" >/dev/null \
   && echo "OK: 100% on $REVISION" \
-  || echo "STOP: rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists; remove any traffic tag (see below), otherwise see §8 step 3"
+  || echo "STOP: services describe failed or returned nothing, REVISION/ROLLOUT_OK_JQ are empty, rollout not complete, revision changed, traffic is pinned to a non-latest revision, or a traffic tag exists; remove any traffic tag (see below), otherwise see §8 step 3"
 ```
+
+The `[ -n ... ]` checks keep this gate fail-closed on every `jq` version: jq 1.6
+treats a missing or empty program as `.` and exits 0 under `-e` even with no input,
+so without these checks a failed `describe` or an empty
+`$REVISION`/`$ROLLOUT_OK_JQ` would print `OK` instead of `STOP`. If `REVISION` or
+`ROLLOUT_OK_JQ` come back empty, this shell lost §2's state (a new terminal, a Cloud
+Shell timeout, or leaving the `bash` subshell §1 asks for) — see §8 step 3: delete
+the job and restart from §2. Don't just re-export the placeholders and re-run §2's
+discovery by hand; that re-derives `REVISION` from live traffic while the existing
+job stays pinned to the old digest, so the gate would then check the wrong revision
+against the right one.
 
 You want exactly one traffic entry, at 100%, on the revision whose digest you pinned
 the job to in §2, and that revision must also be both `latestReadyRevisionName` and
@@ -405,9 +430,10 @@ diagnosis (§5) before you touch `--delete-legacy`.
 
 ### Before pass 3 — check the rollout
 
-`--delete-legacy` is only safe once **every** replica of this hub is running a binary
-that includes the hub-prefixed naming scheme — i.e. the rollout is 100% complete and no
-older revision is still serving traffic. GCP Secret Manager has no conditional delete:
+`--delete-legacy` is only safe once **every** replica of this hub is running a
+binary that includes the hub-prefixed naming scheme — i.e. the rollout is 100%
+complete and no older revision is still serving traffic. GCP Secret Manager has no
+conditional delete:
 if an old binary is still a live writer to the legacy name, its write can land between
 the safety check and the delete, and the delete destroys that write's only copy.
 
@@ -605,8 +631,9 @@ runbook doesn't cover:
      revision: roll forward — `gcloud run services update-traffic "$HUB" --project
      "$PROJECT" --region "$REGION" --to-latest`.
    - A **deploy still in progress** (`metadata.generation` ahead of
-     `status.observedGeneration`): wait for it to finish, then re-check — it then
-     resolves into the roll-forward case above.
+     `status.observedGeneration`): wait for it to finish, then re-run §2's check and
+     handle whichever case applies, if any — it may now pass with nothing to do, or
+     turn out to be the roll-forward case above or the failed-deploy case below.
    - A **failed deploy** (`latestCreatedRevisionName` != `latestReadyRevisionName`):
      `--to-latest` won't clear this, since traffic already sits on the latest
      *ready* revision. Redeploy a known-good image as a new revision first, through
