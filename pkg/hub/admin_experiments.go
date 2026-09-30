@@ -81,6 +81,7 @@ func (s *Server) buildAdminExperimentsResponse(overrides map[string]bool, revisi
 	all := reg.All()
 	entries := make([]adminExperimentEntry, 0, len(all))
 	known := make(map[string]bool, len(all))
+	now := time.Now() // one consistent instant for every entry in this response
 	for _, exp := range all {
 		known[exp.Name] = true
 
@@ -107,7 +108,7 @@ func (s *Server) buildAdminExperimentsResponse(overrides map[string]bool, revisi
 			Issue:         exp.Issue,
 			Owner:         exp.Owner,
 			ReviewBy:      exp.ReviewBy,
-			ReviewOverdue: exp.ReviewOverdue(time.Now()),
+			ReviewOverdue: exp.ReviewOverdue(now),
 		})
 	}
 

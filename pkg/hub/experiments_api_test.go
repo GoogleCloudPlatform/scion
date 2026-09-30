@@ -200,9 +200,19 @@ func refreshOps(t *testing.T, srv *Server) {
 // experiments_malformed instead of asserting on HTTP status alone.
 func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
+	code, _ := errorCodeAndDetails(t, rec)
+	return code
+}
+
+// errorCodeAndDetails decodes the standard {"error":{"code":...,"details":
+// {...}}} envelope, returning the code and the raw details object (nil when
+// absent).
+func errorCodeAndDetails(t *testing.T, rec *httptest.ResponseRecorder) (string, map[string]interface{}) {
+	t.Helper()
 	var body struct {
 		Error struct {
-			Code string `json:"code"`
+			Code    string                 `json:"code"`
+			Details map[string]interface{} `json:"details"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -211,7 +221,7 @@ func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	if body.Error.Code == "" {
 		t.Fatalf("expected a non-empty error code, got %s", rec.Body.String())
 	}
-	return body.Error.Code
+	return body.Error.Code, body.Error.Details
 }
 
 // grantSystemPermissions creates a system-scoped role holding exactly the
@@ -413,13 +423,17 @@ func TestAdminExperimentsRouteMetadataExists(t *testing.T) {
 // --- PUT /api/v1/admin/experiments ---
 
 func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, nil)
+	ctx := context.Background()
 
 	t.Run("missing expected_revision is rejected", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
 			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "validation_failed" {
+			t.Errorf("expected code=validation_failed, got %q", code)
 		}
 	})
 
@@ -452,6 +466,19 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 			t.Errorf("expected updated_by=dev@localhost, got %v", body.UpdatedBy)
 		}
 		lastRevision = body.Revision
+
+		// The response's updated_at/updated_by must be the write's own,
+		// not merely non-nil: compare against the row the write produced.
+		row, err := s.GetHubSetting(ctx, "experiments")
+		if err != nil {
+			t.Fatalf("GetHubSetting: %v", err)
+		}
+		if body.UpdatedAt == nil || !body.UpdatedAt.Equal(row.UpdatedAt) {
+			t.Errorf("expected updated_at=%v (the write's own), got %v", row.UpdatedAt, body.UpdatedAt)
+		}
+		if body.UpdatedBy == nil || *body.UpdatedBy != row.UpdatedBy {
+			t.Errorf("expected updated_by=%q (the write's own), got %v", row.UpdatedBy, body.UpdatedBy)
+		}
 
 		// GET /api/v1/experiments reflects the change without a restart.
 		exp := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
@@ -552,13 +579,17 @@ func TestHandleAdminExperiments_NameValidation(t *testing.T) {
 		name       string
 		overrides  map[string]interface{}
 		wantStatus int
+		// wantCode and wantNameDetail are checked only when wantStatus is a
+		// 4xx; both empty means "don't check" (used for the 200 case).
+		wantCode       string
+		wantNameDetail string
 	}{
-		{"true for unknown name", map[string]interface{}{"hub.future_thing": true}, http.StatusBadRequest},
-		{"false for retired name", map[string]interface{}{"web.access_boundaries_read": false}, http.StatusBadRequest},
-		{"null for pattern-valid unknown name is accepted (no-op)", map[string]interface{}{"hub.future_thing": nil}, http.StatusOK},
-		{"null for pattern-invalid key", map[string]interface{}{"not a valid name": nil}, http.StatusBadRequest},
-		{"non-boolean value", map[string]interface{}{"web.terminal_workspace": "nope"}, http.StatusBadRequest},
-		{"empty overrides", map[string]interface{}{}, http.StatusBadRequest},
+		{"true for unknown name", map[string]interface{}{"hub.future_thing": true}, http.StatusBadRequest, "validation_failed", "hub.future_thing"},
+		{"false for retired name", map[string]interface{}{"web.access_boundaries_read": false}, http.StatusBadRequest, "validation_failed", "web.access_boundaries_read"},
+		{"null for pattern-valid unknown name is accepted (no-op)", map[string]interface{}{"hub.future_thing": nil}, http.StatusOK, "", ""},
+		{"null for pattern-invalid key", map[string]interface{}{"not a valid name": nil}, http.StatusBadRequest, "validation_failed", "not a valid name"},
+		{"non-boolean value", map[string]interface{}{"web.terminal_workspace": "nope"}, http.StatusBadRequest, "validation_failed", ""},
+		{"empty overrides", map[string]interface{}{}, http.StatusBadRequest, "validation_failed", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -566,6 +597,18 @@ func TestHandleAdminExperiments_NameValidation(t *testing.T) {
 				map[string]interface{}{"overrides": tt.overrides, "expected_revision": 0})
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("expected %d, got %d: %s", tt.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tt.wantCode == "" {
+				return
+			}
+			code, details := errorCodeAndDetails(t, rec)
+			if code != tt.wantCode {
+				t.Errorf("expected code=%s, got %q", tt.wantCode, code)
+			}
+			if tt.wantNameDetail != "" {
+				if got, _ := details["name"].(string); got != tt.wantNameDetail {
+					t.Errorf("expected details.name=%q, got %v", tt.wantNameDetail, details["name"])
+				}
 			}
 		})
 	}
@@ -763,6 +806,12 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 		if body.Malformed {
 			t.Error("expected malformed=false after recovery")
 		}
+		// wrapped keeps reporting the section as malformed on every read, so
+		// this response is always attributed through the caller/now fallback
+		// (buildAdminExperimentsResponseAfterWrite), never the refreshed
+		// snapshot; that fallback is asserted exactly in
+		// TestHandleAdminExperiments_RevisionChecks and
+		// TestHandleAdminExperiments_HealthyRowDeleteChecks instead.
 		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
 			t.Errorf("expected updated_by=dev@localhost with a non-nil updated_at, got %v / %v", body.UpdatedBy, body.UpdatedAt)
 		}
@@ -782,6 +831,9 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/experiments", map[string]interface{}{})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "validation_failed" {
+			t.Errorf("expected code=validation_failed, got %q", code)
 		}
 	})
 
@@ -834,8 +886,18 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
-			t.Errorf("expected updated_by=dev@localhost with a non-nil updated_at, got %v / %v", body.UpdatedBy, body.UpdatedAt)
+
+		raw, err := s.GetHubSetting(ctx, "experiments")
+		if err != nil {
+			t.Fatalf("GetHubSetting: %v", err)
+		}
+		// The response's updated_at/updated_by must be this write's own, not
+		// merely non-nil: compare against the row the write produced.
+		if body.UpdatedAt == nil || !body.UpdatedAt.Equal(raw.UpdatedAt) {
+			t.Errorf("expected updated_at=%v (the write's own), got %v", raw.UpdatedAt, body.UpdatedAt)
+		}
+		if body.UpdatedBy == nil || *body.UpdatedBy != raw.UpdatedBy {
+			t.Errorf("expected updated_by=%q (the write's own), got %v", raw.UpdatedBy, body.UpdatedBy)
 		}
 		if len(body.UnknownOverrides) != 0 {
 			t.Errorf("expected unknown_overrides cleared by reset-all, got %v", body.UnknownOverrides)
@@ -846,10 +908,6 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 			}
 		}
 
-		raw, err := s.GetHubSetting(ctx, "experiments")
-		if err != nil {
-			t.Fatalf("GetHubSetting: %v", err)
-		}
 		var doc struct {
 			Overrides map[string]bool `json:"overrides"`
 		}
