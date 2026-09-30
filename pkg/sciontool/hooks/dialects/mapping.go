@@ -211,6 +211,14 @@ func applyFieldPath(data map[string]interface{}, field, path string, ed *hooks.E
 		if v := resolveFieldPathInt64(data, path); v > 0 {
 			ed.CachedTokens = v
 		}
+	case "cache_write_tokens":
+		if v := resolveFieldPathInt64(data, path); v > 0 {
+			ed.CacheWriteTokens = v
+		}
+	case "reasoning_tokens":
+		if v := resolveFieldPathInt64(data, path); v > 0 {
+			ed.ReasoningTokens = v
+		}
 	case "success":
 		if val, found := resolveFieldPathBool(data, path); found {
 			ed.Success = val

@@ -257,8 +257,12 @@ func (e *CloudExporter) ExportProtoMetrics(ctx context.Context, resourceMetrics 
 
 	// Generic OTLP path
 	if e.metricClient != nil {
+		stamped, err := stampIdentityLabels(resourceMetrics)
+		if err != nil {
+			return err
+		}
 		req := &colmetricpb.ExportMetricsServiceRequest{
-			ResourceMetrics: resourceMetrics,
+			ResourceMetrics: stamped,
 		}
 		resp, err := e.metricClient.Export(ctx, req)
 		if err != nil {

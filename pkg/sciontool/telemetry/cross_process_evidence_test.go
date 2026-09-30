@@ -221,6 +221,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "authoritative-agent")
 	t.Setenv("SCION_PROJECT_ID", "authoritative-project")
 	t.Setenv("SCION_HARNESS", "claude")
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	tool := phase5BuildTool(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -383,6 +387,10 @@ func TestPhase5CrossProcessReceiverEvidence(t *testing.T) {
 }
 
 func TestPhase5ExplicitAllowKeepsMandatoryRedaction(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -417,6 +425,10 @@ func TestPhase5ExplicitAllowKeepsMandatoryRedaction(t *testing.T) {
 }
 
 func TestPhase5BoundedFailureDiagnostics(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	logPath := filepath.Join(t.TempDir(), "collector.log")
 	scionlog.SetLogPath(logPath)
 	t.Cleanup(func() { scionlog.SetLogPath("/tmp/agent.log") })
@@ -456,6 +468,10 @@ func TestPhase5BoundedFailureDiagnostics(t *testing.T) {
 }
 
 func TestPhase5TransientRecoveryDoesNotDoubleCount(t *testing.T) {
+	// A deriver built with GRPCPort=0 (the default here) dials 127.0.0.1:0 on
+	// shutdown; opt out of native explicitly instead of relying on ambient
+	// absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

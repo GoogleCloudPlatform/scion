@@ -158,6 +158,12 @@ type CredentialContext struct {
 	Type      string
 	ProjectID string
 	Scopes    []string
+
+	// E.1 descriptive credential metadata. Decoration is additive,
+	// server-derived attribution (token name/boundary/purpose/labels) for
+	// logs and audit. It is never read by authorization decisions — see
+	// TestCredentialDecorationNotReadByAuthzCode.
+	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -227,11 +233,45 @@ type Decision struct {
 	Actor   *DecisionActor `json:"actor,omitempty"`
 	Purpose string         `json:"purpose,omitempty"`
 
+	// DenyCause classifies certain deny decisions structurally, so callers
+	// can react to *why* access was denied without parsing or matching
+	// substrings of Reason (which is prose, for logs and explain, and is
+	// free to change wording). Set by Step 10 (the agent delegation
+	// ceiling) for a SUBSET of ceiling denials only — see the DenyCause
+	// constants for which ones. Other ceiling denials (e.g. max depth, no
+	// edge, duplicate active edges), and all non-ceiling denials, leave it
+	// at its zero value.
+	DenyCause DenyCause `json:"denyCause,omitempty"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
 }
+
+// DenyCause is a structural tag for a subset of deny reasons that callers
+// need to distinguish without string-matching Reason. It is deliberately
+// small and closed: only the causes a caller actually branches on get a
+// value here, everything else is the zero value ("").
+type DenyCause string
+
+const (
+	// DenyCauseCeilingOrphaned marks a delegation-ceiling deny where the
+	// delegator (the principal that created the agent, directly or
+	// transitively) no longer resolves at all — e.g. its user was deleted.
+	DenyCauseCeilingOrphaned DenyCause = "ceiling_orphaned"
+
+	// DenyCauseCeilingDelegatorLacksPermission marks a delegation-ceiling
+	// deny where the delegator still exists but no longer holds the
+	// permission being exercised.
+	DenyCauseCeilingDelegatorLacksPermission DenyCause = "ceiling_delegator_lacks_permission"
+
+	// DenyCauseCeilingError marks a delegation-ceiling deny caused by a
+	// transient or internal fault (e.g. a store error) rather than a
+	// policy fact about the delegator. Callers should treat this like an
+	// ordinary denial, not surface it as a specific reason.
+	DenyCauseCeilingError DenyCause = "ceiling_error"
+)
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
@@ -630,15 +670,18 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil)
+			var ceilingCause DenyCause
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				if !isReadOnlyOperation(request.Action) {
 					decision.Allowed = false
 					decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+					decision.DenyCause = DenyCauseCeilingError
 				}
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.DenyCause = ceilingCause
 			}
 		}
 	}
@@ -1398,7 +1441,14 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{}
 	}
 	if scoped, ok := identity.(*ScopedUserIdentity); ok {
-		return CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: scoped.CredentialID(), ProjectID: scoped.ScopedProjectID(), Scopes: scoped.ScopedScopes()}
+		// E.1: carry the descriptive decoration, if ValidateToken attached
+		// one, through to the credential context. This is the single copy
+		// point named in the E.1 design (plan §2.2); decoration is never
+		// otherwise derived here. Decoration() already returns a deep copy,
+		// so this assignment cannot alias the identity's stored value.
+		cc.Decoration = scoped.Decoration()
+		return cc
 	}
 	switch identity.Type() {
 	case "agent":

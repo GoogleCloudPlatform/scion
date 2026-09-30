@@ -91,6 +91,12 @@ type ScopedUserIdentity struct {
 	projectID    string
 	scopes       []string
 	credentialID string
+
+	// E.1 descriptive credential metadata: populated only by
+	// UserAccessTokenService.ValidateToken from the server-validated token
+	// row, and never by any other caller. nil for identities not backed by
+	// a validated UAT row (e.g. constructed directly by older tests/callers).
+	decoration *CredentialDecoration
 }
 
 // NewScopedUserIdentity creates a ScopedUserIdentity.
@@ -107,6 +113,32 @@ func NewScopedUserIdentityWithCredentialID(user UserIdentity, projectID string, 
 		scopes:       scopes,
 		credentialID: credentialID,
 	}
+}
+
+// NewScopedUserIdentityWithDecoration creates a UAT-backed identity carrying
+// E.1's descriptive credential decoration alongside its credential ID. Only
+// UserAccessTokenService.ValidateToken should call this: it is the single
+// point that has the server-validated token row in hand.
+func NewScopedUserIdentityWithDecoration(user UserIdentity, projectID string, scopes []string, credentialID string, decoration *CredentialDecoration) *ScopedUserIdentity {
+	return &ScopedUserIdentity{
+		UserIdentity: user,
+		projectID:    projectID,
+		scopes:       scopes,
+		credentialID: credentialID,
+		decoration:   decoration,
+	}
+}
+
+// Decoration returns a deep copy of the descriptive credential metadata
+// attached at authentication time, or nil if none was derived. Callers may
+// freely mutate the returned value (including its Labels map) without
+// affecting this identity's stored decoration.
+func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
+	if s.decoration == nil {
+		return nil
+	}
+	d := s.decoration.clone()
+	return &d
 }
 
 // ScopedProjectID returns the project this identity is restricted to.

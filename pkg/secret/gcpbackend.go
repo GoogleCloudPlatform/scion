@@ -145,6 +145,85 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 	}, nil
 }
 
+// FetchValues returns values for exactly the given metadata records, matched
+// by ID, Version, AllowProgeny, CreatedBy and SecretType, keyed by each
+// record's ID in the returned map. A decrypt or backend-access failure is
+// reported as a per-item error, never as an empty value delivered in place
+// of an error. A record whose current SecretType is internal is refused with
+// store.ErrNotFound, since internal secrets are never candidates for
+// delivery. The returned outer error reports only a failure of the whole
+// call, not a per-item failure.
+//
+// Unlike Get, it never falls back to a Secret Manager lookup by computed
+// name when the Hub database record is missing: a missing or mismatched
+// record is reported as store.ErrNotFound for that item.
+//
+// store.SecretStore has no primary-key lookup (see LocalBackend.FetchValues
+// for the reasoning this mirrors), so each record is located by its
+// Name/Scope/ScopeID triple and then verified against the recorded metadata
+// (see recordGenerationChanged) before its value is read from Secret
+// Manager, and again immediately after: the DB record and the Secret
+// Manager value are two separate reads with no shared transaction, so a Set
+// or delete-and-recreate can land in between them. Re-checking after the
+// Secret Manager read narrows that window instead of returning a new
+// generation's value under the old generation's metadata.
+func (b *GCPBackend) FetchValues(ctx context.Context, metas []SecretMeta) (map[string]FetchResult, error) {
+	results := make(map[string]FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = b.fetchValue(ctx, meta)
+	}
+	return results, nil
+}
+
+func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResult {
+	s, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	if recordGenerationChanged(s, meta) {
+		// The record has been replaced, rotated or reclassified since the
+		// caller's metadata was recorded; treat it the same as not found
+		// rather than accessing Secret Manager for a different generation
+		// of the record, or falling back to a computed name.
+		return FetchResult{Err: store.ErrNotFound}
+	}
+
+	var value string
+	if smPath, ok := extractGCPSMPath(s.SecretRef); ok {
+		value, err = b.AccessSecretValueByRef(ctx, smPath)
+	} else {
+		smName := b.gcpSecretName(s.Key, s.Scope, s.ScopeID)
+		value, err = b.accessLatestVersion(ctx, smName)
+	}
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return FetchResult{Err: store.ErrNotFound}
+		}
+		if permErr := wrapGCPError(err, "access secret"); permErr != nil {
+			return FetchResult{Err: permErr}
+		}
+		return FetchResult{Err: err}
+	}
+
+	// Re-read the DB record and repeat the comparison. A metadata update,
+	// or a Set whose database write lands between the Secret Manager read
+	// and this re-read, is reported as not found instead of returning a
+	// value under metadata that no longer matches. This narrows the race
+	// but does not close it: Set adds the Secret Manager version before it
+	// writes the database record, so a fetch that completes both reads
+	// between those two writes still returns the new value under the old
+	// metadata. Closing it needs the Secret Manager version recorded in
+	// the database record.
+	after, err := b.store.GetSecret(ctx, meta.Name, meta.Scope, meta.ScopeID)
+	if err != nil {
+		return FetchResult{Err: err}
+	}
+	if recordGenerationChanged(after, meta) {
+		return FetchResult{Err: store.ErrNotFound}
+	}
+	return FetchResult{Value: value}
+}
+
 // extractGCPSMPath extracts the full GCP SM resource path from a stored SecretRef.
 // Returns the path and true if the ref is a gcpsm ref, empty string and false otherwise.
 func extractGCPSMPath(ref string) (string, bool) {
@@ -422,7 +501,11 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 
 			meta := fromStoreSecretMeta(&s)
 
-			if opts.AuthzCheck != nil && !opts.AuthzCheck(*meta) {
+			// Verify access via the policy engine. With no checker configured,
+			// a progeny secret is excluded rather than included by default:
+			// the caller must supply an explicit policy decision before any
+			// progeny value is read.
+			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
 			}
 

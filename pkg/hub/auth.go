@@ -189,33 +189,42 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
-						// Step 1a: Validate against persistent credential state (Phase 1H)
+						// Step 1a: Agent-token authentication requires a successful
+						// credential-status evaluation (Phase 1H). See
+						// evaluateAgentCredentialStatus for the possible outcomes.
 						if cfg.CredentialStore != nil && claims.ID != "" {
-							jtiHash := hashJTI(claims.ID)
-							cred, credErr := cfg.CredentialStore.GetAgentCredentialByJTIHash(ctx, jtiHash)
-							if credErr == nil {
-								// Credential found — check revocation status
-								if cred.RevokedAt != nil {
-									writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-										"token has been revoked", nil)
-									return
-								}
-								// Store credential ID in context for downstream use
+							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
+							switch {
+							case errors.Is(credErr, errAgentCredentialRevoked):
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"token has been revoked", nil)
+								return
+							case credErr != nil:
+								// Any store error other than "not found" must not fall
+								// back to authenticating the request: it means the
+								// credential's status could not actually be determined,
+								// so treat it as a retryable failure.
+								log.Error("Agent credential status lookup failed",
+									"agent_id", claims.Subject, "error", credErr)
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
+							case isLegacy:
+								// Legacy compatibility path: tokens issued before the
+								// credential table existed have no credential record.
+								// Retained pending a product decision; do not close or
+								// widen this branch.
+								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
+									"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
+								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
+							default:
+								// Credential found and active.
 								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
 								// Update last_seen_at (fire-and-forget)
 								go func() {
 									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
 										context.Background(), cred.ID, time.Now())
 								}()
-							} else if errors.Is(credErr, store.ErrNotFound) {
-								// Compatibility window: accept pre-table tokens with a warning
-								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-									"agent_id", claims.Subject, "jti_hash", jtiHash[:8])
-								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-							} else {
-								// Store error — log and accept (fail open for availability)
-								log.Warn("Credential store lookup failed, accepting token",
-									"agent_id", claims.Subject, "error", credErr)
 							}
 						}
 
