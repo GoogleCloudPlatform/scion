@@ -2930,8 +2930,7 @@ func (s *Server) writeConversationReadState(
 // returns. For topics it is not quite exact — an unresolved topic falls back
 // to a ThreadID filter here, where history instead returns a 409 — but that
 // is harmless: an unresolved topic has nothing a ThreadID filter would match
-// either, so both paths agree there is nothing to show or act on (round-2
-// review O1).
+// either, so both paths agree there is nothing to show or act on.
 func (s *Server) conversationRecentMessages(
 	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
 ) ([]store.Message, error) {
@@ -3523,8 +3522,8 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // second copy of this filter: the two are used together — this to know
 // "unread compared to what", mark-unread's predecessor lookup to know
 // "unread from what" — and a mention-exclusion (or envelope-switch) fix
-// applied to only one would silently reintroduce the gap round-1 review R3
-// found (a mention row masking mark-unread's effect).
+// applied to only one would silently reintroduce a mention row masking
+// mark-unread's effect.
 func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
 	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
 	if err != nil {

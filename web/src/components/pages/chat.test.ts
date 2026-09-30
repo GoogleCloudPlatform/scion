@@ -547,13 +547,12 @@ describe('chat page — muted DMs raise no unread dot', () => {
 });
 
 /**
- * Round-2 review R1: the page-level halves of mark-unread's SSE gate (R1),
- * mute check (R2), and same-tab suppression (O2) had no direct coverage —
- * three mutants there survived the full chat test set. These tests exercise
- * `_handleOwnReadStateSSE`, `handleMemberMarkedUnread` and
- * `_handleConversationMarkedUnread` directly, stubbing the rail/thread
- * elements `shadowRoot.querySelector` would otherwise find, rather than
- * mounting the full page (which would fire its own network calls).
+ * Page-level coverage for mark-unread's SSE unread gate, mute check, and
+ * same-tab suppression. These tests exercise `_handleOwnReadStateSSE`,
+ * `handleMemberMarkedUnread` and `_handleConversationMarkedUnread` directly,
+ * stubbing the rail/thread elements `shadowRoot.querySelector` would
+ * otherwise find, rather than mounting the full page (which would fire its
+ * own network calls).
  */
 describe('chat page — mark-unread page-level handling', () => {
   /** A page with an open DM conversation with the given peer. */
@@ -577,9 +576,8 @@ describe('chat page — mark-unread page-level handling', () => {
    * never fire), which means Lit never creates a real shadowRoot to query.
    * Replace the accessor with a fake one backed by a selector→element map, so
    * more than one stub (rail and thread) can coexist on the same page — a
-   * single-selector version silently resolved every other selector to null,
-   * which is why the topic SSE test below used to assert less than its title
-   * claimed (round-3 review N3).
+   * single-selector version would silently resolve every other selector to
+   * null, letting a test assert less than its title claims.
    */
   function stubShadowRoot(el: any, found: Record<string, unknown>): void {
     const fakeShadowRoot = { querySelector: (sel: string) => found[sel] ?? null };
@@ -616,7 +614,7 @@ describe('chat page — mark-unread page-level handling', () => {
     return { rail, thread };
   }
 
-  describe('_handleOwnReadStateSSE unread gate (round-1 R1)', () => {
+  describe('_handleOwnReadStateSSE unread gate', () => {
     it('a self event without unread:true adds no dot and does not mark the rail thread unread', () => {
       const el = createPage();
       el.v2UnreadFromIds = [];
@@ -669,7 +667,7 @@ describe('chat page — mark-unread page-level handling', () => {
     });
   });
 
-  describe('applyDMMarkedUnread mute check and stale-state fix (round-1 R2, round-2 R1)', () => {
+  describe('applyDMMarkedUnread mute check and hasUnread state', () => {
     it('a muted peer gets no dot, but hasUnread flips so the members item hides', () => {
       const el = createPage();
       el.v2DMInfoByPeerId = {
@@ -710,13 +708,12 @@ describe('chat page — mark-unread page-level handling', () => {
       );
 
       expect(el.v2DMInfoByPeerId).toEqual({});
-      // No mute info to check against, so the dot still goes on — matches
-      // round-1 behaviour for a peer loadUnreadDMPeers hasn't captured yet.
+      // No mute info to check against, so the dot still goes on — a peer
+      // loadUnreadDMPeers hasn't captured yet is self-correcting on the next load.
       expect(el.v2UnreadFromIds).toEqual(['user-1']);
     });
 
-    // Round-3 review: noted as an unkilled, idempotency-only mutant (M8) —
-    // dropping the `v2UnreadFromIds.includes(peerId)` duplicate guard. Not
+    // Pins the `v2UnreadFromIds.includes(peerId)` duplicate guard. Not
     // user-visible (a Set-like list either way), but cheap to pin: the local
     // click and the SSE echo of the same mark-unread both call this, and a
     // duplicate id would be a real (if harmless) bug.
@@ -738,7 +735,7 @@ describe('chat page — mark-unread page-level handling', () => {
     });
   });
 
-  describe('same-tab suppression calls (round-1 O2)', () => {
+  describe('same-tab suppression calls', () => {
     it('member-marked-unread for the open conversation suppresses its auto-advance', () => {
       const dmKey = 'dm:user:user-me:user:user-1';
       const el = pageOnDM('user-1', dmKey);

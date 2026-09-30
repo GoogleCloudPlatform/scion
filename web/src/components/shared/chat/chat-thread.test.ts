@@ -1199,10 +1199,10 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
   });
 
   /**
-   * Round-1 review R1: the discriminator for "this is mark-unread" is the
-   * event's `unread` field, not merely a self-targeted userId. A self event
-   * lacking it — e.g. a hypothetical future self-notifying /read — must not
-   * suppress, and must not be misapplied as a peer's seen tick either.
+   * The discriminator for "this is mark-unread" is the event's `unread`
+   * field, not merely a self-targeted userId. A self event lacking it — e.g.
+   * a hypothetical future self-notifying /read — must not suppress, and must
+   * not be misapplied as a peer's seen tick either.
    */
   it('does not suppress a self-targeted event without unread:true', async () => {
     const el = await mount();
@@ -1227,9 +1227,9 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
   });
 
   /**
-   * Round-1 review O1: the debounced callback re-checks suppression when it
-   * *fires*, not only when maybeAdvanceReadWatermark schedules it. Exercised
-   * directly here (flip the flag after scheduling, without going through
+   * The debounced callback re-checks suppression when it *fires*, not only
+   * when maybeAdvanceReadWatermark schedules it. Exercised directly here
+   * (flip the flag after scheduling, without going through
    * suppressAutoAdvance's own clearTimeout) so this covers the guard even if
    * some future suppression path ever sets the flag without also clearing
    * the timer.
@@ -1322,17 +1322,15 @@ describe('scion-chat-thread mark-unread auto-advance suppression', () => {
   });
 
   /**
-   * Round-1 review O3: a dedicated test for the initial-load watermark
-   * timer's suppression guard, independent of mount()'s "first apiFetch
-   * call" resolution heuristic. The earlier suppression test only exercised
-   * this guard by accident — mount() returns while loadHistory() is still
-   * in flight, and mergeMessages([m1]) happened to land before loadHistory's
-   * finally block (which arms the timer) rather than after. Any change to
-   * that ordering would silently drop coverage of this guard. This test
-   * instead waits for `loading` to go false — set in the same synchronous
-   * finally block, immediately before the timer is armed — so the timer is
-   * armed (on the real clock, since fake timers are never installed here)
-   * before the self event is dispatched and before the real-time wait past
+   * A dedicated test for the initial-load watermark timer's suppression
+   * guard, independent of mount()'s "first apiFetch call" resolution
+   * heuristic: mount() returns while loadHistory() may still be in flight,
+   * so relying on that resolution order to imply the timer is already armed
+   * would be fragile. This test instead waits for `loading` to go false —
+   * set in the same synchronous finally block, immediately before the timer
+   * is armed — so the timer is armed (on the real clock, since fake timers
+   * are never installed here) before the self event is dispatched and before
+   * the real-time wait past
    * its delay.
    */
   it('suppresses the initial-load watermark timer directly, independent of mount() timing', async () => {

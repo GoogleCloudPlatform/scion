@@ -284,10 +284,10 @@ export class ScionPageChat extends LitElement {
    * Bound listener for the read-state SSE event (stateManager's
    * 'chat-read-state-updated', sourced from ChatReadStateEvent — distinct
    * from the same-tab DOM event above). Gated on the event's `unread` field,
-   * not merely a userId match (round-1 review R1).
+   * not merely a userId match.
    */
   private _onOwnReadStateSSE = this._handleOwnReadStateSSE.bind(this);
-  /** Bound listener for the rail's own-tab "Mark unread" notification (round-1 review O2). */
+  /** Bound listener for the rail's own-tab "Mark unread" notification. */
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
@@ -1282,10 +1282,10 @@ export class ScionPageChat extends LitElement {
     this.addEventListener('read-state-updated', this._onReadStateUpdated);
 
     // The rail's own "Mark unread" click, for same-tab suppression without
-    // waiting on the SSE round trip (round-1 review O2). The members
-    // sidebar's equivalent ('member-marked-unread') is handled inline by
-    // handleMemberMarkedUnread rather than through this same listener, since
-    // it also carries the peerId needed for the dot.
+    // waiting on the SSE round trip. The members sidebar's equivalent
+    // ('member-marked-unread') is handled inline by handleMemberMarkedUnread
+    // rather than through this same listener, since it also carries the
+    // peerId needed for the dot.
     this.addEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
 
     // Agent membership and status badges are SSE-driven: the chat scope
@@ -1869,9 +1869,9 @@ export class ScionPageChat extends LitElement {
    * handler's concern — a DM peer's "seen" receipt (a different userId) is
    * chat-thread's. The `unread` field, not the userId match, is what
    * identifies a mark-unread event: userId alone would also match a future
-   * self-notifying /read, which must NOT re-mark the conversation unread
-   * (round-1 review R1). Mirrors _handleReadStateUpdated's DM-peer-ID
-   * resolution, but marks the thread/DM unread rather than read.
+   * self-notifying /read, which must NOT re-mark the conversation unread.
+   * Mirrors _handleReadStateUpdated's DM-peer-ID resolution, but marks the
+   * thread/DM unread rather than read.
    */
   private _handleOwnReadStateSSE(e: Event): void {
     type ReadStateData = { conversationKey?: string; userId?: string; unread?: boolean };
@@ -1906,17 +1906,16 @@ export class ScionPageChat extends LitElement {
    * Record that a DM peer's conversation was just marked unread: add it to
    * the unread-dot list unless the DM is muted (muting suppresses the dot
    * regardless of why the watermark moved — #1029 — so a mark-unread on a
-   * muted DM rewinds the watermark without ever showing a dot for it,
-   * round-1 review R2), and — regardless of mute — update
-   * `v2DMInfoByPeerId[peerId].hasUnread` so the members sidebar's
-   * `canMarkUnread` sees the change immediately.
+   * muted DM rewinds the watermark without ever showing a dot for it), and —
+   * regardless of mute — update `v2DMInfoByPeerId[peerId].hasUnread` so the
+   * members sidebar's `canMarkUnread` sees the change immediately.
    *
    * Without this second part the map only refreshes on the next
    * `loadUnreadDMPeers` (on connect, an inbound message, a normal /read, or
-   * the 60s fallback poll), so "Mark unread" stayed offered after a
+   * the 60s fallback poll), so "Mark unread" would stay offered after a
    * successful click until that next refresh — up to 60s on a quiet DM,
    * muted or not, since `/chat/dms` reports `hasUnread` independently of
-   * mute (round-2 review R1; round-3 review N4 corrected "indefinitely").
+   * mute.
    */
   private applyDMMarkedUnread(peerId: string): void {
     if (!peerId) return;
@@ -1933,7 +1932,7 @@ export class ScionPageChat extends LitElement {
    * directly to suppress auto-advance. Used both by the SSE path above (for
    * this tab's own echo, and other tabs) and, more importantly, right after
    * this tab's own "Mark unread" POST succeeds — same-tab suppression must
-   * not wait on the SSE round trip (round-1 review O2).
+   * not wait on the SSE round trip.
    */
   private suppressOpenThreadAutoAdvance(key: string): void {
     if (!key || this.v2Conversation?.conversationKey !== key) return;
@@ -1944,9 +1943,9 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * The rail's own "Mark unread" click succeeded. Same-tab suppression path
-   * (round-1 review O2) — the DM/members equivalent is handled inline in
-   * handleMemberMarkedUnread since it also needs the peerId for the dot.
+   * The rail's own "Mark unread" click succeeded — same-tab suppression path.
+   * The DM/members equivalent is handled inline in handleMemberMarkedUnread
+   * since it also needs the peerId for the dot.
    */
   private _handleConversationMarkedUnread(e: Event): void {
     const detail = (e as CustomEvent).detail as { conversationKey?: string } | undefined;
@@ -2779,12 +2778,11 @@ export class ScionPageChat extends LitElement {
    * A member's DM was marked unread from the members sidebar's context menu.
    * The sidebar already confirmed the request succeeded — this reflects it
    * in the unread-dot state the page owns (respecting mute, same as
-   * loadUnreadDMPeers — round-1 review R2) and in `v2DMInfoByPeerId`, so the
-   * sidebar's own "Mark unread" item hides right away instead of staying
-   * offered until the next refresh (round-2 review R1). If that DM happens
-   * to be the conversation currently open, this also suppresses its
-   * auto-advance immediately rather than waiting on the SSE round trip
-   * (round-1 review O2).
+   * loadUnreadDMPeers) and in `v2DMInfoByPeerId`, so the sidebar's own
+   * "Mark unread" item hides right away instead of staying offered until the
+   * next refresh. If that DM happens to be the conversation currently open,
+   * this also suppresses its auto-advance immediately rather than waiting on
+   * the SSE round trip.
    */
   private handleMemberMarkedUnread(e: CustomEvent): void {
     const detail = e.detail as { peerId?: string; conversationKey?: string } | undefined;

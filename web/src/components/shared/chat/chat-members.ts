@@ -209,7 +209,7 @@ export class ScionChatMembers extends LitElement {
    * already unread — checked here via `hasUnread` directly rather than via
    * `unreadFromIds`, which deliberately excludes muted-but-unread DMs (the
    * dot-suppression rule from #1029) and would otherwise make an
-   * already-unread muted DM look eligible again (round-1 review R2).
+   * already-unread muted DM look eligible again.
    */
   @property({ type: Object })
   dmInfoByPeerId: Record<string, { key: string; muted: boolean; hasUnread: boolean }> = {};
@@ -661,9 +661,8 @@ export class ScionChatMembers extends LitElement {
    * the chat page owns (unreadFromIds, respecting mute) — on success this
    * dispatches member-marked-unread with the DM key so the page can both
    * reflect the dot immediately (mute permitting) and suppress the open
-   * thread's auto-advance without waiting on the SSE round trip (round-1
-   * review O2), the same way the space rail reflects its own "Mark unread"
-   * locally.
+   * thread's auto-advance without waiting on the SSE round trip, the same
+   * way the space rail reflects its own "Mark unread" locally.
    */
   private async handleMarkUnread(peerId: string): Promise<void> {
     this.contextMenuTarget = null;

@@ -38,7 +38,7 @@ type ChatReadStateEvent struct {
 	// notification" — NOT the userId match, which also happens to be true
 	// today only because normal /read never self-notifies. Without this
 	// field, a future self-notifying /read would be silently misread by the
-	// client as a mark-unread (round-1 review R1).
+	// client as a mark-unread.
 	Unread bool `json:"unread,omitempty"`
 }
 

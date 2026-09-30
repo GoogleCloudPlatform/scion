@@ -1913,10 +1913,9 @@ export class ScionChatThread extends LitElement {
    * (render the "Seen" tick), and the caller's OWN watermark moving via
    * mark-unread. The `unread` field is the sole discriminator for the
    * latter — NOT the userId match. userId alone would also be true for any
-   * future self-notifying /read (round-1 review R1): today normal /read
-   * never self-notifies over SSE, so that coincidence used to be load-
-   * bearing. A self-targeted event without `unread: true` is neither a peer
-   * tick nor a mark-unread — it is ignored, not misapplied as either.
+   * future self-notifying /read, which must not be misread as mark-unread. A
+   * self-targeted event without `unread: true` is neither a peer tick nor a
+   * mark-unread — it is ignored, not misapplied as either.
    */
   private handleV2ReadStateEvent(e: Event): void {
     type ReadStateData = {
@@ -1954,14 +1953,14 @@ export class ScionChatThread extends LitElement {
    * Suppress auto-advance immediately. Called from two places: the SSE path
    * above (other tabs, and this one on the round trip back), and directly by
    * the chat page right after this tab's own "Mark unread" POST succeeds —
-   * the same-tab case must not wait on the SSE echo (round-1 review O2).
+   * the same-tab case must not wait on the SSE echo.
    *
    * Also cancels any debounce timer already in flight. In single-threaded
    * JS this clearTimeout always wins over a pending callback — there is no
    * "queued before the clear takes effect" race to close — so this is
-   * belt-and-braces with maybeAdvanceReadWatermark's own re-check (O1) and
-   * never load-bearing on its own: whichever of the two runs first already
-   * prevents the stale advance (round-2 review N2).
+   * belt-and-braces with maybeAdvanceReadWatermark's own re-check and never
+   * load-bearing on its own: whichever of the two runs first already
+   * prevents the stale advance.
    */
   suppressAutoAdvance(): void {
     this._autoAdvanceSuppressed = true;
@@ -2518,13 +2517,13 @@ export class ScionChatThread extends LitElement {
     this._readDebounceTimer = setTimeout(() => {
       this._readDebounceTimer = null;
       // Re-check: suppression can arrive after this callback is scheduled
-      // but before it fires (round-1 review O1) — a message arms this 1s
-      // debounce, then mark-unread lands mid-flight. suppressAutoAdvance
-      // already clears an in-flight timer synchronously when that is how
-      // suppression arrives, so this guard is belt-and-braces for that path
-      // (there is no "queued before the clear" race in single-threaded JS —
-      // round-2 review O2) and load-bearing only if suppression is ever set
-      // some other way, without going through suppressAutoAdvance.
+      // but before it fires — a message arms this 1s debounce, then
+      // mark-unread lands mid-flight. suppressAutoAdvance already clears an
+      // in-flight timer synchronously when that is how suppression arrives,
+      // so this guard is belt-and-braces for that path (there is no "queued
+      // before the clear" race in single-threaded JS) and load-bearing only
+      // if suppression is ever set some other way, without going through
+      // suppressAutoAdvance.
       if (this._autoAdvanceSuppressed) return;
       const messageId = this.lastReadableMessageId();
       if (messageId) {

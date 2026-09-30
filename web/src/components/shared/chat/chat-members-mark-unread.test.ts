@@ -20,8 +20,8 @@
  * The item only applies to a member with an existing, non-empty DM — hidden
  * for the caller themselves, for a member with no DM, and once the DM is
  * already unread (checked via the DM's own hasUnread, not the mute-filtered
- * unreadFromIds dot list — round-1 review R2: a muted-but-unread DM must
- * stay hidden too, not look eligible again because its dot is suppressed).
+ * unreadFromIds dot list: a muted-but-unread DM must stay hidden too, not
+ * look eligible again because its dot is suppressed).
  */
 
 // @vitest-environment happy-dom

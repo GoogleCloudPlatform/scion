@@ -69,8 +69,8 @@ type EventPublisher interface {
 	// addressed to the reader instead of a DM peer. Used ONLY by "mark
 	// unread" so a user's other open tabs learn their own conversation went
 	// unread; it always sets the event's Unread field, which the client uses
-	// as the sole discriminator for "this is a mark-unread notification"
-	// (round-1 review R1). Unlike PublishChatReadStateEvent it fires for
+	// as the sole discriminator for "this is a mark-unread notification",
+	// distinct from a userId match alone. Unlike PublishChatReadStateEvent it fires for
 	// topic keys too: a self-notification has no "no peer, so no audience"
 	// case to exclude.
 	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)

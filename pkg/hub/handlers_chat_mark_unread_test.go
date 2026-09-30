@@ -286,8 +286,7 @@ func TestChatV2_MarkUnread_DM(t *testing.T) {
 // instead of the one before it), and since the DM list's own hasUnread
 // check (nativeDMLastMessage) already excludes mention rows when computing
 // LastMessageID, the watermark would equal LastMessageID and mark-unread
-// would silently do nothing (round-1 review R3 — this is the exact failure
-// `grep Mention` on this file used to turn up empty for).
+// would silently do nothing.
 func TestChatV2_MarkUnread_DM_ExcludesMentionRowFromPredecessor(t *testing.T) {
 	srv, s, wcs, proj, _ := setupMutePinTest(t)
 	ctx := context.Background()
@@ -560,7 +559,7 @@ func TestPublishChatOwnReadStateEvent_ReachesCallerOnly(t *testing.T) {
 			t.Errorf("expected messageId msg-5, got %s", payload.MessageID)
 		}
 		// The client's sole discriminator for "this is mark-unread, not some
-		// other self-notification" (round-1 review R1) — must always be set.
+		// other self-notification" — must always be set.
 		if !payload.Unread {
 			t.Error("expected unread=true on a PublishChatOwnReadStateEvent payload")
 		}

@@ -1849,9 +1849,9 @@ export class ScionChatSpaceRail extends LitElement {
       );
       if (!res.ok) return;
       this.markThreadUnread(thread.id);
-      // Same-tab suppression must not wait on the SSE round trip (round-1
-      // review O2): if this thread is the one currently open, the page
-      // needs to know right now, not once its own echo comes back.
+      // Same-tab suppression must not wait on the SSE round trip: if this
+      // thread is the one currently open, the page needs to know right now,
+      // not once its own echo comes back.
       this.dispatchEvent(
         new CustomEvent('conversation-marked-unread', {
           detail: { conversationKey: thread.id },
