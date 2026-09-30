@@ -27,10 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// reviewByLayout is the required YYYY-MM-DD shape of Experiment.ReviewBy,
-// matching pkg/experiments' own (unexported) layout constant.
-const reviewByLayout = "2006-01-02"
-
 // handleAdminExperiments handles GET/PUT/DELETE /api/v1/admin/experiments
 // (ptone/scion#2217). Route metadata (RouteHubAdmin, permission
 // hub.experiments.update) authorizes the caller before the handler runs; the
@@ -111,7 +107,7 @@ func (s *Server) buildAdminExperimentsResponse(overrides map[string]bool, revisi
 			Issue:         exp.Issue,
 			Owner:         exp.Owner,
 			ReviewBy:      exp.ReviewBy,
-			ReviewOverdue: reviewOverdue(exp.ReviewBy),
+			ReviewOverdue: exp.ReviewOverdue(time.Now()),
 		})
 	}
 
@@ -156,17 +152,6 @@ func (s *Server) buildAdminExperimentsResponseAfterWrite(overrides map[string]bo
 		updatedBy = snap.UpdatedBy
 	}
 	return s.buildAdminExperimentsResponse(overrides, revision, false, true, updatedAt, updatedBy)
-}
-
-// reviewOverdue reports whether reviewBy (YYYY-MM-DD) is in the past. An
-// unparsable value is treated as not overdue rather than panicking; the
-// registry invariant already guarantees a valid layout.
-func reviewOverdue(reviewBy string) bool {
-	t, err := time.Parse(reviewByLayout, reviewBy)
-	if err != nil {
-		return false
-	}
-	return time.Now().After(t)
 }
 
 // handleGetAdminExperiments returns the current experiments settings, built
@@ -266,10 +251,7 @@ func (s *Server) handlePutAdminExperiments(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if errs := opsettings.Validate("experiments", doc); len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":  "validation_failed",
-			"errors": errs,
-		})
+		writeError(w, http.StatusBadRequest, "validation_failed", "Invalid experiment settings", map[string]interface{}{"errors": errs})
 		return
 	}
 

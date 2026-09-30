@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"testing"
+	"time"
 )
 
 // valid returns a minimally valid Experiment with every required field set,
@@ -129,6 +130,37 @@ func TestHasLayerAndStableOrder(t *testing.T) {
 	all := r.All()
 	if len(all) != 2 || all[0].Name != "web.a" || all[1].Name != "web.b" {
 		t.Fatalf("All() = %v, want [web.a, web.b] (stable order by name)", all)
+	}
+}
+
+// TestReviewOverdue asserts the boundary explicitly (ptone/scion#2217): the
+// tab shows "review overdue" starting the day after ReviewBy, not during
+// ReviewBy itself.
+func TestReviewOverdue(t *testing.T) {
+	e := valid("web.reviewed", LayerWeb)
+	e.ReviewBy = "2026-06-15"
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"before ReviewBy", time.Date(2026, 6, 14, 23, 59, 0, 0, time.UTC), false},
+		{"during ReviewBy (start of day)", time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC), false},
+		{"during ReviewBy (end of day)", time.Date(2026, 6, 15, 23, 59, 59, 0, time.UTC), false},
+		{"the day after ReviewBy", time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC), true},
+		{"well after ReviewBy", time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := e.ReviewOverdue(tt.now); got != tt.want {
+				t.Errorf("ReviewOverdue(%v) = %v, want %v", tt.now, got, tt.want)
+			}
+		})
+	}
+
+	if (Experiment{ReviewBy: "not-a-date"}).ReviewOverdue(time.Now()) {
+		t.Error("an unparsable ReviewBy must resolve to not-overdue, not panic")
 	}
 }
 

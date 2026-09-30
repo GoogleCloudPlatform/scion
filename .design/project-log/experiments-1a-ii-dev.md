@@ -22,7 +22,13 @@ change to `pkg/hub/web.go` and no web changes.
   `name == "experiments"` before any store call, with a test.
 - Regenerated `.design/authorization-operation-catalog.md`.
 
-No changes to 1a-i code were needed.
+No changes to 1a-i code were needed for the initial submission. One followed
+from review: `pkg/experiments/registry.go` gained `Experiment.ReviewOverdue(now
+time.Time) bool`, replacing a duplicated layout constant and function that had
+lived in `pkg/hub/admin_experiments.go` and had an off-by-one (it treated the
+`ReviewBy` day itself as already overdue). Giving it a home next to
+`HasLayer`, in the package that owns `Experiment` and its `reviewByLayout`
+constant, was the natural fix and removes the duplication at the same time.
 
 ## Decisions / notes for reviewers
 
@@ -99,6 +105,16 @@ No changes to 1a-i code were needed.
   existing messaging/maintenance propagation tests in that file: it proves
   the new section rides the existing LISTEN/NOTIFY-style propagation path
   with no section-specific code of its own.
+- **Error-code assertions found a real shape bug.** Decoding the standard
+  `{"error":{"code":...}}` envelope in the conflict/malformed/validation
+  test cases (rather than asserting on HTTP status alone) turned up one
+  response that didn't carry a `code` field at all: the `opsettings.Validate`
+  failure branch in the PUT handler had copied `admin_messaging.go`'s flat
+  `{"error":"validation_failed","errors":[...]}` shape, which has no nested
+  `code`. It now goes through `writeError` like every other response in this
+  handler. This branch is close to unreachable in practice (the merge/prune
+  step already filters out anything `Validate` would reject), but a 1b
+  client branching on `error.code` would have silently misparsed it.
 
 ## Verification
 
@@ -115,6 +131,9 @@ No changes to 1a-i code were needed.
 - `go test -p 2 ./pkg/hub/authzop/...`: pass, including
   `TestCatalogReportStaleness` on the regenerated
   `.design/authorization-operation-catalog.md`.
+- `go test -p 2 ./pkg/hub/permissions/...`: pass, including the new
+  `hub.experiments.update` entries in `project_applicability.go` and
+  `collection_target_classes.go`.
 - Not run: the full `pkg/hub/...` suite (the project's own
   `test-hub-sqlite` gate). Per the brief, `TestBackupBinary`,
   `TestBackupAndRestoreRoundtrip`, and the flaky

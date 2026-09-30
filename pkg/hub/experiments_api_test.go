@@ -36,7 +36,9 @@ import (
 )
 
 // newBareTestStore builds a fresh, migrated sqlite store without wiring a
-// Server around it, so it can be wrapped before the first New() call.
+// Server around it, so it can be wrapped before the first New() call. The
+// store is closed on cleanup, matching testServer's "avoid OOM across many
+// tests" convention, regardless of how many layers wrap it afterward.
 func newBareTestStore(t *testing.T) store.Store {
 	t.Helper()
 	base, err := newTestStore(":memory:")
@@ -50,6 +52,7 @@ func newBareTestStore(t *testing.T) store.Store {
 		t.Fatalf("Migrate: %v", err)
 	}
 	_ = base.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
+	t.Cleanup(func() { _ = base.Close() })
 	return base
 }
 
@@ -179,16 +182,8 @@ func newTestServerWithMalformedSection(t *testing.T, reg *experiments.Registry, 
 // non-nil, it replaces the production experiments registry.
 func testServerWithOps(t *testing.T, reg *experiments.Registry) (*Server, store.Store) {
 	t.Helper()
-	srv, s := testServer(t)
-	if reg != nil {
-		srv.experiments = reg
-	}
-	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-	return srv, s
+	s := newBareTestStore(t)
+	return newTestServerFromStore(t, s, reg), s
 }
 
 // refreshOps re-reads the store into the cache after a test writes a row
@@ -198,6 +193,25 @@ func refreshOps(t *testing.T, srv *Server) {
 	if _, err := srv.GetOperationalSettings().Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
+}
+
+// errorCode decodes the standard {"error":{"code":...}} envelope and returns
+// the code, so tests can distinguish (for example) revision_conflict from
+// experiments_malformed instead of asserting on HTTP status alone.
+func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v (%s)", err, rec.Body.String())
+	}
+	if body.Error.Code == "" {
+		t.Fatalf("expected a non-empty error code, got %s", rec.Body.String())
+	}
+	return body.Error.Code
 }
 
 // grantSystemPermissions creates a system-scoped role holding exactly the
@@ -415,8 +429,12 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 		}
+		if code := errorCode(t, rec); code != "revision_conflict" {
+			t.Errorf("expected code=revision_conflict, got %q", code)
+		}
 	})
 
+	var lastRevision int64
 	t.Run("successful write returns 200 and increases the revision, and persists without a restart", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
 			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
@@ -433,6 +451,7 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
 			t.Errorf("expected updated_by=dev@localhost, got %v", body.UpdatedBy)
 		}
+		lastRevision = body.Revision
 
 		// GET /api/v1/experiments reflects the change without a restart.
 		exp := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
@@ -442,6 +461,42 @@ func TestHandleAdminExperiments_RevisionChecks(t *testing.T) {
 		}
 		if expBody.Experiments["web.terminal_workspace"] {
 			t.Error("expected web.terminal_workspace=false after the PUT")
+		}
+	})
+
+	t.Run("null for a registered name resets it to the default", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
+			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": nil}, "expected_revision": lastRevision})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body adminExperimentsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		var found *adminExperimentEntry
+		for i := range body.Experiments {
+			if body.Experiments[i].Name == "web.terminal_workspace" {
+				found = &body.Experiments[i]
+			}
+		}
+		if found == nil {
+			t.Fatal("expected web.terminal_workspace in the listing")
+		}
+		if found.Override != nil {
+			t.Errorf("expected override=nil after resetting to the default, got %v", *found.Override)
+		}
+		if !found.Enabled {
+			t.Error("expected enabled=true (the registry default) after resetting to the default")
+		}
+
+		exp := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
+		var expBody experimentsResponse
+		if err := json.Unmarshal(exp.Body.Bytes(), &expBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !expBody.Experiments["web.terminal_workspace"] {
+			t.Error("expected web.terminal_workspace=true (the default) after resetting to the default")
 		}
 	})
 }
@@ -463,6 +518,9 @@ func TestHandleAdminExperiments_StaleReplica(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 		}
+		if code := errorCode(t, rec); code != "revision_conflict" {
+			t.Errorf("expected code=revision_conflict, got %q", code)
+		}
 	})
 
 	t.Run("PUT with the store's current revision succeeds", func(t *testing.T) {
@@ -481,6 +539,9 @@ func TestHandleAdminExperiments_StoreRace(t *testing.T) {
 		map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 from a store race, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if code := errorCode(t, rec); code != "revision_conflict" {
+		t.Errorf("expected code=revision_conflict, got %q", code)
 	}
 }
 
@@ -642,11 +703,36 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/v1/experiments also fails closed", func(t *testing.T) {
+		// The endpoint the web client actually reads must agree with the
+		// admin GET's per-entry enabled values (ptone/scion#2217).
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body experimentsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Experiments["hub.test_gate"] {
+			t.Error("expected hub.test_gate=false (server layer fails closed) with a malformed row")
+		}
+		if !body.Experiments["web.only_thing"] {
+			t.Error("expected web.only_thing=true (its registry default) with a malformed row")
+		}
+		if _, ok := body.Experiments["hub.server_only"]; ok {
+			t.Error("hub.server_only has no web layer and must not appear in the resolved map")
+		}
+	})
+
 	t.Run("PUT is rejected and nothing is written", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
 			map[string]interface{}{"overrides": map[string]interface{}{"hub.test_gate": true}, "expected_revision": 0})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "experiments_malformed" {
+			t.Errorf("expected code=experiments_malformed, got %q", code)
 		}
 		if _, err := wrapped.Store.GetHubSetting(ctx, "experiments"); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("expected the real store to still have no experiments row, got err=%v", err)
@@ -658,6 +744,9 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 			map[string]interface{}{"expected_revision": 0})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != "validation_failed" {
+			t.Errorf("expected code=validation_failed, got %q", code)
 		}
 	})
 
@@ -674,6 +763,9 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 		if body.Malformed {
 			t.Error("expected malformed=false after recovery")
 		}
+		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
+			t.Errorf("expected updated_by=dev@localhost with a non-nil updated_at, got %v / %v", body.UpdatedBy, body.UpdatedAt)
+		}
 		for _, e := range body.Experiments {
 			if e.Override != nil {
 				t.Errorf("expected no overrides after reset-all, got %s=%v", e.Name, *e.Override)
@@ -683,7 +775,8 @@ func TestHandleAdminExperiments_MalformedRow(t *testing.T) {
 }
 
 func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
-	srv, _ := testServerWithOps(t, nil)
+	srv, s := testServerWithOps(t, nil)
+	ctx := context.Background()
 
 	t.Run("DELETE on a healthy row without expected_revision is rejected", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/experiments", map[string]interface{}{})
@@ -698,18 +791,42 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 		}
+		if code := errorCode(t, rec); code != "revision_conflict" {
+			t.Errorf("expected code=revision_conflict, got %q", code)
+		}
+		// Nothing is written: the row is still absent.
+		if _, err := s.GetHubSetting(ctx, "experiments"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected the row to still be absent, got err=%v", err)
+		}
 	})
 
-	t.Run("reset-all with the current revision clears overrides", func(t *testing.T) {
+	t.Run("reset-all with the current revision clears overrides, including unknown keys", func(t *testing.T) {
+		// Seed a stored unknown pattern-valid key directly, alongside a
+		// registered override written through the handler, so the reset-all
+		// clears both kinds of stored entry.
 		put := doRequest(t, srv, http.MethodPut, "/api/v1/admin/experiments",
 			map[string]interface{}{"overrides": map[string]interface{}{"web.terminal_workspace": false}, "expected_revision": 0})
 		var putBody adminExperimentsResponse
 		if err := json.Unmarshal(put.Body.Bytes(), &putBody); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		if _, err := s.UpsertHubSetting(ctx, "experiments",
+			json.RawMessage(`{"overrides":{"web.terminal_workspace":false,"hub.future_thing":false}}`),
+			"seed", putBody.Revision, "managed"); err != nil {
+			t.Fatalf("UpsertHubSetting: %v", err)
+		}
+		refreshOps(t, srv)
+		get := doRequest(t, srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+		var getBody adminExperimentsResponse
+		if err := json.Unmarshal(get.Body.Bytes(), &getBody); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(getBody.UnknownOverrides) != 1 {
+			t.Fatalf("setup: expected one unknown override before reset, got %v", getBody.UnknownOverrides)
+		}
 
 		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/experiments",
-			map[string]interface{}{"expected_revision": putBody.Revision})
+			map[string]interface{}{"expected_revision": getBody.Revision})
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -717,10 +834,30 @@ func TestHandleAdminExperiments_HealthyRowDeleteChecks(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		if body.UpdatedAt == nil || body.UpdatedBy == nil || *body.UpdatedBy != "dev@localhost" {
+			t.Errorf("expected updated_by=dev@localhost with a non-nil updated_at, got %v / %v", body.UpdatedBy, body.UpdatedAt)
+		}
+		if len(body.UnknownOverrides) != 0 {
+			t.Errorf("expected unknown_overrides cleared by reset-all, got %v", body.UnknownOverrides)
+		}
 		for _, e := range body.Experiments {
 			if e.Override != nil {
 				t.Errorf("expected no overrides after reset-all, got %s=%v", e.Name, *e.Override)
 			}
+		}
+
+		raw, err := s.GetHubSetting(ctx, "experiments")
+		if err != nil {
+			t.Fatalf("GetHubSetting: %v", err)
+		}
+		var doc struct {
+			Overrides map[string]bool `json:"overrides"`
+		}
+		if err := json.Unmarshal(raw.Value, &doc); err != nil {
+			t.Fatalf("unmarshal stored doc: %v", err)
+		}
+		if len(doc.Overrides) != 0 {
+			t.Errorf("expected the stored document to have no overrides after reset-all, got %v", doc.Overrides)
 		}
 	})
 }
@@ -745,6 +882,9 @@ func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if code := errorCode(t, rec); code != "validation_failed" {
+		t.Errorf("expected code=validation_failed, got %q", code)
+	}
 
 	after, err := s.GetHubSetting(context.Background(), "experiments")
 	if err != nil {
@@ -755,10 +895,17 @@ func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
 			before.Value, before.Revision, after.Value, after.Revision)
 	}
 
-	// A different section is unaffected by the experiments-specific rejection
-	// (it fails later, on the absent row, not on my new check).
+	// A different section still resets through the same route: the rejection
+	// is specific to "experiments", not a blanket change to the route.
+	msgStore := json.RawMessage(`{"conversation_envelope_switch":true}`)
+	if _, err := s.UpsertHubSetting(context.Background(), "messaging", msgStore, "seed", 0, "managed"); err != nil {
+		t.Fatalf("UpsertHubSetting: %v", err)
+	}
 	other := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/server-config/sections/messaging", nil)
-	if other.Code == http.StatusBadRequest {
-		t.Errorf("expected the messaging section reset to reach the store, got 400: %s", other.Body.String())
+	if other.Code != http.StatusOK {
+		t.Fatalf("expected the messaging section reset to succeed, got %d: %s", other.Code, other.Body.String())
+	}
+	if _, err := s.GetHubSetting(context.Background(), "messaging"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("expected the messaging row to be gone after reset, got err=%v", err)
 	}
 }

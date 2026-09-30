@@ -98,6 +98,19 @@ func (e Experiment) HasLayer(l Layer) bool {
 	return false
 }
 
+// ReviewOverdue reports whether now is strictly after the ReviewBy day: the
+// tab shows "review overdue" starting the day after ReviewBy, not during
+// ReviewBy itself. ReviewBy's layout is validated by NewRegistry; an
+// unparsable value (only reachable by bypassing that validation) is treated
+// as not overdue rather than panicking.
+func (e Experiment) ReviewOverdue(now time.Time) bool {
+	t, err := time.Parse(reviewByLayout, e.ReviewBy)
+	if err != nil {
+		return false
+	}
+	return !now.Before(t.AddDate(0, 0, 1))
+}
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
