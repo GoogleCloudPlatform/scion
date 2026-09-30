@@ -431,6 +431,10 @@ func (s *Server) dispatchRoutedRecipient(
 			msg.Metadata[k] = v
 		}
 	}
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys — the switch above doesn't exclude them, so a
+	// plugin could otherwise spoof body_offloaded/body_chars/body_sha256.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	// --- Validate through envelope choke point ---
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {

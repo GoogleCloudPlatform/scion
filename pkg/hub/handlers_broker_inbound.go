@@ -97,6 +97,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys from plugin-supplied messages before any further
+	// processing, render, or dispatch.
+	req.Message.Metadata = messaging.StripReservedMetadata(req.Message.Metadata)
+
 	// Parse topic to extract project ID and agent slug
 	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
 	if err != nil {

@@ -1355,6 +1355,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before render/dispatch. Defence in depth —
+	// allowedClientMetadataKeys above already excludes body_* — so this
+	// covers any future site that copies richer client metadata through.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
 	// Authorization runs BEFORE validation (B-2): authorizeAgentMessage depends
@@ -1619,6 +1625,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			// W7: Copy attachment paths and metadata to mention messages.
 			mentionMsg.Attachments = msg.Attachments
 			mentionMsg.Metadata = msg.Metadata
+			// #2257 P2: strip on this copy too (U5(a) row). msg.Metadata was
+			// already stripped above, so this is a defence-in-depth no-op
+			// today, not a load-bearing second strip.
+			mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
 
 			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
 			// review): a mentioned (secondary) agent is a recipient in its
