@@ -205,9 +205,10 @@ func TestNoRawExecInPID1Path(t *testing.T) {
 		t.Fatalf("%d violation(s) found in the PID-1 path outside pkg/sciontool/procreap; route "+
 			"raw exec.Cmd calls through procreap.RunManaged/CombinedOutputManaged/OutputManaged "+
 			"(or the Gated+RegisterManagedPID/UnregisterManagedPID pattern); route calls into a "+
-			"risky package through execAuditSymbolAllowlist, or a same-package call to a risky "+
-			"allowlisted-file function by not calling it at all; or add an execAuditFileAllowlist "+
-			"entry with a citation if the file is genuinely unreachable from runInit", len(violations))
+			"risky package through execAuditSymbolAllowlist, or a same-package reference to a risky "+
+			"allowlisted-file function or variable by not referencing it at all; or add an "+
+			"execAuditFileAllowlist entry with a citation if the file is genuinely unreachable from "+
+			"runInit", len(violations))
 	}
 }
 
@@ -273,47 +274,92 @@ func execAuditRiskyPackageDirs() map[string]bool {
 }
 
 // execAuditFuncInfo is what execAuditRiskyFuncNames records per top-level,
-// non-method function declared in an execAuditFileAllowlist file, before
-// the fixpoint below turns it into a plain risky/not-risky verdict.
+// non-method function and per package-level var (with an initializer)
+// declared in an execAuditFileAllowlist file, before the fixpoint below
+// turns it into a plain risky/not-risky verdict.
 type execAuditFuncInfo struct {
-	// direct is true if the function's own body references os/exec, or
-	// references a not-explicitly-approved symbol from an imported risky
-	// package (see execAuditRiskyPackageDirs/execAuditSymbolAllowlist) —
-	// i.e. it reaches exec.Cmd in zero further same-package hops.
+	// direct is true if the function's body, or the var's initializer
+	// expression, references os/exec, or references a not-explicitly-
+	// approved symbol from an imported risky package (see
+	// execAuditRiskyPackageDirs/execAuditSymbolAllowlist) — i.e. it reaches
+	// exec.Cmd in zero further same-package hops.
 	direct bool
-	// refs is every bare identifier this function's body mentions — a
-	// superset that includes ordinary local variables, parameters and
-	// selector members, not just other top-level function names; the
-	// fixpoint below only cares whether one of them happens to name an
-	// already-risky function in the same directory.
+	// refs is every bare identifier the function's body (or the var's
+	// initializer) mentions — a superset that includes ordinary local
+	// variables, parameters and selector members, not just other top-level
+	// names; the fixpoint below only cares whether one of them happens to
+	// name an already-risky function or var in the same directory.
 	refs map[string]bool
+}
+
+// inspectExecAuditRefs walks n — a top-level function's body, or a
+// package-level var's initializer expression — and returns the
+// execAuditFuncInfo describing whether it directly reaches os/exec or a
+// not-explicitly-approved symbol from a risky imported package (via
+// aliasToRiskyDir), and every bare identifier it references. This is the one
+// piece of inspection logic execAuditRiskyFuncNames uses for both function
+// bodies and var initializers, so the two can't drift out of sync — a
+// function and a var initializer that reach exec.Cmd the same way (a direct
+// exec.alias.X selector, or a selector into a risky imported package) must
+// be judged identically.
+func inspectExecAuditRefs(n ast.Node, execAlias string, aliasToRiskyDir map[string]string) execAuditFuncInfo {
+	info := execAuditFuncInfo{refs: map[string]bool{}}
+	ast.Inspect(n, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.SelectorExpr:
+			if id, ok := v.X.(*ast.Ident); ok {
+				if execAlias != "" && id.Name == execAlias {
+					info.direct = true
+				}
+				if riskyDir, ok := aliasToRiskyDir[id.Name]; ok &&
+					!execAuditSymbolAllowlist[riskyDir][v.Sel.Name] {
+					info.direct = true
+				}
+			}
+		case *ast.Ident:
+			info.refs[v.Name] = true
+		}
+		return true
+	})
+	return info
 }
 
 // execAuditRiskyFuncNames is the same-package counterpart to
 // execAuditRiskyPackageDirs/execAuditSymbolAllowlist: for each
 // execAuditFileAllowlist file, it finds every top-level, non-method
-// function that reaches os/exec or a risky imported package — directly, or
-// transitively through any number of other same-package functions (a
-// wrapper around a risky function, or a risky function passed around as a
-// value, is still risky) — and returns their names, keyed by directory. A
-// non-allowlisted file elsewhere in the *same directory* could otherwise
-// dodge this whole test by referencing one of these unqualified (Go's
-// same-package reference syntax) instead of calling exec.Command directly —
-// the same shape of backdoor execAuditSymbolAllowlist closes across package
-// boundaries, just within one. Keyed by directory, since an unqualified
-// reference is only ever resolved within its own package: two different
-// directories reusing a function name isn't a collision here.
+// function and every package-level var declaration with an initializer
+// (e.g. the `*cobra.Command` vars — doctorCmd, provisionCmd, and the rest —
+// whose Run/RunE closures call into the risky functions below) that reaches
+// os/exec or a risky imported package — directly, or transitively through
+// any number of other same-package functions or vars (a wrapper around a
+// risky function, a risky function passed around as a value, or a var whose
+// initializer references one, is still risky) — and returns their names,
+// keyed by directory. A non-allowlisted file elsewhere in the *same
+// directory* could otherwise dodge this whole test by referencing one of
+// these unqualified (Go's same-package reference syntax) instead of calling
+// exec.Command directly — the same shape of backdoor execAuditSymbolAllowlist
+// closes across package boundaries, just within one. Keyed by directory,
+// since an unqualified reference is only ever resolved within its own
+// package: two different directories reusing a name isn't a collision here.
+// `init` functions are excluded from the candidate set entirely: Go forbids
+// referencing `init` by name, so it can never be the target of an
+// unqualified reference, and several allowlisted files each declare one —
+// without this exclusion, whichever file's `init` a map iteration visited
+// last would silently win the `byDir[dir]["init"]` entry, making the result
+// depend on random map order the moment any allowlisted `init` became risky.
 //
 // This is a fixpoint over bare-identifier references, not a call graph:
 // methods are excluded from the risky set itself (an unqualified reference
-// can never resolve to one), but a plain function's body referencing a
-// risky name in *any* position — not just as a call — is enough, so a
-// function value (`f := riskyFunc`) or a wrapper (`func w() { riskyFunc()
-// }`) is still caught. The only way this can over- or under-count is a
-// local variable, parameter, or struct field that happens to share a name
-// with a risky same-package function (a "shadow"); none exist in this
-// codebase today, and if one is ever added, the failure mode is a false
-// positive (something extra to justify), never a silent miss.
+// can never resolve to one), but a plain function's body, or a var's
+// initializer, referencing a risky name in *any* position — not just as a
+// call — is enough, so a function value (`f := riskyFunc`), a wrapper (`func
+// w() { riskyFunc() }`), or a var referencing one in its initializer (`var v
+// = &cobra.Command{RunE: riskyFunc}`) is still caught. The only way this can
+// over- or under-count is a local variable, parameter, or struct field that
+// happens to share a name with a risky same-package function or var (a
+// "shadow"); none exist in this codebase today, and if one is ever added,
+// the failure mode is a false positive (something extra to justify), never a
+// silent miss.
 func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[string]bool {
 	t.Helper()
 	riskyPkgDirs := execAuditRiskyPackageDirs()
@@ -353,33 +399,44 @@ func execAuditRiskyFuncNames(t *testing.T, repoRoot string) map[string]map[strin
 			aliasToRiskyDir[alias] = relDir
 		}
 
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv != nil || fn.Body == nil {
-				continue // methods are excluded: an unqualified reference can never reach one
-			}
-			info := execAuditFuncInfo{refs: map[string]bool{}}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				switch v := n.(type) {
-				case *ast.SelectorExpr:
-					if id, ok := v.X.(*ast.Ident); ok {
-						if execAlias != "" && id.Name == execAlias {
-							info.direct = true
-						}
-						if riskyDir, ok := aliasToRiskyDir[id.Name]; ok &&
-							!execAuditSymbolAllowlist[riskyDir][v.Sel.Name] {
-							info.direct = true
-						}
-					}
-				case *ast.Ident:
-					info.refs[v.Name] = true
-				}
-				return true
-			})
+		recordInfo := func(name string, body ast.Node) {
 			if byDir[dir] == nil {
 				byDir[dir] = map[string]execAuditFuncInfo{}
 			}
-			byDir[dir][fn.Name.Name] = info
+			byDir[dir][name] = inspectExecAuditRefs(body, execAlias, aliasToRiskyDir)
+		}
+
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv != nil || d.Body == nil || d.Name.Name == "init" {
+					// Methods are excluded: an unqualified reference can
+					// never reach one. init is excluded: it can't be
+					// referenced by name at all (see doc comment above).
+					continue
+				}
+				recordInfo(d.Name.Name, d.Body)
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || len(vs.Values) == 0 {
+						continue // no initializer to inspect, e.g. `var x int`
+					}
+					for i, name := range vs.Names {
+						valueIdx := i
+						if len(vs.Values) != len(vs.Names) {
+							// e.g. `var a, b = f()`: a single multi-value
+							// initializer shared across names. Conservatively
+							// apply that one expression's analysis to each.
+							valueIdx = 0
+						}
+						recordInfo(name.Name, vs.Values[valueIdx])
+					}
+				}
+			}
 		}
 	}
 
@@ -777,13 +834,14 @@ func findSymbolAllowlistViolations(path string, risky map[string]bool) ([]string
 // counterpart to findSymbolAllowlistViolations's cross-package check. Go
 // only resolves an unqualified identifier within the same package, so a
 // hit here means this file (which the caller has already confirmed is not
-// itself in execAuditFileAllowlist) references a function that
-// execAuditRiskyFuncNames determined (directly, or transitively through
-// other same-package functions) reaches os/exec or a risky imported
-// package — the same shape of backdoor as calling into a risky imported
-// package, just within one package instead of across two. This flags any
-// *ast.Ident, not just a CallExpr.Fun, so a function value (`f :=
-// riskyFunc`) or a wrapper's own reference is caught, not just a direct
+// itself in execAuditFileAllowlist) references a function or package-level
+// var that execAuditRiskyFuncNames determined (directly, or transitively
+// through other same-package functions or vars) reaches os/exec or a risky
+// imported package — the same shape of backdoor as calling into a risky
+// imported package, just within one package instead of across two. This
+// flags any *ast.Ident, not just a CallExpr.Fun, so a function value (`f :=
+// riskyFunc`), a wrapper's own reference, or a reference to a risky var
+// (e.g. `doctorCmd.Run(doctorCmd, nil)`) is caught, not just a direct
 // `riskyFunc(...)` call — see execAuditRiskyFuncNames's doc comment for the
 // (empty today) false-positive risk this accepts in exchange.
 func findRiskyFuncCallViolations(path string, riskyFuncs map[string]bool) ([]string, error) {
@@ -803,9 +861,9 @@ func findRiskyFuncCallViolations(path string, riskyFuncs map[string]bool) ([]str
 			return true
 		}
 		violations = append(violations, fmt.Sprintf(
-			"%s: references %s, a same-package function that (transitively) reaches os/exec or a "+
-				"risky package (see execAuditFileAllowlist/execAuditRiskyFuncNames); route through "+
-				"pkg/sciontool/procreap instead, or justify this reference explicitly",
+			"%s: references %s, a same-package function or variable that (transitively) reaches "+
+				"os/exec or a risky package (see execAuditFileAllowlist/execAuditRiskyFuncNames); "+
+				"route through pkg/sciontool/procreap instead, or justify this reference explicitly",
 			fset.Position(id.Pos()), id.Name))
 		return true
 	})
