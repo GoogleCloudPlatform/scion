@@ -125,6 +125,7 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				Message           string                      `json:"message"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
+				Mentions          []string                    `json:"mentions"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -132,6 +133,7 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				AgentName:     agentName,
 				Interrupt:     body.Interrupt,
 				StructuredMsg: body.StructuredMessage,
+				Mentions:      body.Mentions,
 			}
 			if body.StructuredMessage != nil {
 				sm.Message = body.StructuredMessage.Msg
@@ -142,8 +144,17 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 			mu.Lock()
 			sent = append(sent, sm)
 			mu.Unlock()
+
+			// Echo mention_results for the requested mentions, matching
+			// newMessageMockHubServer's pattern — good enough to exercise
+			// the CLI's own response handling without real hub resolution.
+			var mentionResults []messages.MentionResult
+			for _, m := range body.Mentions {
+				mentionResults = append(mentionResults, messages.MentionResult{Slug: m, Status: "not_found", Error: "no matching agent in this project"})
+			}
+
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mention_results": mentionResults})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -291,6 +302,81 @@ func TestSendMessageViaConversation_AgentRef_AgentContext(t *testing.T) {
 	assert.Equal(t, "agent:test-sender-agent", (*sent)[0].StructuredMsg.Sender)
 	assert.Equal(t, "agent:builder", (*sent)[0].StructuredMsg.Recipient)
 	assert.Equal(t, "please review", (*sent)[0].StructuredMsg.Msg)
+}
+
+// TestSendMessageViaConversation_AgentRef_MentionFanOut: @agent from an
+// agent context sends the body's @mention through the explicit mentions
+// field, filtered of the sender and the primary, and makes no extra
+// TypeMention POST.
+func TestSendMessageViaConversation_AgentRef_MentionFanOut(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-mention"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefAgent,
+		Value: "builder",
+		Raw:   "@builder",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "please review, cc @bystander and @test-sender-agent and @builder", false, false, nil)
+	require.NoError(t, err)
+
+	assert.Len(t, *outbound, 0, "no extra TypeMention POST for path B")
+	require.Len(t, *sent, 1, "exactly one request for the primary send")
+	assert.Equal(t, "builder", (*sent)[0].AgentName)
+	// The sender (test-sender-agent) and the primary (builder) are filtered
+	// out client-side; only the third-party bystander mention survives.
+	assert.Equal(t, []string{"bystander"}, (*sent)[0].Mentions)
+}
+
+// TestSendMessageViaConversation_AgentRef_JSONOutputIncludesMentionResults
+// is path B's --json coverage: the mention_results the mock echoes back must
+// actually reach stdout as part of the decoded response, not be silently
+// dropped the way it was before printing was wired up.
+func TestSendMessageViaConversation_AgentRef_JSONOutputIncludesMentionResults(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-json"
+	server, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
+
+	out := captureStdout(t, func() {
+		err = sendMessageViaConversation(hubCtx, ref, "please review @unknown-name", false, false, nil)
+	})
+	require.NoError(t, err)
+
+	var resp hubclient.MessageResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp), "stdout: %s", out)
+	require.Len(t, resp.MentionResults, 1, "--json output must include mention_results")
+	require.Equal(t, "unknown-name", resp.MentionResults[0].Slug)
 }
 
 // TestConvRef_ThreadRefAccepted verifies that #<thread> references are
