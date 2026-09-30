@@ -135,6 +135,46 @@ func Sampled(v bool) predicate.DecisionAudit {
 	return predicate.DecisionAudit(sql.FieldEQ(FieldSampled, v))
 }
 
+// PermissionID applies equality check predicate on the "permission_id" field. It's identical to PermissionIDEQ.
+func PermissionID(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldPermissionID, v))
+}
+
+// CredentialName applies equality check predicate on the "credential_name" field. It's identical to CredentialNameEQ.
+func CredentialName(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialName, v))
+}
+
+// CredentialBoundaryKind applies equality check predicate on the "credential_boundary_kind" field. It's identical to CredentialBoundaryKindEQ.
+func CredentialBoundaryKind(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryProjectID applies equality check predicate on the "credential_boundary_project_id" field. It's identical to CredentialBoundaryProjectIDEQ.
+func CredentialBoundaryProjectID(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialLabels applies equality check predicate on the "credential_labels" field. It's identical to CredentialLabelsEQ.
+func CredentialLabels(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialLabels, v))
+}
+
+// ExecutorKind applies equality check predicate on the "executor_kind" field. It's identical to ExecutorKindEQ.
+func ExecutorKind(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldExecutorKind, v))
+}
+
+// ExecutorID applies equality check predicate on the "executor_id" field. It's identical to ExecutorIDEQ.
+func ExecutorID(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldExecutorID, v))
+}
+
+// DeniedBy applies equality check predicate on the "denied_by" field. It's identical to DeniedByEQ.
+func DeniedBy(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldDeniedBy, v))
+}
+
 // TimestampEQ applies the EQ predicate on the "timestamp" field.
 func TimestampEQ(v time.Time) predicate.DecisionAudit {
 	return predicate.DecisionAudit(sql.FieldEQ(FieldTimestamp, v))
@@ -1173,6 +1213,606 @@ func SampledEQ(v bool) predicate.DecisionAudit {
 // SampledNEQ applies the NEQ predicate on the "sampled" field.
 func SampledNEQ(v bool) predicate.DecisionAudit {
 	return predicate.DecisionAudit(sql.FieldNEQ(FieldSampled, v))
+}
+
+// PermissionIDEQ applies the EQ predicate on the "permission_id" field.
+func PermissionIDEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldPermissionID, v))
+}
+
+// PermissionIDNEQ applies the NEQ predicate on the "permission_id" field.
+func PermissionIDNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldPermissionID, v))
+}
+
+// PermissionIDIn applies the In predicate on the "permission_id" field.
+func PermissionIDIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldPermissionID, vs...))
+}
+
+// PermissionIDNotIn applies the NotIn predicate on the "permission_id" field.
+func PermissionIDNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldPermissionID, vs...))
+}
+
+// PermissionIDGT applies the GT predicate on the "permission_id" field.
+func PermissionIDGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldPermissionID, v))
+}
+
+// PermissionIDGTE applies the GTE predicate on the "permission_id" field.
+func PermissionIDGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldPermissionID, v))
+}
+
+// PermissionIDLT applies the LT predicate on the "permission_id" field.
+func PermissionIDLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldPermissionID, v))
+}
+
+// PermissionIDLTE applies the LTE predicate on the "permission_id" field.
+func PermissionIDLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldPermissionID, v))
+}
+
+// PermissionIDContains applies the Contains predicate on the "permission_id" field.
+func PermissionIDContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldPermissionID, v))
+}
+
+// PermissionIDHasPrefix applies the HasPrefix predicate on the "permission_id" field.
+func PermissionIDHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldPermissionID, v))
+}
+
+// PermissionIDHasSuffix applies the HasSuffix predicate on the "permission_id" field.
+func PermissionIDHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldPermissionID, v))
+}
+
+// PermissionIDIsNil applies the IsNil predicate on the "permission_id" field.
+func PermissionIDIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldPermissionID))
+}
+
+// PermissionIDNotNil applies the NotNil predicate on the "permission_id" field.
+func PermissionIDNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldPermissionID))
+}
+
+// PermissionIDEqualFold applies the EqualFold predicate on the "permission_id" field.
+func PermissionIDEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldPermissionID, v))
+}
+
+// PermissionIDContainsFold applies the ContainsFold predicate on the "permission_id" field.
+func PermissionIDContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldPermissionID, v))
+}
+
+// CredentialNameEQ applies the EQ predicate on the "credential_name" field.
+func CredentialNameEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialName, v))
+}
+
+// CredentialNameNEQ applies the NEQ predicate on the "credential_name" field.
+func CredentialNameNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldCredentialName, v))
+}
+
+// CredentialNameIn applies the In predicate on the "credential_name" field.
+func CredentialNameIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldCredentialName, vs...))
+}
+
+// CredentialNameNotIn applies the NotIn predicate on the "credential_name" field.
+func CredentialNameNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldCredentialName, vs...))
+}
+
+// CredentialNameGT applies the GT predicate on the "credential_name" field.
+func CredentialNameGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldCredentialName, v))
+}
+
+// CredentialNameGTE applies the GTE predicate on the "credential_name" field.
+func CredentialNameGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldCredentialName, v))
+}
+
+// CredentialNameLT applies the LT predicate on the "credential_name" field.
+func CredentialNameLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldCredentialName, v))
+}
+
+// CredentialNameLTE applies the LTE predicate on the "credential_name" field.
+func CredentialNameLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldCredentialName, v))
+}
+
+// CredentialNameContains applies the Contains predicate on the "credential_name" field.
+func CredentialNameContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldCredentialName, v))
+}
+
+// CredentialNameHasPrefix applies the HasPrefix predicate on the "credential_name" field.
+func CredentialNameHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldCredentialName, v))
+}
+
+// CredentialNameHasSuffix applies the HasSuffix predicate on the "credential_name" field.
+func CredentialNameHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldCredentialName, v))
+}
+
+// CredentialNameIsNil applies the IsNil predicate on the "credential_name" field.
+func CredentialNameIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldCredentialName))
+}
+
+// CredentialNameNotNil applies the NotNil predicate on the "credential_name" field.
+func CredentialNameNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldCredentialName))
+}
+
+// CredentialNameEqualFold applies the EqualFold predicate on the "credential_name" field.
+func CredentialNameEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldCredentialName, v))
+}
+
+// CredentialNameContainsFold applies the ContainsFold predicate on the "credential_name" field.
+func CredentialNameContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldCredentialName, v))
+}
+
+// CredentialBoundaryKindEQ applies the EQ predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindNEQ applies the NEQ predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindIn applies the In predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldCredentialBoundaryKind, vs...))
+}
+
+// CredentialBoundaryKindNotIn applies the NotIn predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldCredentialBoundaryKind, vs...))
+}
+
+// CredentialBoundaryKindGT applies the GT predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindGTE applies the GTE predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindLT applies the LT predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindLTE applies the LTE predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindContains applies the Contains predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindHasPrefix applies the HasPrefix predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindHasSuffix applies the HasSuffix predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindIsNil applies the IsNil predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldCredentialBoundaryKind))
+}
+
+// CredentialBoundaryKindNotNil applies the NotNil predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldCredentialBoundaryKind))
+}
+
+// CredentialBoundaryKindEqualFold applies the EqualFold predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryKindContainsFold applies the ContainsFold predicate on the "credential_boundary_kind" field.
+func CredentialBoundaryKindContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldCredentialBoundaryKind, v))
+}
+
+// CredentialBoundaryProjectIDEQ applies the EQ predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDNEQ applies the NEQ predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDIn applies the In predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldCredentialBoundaryProjectID, vs...))
+}
+
+// CredentialBoundaryProjectIDNotIn applies the NotIn predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldCredentialBoundaryProjectID, vs...))
+}
+
+// CredentialBoundaryProjectIDGT applies the GT predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDGTE applies the GTE predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDLT applies the LT predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDLTE applies the LTE predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDContains applies the Contains predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDHasPrefix applies the HasPrefix predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDHasSuffix applies the HasSuffix predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDIsNil applies the IsNil predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldCredentialBoundaryProjectID))
+}
+
+// CredentialBoundaryProjectIDNotNil applies the NotNil predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldCredentialBoundaryProjectID))
+}
+
+// CredentialBoundaryProjectIDEqualFold applies the EqualFold predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialBoundaryProjectIDContainsFold applies the ContainsFold predicate on the "credential_boundary_project_id" field.
+func CredentialBoundaryProjectIDContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldCredentialBoundaryProjectID, v))
+}
+
+// CredentialLabelsEQ applies the EQ predicate on the "credential_labels" field.
+func CredentialLabelsEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsNEQ applies the NEQ predicate on the "credential_labels" field.
+func CredentialLabelsNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsIn applies the In predicate on the "credential_labels" field.
+func CredentialLabelsIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldCredentialLabels, vs...))
+}
+
+// CredentialLabelsNotIn applies the NotIn predicate on the "credential_labels" field.
+func CredentialLabelsNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldCredentialLabels, vs...))
+}
+
+// CredentialLabelsGT applies the GT predicate on the "credential_labels" field.
+func CredentialLabelsGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsGTE applies the GTE predicate on the "credential_labels" field.
+func CredentialLabelsGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsLT applies the LT predicate on the "credential_labels" field.
+func CredentialLabelsLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsLTE applies the LTE predicate on the "credential_labels" field.
+func CredentialLabelsLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsContains applies the Contains predicate on the "credential_labels" field.
+func CredentialLabelsContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsHasPrefix applies the HasPrefix predicate on the "credential_labels" field.
+func CredentialLabelsHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsHasSuffix applies the HasSuffix predicate on the "credential_labels" field.
+func CredentialLabelsHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsIsNil applies the IsNil predicate on the "credential_labels" field.
+func CredentialLabelsIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldCredentialLabels))
+}
+
+// CredentialLabelsNotNil applies the NotNil predicate on the "credential_labels" field.
+func CredentialLabelsNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldCredentialLabels))
+}
+
+// CredentialLabelsEqualFold applies the EqualFold predicate on the "credential_labels" field.
+func CredentialLabelsEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldCredentialLabels, v))
+}
+
+// CredentialLabelsContainsFold applies the ContainsFold predicate on the "credential_labels" field.
+func CredentialLabelsContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldCredentialLabels, v))
+}
+
+// ExecutorKindEQ applies the EQ predicate on the "executor_kind" field.
+func ExecutorKindEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldExecutorKind, v))
+}
+
+// ExecutorKindNEQ applies the NEQ predicate on the "executor_kind" field.
+func ExecutorKindNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldExecutorKind, v))
+}
+
+// ExecutorKindIn applies the In predicate on the "executor_kind" field.
+func ExecutorKindIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldExecutorKind, vs...))
+}
+
+// ExecutorKindNotIn applies the NotIn predicate on the "executor_kind" field.
+func ExecutorKindNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldExecutorKind, vs...))
+}
+
+// ExecutorKindGT applies the GT predicate on the "executor_kind" field.
+func ExecutorKindGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldExecutorKind, v))
+}
+
+// ExecutorKindGTE applies the GTE predicate on the "executor_kind" field.
+func ExecutorKindGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldExecutorKind, v))
+}
+
+// ExecutorKindLT applies the LT predicate on the "executor_kind" field.
+func ExecutorKindLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldExecutorKind, v))
+}
+
+// ExecutorKindLTE applies the LTE predicate on the "executor_kind" field.
+func ExecutorKindLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldExecutorKind, v))
+}
+
+// ExecutorKindContains applies the Contains predicate on the "executor_kind" field.
+func ExecutorKindContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldExecutorKind, v))
+}
+
+// ExecutorKindHasPrefix applies the HasPrefix predicate on the "executor_kind" field.
+func ExecutorKindHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldExecutorKind, v))
+}
+
+// ExecutorKindHasSuffix applies the HasSuffix predicate on the "executor_kind" field.
+func ExecutorKindHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldExecutorKind, v))
+}
+
+// ExecutorKindIsNil applies the IsNil predicate on the "executor_kind" field.
+func ExecutorKindIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldExecutorKind))
+}
+
+// ExecutorKindNotNil applies the NotNil predicate on the "executor_kind" field.
+func ExecutorKindNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldExecutorKind))
+}
+
+// ExecutorKindEqualFold applies the EqualFold predicate on the "executor_kind" field.
+func ExecutorKindEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldExecutorKind, v))
+}
+
+// ExecutorKindContainsFold applies the ContainsFold predicate on the "executor_kind" field.
+func ExecutorKindContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldExecutorKind, v))
+}
+
+// ExecutorIDEQ applies the EQ predicate on the "executor_id" field.
+func ExecutorIDEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldExecutorID, v))
+}
+
+// ExecutorIDNEQ applies the NEQ predicate on the "executor_id" field.
+func ExecutorIDNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldExecutorID, v))
+}
+
+// ExecutorIDIn applies the In predicate on the "executor_id" field.
+func ExecutorIDIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldExecutorID, vs...))
+}
+
+// ExecutorIDNotIn applies the NotIn predicate on the "executor_id" field.
+func ExecutorIDNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldExecutorID, vs...))
+}
+
+// ExecutorIDGT applies the GT predicate on the "executor_id" field.
+func ExecutorIDGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldExecutorID, v))
+}
+
+// ExecutorIDGTE applies the GTE predicate on the "executor_id" field.
+func ExecutorIDGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldExecutorID, v))
+}
+
+// ExecutorIDLT applies the LT predicate on the "executor_id" field.
+func ExecutorIDLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldExecutorID, v))
+}
+
+// ExecutorIDLTE applies the LTE predicate on the "executor_id" field.
+func ExecutorIDLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldExecutorID, v))
+}
+
+// ExecutorIDContains applies the Contains predicate on the "executor_id" field.
+func ExecutorIDContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldExecutorID, v))
+}
+
+// ExecutorIDHasPrefix applies the HasPrefix predicate on the "executor_id" field.
+func ExecutorIDHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldExecutorID, v))
+}
+
+// ExecutorIDHasSuffix applies the HasSuffix predicate on the "executor_id" field.
+func ExecutorIDHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldExecutorID, v))
+}
+
+// ExecutorIDIsNil applies the IsNil predicate on the "executor_id" field.
+func ExecutorIDIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldExecutorID))
+}
+
+// ExecutorIDNotNil applies the NotNil predicate on the "executor_id" field.
+func ExecutorIDNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldExecutorID))
+}
+
+// ExecutorIDEqualFold applies the EqualFold predicate on the "executor_id" field.
+func ExecutorIDEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldExecutorID, v))
+}
+
+// ExecutorIDContainsFold applies the ContainsFold predicate on the "executor_id" field.
+func ExecutorIDContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldExecutorID, v))
+}
+
+// DeniedByEQ applies the EQ predicate on the "denied_by" field.
+func DeniedByEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEQ(FieldDeniedBy, v))
+}
+
+// DeniedByNEQ applies the NEQ predicate on the "denied_by" field.
+func DeniedByNEQ(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNEQ(FieldDeniedBy, v))
+}
+
+// DeniedByIn applies the In predicate on the "denied_by" field.
+func DeniedByIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIn(FieldDeniedBy, vs...))
+}
+
+// DeniedByNotIn applies the NotIn predicate on the "denied_by" field.
+func DeniedByNotIn(vs ...string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotIn(FieldDeniedBy, vs...))
+}
+
+// DeniedByGT applies the GT predicate on the "denied_by" field.
+func DeniedByGT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGT(FieldDeniedBy, v))
+}
+
+// DeniedByGTE applies the GTE predicate on the "denied_by" field.
+func DeniedByGTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldGTE(FieldDeniedBy, v))
+}
+
+// DeniedByLT applies the LT predicate on the "denied_by" field.
+func DeniedByLT(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLT(FieldDeniedBy, v))
+}
+
+// DeniedByLTE applies the LTE predicate on the "denied_by" field.
+func DeniedByLTE(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldLTE(FieldDeniedBy, v))
+}
+
+// DeniedByContains applies the Contains predicate on the "denied_by" field.
+func DeniedByContains(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContains(FieldDeniedBy, v))
+}
+
+// DeniedByHasPrefix applies the HasPrefix predicate on the "denied_by" field.
+func DeniedByHasPrefix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasPrefix(FieldDeniedBy, v))
+}
+
+// DeniedByHasSuffix applies the HasSuffix predicate on the "denied_by" field.
+func DeniedByHasSuffix(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldHasSuffix(FieldDeniedBy, v))
+}
+
+// DeniedByIsNil applies the IsNil predicate on the "denied_by" field.
+func DeniedByIsNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldIsNull(FieldDeniedBy))
+}
+
+// DeniedByNotNil applies the NotNil predicate on the "denied_by" field.
+func DeniedByNotNil() predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldNotNull(FieldDeniedBy))
+}
+
+// DeniedByEqualFold applies the EqualFold predicate on the "denied_by" field.
+func DeniedByEqualFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldEqualFold(FieldDeniedBy, v))
+}
+
+// DeniedByContainsFold applies the ContainsFold predicate on the "denied_by" field.
+func DeniedByContainsFold(v string) predicate.DecisionAudit {
+	return predicate.DecisionAudit(sql.FieldContainsFold(FieldDeniedBy, v))
 }
 
 // And groups predicates with the AND operator between them.
