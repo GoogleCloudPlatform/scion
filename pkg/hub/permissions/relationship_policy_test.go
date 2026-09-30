@@ -16,6 +16,74 @@ package permissions
 
 import "testing"
 
+// relationshipPolicyExceptionKey identifies one permission in one
+// RelationshipPolicies row for one principal kind.
+type relationshipPolicyExceptionKey struct {
+	Relationship  string
+	PrincipalKind string
+	ResourceType  string
+	PermissionID  string
+}
+
+// relationshipPolicyReviewedExceptions lists row permissions that the two
+// row-shape tests below accept although the Registry entry does not match
+// the row's ResourceType or read-class rule. Each entry is reviewed and
+// scoped to exactly one row and principal kind; it is not a global
+// reclassification. TestRelationshipPolicies_ReviewedExceptionsMatchRows
+// fails for any entry that no longer matches a row.
+var relationshipPolicyReviewedExceptions = map[relationshipPolicyExceptionKey]string{
+	// TODO(ptone/scion#2120): agent.manage is a derived agent permission used
+	// by the message and log handlers (pkg/hub/handlers_messages.go,
+	// pkg/hub/handlers_logs.go) and is not a Registry permission.
+	{"owner", "user", ResourceAgent, "agent.manage"}:    "derived agent.manage for message and log reads; not registered",
+	{"ancestor", "user", ResourceAgent, "agent.manage"}: "derived agent.manage for message and log reads; not registered",
+	// Progeny secret reads are decided with Resource.Type "secret" and
+	// Permission "project.secret_read" (pkg/hub/httpdispatcher.go). The row's
+	// ResourceType is that Decide resource type, and secret_read is treated
+	// as read-class for this row only.
+	{"progeny", "agent", "secret", "project.secret_read"}: "Decide resource type is secret; secret_read is read-class for this row only",
+}
+
+// relationshipPolicyExcepted reports whether permID in row is a reviewed
+// exception for every principal kind the row declares.
+func relationshipPolicyExcepted(row RelationshipPolicy, permID string) bool {
+	if len(row.PrincipalKinds) == 0 {
+		return false
+	}
+	for _, kind := range row.PrincipalKinds {
+		if _, ok := relationshipPolicyReviewedExceptions[relationshipPolicyExceptionKey{row.Relationship, kind, row.ResourceType, permID}]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRelationshipPolicies_ReviewedExceptionsMatchRows pins that every
+// reviewed exception names an existing row, principal kind and permission.
+func TestRelationshipPolicies_ReviewedExceptionsMatchRows(t *testing.T) {
+	for key := range relationshipPolicyReviewedExceptions {
+		found := false
+		for _, row := range RelationshipPolicies {
+			if row.Relationship != key.Relationship || row.ResourceType != key.ResourceType {
+				continue
+			}
+			kindOK := false
+			for _, k := range row.PrincipalKinds {
+				kindOK = kindOK || k == key.PrincipalKind
+			}
+			if !kindOK {
+				continue
+			}
+			for _, id := range row.PermissionIDs {
+				found = found || id == key.PermissionID
+			}
+		}
+		if !found {
+			t.Errorf("reviewed exception %+v matches no RelationshipPolicies row", key)
+		}
+	}
+}
+
 // TestRelationshipPolicies_PermissionIDsMatchRegistryResourceType pins that
 // every RelationshipPolicies row's PermissionIDs are real Registry IDs whose
 // own Resource matches the row's ResourceType — a row can never grant a
@@ -27,6 +95,9 @@ func TestRelationshipPolicies_PermissionIDsMatchRegistryResourceType(t *testing.
 	}
 	for _, row := range RelationshipPolicies {
 		for _, permID := range row.PermissionIDs {
+			if relationshipPolicyExcepted(row, permID) {
+				continue
+			}
 			p, ok := byID[permID]
 			if !ok {
 				t.Errorf("RelationshipPolicies row %q/%q references %q, which is not a Registry permission", row.Relationship, row.ResourceType, permID)
@@ -52,6 +123,9 @@ func TestRelationshipPolicies_ReadOnlyRowsContainOnlyReadActions(t *testing.T) {
 			continue
 		}
 		for _, permID := range row.PermissionIDs {
+			if relationshipPolicyExcepted(row, permID) {
+				continue
+			}
 			p, ok := byID[permID]
 			if !ok {
 				continue // reported by the sibling test above

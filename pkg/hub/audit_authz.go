@@ -287,11 +287,10 @@ func isKnownPermission(id string) bool {
 // canonicalizeExplainPermission resolves a canonical permission ID from
 // the (resourceType, action) pair supplied by an explain API caller.
 //
-// Production enforcement uses derivePermissionID, which is intentionally left
-// unchanged: its fallback concatenation is safe because route middleware
-// always supplies the correct (Resource, Action) pair from route metadata.
-// The explain API, however, accepts arbitrary client input that may use
-// non-canonical patterns:
+// Production enforcement uses resolveResourcePermission
+// (authz_permission_resolver.go), which resolves only pairs that name exactly
+// one permission and denies every other pair. The explain API accepts
+// arbitrary client input that may use non-canonical patterns:
 //
 //   - resource.type="hub", action="user.read" → canonical "user.read"
 //   - resource.type="hub.user", action="read" → canonical "user.read"
@@ -432,8 +431,8 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	// Resolve the permission ID for the explain request.
 	// When the client provides an explicit permission, validate it against
 	// the registry. When omitted, canonicalize from resource.type + action
-	// using the explain-specific helper (not derivePermissionID, which is
-	// reserved for production enforcement and intentionally left unchanged).
+	// using the explain-specific helper (not resolveResourcePermission, which
+	// is reserved for production enforcement).
 	permissionID := req.Permission
 	if permissionID != "" {
 		// Explicit permission: validate against the canonical registry.
