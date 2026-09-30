@@ -14,7 +14,7 @@ current head).
   100, per ptone's 2026-09-29 ruling to keep one global default for now (no
   per-broker tuning until P2 / `ptone/scion#2177`). The comment above
   `seedLimitDefinitions` was rewritten to state the ruling, the Cloud Run
-  single-node crash risk (100 is above the observed ~17-18 agent idle ceiling
+  single-node crash risk (100 is above the observed ~19-20 idle-agent ceiling
   on 4 CPU/8 GiB), and the mitigation (set it via Admin → Quotas or `PUT
   /api/v1/admin/limits/{id}`). Seeding remains strictly insert-only — a hub
   that already has a row (12, 30, or any other value) is never touched on
@@ -70,10 +70,11 @@ current head).
 The design's coordination note calls out PR `ptone/scion#2168`
 (`TestListProjectProviders_AgentLimitDefaultNoBindings`, small-issues-lead-2)
 as a test that reads the seeded value rather than hard-coding 12, so it and
-this PR can land in either order. As of this branch (rebased onto upstream
-`e1f682eac`), that PR has not merged into `ptone/scion` — there is no
-`resolveBrokerCapacity` or `TestListProjectProviders_AgentLimitDefaultNoBindings`
-in this tree yet, and a repo-wide grep found no other test hard-coding 12 for
+this PR can land in either order. As of this PR's initial commit (base
+`e1f682eac`, before any of the rebases in the Review rounds section below),
+that PR had not merged into `ptone/scion` — there was no `resolveBrokerCapacity`
+or `TestListProjectProviders_AgentLimitDefaultNoBindings` in the tree yet, and
+a repo-wide grep found no other test hard-coding 12 for
 this seed value (`pkg/hub/agent_ceiling_gate_test.go`'s reference was a
 comment only, now corrected). No further action was needed here; if
 `ptone/scion#2168` lands with the hard-coded value still in place, whichever

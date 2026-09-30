@@ -357,6 +357,16 @@ with no warning and no recovery. The two errors are not the same size.
 There are **no per-agent resource limits**. All agents share the Instance's CPU and
 memory budget. A single compute-heavy agent can starve its neighbours.
 
+To change the Instance size:
+
+```bash
+./scripts/single-node/deploy.sh \
+  --name my-scion-hub \
+  --project $PROJECT_ID \
+  --cpu 8 --memory 32Gi \
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
+```
+
 ### Set the agent cap after deploying
 
 The Hub's `max_agents_per_broker` limit defaults to **100** hub-wide, which is above
@@ -366,8 +376,9 @@ under the 4 CPU/8 GiB idle ceiling — from **Admin → Quotas** in the web UI, 
 
 ```bash
 # PUT replaces the whole limit definition, so fetch the current one first and
-# only change defaultValue — omitting name/resourceType/unit/description would
-# either be rejected (system limit, ptone/scion#2063) or erase the description.
+# only change defaultValue — omitting name gets 400 "name is required";
+# omitting resourceType or unit gets 403 (system limit); omitting description
+# is accepted but erases it.
 curl "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" -H "Authorization: Bearer $TOKEN"
 
 curl -X PUT "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" \
@@ -389,16 +400,6 @@ one broker (per-broker values are coming in `ptone/scion#2061` P2). If you
 deploy at 8 CPU/32 GiB instead, scale the cap proportionally, keeping the same
 margin below that tier's measured ceiling — not up to it; see
 [Sizing](#4-sizing) above.
-
-To change the Instance size:
-
-```bash
-./scripts/single-node/deploy.sh \
-  --name my-scion-hub \
-  --project $PROJECT_ID \
-  --cpu 8 --memory 32Gi \
-  --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
-```
 
 ---
 
