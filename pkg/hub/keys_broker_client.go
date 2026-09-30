@@ -92,7 +92,7 @@ func decodeBrokerKeysResponse(statusCode int, body []byte, expectedOperationID s
 		return agentkeys.BrokerResult{}, fmt.Errorf("keys: broker returned HTTP 200 with an unexpected body")
 	}
 
-	if statusCode == http.StatusNotFound && !(validBody && agentkeys.ValidBrokerOutcome(result.Outcome)) {
+	if statusCode == http.StatusNotFound && (!validBody || !agentkeys.ValidBrokerOutcome(result.Outcome)) {
 		return agentkeys.BrokerResult{}, &agentkeys.BrokerOutcomeError{Outcome: agentkeys.OutcomeKeysUnsupported}
 	}
 
