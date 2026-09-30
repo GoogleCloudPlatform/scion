@@ -325,6 +325,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
 
+While the migration is in progress, messages to the agent are saved to its history rather than
+delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
+instead. The new generation's preamble tells it to catch up with `scion conversation catch-up`.
+
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
 progress. When migrating another agent, the handoff is optional.
