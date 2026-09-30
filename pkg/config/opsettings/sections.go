@@ -178,7 +178,7 @@ type MessagingSettings struct {
 // DB-only (runtime state), no settings.yaml representation: experiment names
 // contain dots, and koanf uses "." as its key delimiter, so a koanf-backed
 // map keyed by experiment name would split "web.terminal_workspace" into
-// nested keys (design.md §3.3).
+// nested keys (ptone/scion#2217).
 type ExperimentsSettings struct {
 	Overrides map[string]bool `json:"overrides,omitempty"`
 }

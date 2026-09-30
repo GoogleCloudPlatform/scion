@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -369,14 +370,16 @@ func compileSchemas() {
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
-		// the pattern mirrors experiments.namePattern (pkg/experiments).
+		// the pattern is the single definition in experiments.NamePattern
+		// (pkg/experiments), so this schema cannot drift from NewRegistry's
+		// own name validation.
 		"experiments": {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"overrides": map[string]interface{}{
 					"type": "object",
 					"patternProperties": map[string]interface{}{
-						`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`: map[string]interface{}{"type": "boolean"},
+						experiments.NamePattern: map[string]interface{}{"type": "boolean"},
 					},
 					"additionalProperties": false,
 				},

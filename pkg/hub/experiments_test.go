@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -43,12 +44,15 @@ func testExperiment(name string, def bool, layers ...experiments.Layer) experime
 }
 
 // testRegistry returns a registry with hub.test_gate (server+web, default
-// on) and web.only_thing (web-only, default on), per design.md §3.2/§3.6.
+// on), web.only_thing (web-only, default on), and hub.server_only
+// (server-only, default on, so a test asserting web-layer filtering has a
+// name that must NOT appear in a web-facing result), per ptone/scion#2217.
 func testRegistry(t *testing.T) *experiments.Registry {
 	t.Helper()
 	reg, err := experiments.NewRegistry([]experiments.Experiment{
 		testExperiment("hub.test_gate", true, experiments.LayerServer, experiments.LayerWeb),
 		testExperiment("web.only_thing", true, experiments.LayerWeb),
+		testExperiment("hub.server_only", true, experiments.LayerServer),
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
@@ -79,7 +83,7 @@ func TestExperimentRegistry_ZeroValueServerFallsBackToDefault(t *testing.T) {
 	if srv.experimentRegistry() != experiments.Default() {
 		t.Error("experimentRegistry() on a zero-value Server must return experiments.Default()")
 	}
-	// design.md §9: a zero-value &Server{} (no New()) must resolve
+	// ptone/scion#2217: a zero-value &Server{} (no New()) must resolve
 	// web.terminal_workspace to its compiled default without panicking.
 	if !srv.experimentEnabled("web.terminal_workspace") {
 		t.Error("zero-value Server: web.terminal_workspace should resolve to its default (true)")
@@ -121,6 +125,11 @@ func TestResolvedExperiments_WebLayerOnlyFromOneSnapshot(t *testing.T) {
 		if got[name] != v {
 			t.Errorf("resolvedExperiments()[%q] = %v, want %v", name, got[name], v)
 		}
+	}
+	// hub.server_only has no LayerWeb: it must never appear in a map meant
+	// for the web-facing /api/v1/experiments response (1a-ii).
+	if _, present := got["hub.server_only"]; present {
+		t.Error("resolvedExperiments() must exclude server-only experiments")
 	}
 }
 
@@ -217,35 +226,62 @@ func TestRequireExperiment_PanicsAtRegistration(t *testing.T) {
 
 // --- ExperimentsSnapshot / ReadAuthoritativeExperiments ---
 
+// testUpdatedAt is a fixed, non-zero timestamp used to prove that
+// ExperimentsSnapshot/ReadAuthoritativeExperiments propagate every metadata
+// field from a single seeded row, not just Present/Malformed.
+var testUpdatedAt = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
 func TestExperimentsSnapshot(t *testing.T) {
 	tests := []struct {
 		name          string
-		raw           string // "" = no row
+		seed          bool
+		raw           string
 		wantPresent   bool
 		wantMalformed bool
-		wantOverride  bool // hub.test_gate present in Overrides
+		wantRevision  int64
+		wantUpdatedAt time.Time
+		wantUpdatedBy string
+		wantOverrides map[string]bool
 	}{
-		{"absent row", "", false, false, false},
-		{"valid row", `{"overrides":{"hub.test_gate":false}}`, true, false, true},
-		{"malformed row", `not json`, true, true, false},
+		{
+			name: "absent row", seed: false,
+			wantPresent: false, wantMalformed: false, wantRevision: 0,
+			wantUpdatedAt: time.Time{}, wantUpdatedBy: "", wantOverrides: map[string]bool{},
+		},
+		{
+			name: "valid row", seed: true, raw: `{"overrides":{"hub.test_gate":false}}`,
+			wantPresent: true, wantMalformed: false, wantRevision: 7,
+			wantUpdatedAt: testUpdatedAt, wantUpdatedBy: "admin@example.com",
+			wantOverrides: map[string]bool{"hub.test_gate": false},
+		},
+		{
+			name: "malformed row", seed: true, raw: `not json`,
+			wantPresent: true, wantMalformed: true, wantRevision: 7,
+			wantUpdatedAt: testUpdatedAt, wantUpdatedBy: "admin@example.com",
+			wantOverrides: map[string]bool{},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeStore := newFakeHubSettingStore()
-			if tt.raw != "" {
-				fakeStore.seed("experiments", json.RawMessage(tt.raw))
+			if tt.seed {
+				fakeStore.settings["experiments"] = &store.HubSetting{
+					ID: "experiments", Section: "experiments", Value: json.RawMessage(tt.raw),
+					Revision: 7, UpdatedBy: "admin@example.com", UpdatedAt: testUpdatedAt,
+				}
 			}
 			ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 			if _, err := ops.Refresh(context.Background()); err != nil {
 				t.Fatalf("Refresh: %v", err)
 			}
 			snap := ops.ExperimentsSnapshot()
-			if snap.Present != tt.wantPresent || snap.Malformed != tt.wantMalformed {
-				t.Fatalf("snap = %+v, want Present=%v Malformed=%v", snap, tt.wantPresent, tt.wantMalformed)
+			if snap.Present != tt.wantPresent || snap.Malformed != tt.wantMalformed ||
+				snap.Revision != tt.wantRevision || !snap.UpdatedAt.Equal(tt.wantUpdatedAt) ||
+				snap.UpdatedBy != tt.wantUpdatedBy {
+				t.Fatalf("snap = %+v, want Present=%v Malformed=%v Revision=%d UpdatedAt=%v UpdatedBy=%q",
+					snap, tt.wantPresent, tt.wantMalformed, tt.wantRevision, tt.wantUpdatedAt, tt.wantUpdatedBy)
 			}
-			if _, ok := snap.Overrides["hub.test_gate"]; ok != tt.wantOverride {
-				t.Errorf("Overrides[hub.test_gate] present = %v, want %v", ok, tt.wantOverride)
-			}
+			assertOverrides(t, snap.Overrides, tt.wantOverrides)
 		})
 	}
 }
@@ -253,18 +289,20 @@ func TestExperimentsSnapshot(t *testing.T) {
 func TestReadAuthoritativeExperiments(t *testing.T) {
 	tests := []struct {
 		name          string
+		seed          bool
 		raw           string
 		wantRevision  int64
 		wantMalformed bool
+		wantOverrides map[string]bool
 	}{
-		{"absent row", "", 0, false},
-		{"valid row", `{"overrides":{"hub.test_gate":true}}`, 1, false},
-		{"malformed row", `not json`, 1, true},
+		{"absent row", false, "", 0, false, map[string]bool{}},
+		{"valid row", true, `{"overrides":{"hub.test_gate":true}}`, 1, false, map[string]bool{"hub.test_gate": true}},
+		{"malformed row", true, `not json`, 1, true, map[string]bool{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeStore := newFakeHubSettingStore()
-			if tt.raw != "" {
+			if tt.seed {
 				fakeStore.seed("experiments", json.RawMessage(tt.raw))
 			}
 			ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
@@ -272,7 +310,22 @@ func TestReadAuthoritativeExperiments(t *testing.T) {
 			if res.Err != nil || res.Malformed != tt.wantMalformed || res.Revision != tt.wantRevision {
 				t.Fatalf("res = %+v, want revision=%d malformed=%v err=nil", res, tt.wantRevision, tt.wantMalformed)
 			}
+			assertOverrides(t, res.Overrides, tt.wantOverrides)
 		})
+	}
+}
+
+// assertOverrides checks that got holds exactly the entries of want (both
+// nil-safe: a nil got is only acceptable when want is also empty).
+func assertOverrides(t *testing.T, got, want map[string]bool) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("Overrides = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("Overrides[%q] = %v, want %v", k, got[k], v)
+		}
 	}
 }
 

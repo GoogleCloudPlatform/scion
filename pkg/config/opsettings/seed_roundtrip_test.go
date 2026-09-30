@@ -92,8 +92,7 @@ func TestSeedEquivalentRoundTrip_TelemetrySpecific(t *testing.T) {
 // TestExperimentsSectionSkippedBySeeding verifies that the experiments
 // section, like messaging and maintenance, has KoanfPaths == nil and is
 // therefore invisible to seeding: ExtractSectionFromKoanf returns an empty
-// document regardless of what the bootstrap koanf contains (design.md §3.3,
-// §7 1a-i).
+// document regardless of what the bootstrap koanf contains (ptone/scion#2217).
 func TestExperimentsSectionSkippedBySeeding(t *testing.T) {
 	sec := opsettings.SectionByName("experiments")
 	if sec == nil {

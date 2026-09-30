@@ -16,11 +16,10 @@ per §7.
 
 - **Registry entry placement.** The `opsettings.Registry` entry for
   `"experiments"` is appended at the end (after `harness_configs`), and the
-  schema-map entry is inserted after `auto_expose_ports`. Round-5 disposition
-  #6 notes ptone/scion#2270 (`quotas`) inserts mid-`Registry` after
-  `auto_expose_ports`, not at the tail, and both PRs touch the
-  `TestRegistryHasAllSections` expected-names line
-  (`opsettings_test.go:33-35`). My change there is a single-element append to
+  schema-map entry is inserted after `auto_expose_ports`. ptone/scion#2270
+  (`quotas`) inserts mid-`Registry` after `auto_expose_ports`, not at the
+  tail, and both PRs touch the `TestRegistryHasAllSections` expected-names
+  line (`opsettings_test.go:33-35`). My change there is a single-element append to
   keep that conflict minimal and textual, as instructed.
 - **`TestSectionHasKoanfPaths`** (pre-existing test, not called out in the
   design) also enumerates DB-only sections by name. Added `"experiments"`

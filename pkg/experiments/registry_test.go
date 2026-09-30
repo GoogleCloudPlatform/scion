@@ -66,6 +66,9 @@ func TestNewRegistry_InvariantViolations(t *testing.T) {
 		{name: "missing issue", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.Issue = "" })}},
 		{name: "missing owner", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.Owner = "" })}},
 		{name: "missing review_by", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.ReviewBy = "" })}},
+		{name: "malformed review_by: bad month", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.ReviewBy = "2026-13-01" })}},
+		{name: "malformed review_by: wrong format", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.ReviewBy = "31/12/2026" })}},
+		{name: "invalid stage", active: []Experiment{mutate(valid("web.a", LayerWeb), func(e *Experiment) { e.Stage = "betta" })}},
 		{name: "no layers", active: []Experiment{valid("web.a")}},
 	}
 
@@ -129,13 +132,40 @@ func TestHasLayerAndStableOrder(t *testing.T) {
 	}
 }
 
-// --- DEFAULT_ON_FLAGS consistency (design.md §3.2) ---
+// TestAll_ReturnsIndependentCopies proves that mutating a slice returned by
+// All(), or a Layers slice passed into NewRegistry, cannot reach the
+// Registry's internal state (design invariant: immutable, no shared mutable
+// state).
+func TestAll_ReturnsIndependentCopies(t *testing.T) {
+	layers := []Layer{LayerWeb}
+	r, err := NewRegistry([]Experiment{valid("web.a", layers...)}, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// Mutating the caller's original Layers slice after construction must
+	// not affect the stored entry.
+	layers[0] = LayerServer
+	if e, _ := r.Lookup("web.a"); !e.HasLayer(LayerWeb) || e.HasLayer(LayerServer) {
+		t.Fatalf("Lookup after mutating caller's Layers slice: %+v, want unaffected (LayerWeb only)", e)
+	}
+
+	// Mutating a slice returned by All() must not affect a later All() call.
+	first := r.All()
+	first[0].Name = "corrupted"
+	second := r.All()
+	if second[0].Name != "web.a" {
+		t.Fatalf("All() after mutating a previous All() result: got %q, want %q", second[0].Name, "web.a")
+	}
+}
+
+// --- DEFAULT_ON_FLAGS consistency (ptone/scion#2217) ---
 
 var (
 	defaultOnFlagsLiteral = regexp.MustCompile(`DEFAULT_ON_FLAGS\s*=\s*new Set\(\[([^\]]*)\]\)`)
 	flagStringLiteral     = regexp.MustCompile(`'([^']+)'`)
 	// nativeChatAllowlist names are explicitly allowed in DEFAULT_ON_FLAGS even
-	// though they are not registered experiments (design.md §3.2, §3.11).
+	// though they are not registered experiments (ptone/scion#2217).
 	nativeChatAllowlist = []string{"web.native_chat", "web.native_chat_v2"}
 )
 
@@ -208,7 +238,7 @@ func TestDefaultOnFlagsConsistency(t *testing.T) {
 
 // TestDefaultOnFlagsConsistency_DetectsMissingEntry proves the consistency
 // check actually fails when a default-on web experiment is missing from the
-// TS set (design.md §9), without touching the real TS file.
+// TS set (ptone/scion#2217), without touching the real TS file.
 func TestDefaultOnFlagsConsistency_DetectsMissingEntry(t *testing.T) {
 	e := valid("web.new_default_on_thing", LayerWeb)
 	e.Default = true

@@ -324,7 +324,7 @@ type ServerConfig struct {
 	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
 	// every reader goes through the nil-safe Server.experimentRegistry(),
 	// which falls back to experiments.Default(). Tests that need a
-	// server-layer experiment inject their own registry here (design.md §3.2).
+	// server-layer experiment inject their own registry here (ptone/scion#2217).
 	Experiments *experiments.Registry
 }
 
@@ -918,17 +918,13 @@ type Server struct {
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
-	execDispatch func(ctx context.Context, d store.BrokerDispatch) (string, error)
-	deliverMsg   func(ctx context.Context, m *store.Message) error
-	maintenance  *MaintenanceState // Runtime maintenance mode state
-	// experiments is the compiled feature-flag registry (pkg/experiments).
-	// Nil in production and in most tests; always read through the
-	// nil-safe experimentRegistry() accessor, never directly.
-	experiments      *experiments.Registry
-	hubID            string // Unique hub instance ID for secret namespacing
-	instanceID       string // Unique per-process ID (uuid); affinity key for broker dispatch
-	encryptionKey    []byte // AES-256 key for encrypting backup secrets; nil disables encryption
-	embeddedBrokerID string // Broker ID when running in hub+broker combo mode
+	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
+	deliverMsg       func(ctx context.Context, m *store.Message) error
+	maintenance      *MaintenanceState // Runtime maintenance mode state
+	hubID            string            // Unique hub instance ID for secret namespacing
+	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
+	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
+	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
 	// embeddedBrokerPending is non-nil while a co-located broker is expected
 	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
 	// registration succeeds or fails. embeddedBrokerRegErr records a failed
@@ -1180,6 +1176,11 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+
+	// experiments is the compiled feature-flag registry (pkg/experiments).
+	// Nil in production and in most tests; always read through the
+	// nil-safe experimentRegistry() accessor, never directly.
+	experiments *experiments.Registry
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

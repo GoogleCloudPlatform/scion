@@ -22,7 +22,7 @@ import (
 // TestParseExperimentsDocMatchesRefreshUpdatePredicate feeds the same table
 // of documents to ParseExperimentsDoc and to the exact malformed predicate
 // Refresh/Update apply generically (json.Valid + json.Unmarshal into
-// sec.New()), and asserts the two never disagree (design.md §3.3).
+// sec.New()), and asserts the two never disagree (ptone/scion#2217).
 func TestParseExperimentsDocMatchesRefreshUpdatePredicate(t *testing.T) {
 	sec := SectionByName("experiments")
 	if sec == nil {

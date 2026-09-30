@@ -20,8 +20,10 @@ package experiments
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Layer identifies which part of the system an experiment gates.
@@ -43,14 +45,27 @@ const (
 	StageBeta  Stage = "beta"
 )
 
-// namePattern is the required shape of an experiment name, e.g.
-// "web.terminal_workspace" or "hub.foo.bar".
-var namePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+// validStages is the exhaustive set of Stage values NewRegistry accepts.
+var validStages = map[Stage]bool{StageAlpha: true, StageBeta: true}
+
+// NamePattern is the required shape of an experiment name, e.g.
+// "web.terminal_workspace" or "hub.foo.bar". pkg/config/opsettings uses the
+// same pattern in its JSON schema for the "experiments" section, and pkg/hub
+// uses ValidName to apply the identical rule to admin PUT payloads.
+const NamePattern = `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`
+
+var namePatternRe = regexp.MustCompile(NamePattern)
+
+// ValidName reports whether name matches NamePattern.
+func ValidName(name string) bool { return namePatternRe.MatchString(name) }
+
+// reviewByLayout is the required YYYY-MM-DD shape of Experiment.ReviewBy.
+const reviewByLayout = "2006-01-02"
 
 // Experiment describes one hub-wide feature flag.
 type Experiment struct {
 	// Name is the stable identifier, e.g. "web.terminal_workspace". It must
-	// match namePattern. "web." is the convention for UI-only gates, "hub."
+	// match NamePattern. "web." is the convention for UI-only gates, "hub."
 	// for anything that gates server behaviour (Layers is the source of
 	// truth; the prefix is only a readability aid).
 	Name string
@@ -85,7 +100,7 @@ func (e Experiment) HasLayer(l Layer) bool {
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
-// the Registry instance it was given (design.md §3.2).
+// the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
 	{
 		Name:        "web.terminal_workspace",
@@ -119,10 +134,13 @@ type Registry struct {
 
 // NewRegistry validates active and retired together and returns an error on
 // the first invariant violation:
-//   - names are unique and match namePattern
+//   - names are unique and match NamePattern
 //   - no active name appears in the retired list
-//   - every entry has a non-empty Title, Description, Issue, Owner and
-//     ReviewBy, and at least one Layer
+//   - every entry has a non-empty Title, Description, Issue and Owner, at
+//     least one Layer, a ReviewBy matching YYYY-MM-DD, and a recognized Stage
+//
+// The returned Registry owns a private copy of each entry's Layers slice, so
+// mutating a slice the caller passed in afterward cannot affect the Registry.
 func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
 	retiredSet := make(map[string]bool, len(retired))
 	for _, name := range retired {
@@ -132,8 +150,8 @@ func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
 	byName := make(map[string]Experiment, len(active))
 	ordered := make([]Experiment, 0, len(active))
 	for _, e := range active {
-		if !namePattern.MatchString(e.Name) {
-			return nil, fmt.Errorf("experiments: invalid name %q: must match %s", e.Name, namePattern.String())
+		if !ValidName(e.Name) {
+			return nil, fmt.Errorf("experiments: invalid name %q: must match %s", e.Name, NamePattern)
 		}
 		if _, dup := byName[e.Name]; dup {
 			return nil, fmt.Errorf("experiments: duplicate name %q", e.Name)
@@ -147,6 +165,13 @@ func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
 		if len(e.Layers) == 0 {
 			return nil, fmt.Errorf("experiments: %q has no layers", e.Name)
 		}
+		if _, err := time.Parse(reviewByLayout, e.ReviewBy); err != nil {
+			return nil, fmt.Errorf("experiments: %q has an invalid review_by %q: must match YYYY-MM-DD", e.Name, e.ReviewBy)
+		}
+		if !validStages[e.Stage] {
+			return nil, fmt.Errorf("experiments: %q has an invalid stage %q", e.Name, e.Stage)
+		}
+		e.Layers = slices.Clone(e.Layers)
 		byName[e.Name] = e
 		ordered = append(ordered, e)
 	}
@@ -155,8 +180,9 @@ func NewRegistry(active []Experiment, retired []string) (*Registry, error) {
 	return &Registry{byName: byName, ordered: ordered, retired: retiredSet}, nil
 }
 
-// All returns every active experiment in stable order (by Name).
-func (r *Registry) All() []Experiment { return r.ordered }
+// All returns every active experiment in stable order (by Name). The
+// returned slice is a copy; mutating it does not affect the Registry.
+func (r *Registry) All() []Experiment { return slices.Clone(r.ordered) }
 
 // Lookup returns the named active experiment, or false if it is unknown or
 // retired.

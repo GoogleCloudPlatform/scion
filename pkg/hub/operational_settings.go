@@ -1441,7 +1441,7 @@ func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.C
 type ExperimentsSnapshot struct {
 	// Overrides is a copy of the stored admin overrides; empty when
 	// malformed or absent. May contain names this binary does not know
-	// (design.md §3.3).
+	// (ptone/scion#2217).
 	Overrides map[string]bool
 	Revision  int64
 	Malformed bool
@@ -1519,7 +1519,7 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 
 	doc, malformed := opsettings.ParseExperimentsDoc(setting.Value)
 	if malformed {
-		return ExperimentsReadResult{Revision: setting.Revision, Malformed: true}
+		return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: setting.Revision, Malformed: true}
 	}
 	overrides := doc.Overrides
 	if overrides == nil {

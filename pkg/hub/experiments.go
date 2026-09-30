@@ -25,7 +25,7 @@ import (
 // against. Production never sets ServerConfig.Experiments, so this falls
 // back to experiments.Default(). Every reader below goes through this
 // accessor, never the s.experiments field directly, because many pkg/hub
-// tests build &Server{...} by struct literal without New() (design.md §3.2).
+// tests build &Server{...} by struct literal without New() (ptone/scion#2217).
 func (s *Server) experimentRegistry() *experiments.Registry {
 	if s.experiments == nil {
 		return experiments.Default()
@@ -54,7 +54,7 @@ func (s *Server) experimentEnabled(name string) bool {
 // experimentEnabledIn is the single resolution function. Callers that report
 // several values (resolvedExperiments, the admin responses in 1a-ii) take one
 // snapshot and resolve every name from it, so a concurrent refresh cannot
-// produce a mixed answer (design.md §3.3).
+// produce a mixed answer (ptone/scion#2217).
 func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool {
 	exp, ok := s.experimentRegistry().Lookup(name)
 	if !ok {
