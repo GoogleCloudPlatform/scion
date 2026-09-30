@@ -229,9 +229,10 @@ func TestRequireExperiment_PanicsAtRegistration(t *testing.T) {
 // real Refresh ingest path -- not a second, in-test copy of the predicate --
 // agrees with opsettings.ParseExperimentsDoc on the shared document table
 // ("ParseExperimentsDoc applies exactly the Refresh/Update predicate";
-// ptone/scion#2217). It reads the cached sectionState.Malformed directly
-// (not through ExperimentsSnapshot, which re-parses and would hide a
-// disagreement between Refresh's ingest-time check and ParseExperimentsDoc).
+// ptone/scion#2217). It reads the cached sectionState.Malformed directly:
+// that field is set once at ingest time, and ExperimentsSnapshot only
+// forwards it, so reading it here is reading the same ingest-time value
+// ExperimentsSnapshot would report.
 //
 // Only the Refresh side needs this table: Update rejects a schema-invalid
 // document (including a non-boolean override value) in opsettings.Validate
@@ -365,6 +366,37 @@ func TestExperimentsSnapshot_MutatingResultDoesNotAffectNextCall(t *testing.T) {
 	if _, ok := second.Overrides["hub.injected"]; ok {
 		t.Error("second snapshot must not see a key injected into the first snapshot's map")
 	}
+}
+
+// TestExperimentsSnapshot_DeleteSectionClearsOverrides proves DeleteSection
+// leaves no stale parsed overrides behind: the cache entry, and everything
+// it carries (including the parsed overrides), is removed as one unit. A
+// snapshot taken right after reports absent with an empty map, and a row
+// written afterward is reflected from scratch rather than merged with
+// anything the delete should have discarded.
+func TestExperimentsSnapshot_DeleteSectionClearsOverrides(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.test_gate":false}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if err := ops.DeleteSection(context.Background(), "experiments"); err != nil {
+		t.Fatalf("DeleteSection: %v", err)
+	}
+
+	snap := ops.ExperimentsSnapshot()
+	if snap.Present {
+		t.Error("Present = true after DeleteSection, want false")
+	}
+	assertOverrides(t, snap.Overrides, map[string]bool{})
+
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.other":true}}`))
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	assertOverrides(t, ops.ExperimentsSnapshot().Overrides, map[string]bool{"hub.other": true})
 }
 
 func TestReadAuthoritativeExperiments(t *testing.T) {

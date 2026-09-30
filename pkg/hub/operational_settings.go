@@ -51,6 +51,18 @@ type sectionState struct {
 	// distinguish "validated document" from "unreadable document" without
 	// re-parsing and without swallowing errors silently.
 	Malformed bool
+
+	// ExperimentsOverrides is the parsed overrides for the "experiments"
+	// section only; nil for every other section, and nil for "experiments"
+	// itself when absent, malformed, or a valid document with no overrides
+	// field. Populated at the same ingest points as Malformed (Refresh,
+	// Update), so it is always part of the same sectionState value and is
+	// replaced or removed together with it — a delete, a replace, or an
+	// eviction can never leave it stale. ExperimentsSnapshot is on a hot
+	// path (GET /api/v1/experiments runs on every page load, and
+	// requireExperiment runs per request), so parsing once here rather than
+	// per read matters.
+	ExperimentsOverrides map[string]bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -179,16 +191,6 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
-	// experimentsOverrides is the "experiments" section's overrides, parsed
-	// once when cache["experiments"] is written (Refresh, Update) rather
-	// than per read. ExperimentsSnapshot is on a hot path (GET
-	// /api/v1/experiments runs on every page load, and requireExperiment
-	// runs per request), so it must not re-parse JSON on every call. Nil
-	// when the section is absent, malformed, or a valid document with no
-	// overrides field; always kept in step with cache["experiments"] under
-	// the same lock.
-	experimentsOverrides map[string]bool
-
 	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
 	events EventPublisher
 
@@ -274,15 +276,16 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 				)
 			}
 		}
+		experimentsOverrides, malformed := experimentsOverridesFor(row.Section, row.Value, malformed)
 		o.cache[row.Section] = sectionState{
-			Value:     row.Value,
-			Revision:  row.Revision,
-			UpdatedAt: row.UpdatedAt,
-			UpdatedBy: row.UpdatedBy,
-			Origin:    row.Origin,
-			Malformed: malformed,
+			Value:                row.Value,
+			Revision:             row.Revision,
+			UpdatedAt:            row.UpdatedAt,
+			UpdatedBy:            row.UpdatedBy,
+			Origin:               row.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
 		}
-		o.setExperimentsCacheLocked(row.Section, row.Value, malformed)
 	}
 
 	// Detect deleted sections (in cache but not in DB).
@@ -290,39 +293,37 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		if !seen[name] {
 			changed = append(changed, name)
 			delete(o.cache, name)
-			if name == "experiments" {
-				o.experimentsOverrides = nil
-			}
 		}
 	}
 
 	return changed, nil
 }
 
-// setExperimentsCacheLocked keeps experimentsOverrides in step with
-// cache["experiments"]. Called with o.mu already held, from the same code
-// path that writes the cache entry (Refresh, Update), so the parsed
-// overrides never drifts from — or lags — the cached document. No-op for
-// any other section name.
-func (o *OperationalSettings) setExperimentsCacheLocked(section string, raw json.RawMessage, malformed bool) {
-	if section != "experiments" {
-		return
-	}
-	if malformed {
-		o.experimentsOverrides = nil
-		return
+// experimentsOverridesFor returns the parsed "experiments" section overrides
+// and the (possibly updated) malformed flag, for storage in sectionState
+// alongside the generic ingest check that produced malformed. It is a no-op
+// for any section other than "experiments": callers pass malformed straight
+// through unchanged and get a nil map back.
+//
+// Folding this into sectionState (rather than a second, separately-tracked
+// field on OperationalSettings) means every write, delete, or replace of the
+// cache entry carries the parsed overrides automatically — there is no
+// second place that can go out of step with the cache.
+func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool) (map[string]bool, bool) {
+	if section != "experiments" || malformed {
+		return nil, malformed
 	}
 	doc, docMalformed := opsettings.ParseExperimentsDoc(raw)
 	if docMalformed {
-		// The generic ingest check above already applies the same predicate
-		// (the "experiments" section's New() unmarshals into the same
-		// ExperimentsSettings shape ParseExperimentsDoc uses), so this
-		// cannot happen in practice. Fail closed rather than trust an
-		// inconsistent parse.
-		o.experimentsOverrides = nil
-		return
+		// The caller's ingest check (Refresh/Update's sec.New() unmarshal)
+		// already applies the same predicate (the "experiments" section's
+		// New() unmarshals into the same ExperimentsSettings shape
+		// ParseExperimentsDoc uses), so this cannot happen in practice. Fail
+		// closed rather than trust an inconsistent parse, and let it show up
+		// in Malformed too.
+		return nil, true
 	}
-	o.experimentsOverrides = doc.Overrides
+	return doc.Overrides, malformed
 }
 
 // Snapshot returns an immutable merged Layer-1 view.
@@ -567,16 +568,17 @@ func (o *OperationalSettings) Update(
 			)
 		}
 	}
+	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
 	o.cache[section] = sectionState{
-		Value:     result.Value,
-		Revision:  result.Revision,
-		UpdatedAt: result.UpdatedAt,
-		UpdatedBy: result.UpdatedBy,
-		Origin:    result.Origin,
-		Malformed: malformed,
+		Value:                result.Value,
+		Revision:             result.Revision,
+		UpdatedAt:            result.UpdatedAt,
+		UpdatedBy:            result.UpdatedBy,
+		Origin:               result.Origin,
+		Malformed:            malformed,
+		ExperimentsOverrides: experimentsOverrides,
 	}
-	o.setExperimentsCacheLocked(section, result.Value, malformed)
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -1494,11 +1496,11 @@ type ExperimentsSnapshot struct {
 }
 
 // ExperimentsSnapshot returns one consistent view of the cached "experiments"
-// section. Read path: it never parses JSON. experimentsOverrides is parsed
-// once, when the cache entry is written (Refresh, Update); this only clones
-// that already-parsed map, so a caller mutating the returned map can never
-// affect another caller or a later snapshot. No logging here (Refresh logs
-// once per ingest).
+// section. Read path: it never parses JSON. state.ExperimentsOverrides is
+// parsed once, when the cache entry is written (Refresh, Update); this only
+// clones that already-parsed map, so a caller mutating the returned map can
+// never affect another caller or a later snapshot. No logging here (Refresh
+// logs once per ingest).
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
@@ -1515,7 +1517,7 @@ func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 		UpdatedBy: state.UpdatedBy,
 		Present:   true,
 	}
-	snap.Overrides = maps.Clone(o.experimentsOverrides)
+	snap.Overrides = maps.Clone(state.ExperimentsOverrides)
 	if snap.Overrides == nil {
 		snap.Overrides = map[string]bool{}
 	}
