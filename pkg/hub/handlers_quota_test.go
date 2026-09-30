@@ -1034,6 +1034,88 @@ func TestQuotaAPI_UpdateLimitDefinition_WhitespaceOnlyName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: upstream review (GoogleCloudPlatform/scion#2114, gemini-code-assist)
+// — updating a non-system limit definition with an empty or whitespace-only
+// resource_type/unit must not corrupt the row. The row is left untouched
+// (still its original values) rather than persisted with an empty field.
+// ---------------------------------------------------------------------------
+
+func TestQuotaAPI_UpdateLimitDefinition_EmptyResourceType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "empty_rt_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         created.Name,
+		ResourceType: "   ",
+		Unit:         created.Unit,
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, "agent", def.ResourceType, "rejected update must not corrupt the stored resource type")
+}
+
+func TestQuotaAPI_UpdateLimitDefinition_EmptyUnit(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createLimitViaAPI(t, srv, createLimitDefinitionRequest{
+		Name: "empty_unit_update_limit", ResourceType: "agent", Unit: "count", DefaultValue: 5,
+	})
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+created.ID, updateLimitDefinitionRequest{
+		Name:         created.Name,
+		ResourceType: created.ResourceType,
+		Unit:         "   ",
+		DefaultValue: 5,
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/limits/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code)
+	var def store.LimitDefinition
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&def))
+	assert.Equal(t, "count", def.Unit, "rejected update must not corrupt the stored unit")
+}
+
+// TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_EmptyFieldsUnaffected
+// verifies the new resource_type/unit validation does not change system-row
+// behaviour: a system row with identity fields unchanged still succeeds, and
+// the pre-existing identity-mismatch 403 (covered elsewhere) is unaffected
+// because the new checks live only in the non-system branch.
+func TestQuotaAPI_UpdateLimitDefinition_SystemSeeded_EmptyFieldsUnaffected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	systemDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         "system_empty_fields_test",
+		ResourceType: "agent",
+		Unit:         "count",
+		DefaultValue: 100,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/limits/"+systemDef.ID, updateLimitDefinitionRequest{
+		Name:         systemDef.Name,
+		ResourceType: systemDef.ResourceType,
+		Unit:         systemDef.Unit,
+		DefaultValue: 42,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var updated store.LimitDefinition
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&updated))
+	assert.Equal(t, int64(42), updated.DefaultValue)
+}
+
+// ---------------------------------------------------------------------------
 // Tests: Fix B3 — empty SubjectType/SubjectID rejected (MEDIUM-5 / MEDIUM-6)
 // ---------------------------------------------------------------------------
 

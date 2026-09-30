@@ -370,6 +370,16 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	} else {
+		req.ResourceType = strings.TrimSpace(req.ResourceType)
+		if req.ResourceType == "" {
+			BadRequest(w, "resource type is required")
+			return
+		}
+		req.Unit = strings.TrimSpace(req.Unit)
+		if req.Unit == "" {
+			BadRequest(w, "unit is required")
+			return
+		}
 		existing.Name = req.Name
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
