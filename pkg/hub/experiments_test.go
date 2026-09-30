@@ -368,6 +368,52 @@ func TestExperimentsSnapshot_MutatingResultDoesNotAffectNextCall(t *testing.T) {
 	}
 }
 
+// TestExperimentsSnapshot_UpdateReplacesOverrides proves the Update write
+// path keeps the cached overrides in step with the stored document, the same
+// way Refresh does. Before the parsed-overrides cache existed,
+// ExperimentsSnapshot parsed state.Value directly on every call, so Update
+// could never go stale; this guards the write path the cache added.
+func TestExperimentsSnapshot_UpdateReplacesOverrides(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.test_gate":false}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	rev := ops.ExperimentsSnapshot().Revision
+
+	newRev, err := ops.Update(context.Background(), "experiments",
+		json.RawMessage(`{"overrides":{"hub.other":true}}`), "admin@example.com", rev, "managed")
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	snap := ops.ExperimentsSnapshot()
+	if snap.Revision != newRev {
+		t.Errorf("Revision = %d, want %d", snap.Revision, newRev)
+	}
+	assertOverrides(t, snap.Overrides, map[string]bool{"hub.other": true})
+}
+
+// TestExperimentsSnapshot_UpdateToEmptyDocClearsOverrides proves Update to an
+// empty (but non-nil) overrides document is reflected immediately: the
+// previous override is gone, and Overrides is empty rather than nil.
+func TestExperimentsSnapshot_UpdateToEmptyDocClearsOverrides(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"hub.test_gate":false}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	rev := ops.ExperimentsSnapshot().Revision
+
+	if _, err := ops.Update(context.Background(), "experiments", json.RawMessage(`{}`), "admin@example.com", rev, "managed"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	assertOverrides(t, ops.ExperimentsSnapshot().Overrides, map[string]bool{})
+}
+
 // TestExperimentsSnapshot_DeleteSectionClearsOverrides proves DeleteSection
 // leaves no stale parsed overrides behind: the cache entry, and everything
 // it carries (including the parsed overrides), is removed as one unit. A
