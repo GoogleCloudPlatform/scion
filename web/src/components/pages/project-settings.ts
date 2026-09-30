@@ -1364,6 +1364,37 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
+   * Whether every runtime broker linked to this project (the same list shown
+   * on the Brokers tab) is reliably known to be Kubernetes: at least one
+   * linked broker, and every one of them registers only "kubernetes"
+   * profiles. This deliberately does not guess — a project with no linked
+   * broker, a broker with no profile info, or a mix of runtime types across
+   * its brokers, all read as false here.
+   */
+  private get projectIsKubernetesOnly(): boolean {
+    if (this.brokers.length === 0) return false;
+    return this.brokers.every((b) => {
+      const profiles = b.profiles ?? [];
+      if (profiles.length === 0) return false;
+      return profiles.every((p) => p.type === 'kubernetes');
+    });
+  }
+
+  /**
+   * Short explanation shown next to the GCP identity picker when this
+   * project's linked brokers are reliably Kubernetes-only: block is disabled
+   * in that case (existing stored "block" values still display; the server
+   * rejects saving a new one).
+   */
+  private renderKubernetesBlockHint() {
+    if (!this.projectIsKubernetesOnly) return nothing;
+    return html`<span class="field-help"
+      >Block is not available for this project: its runtime brokers are Kubernetes. Choose
+      Passthrough or Assign Service Account.</span
+    >`;
+  }
+
+  /**
    * Describes the hub default GCP identity this project inherits while its
    * own setting is "inherit". For "assign" it names the service account (the
    * mode alone doesn't say which identity agents get); for "passthrough" it
@@ -2394,7 +2425,9 @@ export class ScionPageProjectSettings extends LitElement {
                       'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option value="block">Block</sl-option>
+                  <sl-option value="block" ?disabled=${this.projectIsKubernetesOnly}
+                    >Block</sl-option
+                  >
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
                 </sl-select>
@@ -2403,7 +2436,7 @@ export class ScionPageProjectSettings extends LitElement {
                   "Passthrough" allows host identity, "Assign" binds a specific service
                   account.</span
                 >
-                ${this.renderInheritedGCPIdentityHint()}
+                ${this.renderKubernetesBlockHint()} ${this.renderInheritedGCPIdentityHint()}
               </div>
 
               ${this.configDefaultGCPIdentityMode === 'assign'

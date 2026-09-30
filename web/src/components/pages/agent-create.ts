@@ -149,6 +149,26 @@ export class ScionPageAgentCreate extends LitElement {
     return broker?.profiles?.filter((p) => p.available) ?? [];
   }
 
+  /**
+   * Whether the currently selected broker/profile combination is reliably
+   * known to resolve to a Kubernetes runtime. Block is not offered in that
+   * case. This deliberately does not guess: with no broker selected, no
+   * matching profile, or (with no profile chosen) a broker whose available
+   * profiles mix runtime types, this is false.
+   */
+  private get targetRuntimeIsKubernetesOnly(): boolean {
+    if (!this.brokerId) return false;
+    const broker = this.brokers.find((b) => b.id === this.brokerId);
+    if (!broker) return false;
+    if (this.profile) {
+      const selected = broker.profiles?.find((p) => p.name === this.profile);
+      return selected?.type === 'kubernetes';
+    }
+    const available = broker.profiles?.filter((p) => p.available) ?? [];
+    if (available.length === 0) return false;
+    return available.every((p) => p.type === 'kubernetes');
+  }
+
   /** The currently selected project */
   private get selectedProject(): Project | undefined {
     return this.projects.find((p) => p.id === this.projectId);
@@ -399,6 +419,19 @@ export class ScionPageAgentCreate extends LitElement {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    // Block is not offered for a Kubernetes runtime target. Re-check whenever
+    // the broker/profile selection (or the broker list itself, once loaded)
+    // changes, and fall back to passthrough rather than silently submitting a
+    // selection the create request would otherwise still carry.
+    if (
+      (changedProperties.has('brokerId') ||
+        changedProperties.has('profile') ||
+        changedProperties.has('brokers')) &&
+      this.gcpMetadataMode === 'block' &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.gcpMetadataMode = 'passthrough';
     }
   }
 
@@ -933,6 +966,12 @@ export class ScionPageAgentCreate extends LitElement {
     // Validate GCP assign mode
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      return;
+    }
+
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       return;
     }
 
@@ -1671,18 +1710,22 @@ export class ScionPageAgentCreate extends LitElement {
             }
           }}
         >
-          <sl-option value="block">Block</sl-option>
+          ${this.targetRuntimeIsKubernetesOnly
+            ? ''
+            : html`<sl-option value="block">Block</sl-option>`}
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : ''}
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${this.targetRuntimeIsKubernetesOnly
+            ? 'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.'
+            : this.gcpMetadataMode === 'block'
+              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+              : this.gcpMetadataMode === 'assign'
+                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
         </div>
       </div>
 

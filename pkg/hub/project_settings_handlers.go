@@ -264,6 +264,24 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 // handled here — it is tracked separately against the consumption site, because
 // no amount of write-time validation can subsume it.
 func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, projectID string, req *hubclient.ProjectSettings) bool {
+	// block is not offered for a Kubernetes-bound project: the broker rejects
+	// it at dispatch anyway, so saving it here would reproduce the same
+	// silent-defect shape the assign/no-SA check below exists to prevent. This
+	// only fires for a project whose linked brokers are reliably known to be
+	// Kubernetes-only (see projectIsKubernetesBound) — a project with no
+	// linked broker, or with a mix of runtime types, is left alone.
+	if req.DefaultGCPIdentityMode == store.GCPMetadataModeBlock {
+		k8sBound, err := s.projectIsKubernetesBound(ctx, projectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if k8sBound {
+			BadRequest(w, "default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead")
+			return false
+		}
+	}
+
 	// mode=assign with no service account is the same defect wearing different
 	// clothes: the consumption path falls straight through to block.
 	if req.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && req.DefaultGCPIdentityServiceAccountID == "" {
@@ -311,6 +329,53 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	}
 
 	return true
+}
+
+// brokerIsKubernetesOnly reports whether every profile registered on broker is
+// of type "kubernetes". A broker with no registered profiles is not
+// considered Kubernetes-only — there is nothing to confirm the type from, and
+// this must not guess.
+func brokerIsKubernetesOnly(broker *store.RuntimeBroker) bool {
+	if broker == nil || len(broker.Profiles) == 0 {
+		return false
+	}
+	for _, p := range broker.Profiles {
+		if p.Type != "kubernetes" {
+			return false
+		}
+	}
+	return true
+}
+
+// projectIsKubernetesBound reports whether a project's target runtime is
+// reliably known to be Kubernetes: the project has at least one linked
+// runtime broker (project_providers), and every linked broker is
+// Kubernetes-only per brokerIsKubernetesOnly.
+//
+// A project with no linked broker, with a broker whose type cannot be read,
+// or with a mix of runtime types across its linked brokers, is NOT reliably
+// Kubernetes-bound — this returns false rather than guess in those cases,
+// which is the deliberately permissive side: it only ever blocks a write it
+// can confirm the broker will reject anyway.
+func (s *Server) projectIsKubernetesBound(ctx context.Context, projectID string) (bool, error) {
+	providers, err := s.store.GetProjectProviders(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	if len(providers) == 0 {
+		return false, nil
+	}
+	for _, provider := range providers {
+		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
+		if err != nil {
+			// Cannot confirm this broker's runtime type; do not guess.
+			return false, nil
+		}
+		if !brokerIsKubernetesOnly(broker) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // projectSettingsFromAnnotations reads project settings from the project's annotations map.
