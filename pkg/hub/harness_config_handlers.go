@@ -514,21 +514,34 @@ func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
 }
 
 func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
+	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, storagePath)
+	if !ok {
+		return ""
+	}
+	return entry.Image
+}
+
+// extractHarnessConfigEntryFromStorage downloads and parses config.yaml from
+// a harness config's storage path, returning ok=false if it can't be
+// downloaded or parsed. Callers that only need one field (extractImageFromStorage)
+// or that need to stamp several fields at once (the file upload and finalize
+// handlers, via applyModelConfigFromEntry) share this single download+parse.
+func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Storage, storagePath string) (config.HarnessConfigEntry, bool) {
 	objectPath := storagePath + "/config.yaml"
 	reader, _, err := stor.Download(ctx, objectPath)
 	if err != nil || reader == nil {
-		return ""
+		return config.HarnessConfigEntry{}, false
 	}
 	defer func() { _ = reader.Close() }()
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return ""
+		return config.HarnessConfigEntry{}, false
 	}
 	entry, err := config.ParseHarnessConfigYAML(data)
 	if err != nil {
-		return ""
+		return config.HarnessConfigEntry{}, false
 	}
-	return entry.Image
+	return entry, true
 }
 
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
@@ -738,11 +751,14 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
 
-	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
+	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		if entry.Image != "" {
+			if hc.Config == nil {
+				hc.Config = &store.HarnessConfigData{}
+			}
+			hc.Config.Image = entry.Image
 		}
-		hc.Config.Image = image
+		applyModelConfigFromEntry(hc, entry)
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
