@@ -193,3 +193,42 @@ Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 109 files, 3126 tests passed — the previously-flaky
 `agent-create-projects.test.ts` (unrelated to this branch) did not even
 reproduce this run.
+
+## Round 3 review addendum
+
+Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-3.md`
+(REQUEST CHANGES: 0 critical, 3 required (B1'', B2'', B3''), 3 non-blocking
+(N1''-N3'')). Two were regressions from the round-2 fixes themselves
+(B1''/B2'', from B1'/N1'); B3'' was a pre-existing design §6.3 deviation
+the first two rounds' tests didn't catch. All 8 round-2 findings and the
+two reopened round-1 items (B3, N1) were reconfirmed closed. Fixed in one
+commit, rebased onto P1a's latest head (`6519b424`); final SHA `dca93bc4`.
+Full mapping in the dev report addendum:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+
+Summary:
+- **B1'':** `setSmall()` now resets `pageIndex` to 0 when the previous
+  state was paged (a paged -> small transition always swaps in a different
+  data set); small -> small still never resets.
+- **B2'':** removed the `agentsLoadGen` bump from `onPagerNav` (it let a
+  pager click race a page-level request and draw a legitimate 400).
+  Replaced it with disabling the pager itself (`.loading = window.loading
+  || agentsLoading`) plus a defense-in-depth guard with the same condition,
+  so the race can't start even via a raw event dispatched on the pager host.
+- **B3'':** the paged state's `items` now applies the live label-typing
+  preview filter, matching design §6.3 — it previously left the page
+  unfiltered while typing.
+- **N1''-N3'':** `agentsLoading` is ref-counted; the loading indicator is
+  gated on `this.agents` being empty (not the phase-filtered view), so a
+  lifecycle refresh with an unmatched phase filter no longer flickers; the
+  B3' toggle test now asserts the actual alternation and dir value.
+
+Per the EM's instruction, reran all five original review probes (rounds
+1-3) against this fix before pushing — every one now shows the corrected
+behavior, including round 3's own raw-event-dispatch methodology for the
+B2'' race, which is why `onPagerNav` was kept (not deleted) as a second
+guard layer. Probes were not committed.
+
+Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
+109 files, 3137 tests passed; the previously-flaky
+`agent-create-projects.test.ts` did not reproduce this run either.
