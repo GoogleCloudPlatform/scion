@@ -5689,7 +5689,7 @@ describe('scion-chat-thread /stop slash command', () => {
    * Regression test for ptone/scion#2482: `/stop <agent>` must stop the
    * agent, not delete it. It must hit the project-scoped stop endpoint the
    * hub actually resolves slugs against (handleProjectAgentAction,
-   * pkg/hub/handlers_projects_core.go ~L2477), not the unscoped
+   * pkg/hub/handlers_projects_core.go), not the unscoped
    * `/api/v1/agents/{id}/stop` route, which only resolves UUIDs and always
    * 404s for a slug.
    */

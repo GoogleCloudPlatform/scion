@@ -3835,17 +3835,11 @@ export class ScionChatThread extends LitElement {
   /**
    * /stop <agent> — Stop a running agent.
    *
-   * Like `resolvePathLinkProjectId`, in a chat-page DM the thread-level
-   * `projectId` is not a project the DM belongs to — it's whatever
-   * project the user happened to be viewing before opening the DM
-   * (`inheritedProjectId()`). Resolving `/stop <slug>` against it could
-   * target an unrelated project's agent that happens to share the slug.
-   * (On the agent-detail DM surface, `projectId` is already the agent's
-   * own project, so this doesn't apply — but resolving via the peer
-   * agent keeps both DM surfaces consistent.) In a DM, resolve against
-   * the peer agent's own project instead (`peerAgentProjectId()`);
-   * non-DM threads keep using `this.projectId`, which is the thread's
-   * real project.
+   * In a chat-page DM, `this.projectId` is only the inherited project
+   * (whatever the user was viewing before opening the DM), so DMs
+   * resolve the agent's project via `peerAgentProjectId()` instead.
+   * Non-DM threads use `this.projectId`, which is the thread's real
+   * project.
    */
   private async handleSlashStop(args: string): Promise<void> {
     const agentSlug = args.trim();
