@@ -1323,9 +1323,8 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 // initiatorMatchesExecutor (ptone/scion#2342 review round 2, R1 and O1). The
 // helper is pure, so it needs no server. Each dev_local-arm row is chosen so
 // that replacing any single clause of the arm with an unconditional `true`
-// changes that row's expected result from false to true — see
-// devlocal-handoff.md's mutation table for the row-to-clause mapping this
-// pins.
+// changes that row's expected result from false to true — the per-row
+// comments below name the clause each row pins.
 func TestInitiatorMatchesExecutor(t *testing.T) {
 	devUserExec := NewAuthenticatedUser(DevUserID, "dev@localhost", "Development User", "admin", "api")
 	otherUserExec := NewAuthenticatedUser(tid("e2b-ime-other-user"), "other@example.com", "Other User", "member", "api")
