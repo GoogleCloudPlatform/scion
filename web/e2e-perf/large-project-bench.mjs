@@ -52,9 +52,12 @@
  *   fires for the standalone graph's unscoped `/api/v1/agents` fetch (it
  *   previously required a `projectId=` query param that page never sends).
  * - R2: consecutive burst runs target a rotation offset by run index, and
- *   each run's restore is polled to confirm it actually reached the DOM
- *   before the next run starts -- a prior run's stale, not-yet-restored
- *   badge could otherwise be miscounted as the next run's settle.
+ *   each run's restore is polled, up to a bound, to confirm it actually
+ *   reached the DOM (bench-rev-6 N6-2: this bound does NOT block the next
+ *   run -- see bench-rev-3 RR1(b) below for the actual mark-invalid
+ *   behavior that replaced the simpler description here) -- a prior run's
+ *   stale, not-yet-restored badge could otherwise be miscounted as the
+ *   next run's settle.
  * - NB1: restores both phase and activity, not phase alone.
  * - NB2: settle time is measured per agent from that agent's own POST
  *   completion, not from a shared burst-start timestamp (which folded in
@@ -873,13 +876,15 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
 
   return {
     runIndex,
-    // bench-rev-3 RR1(b): the restore-wait now actually GATES the next
-    // run -- see runBurstScenario, which passes this run's
-    // restoreFullyConfirmed as the next run's invalidateDueToPriorRestore.
-    // A run fired while the previous run's restore was not confirmed in
-    // the DOM cannot be trusted to have started from the expected
-    // pre-burst state, so it is marked invalid rather than silently mixed
-    // into the scenario's settle statistics.
+    // bench-rev-3 RR1(b), corrected by bench-rev-6 N6-2: the restore-wait
+    // is bounded, not blocking; the next run starts regardless. What
+    // actually has an effect is this run's OWN restoreFullyConfirmed
+    // result -- see runBurstScenario, which passes it as the NEXT run's
+    // invalidateDueToPriorRestore. A run fired while the previous run's
+    // restore was not confirmed in the DOM within that bound cannot be
+    // trusted to have started from the expected pre-burst state, so it is
+    // marked invalid rather than silently mixed into the scenario's settle
+    // statistics.
     invalid: invalidateDueToPriorRestore === true,
     invalidReason: invalidateDueToPriorRestore
       ? 'previous run restore was not fully confirmed in the DOM before this run started'

@@ -96,15 +96,36 @@ inside the running binary: once a revision and a modified flag are
 reported, there is no remaining signal that distinguishes a correct stamp
 from a wrong one. If you need the build identity recorded reliably:
 
-1. Build from a plain `git clone`/checkout (not any `git worktree`), or
-   stamp explicitly via
-   `-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`.
+1. Build from a plain `git clone`/checkout (not any `git worktree`). For
+   the **hub binary specifically** (`./cmd/scion`), you can alternatively
+   stamp its version explicitly via
+   `-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`
+   (bench-rev-6 N6-3(a): this `-ldflags` option is NOT available to
+   `apibench`/`seed` -- `harnessBuildInfo` reads only Go's own
+   `vcs.revision` build setting, never `pkg/version.Commit`, so an
+   `-ldflags`-stamped `apibench`/`seed` binary gets no benefit from this;
+   those two must be built from a plain clone).
 2. **Independently verify** before trusting a capture:
-   `go version -m /tmp/apibench-bin | grep vcs.revision` (or the hub
-   binary) and compare it against `git rev-parse HEAD` run in the checkout
-   you actually intended to build from. A mismatch means you built from a
-   worktree -- nested or not -- and the stamp does not mean what it looks
-   like it means.
+   `go version -m /tmp/apibench-bin | grep vcs.revision` and compare it
+   against `git rev-parse HEAD` run in the checkout you actually intended
+   to build from. A mismatch means you built from a worktree -- nested or
+   not -- and the stamp does not mean what it looks like it means.
+   **bench-rev-6 N6-3(b):** this specific check does NOT work for a hub
+   binary built with the `-ldflags` option above from inside a worktree --
+   `go version -m` only ever shows Go's own auto-stamp (the wrong,
+   enclosing-checkout commit, or nothing), never the `-ldflags` value,
+   which only shows up at runtime via `pkg/version.Short()`. For an
+   `-ldflags`-stamped hub, verify its `GET /health` `scionVersion` field
+   against `git rev-parse HEAD` instead -- the auto-stamp check only
+   applies to binaries relying on Go's own VCS stamping (`apibench`,
+   `seed`, and a hub built without `-ldflags`). **bench-rev-6 N6-3(c):** a
+   match is necessary but not sufficient in one edge case -- if a nested
+   worktree's own `HEAD` happens to equal the enclosing checkout's `HEAD`
+   (e.g. right after creating the worktree, before committing anything new
+   in either), step 2 will show a match even though `vcs.modified` still
+   reflects the ENCLOSING tree's dirty state, not the worktree's own. A
+   mismatch is always diagnostic; a match is not quite a full guarantee in
+   that specific case.
 
 `scion server start` (the local test-hub subprocess this harness drives) is
 removed from the CLI's command tree in `SCION_CLI_MODE=agent` (see
@@ -545,9 +566,10 @@ confirmed to fail against the old idx-only implementation):
    this closes the hole regardless of whether (1) or the restore-wait is
    itself correct.
 3. The restore-wait's RESULT now actually has an effect on the next run
-   (bench-rev-5 N-d: described precisely, not as "gates", to avoid
-   implying it blocks -- see point 2 at the top of this section for the
-   exact bounded-wait-then-proceed behavior). If the previous run's restore
+   (bench-rev-5 N-d, corrected by bench-rev-6 N6-2: described precisely,
+   not as "gates", to avoid implying it blocks -- see the "bench-rev-4 N4"
+   paragraph above this numbered list for the exact
+   bounded-wait-then-proceed behavior). If the previous run's restore
    was not fully confirmed in the DOM within the bound
    (`restoreFullyConfirmed` is false), the next run is marked `invalid` and
    excluded from the scenario's settle statistics (`invalidRunCount`),
@@ -579,10 +601,15 @@ exactly the kind of silently-redefined field name this tool's own
 range of the five per-run medians itself (the OLD meaning) is still
 available, under its own name: `runMedianMinMs`/`runMedianMaxMs`.
 
-**bench-rev-5 N-c:** each poll has a SAMPLING INTERVAL, not a "floor" --
-the first poll happens immediately after the POST resolves, so values well
-under 170ms are common (many individual per-agent samples read 11-20ms).
-What is true: each sample can LAG the true DOM update by up to one poll
+**bench-rev-5 N-c, precision fixed by bench-rev-6 N6-4:** each poll has a
+SAMPLING INTERVAL, not a "floor" -- the first poll happens immediately
+after the POST resolves, so values well under 170ms are common. The raw
+reports keep no per-agent samples, only per-run minimums, so the
+verifiable claim is narrower than "many individual samples": per-run
+minimums as low as 11-12ms were observed (25 and 100 agents) -- an earlier
+version of this sentence claimed "many individual per-agent samples read
+11-20ms", which the raw data cannot actually support. What is true: each
+sample can LAG the true DOM update by up to one poll
 interval -- a 100ms sleep plus a deep shadow-DOM badge read, which runs
 14ms alone but ~68ms median (p90 98ms) with `--burst-count` concurrent
 pollers sharing one page, per bench-rev-4's own measurement. Differences

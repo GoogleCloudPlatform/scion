@@ -301,14 +301,54 @@ func TestValidateDBPathArg(t *testing.T) {
 	}
 }
 
+// TestResolveDBPathArg covers bench-rev-5 N-a's two distinct slash-count
+// variants, through `resolveDBPathArg` specifically -- the function
+// `main()` actually calls -- rather than through `filepath.Clean` and
+// `checkDBNotExists` directly.
+//
+// bench-rev-6 N6-1: an earlier version of this test called `filepath.Clean`
+// directly, so it exercised Go's standard library, not this package's own
+// logic; deleting `main()`'s call to `filepath.Clean` entirely left this
+// test passing (reviewer-confirmed mutation). `resolveDBPathArg` is the
+// package-local function that owns "validate, then canonicalize, in that
+// order" -- `main()` has nothing left to get wrong beyond calling it -- so
+// a test against `resolveDBPathArg` is a test of the actual implementation
+// `main()` delegates to, the same relationship `validateDBPathArg` and
+// `checkDBNotExists` already have with their own tests above.
+func TestResolveDBPathArg(t *testing.T) {
+	t.Run("rejects what validateDBPathArg rejects, before ever cleaning", func(t *testing.T) {
+		for _, bad := range []string{"//localhost/tmp/x.db", "file:/tmp/x.db", "/tmp/x.db?q=1"} {
+			if _, err := resolveDBPathArg(bad); err == nil {
+				t.Errorf("resolveDBPathArg(%q): want error, got nil", bad)
+			}
+		}
+	})
+
+	t.Run("canonicalizes a messy-but-valid path to match its clean equivalent", func(t *testing.T) {
+		cases := []struct{ in, want string }{
+			{"/tmp/sub/./x.db", "/tmp/sub/x.db"},
+			{"/tmp/sub/other/../x.db", "/tmp/sub/x.db"},
+			{"/tmp/sub//x.db", "/tmp/sub/x.db"}, // internal double slash, not a leading one
+		}
+		for _, c := range cases {
+			got, err := resolveDBPathArg(c.in)
+			if err != nil {
+				t.Errorf("resolveDBPathArg(%q): %v", c.in, err)
+				continue
+			}
+			if got != c.want {
+				t.Errorf("resolveDBPathArg(%q) = %q, want %q", c.in, got, c.want)
+			}
+		}
+	})
+}
+
 // TestFilepathCleanClosesSlashCountBypass reproduces bench-rev-5 N-a's two
-// distinct slash-count variants end-to-end. `validateDBPathArg` now rejects
-// any leading "//" outright (see TestValidateDBPathArg), so this test
-// exercises main()'s SECOND, independent layer -- `filepath.Clean`, applied
-// before both `checkDBNotExists` and the actual DSN open in `run()` -- in
-// isolation, as if the first layer were not there, since a blocklist-only
-// fix can always miss a future variant the canonicalization layer would
-// still catch.
+// distinct slash-count variants end-to-end, at the `filepath.Clean` +
+// `checkDBNotExists` layer specifically (as defense-in-depth independent
+// of `validateDBPathArg`'s leading-"//" rejection, which already rejects
+// both inputs below before `resolveDBPathArg` would ever reach `Clean` --
+// see TestResolveDBPathArg and TestValidateDBPathArg for that layer).
 //
 // The two forms behave differently after cleaning, and both are safe:
 //   - "//tmp/..." and "///tmp/..." (no authority-shaped segment) clean down

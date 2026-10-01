@@ -102,31 +102,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := validateDBPathArg(*dbPath); err != nil {
+	dbPathClean, err := resolveDBPathArg(*dbPath)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(2)
 	}
-
-	// bench-rev-5 N-a: canonicalize ONCE, here, and use the result for both
-	// the existence check and the actual DSN construction (run ->
-	// openSQLiteForBench), as defense-in-depth alongside validateDBPathArg's
-	// explicit "//" prefix rejection above. The underlying problem is any
-	// --db value that os.Stat (the existence check) and the "file:" DSN's
-	// URI parsing (the actual open) resolve DIFFERENTLY: a leading "//" is
-	// the demonstrated case (os.Stat never finds a literal
-	// "//localhost/<path>", so wrongly reports "does not exist", while the
-	// DSN parser treats "localhost" as an empty host and resolves to the
-	// real, possibly EXISTING, "<path>"), but a character-by-character
-	// blocklist can only ever reject forms someone thought to try.
-	// filepath.Clean instead collapses any number of consecutive slashes
-	// ANYWHERE in the path to exactly one, so the stat check and the DSN
-	// parser are guaranteed to agree on the same canonical form regardless
-	// of which slash-count variant is used. For every ordinary single-slash
-	// or relative path (the only kind this tool's docs ever recommended),
-	// Clean is a no-op, so normal usage and `openSQLiteForBench`'s
-	// deliberately-unchanged production-matching construction are
-	// unaffected.
-	dbPathClean := filepath.Clean(*dbPath)
 
 	if err := checkDBNotExists(dbPathClean); err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
@@ -207,8 +187,8 @@ func normalizeDBPathForStat(dbPath string) string {
 // fail before that point). Earlier comments on this function claimed
 // rejecting "#"/"%" "closes every such form" -- it did not, and this is
 // not an exhaustive enumeration of DSN-vs-filesystem disagreements either;
-// main() additionally canonicalizes the path with `filepath.Clean` before
-// using it for anything (see main()'s comment), which is what actually
+// `resolveDBPathArg` below additionally canonicalizes the path with
+// `filepath.Clean` before using it for anything, which is what actually
 // closes this specific class, not a character blocklist. Rejecting a
 // leading "//" here as well costs nothing and makes the intent explicit at
 // the validation layer, not just the canonicalization layer.
@@ -235,6 +215,40 @@ func validateDBPathArg(dbPath string) error {
 		}
 	}
 	return nil
+}
+
+// resolveDBPathArg validates raw (see validateDBPathArg) and, if valid,
+// returns the canonical path main() must use for BOTH the existence check
+// and the actual DSN open (run -> openSQLiteForBench) -- the same value
+// passed to both, never two independently-computed ones.
+//
+// bench-rev-6 N6-1: an earlier version had main() call `filepath.Clean`
+// inline and a test that called `filepath.Clean` and `checkDBNotExists`
+// directly, which could not tell the difference between "main() applies
+// this canonicalization" and "main() does not" -- reviewer-confirmed by
+// deleting main()'s `filepath.Clean` call and finding the test suite still
+// passed. Extracting this function means main() and its test call the
+// exact same code path, so removing the canonicalization step from main()
+// now breaks the test too.
+//
+// filepath.Clean collapses any number of consecutive slashes ANYWHERE in
+// the path to exactly one, so the existence check and the DSN parser agree
+// for slash-count variants specifically (bench-rev-5 N-a: a leading "//"
+// can otherwise be reinterpreted as a URI authority by the DSN parsing
+// this tool's sqlite DSN goes through, resolving to a DIFFERENT filesystem
+// path than a plain existence check sees). It does not, on its own,
+// guarantee agreement for every possible DSN-vs-filesystem disagreement --
+// the other URI-special characters ("?", "#", "%", a "file:" prefix) are
+// validateDBPathArg's job, above, not Clean's. For every ordinary
+// single-slash or relative path (the only kind this tool's docs ever
+// recommended), Clean is a no-op, so normal usage and
+// `openSQLiteForBench`'s deliberately-unchanged production-matching
+// construction are unaffected.
+func resolveDBPathArg(raw string) (string, error) {
+	if err := validateDBPathArg(raw); err != nil {
+		return "", err
+	}
+	return filepath.Clean(raw), nil
 }
 
 // checkDBNotExists refuses an already-existing, non-empty dbPath.
