@@ -1218,7 +1218,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	if req.ProjectSlug != "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
-			return opts, "failed to resolve global dir", fmt.Errorf("Failed to get global dir: %w", err)
+			return opts, "failed to resolve global dir", fmt.Errorf("failed to get global dir: %w", err)
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
@@ -1240,12 +1240,12 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	workspaceDir = resolvedWorkspaceDir
 
 	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-		return opts, "failed to create workspace directory", fmt.Errorf("Failed to create workspace directory: %w", err)
+		return opts, "failed to create workspace directory", fmt.Errorf("failed to create workspace directory: %w", err)
 	}
 
 	bucket := s.config.StorageBucket
 	if bucket == "" {
-		return opts, "storage bucket not configured", errors.New("Storage bucket not configured for workspace bootstrap")
+		return opts, "storage bucket not configured", errors.New("storage bucket not configured for workspace bootstrap")
 	}
 
 	if s.config.Debug {
@@ -1258,7 +1258,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
-		return opts, "failed to download workspace from GCS", fmt.Errorf("Failed to download workspace from GCS: %w", err)
+		return opts, "failed to download workspace from GCS", fmt.Errorf("failed to download workspace from GCS: %w", err)
 	}
 
 	opts.Workspace = workspaceDir
