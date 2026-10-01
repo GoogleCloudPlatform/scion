@@ -34,9 +34,9 @@ func newTestLaunchSender(t *testing.T, rtb *mockRuntimeBrokerService, keepaliveI
 	return newLaunchSender(srv, rec, "agent-1", "instance-1", keepaliveInterval)
 }
 
-// TestNewLaunchSender_DefaultsKeepaliveIntervalTo15s covers mutation M4: a
-// non-positive keepaliveInterval (the Hub's create request omitted
-// LaunchKeepaliveSeconds) must default to 15s (design §3.7).
+// TestNewLaunchSender_DefaultsKeepaliveIntervalTo15s covers a non-positive
+// keepaliveInterval (the Hub's create request omitted LaunchKeepaliveSeconds)
+// defaulting to 15s (design §3.7).
 func TestNewLaunchSender_DefaultsKeepaliveIntervalTo15s(t *testing.T) {
 	rtb := &mockRuntimeBrokerService{}
 	for _, in := range []time.Duration{0, -1} {
@@ -68,9 +68,8 @@ func TestLaunchSender_KeepaliveSendsPeriodically(t *testing.T) {
 	}
 }
 
-// TestLaunchSender_KeepaliveStopsOnTerminalStart covers design r8-8 / review
-// r1 F-10: once a terminal send starts, the keepalive loop exits and sends
-// nothing more.
+// TestLaunchSender_KeepaliveStopsOnTerminalStart covers design §3.8.5: once
+// a terminal send starts, the keepalive loop exits and sends nothing more.
 func TestLaunchSender_KeepaliveStopsOnTerminalStart(t *testing.T) {
 	rtb := &mockRuntimeBrokerService{}
 	s := newTestLaunchSender(t, rtb, 15*time.Millisecond)
@@ -96,8 +95,8 @@ func TestLaunchSender_KeepaliveStopsOnTerminalStart(t *testing.T) {
 }
 
 // TestLaunchSender_KeepaliveRecordsCompletedAnswer covers design §3.8.2's
-// gate-answer table applying to keepalives (review r1 F-5): a "completed"
-// answer is recorded without aborting.
+// gate-answer table applying to keepalives: a "completed" answer is
+// recorded without aborting.
 func TestLaunchSender_KeepaliveRecordsCompletedAnswer(t *testing.T) {
 	rtb := &mockRuntimeBrokerService{
 		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
@@ -120,9 +119,9 @@ func TestLaunchSender_KeepaliveRecordsCompletedAnswer(t *testing.T) {
 	}
 }
 
-// TestLaunchSender_KeepaliveRecordsAbortAnswer covers review r1 F-5: a
-// definitive non-continue, non-completed answer (409 lost here) must wake
-// KeepaliveAborted with the classified action.
+// TestLaunchSender_KeepaliveRecordsAbortAnswer covers a definitive
+// non-continue, non-completed answer (409 lost here) waking KeepaliveAborted
+// with the classified action.
 func TestLaunchSender_KeepaliveRecordsAbortAnswer(t *testing.T) {
 	rtb := &mockRuntimeBrokerService{
 		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
@@ -147,9 +146,8 @@ func TestLaunchSender_KeepaliveRecordsAbortAnswer(t *testing.T) {
 	s.WaitKeepaliveStopped() // the loop must exit once aborted
 }
 
-// TestLaunchSender_KeepaliveRetriesAfterBackoff covers mutation M9: a failed
-// keepalive attempt is retried only after a 2-5s jittered backoff, not
-// immediately.
+// TestLaunchSender_KeepaliveRetriesAfterBackoff covers a failed keepalive
+// attempt being retried only after a 2-5s jittered backoff, not immediately.
 func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 	var attempts int32
 	rtb := &mockRuntimeBrokerService{
@@ -172,12 +170,33 @@ func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 		t.Fatalf("expected exactly 2 attempts (1 failure + 1 retry), got %d", got)
 	}
 	if elapsed < 2*time.Second {
-		t.Fatalf("retry landed after %v, want at least the 2s backoff floor (mutation M9 catch)", elapsed)
+		t.Fatalf("retry landed after %v, want at least the 2s backoff floor", elapsed)
 	}
 }
 
-// TestLaunchSender_AttemptTimesOutAt5s covers mutations M5/M6: both the
-// keepalive and terminal attempt timeouts are 5s, not longer.
+// TestLaunchSender_AttemptTimeoutConstants asserts the per-attempt timeout
+// each report kind uses (design §3.10), rather than timing an actual
+// attempt: claimAttemptTimeout, keepaliveAttemptTimeout and
+// terminalAttemptTimeout are separate constants specifically so a change to
+// one cannot silently change the others, and SendClaim/sendKeepaliveOnce/
+// SendTerminal are confirmed to pass them (not a copied literal) by the
+// TestLaunchSender_AttemptTimesOutAt5s behavioral test below.
+func TestLaunchSender_AttemptTimeoutConstants(t *testing.T) {
+	for name, got := range map[string]time.Duration{
+		"claimAttemptTimeout":     claimAttemptTimeout,
+		"keepaliveAttemptTimeout": keepaliveAttemptTimeout,
+		"terminalAttemptTimeout":  terminalAttemptTimeout,
+	} {
+		if got != 5*time.Second {
+			t.Errorf("%s = %v, want 5s", name, got)
+		}
+	}
+}
+
+// TestLaunchSender_AttemptTimesOutAt5s confirms sendOnce (used by all three
+// report kinds) actually enforces a per-attempt bound in the first place,
+// using a generous outer margin so it is not timing-sensitive; the exact
+// value is TestLaunchSender_AttemptTimeoutConstants's job.
 func TestLaunchSender_AttemptTimesOutAt5s(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
@@ -189,27 +208,23 @@ func TestLaunchSender_AttemptTimesOutAt5s(t *testing.T) {
 	}
 	s := newTestLaunchSender(t, rtb, time.Hour)
 
-	t.Run("single attempt", func(t *testing.T) {
-		// sendOnce makes exactly one attempt (no retry loop), so this
-		// isolates the 5s per-attempt timeout itself rather than however
-		// long sendKeepaliveOnce's/sendReportBlocking's retry loop runs.
-		start := time.Now()
-		_, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, 5*time.Second)
-		elapsed := time.Since(start)
-		if err == nil {
-			t.Fatal("expected the attempt to time out (the mock never answers)")
-		}
-		// Generous relative to 5s, but far short of the 60s a
-		// timeout-constant mutation (M5/M6) would produce.
-		if elapsed > 15*time.Second {
-			t.Fatalf("single attempt took %v; the attempt timeout looks much longer than 5s", elapsed)
-		}
-	})
+	// sendOnce makes exactly one attempt (no retry loop), so this isolates
+	// the per-attempt timeout itself rather than however long
+	// sendKeepaliveOnce's/sendReportBlocking's retry loop runs.
+	start := time.Now()
+	_, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, claimAttemptTimeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the attempt to time out (the mock never answers)")
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("single attempt took %v, want roughly claimAttemptTimeout (5s)", elapsed)
+	}
 }
 
 // TestLaunchSender_FanOutAllUnknownMeansUnknown and
-// TestLaunchSender_FanOutMixOfUnknownAndUnreachableMeansRetry cover review r1
-// F-14's fan-out aggregation gaps (design §3.8.5 routing rule 4).
+// TestLaunchSender_FanOutMixOfUnknownAndUnreachableMeansRetry cover the
+// fan-out aggregation (design §3.8.5 routing rule 4).
 func TestLaunchSender_FanOutAllUnknownMeansUnknown(t *testing.T) {
 	srv := newTestServer(t)
 	unknownFunc := func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
@@ -260,9 +275,9 @@ func TestLaunchSender_FanOutMixOfUnknownAndUnreachableMeansRetry(t *testing.T) {
 	}
 }
 
-// TestLaunchSender_FanOut403DoesNotPinButOthersStillConsulted covers review
-// r1 F-8: a 403 from one connection must not pin OwnerHub, and the fan-out
-// must still consult the other connection.
+// TestLaunchSender_FanOut403DoesNotPinButOthersStillConsulted covers a 403
+// from one connection not pinning OwnerHub, with the fan-out still
+// consulting the other connection.
 func TestLaunchSender_FanOut403DoesNotPinButOthersStillConsulted(t *testing.T) {
 	srv := newTestServer(t)
 	hubA := &mockRuntimeBrokerService{
@@ -315,5 +330,38 @@ func TestLaunchSender_FanOutAll403(t *testing.T) {
 	}
 	if got := rec.OwnerHub(); got != "" {
 		t.Fatalf("OwnerHub = %q, want unset (403 never pins)", got)
+	}
+}
+
+// TestLaunchSender_FanOut401DoesNotPinButOthersStillConsulted covers design
+// §3.8.2's gate-answer table not listing 400/401 as a reason to prefer one
+// connection over another: a 401 from a non-owning connection (e.g. during
+// key rotation) must not win a fan-out over the connection that actually
+// owns the launch.
+func TestLaunchSender_FanOut401DoesNotPinButOthersStillConsulted(t *testing.T) {
+	srv := newTestServer(t)
+	hubA := &mockRuntimeBrokerService{
+		launchReportFunc: func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, nil
+		},
+	}
+	hubB := &mockRuntimeBrokerService{} // default: applied
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
+	srv.hubConnections["hub-b"] = &HubConnection{Name: "hub-b", BrokerID: "broker-b", HubClient: &stubBrokerHubClient{brokers: hubB}}
+	srv.hubMu.Unlock()
+
+	rec := newLaunchRecord("L1", "agent-1", "create", "", time.Now().Add(time.Hour), func() {})
+	s := newLaunchSender(srv, rec, "agent-1", "instance-1", time.Hour)
+
+	result, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, time.Second)
+	if err != nil {
+		t.Fatalf("sendOnce: %v", err)
+	}
+	if result.Result != hubclient.AgentLaunchReportResultApplied {
+		t.Fatalf("result = %+v, want the applied answer from hub-b", result)
+	}
+	if got := rec.OwnerHub(); got != "hub-b" {
+		t.Fatalf("OwnerHub = %q, want hub-b (401 from hub-a must not pin)", got)
 	}
 }

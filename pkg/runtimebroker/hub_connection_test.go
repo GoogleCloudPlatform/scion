@@ -210,11 +210,11 @@ func TestMultiKeyBrokerAuth_MatchesAnyKey(t *testing.T) {
 	}
 }
 
-// TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue covers review
-// r1 F-15: the middleware must set authenticatingHubConnCtxKey to the name
-// of the hub connection whose key verified the request, not just let the
-// request through, so resolveHubNameForLaunch's routing rule 2 (design
-// §3.8.5) has something real to read.
+// TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue covers the
+// middleware setting authenticatingHubConnCtxKey to the name of the hub
+// connection whose key verified the request, not just letting the request
+// through, so resolveHubNameForLaunch's routing rule 2 (design §3.8.5) has
+// something real to read.
 func TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue(t *testing.T) {
 	secret1 := []byte("secret-key-for-hub-1-32bytes!!!!")
 	secret2 := []byte("secret-key-for-hub-2-32bytes!!!!")

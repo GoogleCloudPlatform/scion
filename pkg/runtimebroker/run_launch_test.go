@@ -51,6 +51,8 @@ func TestClassifyGateAnswer(t *testing.T) {
 		{"409 not_launched", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonNotLaunched}, gateAbortCleanup},
 		{"403", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, gateAbortCleanup},
 		{"404 agent_launch_unknown", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusNotFound, Code: hubclient.AgentLaunchReportCodeUnknownLaunch}, gateAbortCleanup},
+		{"400", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusBadRequest}, gateStopNoCleanup},
+		{"401", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, gateStopNoCleanup},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -78,6 +80,8 @@ func TestShouldCleanupAfterFailureReport(t *testing.T) {
 		{"409 lost", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonLost}, true},
 		{"403", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, true},
 		{"404 agent_launch_unknown", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusNotFound, Code: hubclient.AgentLaunchReportCodeUnknownLaunch}, true},
+		{"400", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusBadRequest}, false},
+		{"401", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -121,10 +125,9 @@ func TestClassifyStartError(t *testing.T) {
 	})
 }
 
-// TestTerminalContext covers mutation M8 (terminal TTL +10min changed to
-// +0): a deadline several minutes in the past must still leave a live
-// context, because the TTL is deadline + 10 minutes, not the deadline
-// itself.
+// TestTerminalContext covers a deadline several minutes in the past still
+// leaving a live context, because the TTL is deadline + 10 minutes, not the
+// deadline itself.
 func TestTerminalContext(t *testing.T) {
 	ctx, cancel := terminalContext(time.Now().Add(-5 * time.Minute))
 	defer cancel()
@@ -152,10 +155,12 @@ func TestShouldCleanupAfterSucceededReport(t *testing.T) {
 		{"completed", &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultCompleted}, false},
 		{"409 superseded", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonSuperseded}, false},
 		{"409 other_owner", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonOtherOwner}, false},
-		{"409 timed_out (canonical F-6 case)", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonTimedOut}, true},
+		{"409 timed_out", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonTimedOut}, true},
 		{"409 lost", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Reason: hubclient.AgentLaunchReportReasonLost}, true},
 		{"403", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, true},
 		{"404 agent_launch_unknown", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusNotFound, Code: hubclient.AgentLaunchReportCodeUnknownLaunch}, true},
+		{"400", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusBadRequest}, false},
+		{"401", &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusUnauthorized}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -167,11 +172,11 @@ func TestShouldCleanupAfterSucceededReport(t *testing.T) {
 }
 
 // TestCleanupAbortedLaunch_DeletesFilesWhenMarkerMatches and
-// TestCleanupAbortedLaunch_KeepsFilesWhenMarkerMismatched cover review r1
-// F-14: cleanupAbortedLaunch must actually remove the agent's files when its
-// own marker write is still the current one, and must leave them alone when
-// a newer launch's marker write has superseded it (design §3.8.4; this is
-// also the "two brokers sharing an agents root" case, since the marker
+// TestCleanupAbortedLaunch_KeepsFilesWhenMarkerMismatched cover
+// cleanupAbortedLaunch actually removing the agent's files when its own
+// marker write is still the current one, and leaving them alone when a
+// newer launch's marker write has superseded it (design §3.8.4; this is
+// also the two-brokers-sharing-an-agents-root case, since the marker
 // mechanism is broker-agnostic file state, not in-memory state).
 func TestCleanupAbortedLaunch_DeletesFilesWhenMarkerMatches(t *testing.T) {
 	projectDir := t.TempDir()
@@ -235,10 +240,10 @@ func TestCleanupAbortedLaunch_KeepsFilesWhenMarkerMismatched(t *testing.T) {
 	}
 }
 
-// TestLaunchSenderAndLaunchCtx_NoHTTPRequestField is the private-scope
-// passage's B-6 type-level assertion (review r1 F-26): the types the launch
-// goroutine is built from must never carry an *http.Request or http.Request
-// field, so there is no code path that could read one.
+// TestLaunchSenderAndLaunchCtx_NoHTTPRequestField is design §6 B-6's
+// type-level assertion: the types the launch goroutine is built from must
+// never carry an *http.Request or http.Request field, so there is no code
+// path that could read one.
 func TestLaunchSenderAndLaunchCtx_NoHTTPRequestField(t *testing.T) {
 	assertNoHTTPRequestField(t, reflect.TypeOf(launchSender{}))
 	assertNoHTTPRequestField(t, reflect.TypeOf(launchCtx{}))

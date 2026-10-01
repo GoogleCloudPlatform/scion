@@ -19,8 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,13 +42,21 @@ import (
 type asyncManager struct {
 	*mockManager // Provision/Reprovision/Stop/Delete/DeleteTarget/List/Message/MessageRaw/Watch/Close: unused by these tests
 
-	mu           sync.Mutex
-	preflightErr error
-	startErr     error
-	startCalls   int
-	startBlock   chan struct{} // if non-nil, Start waits on it (or ctx) before returning
-	cleanupCalls int
-	cleanupLast  []agent.ResourceHandle
+	mu             sync.Mutex
+	preflightErr   error
+	preflightCalls int
+	startErr       error
+	startCalls     int
+	startBlock     chan struct{} // if non-nil, Start waits on it (or ctx) before returning
+	cleanupCalls   int
+	cleanupLast    []agent.ResourceHandle
+	lastStartCtx   context.Context
+}
+
+func (m *asyncManager) LastStartCtx() context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastStartCtx
 }
 
 func newAsyncManager() *asyncManager {
@@ -54,12 +66,20 @@ func newAsyncManager() *asyncManager {
 func (m *asyncManager) Preflight(ctx context.Context, opts api.StartOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.preflightCalls++
 	return m.preflightErr
+}
+
+func (m *asyncManager) PreflightCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.preflightCalls
 }
 
 func (m *asyncManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.mu.Lock()
 	m.startCalls++
+	m.lastStartCtx = ctx
 	block := m.startBlock
 	startErr := m.startErr
 	m.mu.Unlock()
@@ -251,8 +271,8 @@ func TestAsyncCreate_PreflightTemplateNotFound_SynchronousNoGoroutine(t *testing
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	// Deterministic, not a race: beginAsyncLaunch returns on the Preflight
-	// error before registry.Begin or "go runLaunch" ever run.
+	// Deterministic, not timing-dependent: beginAsyncLaunch returns on the
+	// Preflight error before registry.Begin or "go runLaunch" ever run.
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must not be called when Preflight fails, got %d calls", n)
 	}
@@ -303,10 +323,14 @@ func TestAsyncCreate_RequestNotTouchedAfterResponse(t *testing.T) {
 
 func TestAsyncCreate_FlagAbsent_StaysSynchronous(t *testing.T) {
 	mgr := newAsyncManager()
-	srv, _ := newAsyncTestServer(t, mgr)
+	srv, rtb := newAsyncTestServer(t, mgr)
 
+	// launchId and launchTimeoutSeconds are both present and otherwise
+	// eligible, so only the absent asyncLaunch field itself can be keeping
+	// this synchronous.
 	w := postCreate(t, srv, map[string]any{
-		"name": "agent-4", "config": map[string]any{"template": "claude"},
+		"name": "agent-4", "launchId": "L-4", "launchTimeoutSeconds": 300,
+		"config": map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
@@ -320,6 +344,72 @@ func TestAsyncCreate_FlagAbsent_StaysSynchronous(t *testing.T) {
 	}
 	if n := mgr.StartCallCount(); n != 1 {
 		t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
+	}
+	if n := mgr.PreflightCallCount(); n != 0 {
+		t.Fatalf("Preflight must not be called on the synchronous path, got %d calls", n)
+	}
+	if len(rtb.getLaunchReports()) != 0 {
+		t.Fatalf("the synchronous path must send no launch reports")
+	}
+}
+
+// TestAsyncCreate_ReprovisionStaysSynchronous covers Reprovision taking the
+// same precedence over AsyncLaunch that ProvisionOnly does (design §3.2:
+// "ProvisionOnly and Reprovision ignore AsyncLaunch"), with ProvisionOnly
+// left false so this exercises the gate's own Reprovision check rather than
+// the already-covered ProvisionOnly one.
+func TestAsyncCreate_ReprovisionStaysSynchronous(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-14", "reprovision": true,
+		"asyncLaunch": true, "launchId": "L-14", "launchTimeoutSeconds": 300,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	resp := decodeCreateResponse(t, w)
+	if resp.LaunchPending {
+		t.Fatalf("Reprovision must ignore AsyncLaunch and stay synchronous: %+v", resp)
+	}
+	if n := mgr.PreflightCallCount(); n != 0 {
+		t.Fatalf("Preflight must not be called on the Reprovision path, got %d calls", n)
+	}
+	if n := mgr.StartCallCount(); n != 1 {
+		t.Fatalf("expected exactly 1 synchronous Start call, got %d", n)
+	}
+}
+
+// TestAsyncCreate_LaunchTimeoutTooSmallStaysSynchronous covers the
+// LaunchTimeoutSeconds sanity check in createAgent's gate (handlers.go): a
+// value at or below the broker's 20s abort margin, or the field absent
+// entirely, falls back to the synchronous path rather than accepting a
+// launch that cannot succeed.
+func TestAsyncCreate_LaunchTimeoutTooSmallStaysSynchronous(t *testing.T) {
+	for name, body := range map[string]map[string]any{
+		"at the margin (20)": {
+			"name": "agent-15", "asyncLaunch": true, "launchId": "L-15", "launchTimeoutSeconds": 20,
+			"config": map[string]any{"template": "claude"},
+		},
+		"field absent": {
+			"name": "agent-16", "asyncLaunch": true, "launchId": "L-16",
+			"config": map[string]any{"template": "claude"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr := newAsyncManager()
+			srv, _ := newAsyncTestServer(t, mgr)
+			w := postCreate(t, srv, body)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			resp := decodeCreateResponse(t, w)
+			if resp.LaunchPending {
+				t.Fatalf("expected a synchronous response, got %+v", resp)
+			}
+		})
 	}
 }
 
@@ -394,15 +484,31 @@ func TestAsyncCreate_FailureAnsweredApplied_CleansUpResourcesAndFiles(t *testing
 	srv, rtb := newAsyncTestServer(t, mgr)
 	_ = rtb // default launchReportFunc: always "applied"
 
+	projectDir := t.TempDir()
+	agentDir := filepath.Join(projectDir, ".scion", "agents", "agent-7")
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("mkdir agentDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("task"), 0644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-7", "asyncLaunch": true, "launchId": "L-7",
-		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+		"launchTimeoutSeconds": 300, "projectPath": projectDir,
+		"config": map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
 		t.Fatal("expected CleanupLaunch to be called after a failed report answered applied")
+	}
+	if !waitUntil(t, 2*time.Second, func() bool {
+		_, err := os.Stat(agentDir)
+		return os.IsNotExist(err)
+	}) {
+		t.Fatalf("expected the agent directory %s to be removed after cleanup", agentDir)
 	}
 }
 
@@ -529,12 +635,12 @@ func TestAsyncCreate_ClaimDeletedAbortsWithCleanup(t *testing.T) {
 	}
 }
 
-// TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp covers review
-// r1 F-5 end to end: design §3.8.2's gate-answer table applies to keepalives
-// too, so a stale 409 landing on a keepalive while Manager.Start is still
-// blocked must cancel ctx' and clean up immediately, without waiting for
-// Start to return on its own and without sending a failed/succeeded
-// terminal (the Hub already said this launch is over).
+// TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp covers design
+// §3.8.2's gate-answer table applying to keepalives too, end to end: a
+// stale 409 landing on a keepalive while Manager.Start is still blocked must
+// cancel ctx' and clean up immediately, without waiting for Start to return
+// on its own and without sending a failed/succeeded terminal (the Hub
+// already said this launch is over).
 func TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp(t *testing.T) {
 	mgr := newAsyncManager()
 	mgr.startBlock = make(chan struct{})
@@ -587,13 +693,14 @@ func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testin
 	srv, rtb := newAsyncTestServer(t, mgr)
 
 	var mu sync.Mutex
-	var terminalCode string
+	var terminalCode, terminalStep string
 	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
 		if claimState(req) {
 			return nil, errors.New("simulated unreachable")
 		}
 		mu.Lock()
 		terminalCode = req.ErrorCode
+		terminalStep = req.Step
 		mu.Unlock()
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
@@ -616,7 +723,239 @@ func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testin
 	}) {
 		t.Fatal("expected a failed{hub_unreachable} terminal once ctx' expired")
 	}
+	mu.Lock()
+	if terminalStep != "claim" {
+		t.Errorf("Step = %q, want claim", terminalStep)
+	}
+	mu.Unlock()
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must never be called when the claim never got through, got %d calls", n)
+	}
+}
+
+// TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText covers the
+// synchronous path's GCS-download failure body staying byte-identical to
+// what it was before downloadWorkspaceFromGCS existed as a separate
+// function: capitalized, with no wrapped-error prefix.
+func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-sync-gcs", "workspaceStoragePath": "some/path",
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var errResp ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp.Error.Message != "Storage bucket not configured for workspace bootstrap" {
+		t.Fatalf("message = %q, want the byte-identical capitalized GCS error text", errResp.Error.Message)
+	}
+}
+
+// TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch covers the GCS download
+// running only inside runLaunch for an accepted async create, never
+// synchronously during admission. The test server has no storage bucket
+// configured, so a synchronous download attempt (the regression this guards)
+// would fail admission itself with a 500, never reaching the 201 accept.
+func TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	var failedMessage string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			failedMessage = req.Message
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-17", "asyncLaunch": true, "launchId": "L-17",
+		"launchTimeoutSeconds": 300, "workspaceStoragePath": "some/path",
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s (the GCS download must not run during admission)", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedMessage != ""
+	}) {
+		t.Fatal("expected a failed report once runLaunch's own download attempt failed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(failedMessage, "storage bucket not configured") {
+		t.Fatalf("failed message = %q, want runLaunch's GCS download failure", failedMessage)
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the download fails first, got %d calls", n)
+	}
+}
+
+// TestAsyncCreate_StartSeesAdmissionContextValues covers ctx' being derived
+// from the admission context (which carries values createAgent attaches
+// after r.Context() was read), not r.Context() itself: a value the Hub's
+// config attached before the async gate must still be visible inside
+// Manager.Start.
+func TestAsyncCreate_StartSeesAdmissionContextValues(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-18", "asyncLaunch": true, "launchId": "L-18",
+		"launchTimeoutSeconds": 300,
+		"config": map[string]any{
+			"template":         "claude",
+			"hubAgentDefaults": map[string]any{"maxTurns": 42},
+		},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called")
+	}
+	startCtx := mgr.LastStartCtx()
+	if startCtx == nil {
+		t.Fatal("Start was called with a nil ctx")
+	}
+	defaults := api.HubAgentDefaultsFromContext(startCtx)
+	if defaults == nil || defaults.MaxTurns != 42 {
+		t.Fatalf("HubAgentDefaultsFromContext(startCtx) = %+v, want MaxTurns=42", defaults)
+	}
+}
+
+// TestAsyncCreate_StartTimeoutNamesLaunchingStep covers design §3.9's generic
+// claim -> launching step sequence: once Manager.Start is reached, a failure
+// (here, ctx' expiring while Start is still blocked) is reported with
+// Step == "launching" and ErrorCode == "launch_timeout".
+func TestAsyncCreate_StartTimeoutNamesLaunchingStep(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{}) // never closed: Start blocks until ctx' expires
+	defer close(mgr.startBlock)
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	var step, code string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			step, code = req.Step, req.ErrorCode
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	// LaunchTimeoutSeconds=23 gives ctx' a ~3s budget (23 - the 20s abort margin).
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-19", "asyncLaunch": true, "launchId": "L-19",
+		"launchTimeoutSeconds": 23, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 8*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return code == "launch_timeout"
+	}) {
+		t.Fatal("expected a failed{launch_timeout} terminal once ctx' expired while Start was blocked")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if step != "launching" {
+		t.Errorf("Step = %q, want launching", step)
+	}
+}
+
+// TestAsyncCreate_SucceededAnsweredTimedOut_CleansUp covers design §3.10's
+// "late succeeded answered 409 timed_out" case end to end: the Hub has
+// already recorded the launch as over by the time the succeeded report
+// lands, so the broker must remove what it just started.
+func TestAsyncCreate_SucceededAnsweredTimedOut_CleansUp(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateSucceeded {
+			return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonTimedOut}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-20", "asyncLaunch": true, "launchId": "L-20",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected a succeeded report answered 409 timed_out to trigger cleanup")
+	}
+}
+
+// TestAsyncCreate_MarkerRemovedAfterSuccessfulLaunch covers the launch
+// marker being removed once the launch ends successfully, not just on abort
+// (design §3.8.4: "The launch removes the marker when it ends, if it still
+// holds L").
+func TestAsyncCreate_MarkerRemovedAfterSuccessfulLaunch(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	projectDir := t.TempDir()
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-21", "asyncLaunch": true, "launchId": "L-21",
+		"launchTimeoutSeconds": 300, "projectPath": projectDir,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called")
+	}
+	if !waitUntil(t, time.Second, func() bool {
+		return !launchMarkerMatches(projectDir, false, "agent-21", "L-21")
+	}) {
+		t.Fatal("expected the launch marker to be removed once the launch ended successfully")
+	}
+}
+
+// TestAsyncCreate_ForcesHeartbeatAfterSuccess covers a successful launch
+// forcing an immediate heartbeat (rather than waiting for the next regular
+// tick), matching the synchronous create path's existing behavior.
+func TestAsyncCreate_ForcesHeartbeatAfterSuccess(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	hb := NewHeartbeatService(rtb, "broker-on-a", MinHeartbeatInterval, nil, nil, slog.Default())
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-a"].Heartbeat = hb
+	srv.hubMu.Unlock()
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-22", "asyncLaunch": true, "launchId": "L-22",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return len(rtb.getHeartbeatCalls()) >= 1 }) {
+		t.Fatal("expected a forced heartbeat after the succeeded terminal was answered")
 	}
 }

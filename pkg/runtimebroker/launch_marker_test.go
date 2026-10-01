@@ -15,8 +15,11 @@
 package runtimebroker
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func TestLaunchMarker_WriteReadMatch(t *testing.T) {
@@ -80,5 +83,88 @@ func TestLaunchMarker_NewerLaunchWins(t *testing.T) {
 	removeLaunchMarkerIfMatches(projectDir, false, "agent-1", "L-new")
 	if readLaunchMarker(projectDir, false, "agent-1") != "" {
 		t.Fatal("the current launch's own removal must clear the marker")
+	}
+}
+
+// TestLaunchMarker_ResolvesUnderProjectScionDir covers design
+// t1-async-create-v11.md §3.8.2 step 5.2 and §3.8.4: the marker must live on
+// the same storage as the agent files, under the project's resolved .scion
+// dir, not under whatever root path the caller happened to pass in. A bare
+// t.TempDir() with nothing under it resolves to itself (no .scion to find),
+// which is why the other tests in this file cannot see a resolution bug; this
+// test creates a real .scion dir so config.GetResolvedProjectDir has
+// something to resolve to.
+func TestLaunchMarker_ResolvesUnderProjectScionDir(t *testing.T) {
+	root := t.TempDir()
+	scionDir := filepath.Join(root, ".scion")
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0755); err != nil {
+		t.Fatalf("mkdir .scion/agents: %v", err)
+	}
+
+	// Pass the project root, exactly as lc.opts.ProjectPath carries it — not
+	// the already-resolved .scion dir.
+	if err := writeLaunchMarker(root, false, "agent-1", "L1"); err != nil {
+		t.Fatalf("writeLaunchMarker: %v", err)
+	}
+
+	wantPath := filepath.Join(scionDir, "launch-markers", "agent-1")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("expected marker at %s, got: %v", wantPath, err)
+	}
+
+	wrongPath := filepath.Join(root, "launch-markers", "agent-1")
+	if _, err := os.Stat(wrongPath); err == nil {
+		t.Fatalf("marker must not be written at the unresolved root (%s)", wrongPath)
+	}
+
+	if got := readLaunchMarker(root, false, "agent-1"); got != "L1" {
+		t.Fatalf("readLaunchMarker = %q, want L1", got)
+	}
+	if !launchMarkerMatches(root, false, "agent-1", "L1") {
+		t.Fatal("expected a match for the launch ID just written")
+	}
+
+	removeLaunchMarkerIfMatches(root, false, "agent-1", "L1")
+	if _, err := os.Stat(wantPath); err == nil {
+		t.Fatal("expected the marker to be removed")
+	}
+}
+
+// TestLaunchMarker_SharedWorkspaceExternalLayout covers the shared-workspace
+// case: SelectAgentsRoot resolves to the external project-configs agents dir
+// (GetGitProjectExternalAgentsDir), so the marker must sit alongside that
+// external agents dir, not under the in-repo root.
+func TestLaunchMarker_SharedWorkspaceExternalLayout(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	root := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(root, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir .scion: %v", err)
+	}
+	if err := config.WriteProjectID(scionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatalf("WriteProjectID: %v", err)
+	}
+
+	extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir)
+	if err != nil || extAgentsDir == "" {
+		t.Fatalf("GetGitProjectExternalAgentsDir: dir=%q err=%v", extAgentsDir, err)
+	}
+	if err := os.MkdirAll(extAgentsDir, 0755); err != nil {
+		t.Fatalf("mkdir external agents dir: %v", err)
+	}
+
+	if err := writeLaunchMarker(root, true, "agent-1", "L1"); err != nil {
+		t.Fatalf("writeLaunchMarker: %v", err)
+	}
+
+	wantPath := filepath.Join(filepath.Dir(extAgentsDir), "launch-markers", "agent-1")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("expected marker at %s, got: %v", wantPath, err)
+	}
+
+	if got := readLaunchMarker(root, true, "agent-1"); got != "L1" {
+		t.Fatalf("readLaunchMarker = %q, want L1", got)
 	}
 }

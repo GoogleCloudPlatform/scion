@@ -140,9 +140,9 @@ func TestReportAgentLaunch_409StaleLaunch(t *testing.T) {
 	}
 }
 
-// TestReportAgentLaunch_409UnrecognizedCodeIsRetryable covers review r1
-// F-19: a 409 whose code is not stale_launch is not something the sender can
-// classify by Reason, so it must be treated as retryable, not guessed at.
+// TestReportAgentLaunch_409UnrecognizedCodeIsRetryable covers a 409 whose
+// code is not stale_launch: that is not something the sender can classify by
+// Reason, so it must be treated as retryable, not guessed at.
 func TestReportAgentLaunch_409UnrecognizedCodeIsRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
@@ -160,9 +160,9 @@ func TestReportAgentLaunch_409UnrecognizedCodeIsRetryable(t *testing.T) {
 	}
 }
 
-// TestReportAgentLaunch_400And401AreDefinitive covers review r1 F-19: these
-// are protocol/auth failures, never transient like an unreachable Hub or a
-// 5xx, so the sender must not retry them forever.
+// TestReportAgentLaunch_400And401AreDefinitive covers these being protocol/
+// auth failures, never transient like an unreachable Hub or a 5xx, so the
+// sender must not retry them forever.
 func TestReportAgentLaunch_400And401AreDefinitive(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

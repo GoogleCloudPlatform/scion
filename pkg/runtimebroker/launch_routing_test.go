@@ -115,9 +115,9 @@ func TestLaunchSender_FanOutPinsOwnerOnFirstDefinitiveAnswer(t *testing.T) {
 		t.Fatalf("OwnerHub = %q, want hub-b (the connection that answered)", got)
 	}
 	// sendOnce returns as soon as hub-b's qualifying answer arrives, without
-	// waiting for hub-a's concurrent attempt (review r1 F-8's fan-out is
-	// concurrent, not sequential), so hub-a's record may land a moment
-	// later; poll instead of asserting immediately.
+	// waiting for hub-a's concurrent attempt (the fan-out is concurrent, not
+	// sequential), so hub-a's record may land a moment later; poll instead
+	// of asserting immediately.
 	if !waitUntil(t, time.Second, func() bool { return len(hubA.getLaunchReports()) > 0 }) {
 		t.Fatal("expected the fan-out to have tried hub-a")
 	}

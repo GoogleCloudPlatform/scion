@@ -74,8 +74,8 @@ func (f *plainFakeRuntime) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// TestCleanupLaunch_SkipsHandleWithoutUIDPrecondition covers review r1 F-9: a
-// runtime with no UID-precondition delete must not fall back to an
+// TestCleanupLaunch_SkipsHandleWithoutUIDPrecondition covers design §3.8.4:
+// a runtime with no UID-precondition delete must not fall back to an
 // unconditional Delete(ctx, h.Name) -- that is exactly what the precondition
 // exists to prevent -- so the handle is skipped and reported as an error.
 func TestCleanupLaunch_SkipsHandleWithoutUIDPrecondition(t *testing.T) {

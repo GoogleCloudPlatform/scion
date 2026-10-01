@@ -90,7 +90,7 @@ func TestLaunchRegistry_CancelLocal_WakesTheHeldRecord(t *testing.T) {
 	}
 }
 
-// TestLaunchRegistry_FinishOnlyRemovesIfStillCurrent covers the race where a
+// TestLaunchRegistry_FinishOnlyRemovesIfStillCurrent covers the case where a
 // newer launch has already replaced the record Finish is being called for:
 // Finish must not delete the newer record from the map.
 func TestLaunchRegistry_FinishOnlyRemovesIfStillCurrent(t *testing.T) {
@@ -133,9 +133,8 @@ func TestWaitSuperseded_ReturnsOnCtxDoneIfNeverClosed(t *testing.T) {
 
 // TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish exercises the
 // exact Begin+WaitSuperseded sequence runLaunch uses (design §3.8.2 step
-// 5.2, F5; review r1 F-14): a new launch's marker write must wait for the
-// superseded record's own cleanup (Finish) to complete, not just for Begin
-// to return.
+// 5.2, F5): a new launch's marker write must wait for the superseded
+// record's own cleanup (Finish) to complete, not just for Begin to return.
 func TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish(t *testing.T) {
 	r := newLaunchRegistry()
 	key := launchKey{ProjectID: "p1", Slug: "agent-1"}

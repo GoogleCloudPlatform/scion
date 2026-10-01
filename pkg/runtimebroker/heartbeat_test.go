@@ -117,8 +117,8 @@ func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, broker
 	if fn == nil {
 		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
-	// Run fn in its own goroutine and race it against ctx, so a test's fn
-	// that deliberately never returns (simulating an unresponsive Hub) is
+	// Run fn in its own goroutine and select on it against ctx, so a test's
+	// fn that deliberately never returns (simulating an unresponsive Hub) is
 	// still bounded by the real attemptCtx launchSender builds -- this mock
 	// has no HTTP transport of its own to enforce that, unlike the real
 	// hubclient.RuntimeBrokerService implementation.
