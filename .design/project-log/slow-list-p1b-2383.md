@@ -310,7 +310,7 @@ output: gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
 `origin/main` moved 10 commits past this branch's base (`8429bb7e` ->
 `224eb0328`) during round 2; the EM flagged overlap in
 `handlers_agents_core.go`, `models.go` and `server.go` and asked for a
-rebase before round 3. `git rebase origin/main` replayed all 20 commits
+rebase before round 3. `git rebase origin/main` replayed all 10 commits
 cleanly with **zero conflicts**: the only new-range commit touching those
 files (`224eb0328`, GCP passthrough runtime-awareness) is confined to
 `createAgentInProject`'s GCP-passthrough branch, `GCPIdentityConfig`/
@@ -328,3 +328,46 @@ Force-pushed with `--force-with-lease`. Targeted re-run:
 on both.
 
 New head: `8edbf3f58b12f9ac216a928b2e77658053e92daf`.
+
+## Round 3 review response
+
+Verdict: **APPROVE** (0 blocking, 1 non-blocking, 3 nits). S6, S9, A3, A15
+all PASS -- the reviewer independently re-measured decision counts (4,000-
+4,002 unraced, 4,285-4,496 raced, all inside A15) and confirmed both prior
+rebases were clean replays via `git range-diff`.
+
+All four remaining findings closed, test-only, in `5799d5ff8`:
+
+- **N-1**: the E2 page-size tests computed their expected `P_eff` by calling
+  `effectivePagedPageSize` -- the function under test -- so the reviewer's
+  `/7`->`/8` mutation passed both tests anyway. Hard-coded erratum E2's
+  literal table (`{500:500, 501:499, 700:471, 1200:400, 2000:285}`) as the
+  actual expected values, with a separate sanity check still
+  cross-referencing the live function (so a real future formula/ceiling
+  change is still caught, just not conflated with the test's own
+  correctness). Replayed the reviewer's exact mutation myself: all 5
+  `BoundedByN_DesignSizes` subtests and `PagedRaced_E2` now fail (caught in
+  0.00s by the sanity check, before any HTTP request); reverted; `git
+  status` clean; re-confirmed both pass again.
+- **nit-1**: deleted the orphan doc comment for the already-removed
+  `LimitClampedTo500` test, folded into `BoundedByN_DesignSizes`'s own
+  comment.
+- **nit-2**: the E1 cursor-present sub-case's compared page-2 responses
+  never actually carried a `nextCursor` with only 2 fixture agents, despite
+  the comment's claim. Added a 3rd agent and an explicit assertion that page
+  2 does emit one.
+- **nit-3**: the N-5 walk fixture had `team=""` rows but no walk filtered on
+  them. Added a second walk over the identical fixture with `label=team=`,
+  checked against the same independent oracle, additionally filtered to
+  `team=""` in the test.
+
+Also a second rebase: `origin/main` advanced one more commit
+(`224eb0328` -> `009227cb0`, #2193 reincarnate timeout bound), confined to
+files this branch doesn't touch. Clean replay, zero conflicts.
+`go build`/`go vet` pass; force-pushed with lease.
+
+Verification: targeted hub (62 subtests) and store (5 subtests) tests, 0
+failures, exit 0 on both, plus the N-1 mutation-test proof above.
+
+New head: `5799d5ff8215e1e560e60b217e7ca9e75d137fd3`. Full disposition table:
+gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
