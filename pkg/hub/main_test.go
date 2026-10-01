@@ -22,7 +22,7 @@ import (
 )
 
 // TestMain isolates $HOME for the whole (non-integration) pkg/hub test
-// binary so tests never read or write the real developer/agent HOME (see
+// binary so tests keep scion state off the real developer/agent HOME (see
 // ptone/scion#2417). The integration build has its own TestMain in
 // main_integration_test.go, which applies the same isolation alongside the
 // ent test database setup — Go allows only one TestMain per package per
