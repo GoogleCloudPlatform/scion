@@ -1055,6 +1055,45 @@ func TestSetMemberRoles_Addressing_ByEmailAndSlug(t *testing.T) {
 	assert.Len(t, mmrBindingsFor(t, f.store, "group", groupID, f.projectID), 1)
 }
 
+// TestSetMemberRoles_Addressing_PercentEncodedIDNotDoubleDecoded is L6
+// (review r1): r.URL.Path is already percent-decoded once by net/http
+// before handleProjectRoutes ever sees it, so a second url.PathUnescape in
+// the principals/ routing branch double-decoded the ID. A principal ID that
+// itself contains a literal "%" (sent double-percent-encoded on the wire, as
+// a real client must) was silently corrupted into a different string.
+func TestSetMemberRoles_Addressing_PercentEncodedIDNotDoubleDecoded(t *testing.T) {
+	f := setupMMRFixture(t)
+	targetID := tid(t.Name() + "-target")
+	// An email containing a literal "%40" substring (not meant to represent
+	// "@" — the user's actual "@" is later in the string). A correct client
+	// escapes the literal "%" as "%25" on the wire; double-decoding would
+	// turn this "%40" into "@", producing a different (and non-existent)
+	// email with two "@" signs.
+	email := "a%40b-" + tid(t.Name())[:8] + "@test.com"
+	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
+		ID: targetID, Email: email, DisplayName: "Target", Role: "member", Status: "active",
+	}))
+
+	wireSegment := strings.ReplaceAll(email, "%", "%25")
+	path := fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", f.projectID, wireSegment)
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, path,
+		map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", targetID, f.projectID), 1, "the literal percent-containing email must resolve correctly, not a double-decoded variant")
+}
+
+// TestSetMemberRoles_Addressing_SlashInPrincipalIDRejected is L6 (review
+// r1): SplitN(principalPath, "/", 2) lets "principals/user/a/b" through as a
+// two-segment ID "a/b" unless the routing layer explicitly rejects an ID
+// containing "/".
+func TestSetMemberRoles_Addressing_SlashInPrincipalIDRejected(t *testing.T) {
+	f := setupMMRFixture(t)
+	path := fmt.Sprintf("/api/v1/projects/%s/members/principals/user/a/b", f.projectID)
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, path,
+		map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}})
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
 func TestSetMemberRoles_Addressing_DeleteOnPrincipalWithNoBindings404(t *testing.T) {
 	f := setupMMRFixture(t)
 	nobody := tid(t.Name() + "-nobody")
