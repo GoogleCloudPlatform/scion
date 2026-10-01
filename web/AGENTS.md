@@ -10,7 +10,7 @@ Before making changes, review the relevant design documentation:
 
 ## Experimental features
 
-New experimental user-facing features must be launched behind a registered experiment (`pkg/experiments/registry.go`); see `docs-site/src/content/docs/reference/experiments.md`. Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
+New experimental user-facing features must be launched behind a registered experiment (`pkg/experiments/registry.go`); see `docs-site/src/content/docs/reference/experiments.md`. Browser-side flag values are user-editable and only affect presentation; if an experiment changes hub behaviour, register it with the server layer and check it in the hub (`requireExperiment` / `experimentEnabled`). Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
 
 ## Architecture Overview
 
