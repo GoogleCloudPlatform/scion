@@ -289,9 +289,52 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 		readableSet[id] = true
 	}
 
-	got := walkAllPagesIDsAs(t, f, caller, "desc", 7)
-	assert.Equal(t, want, got, "a non-owner member's walk over a multi-project store with a strict readable subset must match an independently agentsort-sorted reference")
-	for _, id := range got {
-		assert.True(t, readableSet[id], "the walk must never return an agent from another project or one the caller cannot read: %s", id)
-	}
+	t.Run("no_label_filter", func(t *testing.T) {
+		got := walkAllPagesIDsAs(t, f, caller, "desc", 7)
+		assert.Equal(t, want, got, "a non-owner member's walk over a multi-project store with a strict readable subset must match an independently agentsort-sorted reference")
+		for _, id := range got {
+			assert.True(t, readableSet[id], "the walk must never return an agent from another project or one the caller cannot read: %s", id)
+		}
+	})
+
+	// r3 review nit-3: the fixture above creates team="" (empty-value label)
+	// rows, but the walk never actually filtered on that label, so the k=""
+	// filter edge case went unexercised on the sorted path. This sub-test
+	// reuses the exact same fixture (not a fresh one) and adds label=team=,
+	// checked against an independently filtered reference: the same
+	// readable/GetAgentsByIDs/agentsort.SortRows oracle as above, additionally
+	// restricted in this test to the rows whose persisted Labels["team"]=="".
+	t.Run("empty_value_label_filter", func(t *testing.T) {
+		var wantFiltered []string
+		for _, row := range rows {
+			if fullRows[row.ID].Labels["team"] == "" {
+				wantFiltered = append(wantFiltered, row.ID)
+			}
+		}
+		require.NotEmpty(t, wantFiltered, "the fixture must actually contain readable team=\"\" rows, or this sub-test proves nothing")
+
+		var got []string
+		cursor := ""
+		for pages := 0; ; pages++ {
+			require.Less(t, pages, 1000)
+			q := "sort=updated&dir=desc&limit=7&label=team="
+			if cursor != "" {
+				q += "&cursor=" + url.QueryEscape(cursor)
+			}
+			rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(q), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			resp := mustDecodeListAgentsResponse(t, rec.Body)
+			for _, a := range resp.Agents {
+				got = append(got, a.ID)
+			}
+			if resp.NextCursor == "" {
+				break
+			}
+			cursor = resp.NextCursor
+		}
+		assert.Equal(t, wantFiltered, got, "a label=team= (empty-value) walk must match the same independent reference, additionally filtered to team=\"\" in this test")
+		for _, id := range got {
+			assert.True(t, readableSet[id], "the filtered walk must never return an agent from another project or one the caller cannot read: %s", id)
+		}
+	})
 }

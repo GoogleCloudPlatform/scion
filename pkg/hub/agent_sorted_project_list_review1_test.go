@@ -46,35 +46,48 @@ import (
 // --- B3/B-1: sorted mode must clamp limit to 500, and the paged page size
 // must additionally stay inside A15 at every candidate count n -------------
 
-// TestListProjectAgentsSorted_LimitClampedTo500 is superseded by erratum E2
-// (lists-graph-errata.md, 2026-10-01): the original version of this test
-// asserted limit=700/n=700 costs 5+700+7*500=4,205 decisions, which r2
-// review finding B-1 showed is itself over the A15 ceiling (4,005) -- the
-// 500 clamp alone does not keep every paged request inside A15 at every n.
-// TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes below
-// replaces it with the erratum's P_eff = min(limit, floor((4000-n)/7))
-// formula, asserting the exact page size and decision count at n in
-// {500, 501, 700, 1200, 2000} and limit=500 -- all <= 4,005 decisions,
-// never 4,205.
-
 // TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes is
-// erratum E2's primary S6 test: at limit=500, the paged branch's actual page
-// size is P_eff = min(limit, floor((4000-n)/7)), not limit itself, so the
-// per-request decision cost 5+n+7*P_eff never exceeds the A15 ceiling
+// erratum E2's primary S6 test, superseding the original B3 test
+// (TestListProjectAgentsSorted_LimitClampedTo500, which pinned
+// limit=700/n=700 at 5+700+7*500=4,205 decisions -- itself over the A15
+// ceiling, r2 review finding B-1): at limit=500, the paged branch's actual
+// page size is P_eff = min(limit, floor((4000-n)/7)), not limit itself, so
+// the per-request decision cost 5+n+7*P_eff never exceeds the A15 ceiling
 // (sortedProjectDecisionCeiling, 4,005) at any of the design's own n values.
+//
+// r3 review N-1: the expected page size and decision count are hard-coded
+// from erratum E2's own table here, not derived by calling
+// effectivePagedPageSize (the function under test) -- the reviewer mutated
+// "/7" to "/8" in that function and both this test and PagedRaced_E2 still
+// passed, because a self-referential expected value cannot catch an
+// over-strict P_eff (only an over-ceiling one, via the <=4,005 check). The
+// literal table below is erratum E2's own worked example: at n<=500,
+// P_eff==limit (500); at n=2,000, P_eff<=285.
 func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing.T) {
 	const limit = 500
-	sizes := []int{500, 501, 700, 1200, 2000}
-	for _, n := range sizes {
-		n := n
+	// n -> expected P_eff = min(500, floor((4000-n)/7)), hard-coded per r3
+	// review N-1, not computed from effectivePagedPageSize.
+	wantPEffBySize := map[int]int{
+		500:  500,  // floor(3500/7)=500, equal to limit
+		501:  499,  // floor(3499/7)=499
+		700:  471,  // floor(3300/7)=471 (471*7=3297, 472*7=3304)
+		1200: 400,  // floor(2800/7)=400
+		2000: 285,  // floor(2000/7)=285 (285*7=1995, 286*7=2002)
+	}
+	for n, wantPEff := range wantPEffBySize {
+		n, wantPEff := n, wantPEff
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
-			f := sortedListSetup(t)
-			f.createAgentsBulk(t, n, "e2sz", string(state.PhaseStopped), nil) // nil ownerFor: every agent owned by f.owner, so R=n
-
-			wantPEff := effectivePagedPageSize(limit, n)
-			require.LessOrEqual(t, wantPEff, limit)
+			// Sanity-check the hard-coded table against the function under
+			// test and against A15 itself, so a genuine future change to
+			// either the formula or the ceiling constant is caught here
+			// too, not just silently diverges from this literal table.
+			require.Equal(t, effectivePagedPageSize(limit, n), wantPEff,
+				"this test's hard-coded table must track effectivePagedPageSize's actual behavior")
 			require.LessOrEqual(t, 5+n+7*wantPEff, sortedProjectDecisionCeiling,
 				"the erratum's whole point: P_eff must keep the paged request inside A15")
+
+			f := sortedListSetup(t)
+			f.createAgentsBulk(t, n, "e2sz", string(state.PhaseStopped), nil) // nil ownerFor: every agent owned by f.owner, so R=n
 
 			emitter := &recordingDecisionAuditEmitter{}
 			f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -84,7 +97,7 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			resp := mustDecodeListAgentsResponse(t, rec.Body)
 
-			assert.Len(t, resp.Agents, wantPEff, "the page must hold exactly P_eff items, not min(limit, n)")
+			assert.Len(t, resp.Agents, wantPEff, "the page must hold exactly the erratum E2 table's P_eff, not min(limit, n)")
 			assert.Equal(t, n, resp.TotalCount, "totalCount is the full readable candidate count, independent of page size")
 			if wantPEff < n {
 				assert.NotEmpty(t, resp.NextCursor, "fewer items than n were returned, so there must be a next page")
@@ -93,7 +106,7 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 			}
 
 			want := 5 + n + 7*wantPEff
-			assert.Len(t, emitter.records, want, "decision cost must reflect P_eff, not the requested/clamped limit")
+			assert.Len(t, emitter.records, want, "decision cost must reflect the erratum E2 table's P_eff, not the requested/clamped limit")
 		})
 	}
 }
@@ -156,19 +169,26 @@ func TestListProjectAgentsSorted_PagedWalk_E2_AllReadableReturnedOnce(t *testing
 
 // TestListProjectAgentsSorted_PagedRaced_E2_StaysUnderRacedCeiling is
 // erratum E2's raced variant: at n=501, limit=500 (so P_eff=499, per
-// effectivePagedPageSize), racing every single page item still costs at
-// most 4,504 decisions (5+n+8*P_eff: every raced item costs 8, not 7,
+// effectivePagedPageSize), racing every single page item still costs
+// exactly 4,498 decisions (5+n+8*P_eff: every raced item costs 8, not 7,
 // because step 5a re-decides all 8 actions including read, not just the 7
 // remaining ones) -- inside the design's stated raced exception to A15
 // (4,505), even though the unraced variant above is already at 4,005.
+//
+// r3 review N-1: pEff (and therefore the expected decision count) is
+// hard-coded here, not derived by calling effectivePagedPageSize -- see
+// PagedPageSize_BoundedByN_DesignSizes's doc comment for why a
+// self-referential expected value cannot catch an over-strict P_eff.
 func TestListProjectAgentsSorted_PagedRaced_E2_StaysUnderRacedCeiling(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 501
 	const limit = 500
+	const wantPEff = 499 // floor((4000-501)/7) = floor(3499/7) = 499
 	f.createAgentsBulk(t, n, "e2raced", string(state.PhaseStopped), nil)
 
-	pEff := effectivePagedPageSize(limit, n)
-	require.Less(t, pEff, n, "a race on every page item is only interesting if the page doesn't already cover every candidate")
+	require.Equal(t, wantPEff, effectivePagedPageSize(limit, n),
+		"this test's hard-coded pEff must track effectivePagedPageSize's actual behavior")
+	require.Less(t, wantPEff, n, "a race on every page item is only interesting if the page doesn't already cover every candidate")
 
 	raced := &racingAllMembersStore{Store: f.store}
 	f.srv.store = raced
@@ -179,9 +199,9 @@ func TestListProjectAgentsSorted_PagedRaced_E2_StaysUnderRacedCeiling(t *testing
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&limit=%d", limit)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
-	require.Len(t, resp.Agents, pEff, "every page item must still be kept: the race only changes Labels, which no filter in this request cares about")
+	require.Len(t, resp.Agents, wantPEff, "every page item must still be kept: the race only changes Labels, which no filter in this request cares about")
 
-	want := 5 + n + 8*pEff
+	const want = 5 + n + 8*wantPEff // 5 + 501 + 8*499 = 4,498
 	assert.Len(t, emitter.records, want, "every page item raced costs 8 (full re-decision), not 7")
 	assert.LessOrEqual(t, want, 4504, "the design's stated raced exception to A15")
 }
@@ -734,6 +754,13 @@ func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) 
 	f := sortedListSetup(t)
 	f.createAgent(t, "n6-a", string(state.PhaseRunning), nil)
 	f.createAgent(t, "n6-b", string(state.PhaseStopped), nil)
+	// A third agent (r3 review nit-2): with only 2 agents, the
+	// project_endpoint_cursor_present sub-case's page-2 responses (the ones
+	// actually compared) were always the *last* page, so neither ever had a
+	// nextCursor, even though its comment claimed the emitted
+	// nextCursor/binding was part of the byte comparison. A 3rd agent makes
+	// page 2 non-terminal, so it carries a real nextCursor too.
+	f.createAgent(t, "n6-c", string(state.PhaseStopped), nil)
 
 	// Valid values (the original test's case), plus the invalid shapes the
 	// reviewer's probe used (dir=sideways, fit=0) plus two more unparsable
@@ -762,7 +789,9 @@ func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) 
 	})
 
 	t.Run("project_endpoint_cursor_present", func(t *testing.T) {
-		// limit=1 forces a nextCursor with 2 agents in the project.
+		// limit=1 over 3 agents: page 1 carries a cursor into page 2, and
+		// page 2 (the one actually compared below) is *not* the last page
+		// either, so it carries its own nextCursor too (r3 review nit-2).
 		page1 := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("limit=1"), nil)
 		require.Equal(t, http.StatusOK, page1.Code, page1.Body.String())
 		resp1 := mustDecodeListAgentsResponse(t, page1.Body)
@@ -771,6 +800,9 @@ func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) 
 
 		base := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("limit=1&"+cursorQS), nil)
 		require.Equal(t, http.StatusOK, base.Code, base.Body.String())
+		baseResp := mustDecodeListAgentsResponse(t, base.Body)
+		require.NotEmpty(t, baseResp.NextCursor,
+			"page 2 must itself emit a nextCursor, or the byte comparison below never actually exercises one (r3 review nit-2)")
 		baseBody := rawBodyWithoutServerTime(base)
 
 		for _, extra := range extras {
