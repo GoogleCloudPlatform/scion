@@ -67,21 +67,28 @@ type plainFakeRuntime struct {
 	deletes []string
 }
 
+func (f *plainFakeRuntime) Name() string { return "plain" }
+
 func (f *plainFakeRuntime) Delete(ctx context.Context, id string) error {
 	f.deletes = append(f.deletes, id)
 	return nil
 }
 
-func TestCleanupLaunch_FallsBackToPlainDeleteByName(t *testing.T) {
+// TestCleanupLaunch_SkipsHandleWithoutUIDPrecondition covers review r1 F-9: a
+// runtime with no UID-precondition delete must not fall back to an
+// unconditional Delete(ctx, h.Name) -- that is exactly what the precondition
+// exists to prevent -- so the handle is skipped and reported as an error.
+func TestCleanupLaunch_SkipsHandleWithoutUIDPrecondition(t *testing.T) {
 	rt := &plainFakeRuntime{}
 	mgr := &AgentManager{Runtime: rt}
 
 	handles := []ResourceHandle{{Kind: "container", Name: "container-1"}}
-	if err := mgr.CleanupLaunch(context.Background(), handles); err != nil {
-		t.Fatalf("CleanupLaunch: %v", err)
+	err := mgr.CleanupLaunch(context.Background(), handles)
+	if err == nil {
+		t.Fatal("expected an error for a handle the runtime cannot UID-precondition delete")
 	}
-	if len(rt.deletes) != 1 || rt.deletes[0] != "container-1" {
-		t.Fatalf("expected a plain Delete(\"container-1\"), got %v", rt.deletes)
+	if len(rt.deletes) != 0 {
+		t.Fatalf("expected no unconditional delete-by-name, got %v", rt.deletes)
 	}
 }
 

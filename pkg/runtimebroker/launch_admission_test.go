@@ -261,6 +261,43 @@ func TestAsyncCreate_PreflightTemplateNotFound_SynchronousNoGoroutine(t *testing
 	}
 }
 
+// TestAsyncCreate_RequestNotTouchedAfterResponse is B-6's -race evidence
+// (private-scope passage): once the 201 is written, the test goroutine
+// mutates the *http.Request concurrently with runLaunch proceeding in the
+// background. Run with -race, this fails if the launch goroutine (or
+// anything it calls) ever reads the request.
+func TestAsyncCreate_RequestNotTouchedAfterResponse(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	defer close(mgr.startBlock)
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	body, err := json.Marshal(map[string]any{
+		"name": "agent-13", "asyncLaunch": true, "launchId": "L-13",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	// The launch goroutine is running concurrently now (Start is blocked).
+	// Mutate the request freely; -race must find nothing.
+	req.Header.Set("X-Test-Touch-After-Response", "1")
+	_ = req.Context()
+
+	if !waitUntil(t, time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called")
+	}
+}
+
 // --- B-6: with asyncLaunch absent, behavior is byte-identical; ProvisionOnly
 // plus async stays synchronous. ---
 
@@ -434,6 +471,111 @@ func TestAsyncCreate_ClaimOtherOwner_AbortsNoStartNoCleanup(t *testing.T) {
 	}
 	if got := len(rtb.getLaunchReports()); got != 1 {
 		t.Fatalf("expected no terminal report after other_owner, got %d reports", got)
+	}
+}
+
+// TestAsyncCreate_ClaimSuperseded_AbortsNoStartNoCleanup covers B-2/B-4's
+// superseded case specifically (distinct from other_owner, though both
+// classify to gateAbortNoCleanup).
+func TestAsyncCreate_ClaimSuperseded_AbortsNoStartNoCleanup(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonSuperseded}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-10", "asyncLaunch": true, "launchId": "L-10",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, time.Second, func() bool { return len(rtb.getLaunchReports()) >= 1 }) {
+		t.Fatal("expected a claim report")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called after a 409 superseded claim, got %d calls", n)
+	}
+	if n := mgr.CleanupCallCount(); n != 0 {
+		t.Fatalf("superseded must not clean up, got %d calls", n)
+	}
+}
+
+// TestAsyncCreate_ClaimDeletedAbortsWithCleanup covers B-2's abort-cleanup
+// branch at the claim: a 409 the Hub uses for "the agent never ran and this
+// launch is over" (deleted here; timed_out/lost/stopped/failed/not_launched,
+// 403 and 404 agent_launch_unknown all classify the same way).
+func TestAsyncCreate_ClaimDeletedAbortsWithCleanup(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-11", "asyncLaunch": true, "launchId": "L-11",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected CleanupLaunch to be called after a 409 deleted claim")
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called after an abort-cleanup claim answer, got %d calls", n)
+	}
+}
+
+// TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp covers review
+// r1 F-5 end to end: design §3.8.2's gate-answer table applies to keepalives
+// too, so a stale 409 landing on a keepalive while Manager.Start is still
+// blocked must cancel ctx' and clean up immediately, without waiting for
+// Start to return on its own and without sending a failed/succeeded
+// terminal (the Hub already said this launch is over).
+func TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{})
+	defer close(mgr.startBlock)
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	keepalives := 0
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		mu.Lock()
+		keepalives++
+		n := keepalives
+		mu.Unlock()
+		if n == 1 {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonLost}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-12", "asyncLaunch": true, "launchId": "L-12",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() >= 1 }) {
+		t.Fatal("expected Start to be called (and then blocked)")
+	}
+	if !waitUntil(t, 5*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected a keepalive abort to trigger CleanupLaunch while Start was still blocked")
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a keepalive-triggered abort must send no terminal, got %+v", r.Report)
+		}
 	}
 }
 

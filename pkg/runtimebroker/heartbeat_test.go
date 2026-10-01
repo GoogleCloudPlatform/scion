@@ -114,10 +114,29 @@ func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, broker
 	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
 	fn := m.launchReportFunc
 	m.mu.Unlock()
-	if fn != nil {
-		return fn(req)
+	if fn == nil {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
 	}
-	return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	// Run fn in its own goroutine and race it against ctx, so a test's fn
+	// that deliberately never returns (simulating an unresponsive Hub) is
+	// still bounded by the real attemptCtx launchSender builds -- this mock
+	// has no HTTP transport of its own to enforce that, unlike the real
+	// hubclient.RuntimeBrokerService implementation.
+	type fnResult struct {
+		result *hubclient.AgentLaunchReportResult
+		err    error
+	}
+	done := make(chan fnResult, 1)
+	go func() {
+		result, err := fn(req)
+		done <- fnResult{result, err}
+	}()
+	select {
+	case r := <-done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (m *mockRuntimeBrokerService) getLaunchReports() []*mockLaunchReportCall {
