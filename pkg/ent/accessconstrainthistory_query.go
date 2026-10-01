@@ -4,7 +4,6 @@ package ent
 
 import (
 	"context"
-	"database/sql/driver"
 	"fmt"
 	"math"
 
@@ -19,54 +18,54 @@ import (
 	"github.com/google/uuid"
 )
 
-// AccessConstraintQuery is the builder for querying AccessConstraint entities.
-type AccessConstraintQuery struct {
+// AccessConstraintHistoryQuery is the builder for querying AccessConstraintHistory entities.
+type AccessConstraintHistoryQuery struct {
 	config
-	ctx         *QueryContext
-	order       []accessconstraint.OrderOption
-	inters      []Interceptor
-	predicates  []predicate.AccessConstraint
-	withHistory *AccessConstraintHistoryQuery
-	modifiers   []func(*sql.Selector)
+	ctx            *QueryContext
+	order          []accessconstrainthistory.OrderOption
+	inters         []Interceptor
+	predicates     []predicate.AccessConstraintHistory
+	withConstraint *AccessConstraintQuery
+	modifiers      []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
 }
 
-// Where adds a new predicate for the AccessConstraintQuery builder.
-func (_q *AccessConstraintQuery) Where(ps ...predicate.AccessConstraint) *AccessConstraintQuery {
+// Where adds a new predicate for the AccessConstraintHistoryQuery builder.
+func (_q *AccessConstraintHistoryQuery) Where(ps ...predicate.AccessConstraintHistory) *AccessConstraintHistoryQuery {
 	_q.predicates = append(_q.predicates, ps...)
 	return _q
 }
 
 // Limit the number of records to be returned by this query.
-func (_q *AccessConstraintQuery) Limit(limit int) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) Limit(limit int) *AccessConstraintHistoryQuery {
 	_q.ctx.Limit = &limit
 	return _q
 }
 
 // Offset to start from.
-func (_q *AccessConstraintQuery) Offset(offset int) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) Offset(offset int) *AccessConstraintHistoryQuery {
 	_q.ctx.Offset = &offset
 	return _q
 }
 
 // Unique configures the query builder to filter duplicate records on query.
 // By default, unique is set to true, and can be disabled using this method.
-func (_q *AccessConstraintQuery) Unique(unique bool) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) Unique(unique bool) *AccessConstraintHistoryQuery {
 	_q.ctx.Unique = &unique
 	return _q
 }
 
 // Order specifies how the records should be ordered.
-func (_q *AccessConstraintQuery) Order(o ...accessconstraint.OrderOption) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) Order(o ...accessconstrainthistory.OrderOption) *AccessConstraintHistoryQuery {
 	_q.order = append(_q.order, o...)
 	return _q
 }
 
-// QueryHistory chains the current query on the "history" edge.
-func (_q *AccessConstraintQuery) QueryHistory() *AccessConstraintHistoryQuery {
-	query := (&AccessConstraintHistoryClient{config: _q.config}).Query()
+// QueryConstraint chains the current query on the "constraint" edge.
+func (_q *AccessConstraintHistoryQuery) QueryConstraint() *AccessConstraintQuery {
+	query := (&AccessConstraintClient{config: _q.config}).Query()
 	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
 		if err := _q.prepareQuery(ctx); err != nil {
 			return nil, err
@@ -76,9 +75,9 @@ func (_q *AccessConstraintQuery) QueryHistory() *AccessConstraintHistoryQuery {
 			return nil, err
 		}
 		step := sqlgraph.NewStep(
-			sqlgraph.From(accessconstraint.Table, accessconstraint.FieldID, selector),
-			sqlgraph.To(accessconstrainthistory.Table, accessconstrainthistory.FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, accessconstraint.HistoryTable, accessconstraint.HistoryColumn),
+			sqlgraph.From(accessconstrainthistory.Table, accessconstrainthistory.FieldID, selector),
+			sqlgraph.To(accessconstraint.Table, accessconstraint.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, accessconstrainthistory.ConstraintTable, accessconstrainthistory.ConstraintColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -86,21 +85,21 @@ func (_q *AccessConstraintQuery) QueryHistory() *AccessConstraintHistoryQuery {
 	return query
 }
 
-// First returns the first AccessConstraint entity from the query.
-// Returns a *NotFoundError when no AccessConstraint was found.
-func (_q *AccessConstraintQuery) First(ctx context.Context) (*AccessConstraint, error) {
+// First returns the first AccessConstraintHistory entity from the query.
+// Returns a *NotFoundError when no AccessConstraintHistory was found.
+func (_q *AccessConstraintHistoryQuery) First(ctx context.Context) (*AccessConstraintHistory, error) {
 	nodes, err := _q.Limit(1).All(setContextOp(ctx, _q.ctx, ent.OpQueryFirst))
 	if err != nil {
 		return nil, err
 	}
 	if len(nodes) == 0 {
-		return nil, &NotFoundError{accessconstraint.Label}
+		return nil, &NotFoundError{accessconstrainthistory.Label}
 	}
 	return nodes[0], nil
 }
 
 // FirstX is like First, but panics if an error occurs.
-func (_q *AccessConstraintQuery) FirstX(ctx context.Context) *AccessConstraint {
+func (_q *AccessConstraintHistoryQuery) FirstX(ctx context.Context) *AccessConstraintHistory {
 	node, err := _q.First(ctx)
 	if err != nil && !IsNotFound(err) {
 		panic(err)
@@ -108,22 +107,22 @@ func (_q *AccessConstraintQuery) FirstX(ctx context.Context) *AccessConstraint {
 	return node
 }
 
-// FirstID returns the first AccessConstraint ID from the query.
-// Returns a *NotFoundError when no AccessConstraint ID was found.
-func (_q *AccessConstraintQuery) FirstID(ctx context.Context) (id uuid.UUID, err error) {
-	var ids []uuid.UUID
+// FirstID returns the first AccessConstraintHistory ID from the query.
+// Returns a *NotFoundError when no AccessConstraintHistory ID was found.
+func (_q *AccessConstraintHistoryQuery) FirstID(ctx context.Context) (id string, err error) {
+	var ids []string
 	if ids, err = _q.Limit(1).IDs(setContextOp(ctx, _q.ctx, ent.OpQueryFirstID)); err != nil {
 		return
 	}
 	if len(ids) == 0 {
-		err = &NotFoundError{accessconstraint.Label}
+		err = &NotFoundError{accessconstrainthistory.Label}
 		return
 	}
 	return ids[0], nil
 }
 
 // FirstIDX is like FirstID, but panics if an error occurs.
-func (_q *AccessConstraintQuery) FirstIDX(ctx context.Context) uuid.UUID {
+func (_q *AccessConstraintHistoryQuery) FirstIDX(ctx context.Context) string {
 	id, err := _q.FirstID(ctx)
 	if err != nil && !IsNotFound(err) {
 		panic(err)
@@ -131,10 +130,10 @@ func (_q *AccessConstraintQuery) FirstIDX(ctx context.Context) uuid.UUID {
 	return id
 }
 
-// Only returns a single AccessConstraint entity found by the query, ensuring it only returns one.
-// Returns a *NotSingularError when more than one AccessConstraint entity is found.
-// Returns a *NotFoundError when no AccessConstraint entities are found.
-func (_q *AccessConstraintQuery) Only(ctx context.Context) (*AccessConstraint, error) {
+// Only returns a single AccessConstraintHistory entity found by the query, ensuring it only returns one.
+// Returns a *NotSingularError when more than one AccessConstraintHistory entity is found.
+// Returns a *NotFoundError when no AccessConstraintHistory entities are found.
+func (_q *AccessConstraintHistoryQuery) Only(ctx context.Context) (*AccessConstraintHistory, error) {
 	nodes, err := _q.Limit(2).All(setContextOp(ctx, _q.ctx, ent.OpQueryOnly))
 	if err != nil {
 		return nil, err
@@ -143,14 +142,14 @@ func (_q *AccessConstraintQuery) Only(ctx context.Context) (*AccessConstraint, e
 	case 1:
 		return nodes[0], nil
 	case 0:
-		return nil, &NotFoundError{accessconstraint.Label}
+		return nil, &NotFoundError{accessconstrainthistory.Label}
 	default:
-		return nil, &NotSingularError{accessconstraint.Label}
+		return nil, &NotSingularError{accessconstrainthistory.Label}
 	}
 }
 
 // OnlyX is like Only, but panics if an error occurs.
-func (_q *AccessConstraintQuery) OnlyX(ctx context.Context) *AccessConstraint {
+func (_q *AccessConstraintHistoryQuery) OnlyX(ctx context.Context) *AccessConstraintHistory {
 	node, err := _q.Only(ctx)
 	if err != nil {
 		panic(err)
@@ -158,11 +157,11 @@ func (_q *AccessConstraintQuery) OnlyX(ctx context.Context) *AccessConstraint {
 	return node
 }
 
-// OnlyID is like Only, but returns the only AccessConstraint ID in the query.
-// Returns a *NotSingularError when more than one AccessConstraint ID is found.
+// OnlyID is like Only, but returns the only AccessConstraintHistory ID in the query.
+// Returns a *NotSingularError when more than one AccessConstraintHistory ID is found.
 // Returns a *NotFoundError when no entities are found.
-func (_q *AccessConstraintQuery) OnlyID(ctx context.Context) (id uuid.UUID, err error) {
-	var ids []uuid.UUID
+func (_q *AccessConstraintHistoryQuery) OnlyID(ctx context.Context) (id string, err error) {
+	var ids []string
 	if ids, err = _q.Limit(2).IDs(setContextOp(ctx, _q.ctx, ent.OpQueryOnlyID)); err != nil {
 		return
 	}
@@ -170,15 +169,15 @@ func (_q *AccessConstraintQuery) OnlyID(ctx context.Context) (id uuid.UUID, err 
 	case 1:
 		id = ids[0]
 	case 0:
-		err = &NotFoundError{accessconstraint.Label}
+		err = &NotFoundError{accessconstrainthistory.Label}
 	default:
-		err = &NotSingularError{accessconstraint.Label}
+		err = &NotSingularError{accessconstrainthistory.Label}
 	}
 	return
 }
 
 // OnlyIDX is like OnlyID, but panics if an error occurs.
-func (_q *AccessConstraintQuery) OnlyIDX(ctx context.Context) uuid.UUID {
+func (_q *AccessConstraintHistoryQuery) OnlyIDX(ctx context.Context) string {
 	id, err := _q.OnlyID(ctx)
 	if err != nil {
 		panic(err)
@@ -186,18 +185,18 @@ func (_q *AccessConstraintQuery) OnlyIDX(ctx context.Context) uuid.UUID {
 	return id
 }
 
-// All executes the query and returns a list of AccessConstraints.
-func (_q *AccessConstraintQuery) All(ctx context.Context) ([]*AccessConstraint, error) {
+// All executes the query and returns a list of AccessConstraintHistories.
+func (_q *AccessConstraintHistoryQuery) All(ctx context.Context) ([]*AccessConstraintHistory, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryAll)
 	if err := _q.prepareQuery(ctx); err != nil {
 		return nil, err
 	}
-	qr := querierAll[[]*AccessConstraint, *AccessConstraintQuery]()
-	return withInterceptors[[]*AccessConstraint](ctx, _q, qr, _q.inters)
+	qr := querierAll[[]*AccessConstraintHistory, *AccessConstraintHistoryQuery]()
+	return withInterceptors[[]*AccessConstraintHistory](ctx, _q, qr, _q.inters)
 }
 
 // AllX is like All, but panics if an error occurs.
-func (_q *AccessConstraintQuery) AllX(ctx context.Context) []*AccessConstraint {
+func (_q *AccessConstraintHistoryQuery) AllX(ctx context.Context) []*AccessConstraintHistory {
 	nodes, err := _q.All(ctx)
 	if err != nil {
 		panic(err)
@@ -205,20 +204,20 @@ func (_q *AccessConstraintQuery) AllX(ctx context.Context) []*AccessConstraint {
 	return nodes
 }
 
-// IDs executes the query and returns a list of AccessConstraint IDs.
-func (_q *AccessConstraintQuery) IDs(ctx context.Context) (ids []uuid.UUID, err error) {
+// IDs executes the query and returns a list of AccessConstraintHistory IDs.
+func (_q *AccessConstraintHistoryQuery) IDs(ctx context.Context) (ids []string, err error) {
 	if _q.ctx.Unique == nil && _q.path != nil {
 		_q.Unique(true)
 	}
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryIDs)
-	if err = _q.Select(accessconstraint.FieldID).Scan(ctx, &ids); err != nil {
+	if err = _q.Select(accessconstrainthistory.FieldID).Scan(ctx, &ids); err != nil {
 		return nil, err
 	}
 	return ids, nil
 }
 
 // IDsX is like IDs, but panics if an error occurs.
-func (_q *AccessConstraintQuery) IDsX(ctx context.Context) []uuid.UUID {
+func (_q *AccessConstraintHistoryQuery) IDsX(ctx context.Context) []string {
 	ids, err := _q.IDs(ctx)
 	if err != nil {
 		panic(err)
@@ -227,16 +226,16 @@ func (_q *AccessConstraintQuery) IDsX(ctx context.Context) []uuid.UUID {
 }
 
 // Count returns the count of the given query.
-func (_q *AccessConstraintQuery) Count(ctx context.Context) (int, error) {
+func (_q *AccessConstraintHistoryQuery) Count(ctx context.Context) (int, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryCount)
 	if err := _q.prepareQuery(ctx); err != nil {
 		return 0, err
 	}
-	return withInterceptors[int](ctx, _q, querierCount[*AccessConstraintQuery](), _q.inters)
+	return withInterceptors[int](ctx, _q, querierCount[*AccessConstraintHistoryQuery](), _q.inters)
 }
 
 // CountX is like Count, but panics if an error occurs.
-func (_q *AccessConstraintQuery) CountX(ctx context.Context) int {
+func (_q *AccessConstraintHistoryQuery) CountX(ctx context.Context) int {
 	count, err := _q.Count(ctx)
 	if err != nil {
 		panic(err)
@@ -245,7 +244,7 @@ func (_q *AccessConstraintQuery) CountX(ctx context.Context) int {
 }
 
 // Exist returns true if the query has elements in the graph.
-func (_q *AccessConstraintQuery) Exist(ctx context.Context) (bool, error) {
+func (_q *AccessConstraintHistoryQuery) Exist(ctx context.Context) (bool, error) {
 	ctx = setContextOp(ctx, _q.ctx, ent.OpQueryExist)
 	switch _, err := _q.FirstID(ctx); {
 	case IsNotFound(err):
@@ -258,7 +257,7 @@ func (_q *AccessConstraintQuery) Exist(ctx context.Context) (bool, error) {
 }
 
 // ExistX is like Exist, but panics if an error occurs.
-func (_q *AccessConstraintQuery) ExistX(ctx context.Context) bool {
+func (_q *AccessConstraintHistoryQuery) ExistX(ctx context.Context) bool {
 	exist, err := _q.Exist(ctx)
 	if err != nil {
 		panic(err)
@@ -266,33 +265,33 @@ func (_q *AccessConstraintQuery) ExistX(ctx context.Context) bool {
 	return exist
 }
 
-// Clone returns a duplicate of the AccessConstraintQuery builder, including all associated steps. It can be
+// Clone returns a duplicate of the AccessConstraintHistoryQuery builder, including all associated steps. It can be
 // used to prepare common query builders and use them differently after the clone is made.
-func (_q *AccessConstraintQuery) Clone() *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) Clone() *AccessConstraintHistoryQuery {
 	if _q == nil {
 		return nil
 	}
-	return &AccessConstraintQuery{
-		config:      _q.config,
-		ctx:         _q.ctx.Clone(),
-		order:       append([]accessconstraint.OrderOption{}, _q.order...),
-		inters:      append([]Interceptor{}, _q.inters...),
-		predicates:  append([]predicate.AccessConstraint{}, _q.predicates...),
-		withHistory: _q.withHistory.Clone(),
+	return &AccessConstraintHistoryQuery{
+		config:         _q.config,
+		ctx:            _q.ctx.Clone(),
+		order:          append([]accessconstrainthistory.OrderOption{}, _q.order...),
+		inters:         append([]Interceptor{}, _q.inters...),
+		predicates:     append([]predicate.AccessConstraintHistory{}, _q.predicates...),
+		withConstraint: _q.withConstraint.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
 	}
 }
 
-// WithHistory tells the query-builder to eager-load the nodes that are connected to
-// the "history" edge. The optional arguments are used to configure the query builder of the edge.
-func (_q *AccessConstraintQuery) WithHistory(opts ...func(*AccessConstraintHistoryQuery)) *AccessConstraintQuery {
-	query := (&AccessConstraintHistoryClient{config: _q.config}).Query()
+// WithConstraint tells the query-builder to eager-load the nodes that are connected to
+// the "constraint" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AccessConstraintHistoryQuery) WithConstraint(opts ...func(*AccessConstraintQuery)) *AccessConstraintHistoryQuery {
+	query := (&AccessConstraintClient{config: _q.config}).Query()
 	for _, opt := range opts {
 		opt(query)
 	}
-	_q.withHistory = query
+	_q.withConstraint = query
 	return _q
 }
 
@@ -302,19 +301,19 @@ func (_q *AccessConstraintQuery) WithHistory(opts ...func(*AccessConstraintHisto
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		ConstraintID uuid.UUID `json:"constraint_id,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
-//	client.AccessConstraint.Query().
-//		GroupBy(accessconstraint.FieldName).
+//	client.AccessConstraintHistory.Query().
+//		GroupBy(accessconstrainthistory.FieldConstraintID).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
-func (_q *AccessConstraintQuery) GroupBy(field string, fields ...string) *AccessConstraintGroupBy {
+func (_q *AccessConstraintHistoryQuery) GroupBy(field string, fields ...string) *AccessConstraintHistoryGroupBy {
 	_q.ctx.Fields = append([]string{field}, fields...)
-	grbuild := &AccessConstraintGroupBy{build: _q}
+	grbuild := &AccessConstraintHistoryGroupBy{build: _q}
 	grbuild.flds = &_q.ctx.Fields
-	grbuild.label = accessconstraint.Label
+	grbuild.label = accessconstrainthistory.Label
 	grbuild.scan = grbuild.Scan
 	return grbuild
 }
@@ -325,26 +324,26 @@ func (_q *AccessConstraintQuery) GroupBy(field string, fields ...string) *Access
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		ConstraintID uuid.UUID `json:"constraint_id,omitempty"`
 //	}
 //
-//	client.AccessConstraint.Query().
-//		Select(accessconstraint.FieldName).
+//	client.AccessConstraintHistory.Query().
+//		Select(accessconstrainthistory.FieldConstraintID).
 //		Scan(ctx, &v)
-func (_q *AccessConstraintQuery) Select(fields ...string) *AccessConstraintSelect {
+func (_q *AccessConstraintHistoryQuery) Select(fields ...string) *AccessConstraintHistorySelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)
-	sbuild := &AccessConstraintSelect{AccessConstraintQuery: _q}
-	sbuild.label = accessconstraint.Label
+	sbuild := &AccessConstraintHistorySelect{AccessConstraintHistoryQuery: _q}
+	sbuild.label = accessconstrainthistory.Label
 	sbuild.flds, sbuild.scan = &_q.ctx.Fields, sbuild.Scan
 	return sbuild
 }
 
-// Aggregate returns a AccessConstraintSelect configured with the given aggregations.
-func (_q *AccessConstraintQuery) Aggregate(fns ...AggregateFunc) *AccessConstraintSelect {
+// Aggregate returns a AccessConstraintHistorySelect configured with the given aggregations.
+func (_q *AccessConstraintHistoryQuery) Aggregate(fns ...AggregateFunc) *AccessConstraintHistorySelect {
 	return _q.Select().Aggregate(fns...)
 }
 
-func (_q *AccessConstraintQuery) prepareQuery(ctx context.Context) error {
+func (_q *AccessConstraintHistoryQuery) prepareQuery(ctx context.Context) error {
 	for _, inter := range _q.inters {
 		if inter == nil {
 			return fmt.Errorf("ent: uninitialized interceptor (forgotten import ent/runtime?)")
@@ -356,7 +355,7 @@ func (_q *AccessConstraintQuery) prepareQuery(ctx context.Context) error {
 		}
 	}
 	for _, f := range _q.ctx.Fields {
-		if !accessconstraint.ValidColumn(f) {
+		if !accessconstrainthistory.ValidColumn(f) {
 			return &ValidationError{Name: f, err: fmt.Errorf("ent: invalid field %q for query", f)}
 		}
 	}
@@ -370,19 +369,19 @@ func (_q *AccessConstraintQuery) prepareQuery(ctx context.Context) error {
 	return nil
 }
 
-func (_q *AccessConstraintQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*AccessConstraint, error) {
+func (_q *AccessConstraintHistoryQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*AccessConstraintHistory, error) {
 	var (
-		nodes       = []*AccessConstraint{}
+		nodes       = []*AccessConstraintHistory{}
 		_spec       = _q.querySpec()
 		loadedTypes = [1]bool{
-			_q.withHistory != nil,
+			_q.withConstraint != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
-		return (*AccessConstraint).scanValues(nil, columns)
+		return (*AccessConstraintHistory).scanValues(nil, columns)
 	}
 	_spec.Assign = func(columns []string, values []any) error {
-		node := &AccessConstraint{config: _q.config}
+		node := &AccessConstraintHistory{config: _q.config}
 		nodes = append(nodes, node)
 		node.Edges.loadedTypes = loadedTypes
 		return node.assignValues(columns, values)
@@ -399,48 +398,46 @@ func (_q *AccessConstraintQuery) sqlAll(ctx context.Context, hooks ...queryHook)
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
-	if query := _q.withHistory; query != nil {
-		if err := _q.loadHistory(ctx, query, nodes,
-			func(n *AccessConstraint) { n.Edges.History = []*AccessConstraintHistory{} },
-			func(n *AccessConstraint, e *AccessConstraintHistory) { n.Edges.History = append(n.Edges.History, e) }); err != nil {
+	if query := _q.withConstraint; query != nil {
+		if err := _q.loadConstraint(ctx, query, nodes, nil,
+			func(n *AccessConstraintHistory, e *AccessConstraint) { n.Edges.Constraint = e }); err != nil {
 			return nil, err
 		}
 	}
 	return nodes, nil
 }
 
-func (_q *AccessConstraintQuery) loadHistory(ctx context.Context, query *AccessConstraintHistoryQuery, nodes []*AccessConstraint, init func(*AccessConstraint), assign func(*AccessConstraint, *AccessConstraintHistory)) error {
-	fks := make([]driver.Value, 0, len(nodes))
-	nodeids := make(map[uuid.UUID]*AccessConstraint)
+func (_q *AccessConstraintHistoryQuery) loadConstraint(ctx context.Context, query *AccessConstraintQuery, nodes []*AccessConstraintHistory, init func(*AccessConstraintHistory), assign func(*AccessConstraintHistory, *AccessConstraint)) error {
+	ids := make([]uuid.UUID, 0, len(nodes))
+	nodeids := make(map[uuid.UUID][]*AccessConstraintHistory)
 	for i := range nodes {
-		fks = append(fks, nodes[i].ID)
-		nodeids[nodes[i].ID] = nodes[i]
-		if init != nil {
-			init(nodes[i])
+		fk := nodes[i].ConstraintID
+		if _, ok := nodeids[fk]; !ok {
+			ids = append(ids, fk)
 		}
+		nodeids[fk] = append(nodeids[fk], nodes[i])
 	}
-	if len(query.ctx.Fields) > 0 {
-		query.ctx.AppendFieldOnce(accessconstrainthistory.FieldConstraintID)
+	if len(ids) == 0 {
+		return nil
 	}
-	query.Where(predicate.AccessConstraintHistory(func(s *sql.Selector) {
-		s.Where(sql.InValues(s.C(accessconstraint.HistoryColumn), fks...))
-	}))
+	query.Where(accessconstraint.IDIn(ids...))
 	neighbors, err := query.All(ctx)
 	if err != nil {
 		return err
 	}
 	for _, n := range neighbors {
-		fk := n.ConstraintID
-		node, ok := nodeids[fk]
+		nodes, ok := nodeids[n.ID]
 		if !ok {
-			return fmt.Errorf(`unexpected referenced foreign-key "constraint_id" returned %v for node %v`, fk, n.ID)
+			return fmt.Errorf(`unexpected foreign-key "constraint_id" returned %v`, n.ID)
 		}
-		assign(node, n)
+		for i := range nodes {
+			assign(nodes[i], n)
+		}
 	}
 	return nil
 }
 
-func (_q *AccessConstraintQuery) sqlCount(ctx context.Context) (int, error) {
+func (_q *AccessConstraintHistoryQuery) sqlCount(ctx context.Context) (int, error) {
 	_spec := _q.querySpec()
 	if len(_q.modifiers) > 0 {
 		_spec.Modifiers = _q.modifiers
@@ -452,8 +449,8 @@ func (_q *AccessConstraintQuery) sqlCount(ctx context.Context) (int, error) {
 	return sqlgraph.CountNodes(ctx, _q.driver, _spec)
 }
 
-func (_q *AccessConstraintQuery) querySpec() *sqlgraph.QuerySpec {
-	_spec := sqlgraph.NewQuerySpec(accessconstraint.Table, accessconstraint.Columns, sqlgraph.NewFieldSpec(accessconstraint.FieldID, field.TypeUUID))
+func (_q *AccessConstraintHistoryQuery) querySpec() *sqlgraph.QuerySpec {
+	_spec := sqlgraph.NewQuerySpec(accessconstrainthistory.Table, accessconstrainthistory.Columns, sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString))
 	_spec.From = _q.sql
 	if unique := _q.ctx.Unique; unique != nil {
 		_spec.Unique = *unique
@@ -462,11 +459,14 @@ func (_q *AccessConstraintQuery) querySpec() *sqlgraph.QuerySpec {
 	}
 	if fields := _q.ctx.Fields; len(fields) > 0 {
 		_spec.Node.Columns = make([]string, 0, len(fields))
-		_spec.Node.Columns = append(_spec.Node.Columns, accessconstraint.FieldID)
+		_spec.Node.Columns = append(_spec.Node.Columns, accessconstrainthistory.FieldID)
 		for i := range fields {
-			if fields[i] != accessconstraint.FieldID {
+			if fields[i] != accessconstrainthistory.FieldID {
 				_spec.Node.Columns = append(_spec.Node.Columns, fields[i])
 			}
+		}
+		if _q.withConstraint != nil {
+			_spec.Node.AddColumnOnce(accessconstrainthistory.FieldConstraintID)
 		}
 	}
 	if ps := _q.predicates; len(ps) > 0 {
@@ -492,12 +492,12 @@ func (_q *AccessConstraintQuery) querySpec() *sqlgraph.QuerySpec {
 	return _spec
 }
 
-func (_q *AccessConstraintQuery) sqlQuery(ctx context.Context) *sql.Selector {
+func (_q *AccessConstraintHistoryQuery) sqlQuery(ctx context.Context) *sql.Selector {
 	builder := sql.Dialect(_q.driver.Dialect())
-	t1 := builder.Table(accessconstraint.Table)
+	t1 := builder.Table(accessconstrainthistory.Table)
 	columns := _q.ctx.Fields
 	if len(columns) == 0 {
-		columns = accessconstraint.Columns
+		columns = accessconstrainthistory.Columns
 	}
 	selector := builder.Select(t1.Columns(columns...)...).From(t1)
 	if _q.sql != nil {
@@ -530,7 +530,7 @@ func (_q *AccessConstraintQuery) sqlQuery(ctx context.Context) *sql.Selector {
 // ForUpdate locks the selected rows against concurrent updates, and prevent them from being
 // updated, deleted or "selected ... for update" by other sessions, until the transaction is
 // either committed or rolled-back.
-func (_q *AccessConstraintQuery) ForUpdate(opts ...sql.LockOption) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) ForUpdate(opts ...sql.LockOption) *AccessConstraintHistoryQuery {
 	if _q.driver.Dialect() == dialect.Postgres {
 		_q.Unique(false)
 	}
@@ -543,7 +543,7 @@ func (_q *AccessConstraintQuery) ForUpdate(opts ...sql.LockOption) *AccessConstr
 // ForShare behaves similarly to ForUpdate, except that it acquires a shared mode lock
 // on any rows that are read. Other sessions can read the rows, but cannot modify them
 // until your transaction commits.
-func (_q *AccessConstraintQuery) ForShare(opts ...sql.LockOption) *AccessConstraintQuery {
+func (_q *AccessConstraintHistoryQuery) ForShare(opts ...sql.LockOption) *AccessConstraintHistoryQuery {
 	if _q.driver.Dialect() == dialect.Postgres {
 		_q.Unique(false)
 	}
@@ -553,28 +553,28 @@ func (_q *AccessConstraintQuery) ForShare(opts ...sql.LockOption) *AccessConstra
 	return _q
 }
 
-// AccessConstraintGroupBy is the group-by builder for AccessConstraint entities.
-type AccessConstraintGroupBy struct {
+// AccessConstraintHistoryGroupBy is the group-by builder for AccessConstraintHistory entities.
+type AccessConstraintHistoryGroupBy struct {
 	selector
-	build *AccessConstraintQuery
+	build *AccessConstraintHistoryQuery
 }
 
 // Aggregate adds the given aggregation functions to the group-by query.
-func (_g *AccessConstraintGroupBy) Aggregate(fns ...AggregateFunc) *AccessConstraintGroupBy {
+func (_g *AccessConstraintHistoryGroupBy) Aggregate(fns ...AggregateFunc) *AccessConstraintHistoryGroupBy {
 	_g.fns = append(_g.fns, fns...)
 	return _g
 }
 
 // Scan applies the selector query and scans the result into the given value.
-func (_g *AccessConstraintGroupBy) Scan(ctx context.Context, v any) error {
+func (_g *AccessConstraintHistoryGroupBy) Scan(ctx context.Context, v any) error {
 	ctx = setContextOp(ctx, _g.build.ctx, ent.OpQueryGroupBy)
 	if err := _g.build.prepareQuery(ctx); err != nil {
 		return err
 	}
-	return scanWithInterceptors[*AccessConstraintQuery, *AccessConstraintGroupBy](ctx, _g.build, _g, _g.build.inters, v)
+	return scanWithInterceptors[*AccessConstraintHistoryQuery, *AccessConstraintHistoryGroupBy](ctx, _g.build, _g, _g.build.inters, v)
 }
 
-func (_g *AccessConstraintGroupBy) sqlScan(ctx context.Context, root *AccessConstraintQuery, v any) error {
+func (_g *AccessConstraintHistoryGroupBy) sqlScan(ctx context.Context, root *AccessConstraintHistoryQuery, v any) error {
 	selector := root.sqlQuery(ctx).Select()
 	aggregation := make([]string, 0, len(_g.fns))
 	for _, fn := range _g.fns {
@@ -601,28 +601,28 @@ func (_g *AccessConstraintGroupBy) sqlScan(ctx context.Context, root *AccessCons
 	return sql.ScanSlice(rows, v)
 }
 
-// AccessConstraintSelect is the builder for selecting fields of AccessConstraint entities.
-type AccessConstraintSelect struct {
-	*AccessConstraintQuery
+// AccessConstraintHistorySelect is the builder for selecting fields of AccessConstraintHistory entities.
+type AccessConstraintHistorySelect struct {
+	*AccessConstraintHistoryQuery
 	selector
 }
 
 // Aggregate adds the given aggregation functions to the selector query.
-func (_s *AccessConstraintSelect) Aggregate(fns ...AggregateFunc) *AccessConstraintSelect {
+func (_s *AccessConstraintHistorySelect) Aggregate(fns ...AggregateFunc) *AccessConstraintHistorySelect {
 	_s.fns = append(_s.fns, fns...)
 	return _s
 }
 
 // Scan applies the selector query and scans the result into the given value.
-func (_s *AccessConstraintSelect) Scan(ctx context.Context, v any) error {
+func (_s *AccessConstraintHistorySelect) Scan(ctx context.Context, v any) error {
 	ctx = setContextOp(ctx, _s.ctx, ent.OpQuerySelect)
 	if err := _s.prepareQuery(ctx); err != nil {
 		return err
 	}
-	return scanWithInterceptors[*AccessConstraintQuery, *AccessConstraintSelect](ctx, _s.AccessConstraintQuery, _s, _s.inters, v)
+	return scanWithInterceptors[*AccessConstraintHistoryQuery, *AccessConstraintHistorySelect](ctx, _s.AccessConstraintHistoryQuery, _s, _s.inters, v)
 }
 
-func (_s *AccessConstraintSelect) sqlScan(ctx context.Context, root *AccessConstraintQuery, v any) error {
+func (_s *AccessConstraintHistorySelect) sqlScan(ctx context.Context, root *AccessConstraintHistoryQuery, v any) error {
 	selector := root.sqlQuery(ctx)
 	aggregation := make([]string, 0, len(_s.fns))
 	for _, fn := range _s.fns {
