@@ -165,8 +165,9 @@ func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 		// without recording an edge, so the request reaches the kernel path.
 		owner, err := f.Store.GetUser(ctx, f.UserID)
 		require.NoError(t, err)
+		prevResolver := f.Server.authzService.sourceResolver
 		f.Server.authzService.sourceResolver = stubSourceResolver{user: owner}
-		t.Cleanup(func() { f.Server.authzService.sourceResolver = nil })
+		t.Cleanup(func() { f.Server.authzService.sourceResolver = prevResolver })
 
 		d := decide("some-user-secret")
 		wantReason := `no active binding grants permission "secret.use"`
