@@ -186,6 +186,31 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadSettingsKoanfWithAutoExposePortsEnvSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+
+	// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+	// sciontool-only; they must never break the legacy Settings decode, and
+	// a real override (SCION_ACTIVE_PROFILE) must still apply alongside them.
+	// This is a guard, not a regression test: the legacy Settings struct has
+	// no auto_expose_ports field, so decoding never failed here even before
+	// the env key mapper excluded these two variables (see
+	// isSettingsExcludedEnv in settings_v1.go). It still passes with the
+	// mapper exclusion reverted.
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+	t.Setenv("SCION_ACTIVE_PROFILE", "remote")
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadSettingsKoanf decoding")
+	assert.Equal(t, "remote", s.ActiveProfile)
+}
+
 func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 

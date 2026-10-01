@@ -29,6 +29,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
+import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -2727,6 +2728,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab slot="nav" panel="gcp-identity" ?active=${this.activeTab === 'gcp-identity'}
           >GCP Identity</sl-tab
         >
+        <sl-tab slot="nav" panel="experiments" ?active=${this.activeTab === 'experiments'}
+          >Experiments</sl-tab
+        >
 
         <sl-tab-panel name="general">${this.renderGeneralTab()}</sl-tab-panel>
         <sl-tab-panel name="hub-server">${this.renderHubServerTab()}</sl-tab-panel>
@@ -2737,34 +2741,43 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
         <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
         <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
+        <sl-tab-panel name="experiments">
+          <scion-admin-experiments
+            .active=${this.activeTab === 'experiments'}
+          ></scion-admin-experiments>
+        </sl-tab-panel>
       </sl-tab-group>
 
-      ${this.hasHarnessConfigErrors
-        ? html`<div class="error" style="margin-bottom:0.75rem;">
-            Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on
-            the Runtimes &amp; Profiles tab before saving.
-          </div>`
+      ${this.activeTab !== 'experiments'
+        ? html`
+            ${this.hasHarnessConfigErrors
+              ? html`<div class="error" style="margin-bottom:0.75rem;">
+                  Cannot save: one or more harness config entries contain invalid JSON. Fix the
+                  errors on the Runtimes &amp; Profiles tab before saving.
+                </div>`
+              : nothing}
+            <div class="actions">
+              <sl-button
+                variant="primary"
+                ?loading=${this.saving}
+                ?disabled=${this.hasHarnessConfigErrors}
+                @click=${() => {
+                  void this.handleSave();
+                }}
+              >
+                Save & Reload
+              </sl-button>
+              <sl-button
+                variant="default"
+                @click=${() => {
+                  void this.loadConfig();
+                }}
+              >
+                Reset
+              </sl-button>
+            </div>
+          `
         : nothing}
-      <div class="actions">
-        <sl-button
-          variant="primary"
-          ?loading=${this.saving}
-          ?disabled=${this.hasHarnessConfigErrors}
-          @click=${() => {
-            void this.handleSave();
-          }}
-        >
-          Save & Reload
-        </sl-button>
-        <sl-button
-          variant="default"
-          @click=${() => {
-            void this.loadConfig();
-          }}
-        >
-          Reset
-        </sl-button>
-      </div>
     `;
   }
 

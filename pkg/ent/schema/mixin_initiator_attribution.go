@@ -52,8 +52,8 @@ func (InitiatorAttributionMixin) Fields() []ent.Field {
 		field.String("initiator_principal_id").
 			Optional().
 			Nillable(),
-		// session | uat | agent | legacy_unknown — a smaller, committed
-		// domain than hub.CredentialKind; see
+		// session | uat | agent | dev_local | legacy_unknown — a smaller,
+		// committed domain than hub.CredentialKind; see
 		// store.InitiatorCredentialKind*.
 		field.String("initiator_credential_kind").
 			Optional().

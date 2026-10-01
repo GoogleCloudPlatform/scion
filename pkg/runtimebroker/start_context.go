@@ -825,12 +825,21 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // env and envCls are mutated in place. envCls may be nil (the hub did not
 // send classifications for this request); a nil map is left nil, matching
 // classifyBrokerEnv's own rule elsewhere in this file. env itself is
-// produced by buildStartContext as a non-nil map on every current call path,
-// but a nil env is handled the same way: with no env there is nothing to
-// downgrade, and writing into a nil map would panic, so a nil env returns
-// early instead.
+// produced by buildStartContext as a non-nil map on every current call
+// path: the direct call above assigns it from the same make() map just
+// built; startAgent and restartAgent each take opts := sc.Opts from that
+// same buildStartContext call and pass opts.Env on to
+// recheckHubDefaultPassthrough without reassigning it, so they inherit the
+// identical non-nil map by reference. A nil env is still handled: writing
+// into a nil map would panic, so this returns without making any change —
+// which, if that invariant were ever broken, is a fail-open outcome for a
+// passthrough grant that should have been downgraded, not a fail-closed
+// one. The Warn below exists so that break would be visible instead of
+// silent.
 func downgradeUnverifiedHubDefaultPassthrough(env map[string]string, envCls map[string]api.EnvKind, currentMetadataMode string, requireLocalRuntime bool, resolvedRuntimeType string) {
 	if env == nil {
+		slog.Warn("hub-default-passthrough-downgrade: nil env, returning without changes",
+			"requireLocalRuntime", requireLocalRuntime, "resolvedRuntimeType", resolvedRuntimeType)
 		return
 	}
 	if !requireLocalRuntime || currentMetadataMode != store.GCPMetadataModePassthrough {

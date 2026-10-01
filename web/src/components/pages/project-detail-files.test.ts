@@ -223,6 +223,151 @@ async function pushProjectUpdate(el: TestElement, patch: Record<string, unknown>
   await el.updateComplete;
 }
 
+/**
+ * A minimal fake IntersectionObserver for driving the Files section's
+ * deferred-reveal logic (observeFilesSection() / revealFilesSection() in
+ * project-detail.ts) without a real browser. Records every observe() and
+ * unobserve() target, and exposes `fire()` to simulate an intersection
+ * entry through the captured callback — e.g. a placeholder scrolling into
+ * view. Install with `vi.stubGlobal('IntersectionObserver', fakeIO.Ctor)`.
+ *
+ * `fire()` only delivers entries for targets currently observed (observed
+ * and not since unobserved or disconnected) — matching real
+ * IntersectionObserver semantics, where the browser never reports
+ * intersections for a target you aren't (or are no longer) observing. A
+ * `fire()` call with no currently-observed targets in its entries is a
+ * no-op. `fire()` can be called any number of times.
+ */
+function makeFakeIntersectionObserver(): {
+  Ctor: new (cb: IntersectionObserverCallback) => IntersectionObserver;
+  observedTargets: Element[];
+  unobserveCalls: Element[];
+  fire: (entries: Array<{ isIntersecting: boolean; target: Element }>) => void;
+} {
+  const observedTargets: Element[] = [];
+  const unobserveCalls: Element[] = [];
+  const currentlyObserved = new Set<Element>();
+  let callback: IntersectionObserverCallback | null = null;
+  let instance: IntersectionObserver | null = null;
+
+  class FakeIntersectionObserver {
+    constructor(cb: IntersectionObserverCallback) {
+      callback = cb;
+      instance = this as unknown as IntersectionObserver;
+    }
+    observe(target: Element): void {
+      observedTargets.push(target);
+      currentlyObserved.add(target);
+    }
+    unobserve(target: Element): void {
+      unobserveCalls.push(target);
+      currentlyObserved.delete(target);
+    }
+    disconnect(): void {
+      currentlyObserved.clear();
+    }
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  }
+
+  return {
+    Ctor: FakeIntersectionObserver as unknown as new (
+      cb: IntersectionObserverCallback
+    ) => IntersectionObserver,
+    observedTargets,
+    unobserveCalls,
+    fire(entries) {
+      // Reuse the one constructed instance as the callback's second
+      // argument, rather than constructing a throwaway one — building a
+      // second instance here would re-run the constructor and overwrite
+      // `callback` with that instance's (no-op) callback, silently turning
+      // every call after the first into a no-op.
+      const deliverable = entries.filter((e) => currentlyObserved.has(e.target));
+      if (deliverable.length === 0 || !callback || !instance) return;
+      callback(deliverable as IntersectionObserverEntry[], instance);
+    },
+  };
+}
+
+describe('makeFakeIntersectionObserver (test helper)', () => {
+  it('fire() can be called more than once and still invokes the callback each time', () => {
+    // Round-1 Gemini-fix follow-up review, NB-1: fire() used to build a
+    // throwaway second Ctor instance as the callback's second argument,
+    // which re-ran the constructor and silently overwrote the captured
+    // callback with that instance's own no-op — every fire() after the
+    // first one did nothing. No current component test happened to call
+    // fire() twice, so this went unnoticed; it would have been a silent
+    // false-pass trap for the next test that did.
+    const fakeIO = makeFakeIntersectionObserver();
+    const target = document.createElement('div');
+    let callCount = 0;
+    const observer = new fakeIO.Ctor(() => {
+      callCount++;
+    });
+    observer.observe(target);
+
+    fakeIO.fire([{ isIntersecting: true, target }]);
+    expect(callCount).toBe(1);
+
+    fakeIO.fire([{ isIntersecting: true, target }]);
+    expect(callCount).toBe(2);
+  });
+
+  it('fire() does not deliver entries for a target that was never observed, was since unobserved, or after disconnect()', () => {
+    const fakeIO = makeFakeIntersectionObserver();
+    const observedTarget = document.createElement('div');
+    const neverObservedTarget = document.createElement('div');
+    let callCount = 0;
+    const observer = new fakeIO.Ctor(() => {
+      callCount++;
+    });
+    observer.observe(observedTarget);
+
+    fakeIO.fire([{ isIntersecting: true, target: neverObservedTarget }]);
+    expect(callCount).toBe(0);
+
+    observer.unobserve(observedTarget);
+    fakeIO.fire([{ isIntersecting: true, target: observedTarget }]);
+    expect(callCount).toBe(0);
+
+    // Round-2 review, Nit 1: disconnect() was documented ("unobserved or
+    // disconnected") but not self-tested.
+    observer.observe(observedTarget);
+    observer.disconnect();
+    fakeIO.fire([{ isIntersecting: true, target: observedTarget }]);
+    expect(callCount).toBe(0);
+  });
+
+  it('fire() delivers only the currently-observed entries, not the full input list, when the two differ', () => {
+    // Round-2 review, Nit 2: the two existing self-tests above only ever
+    // fire a single entry, so they can't tell "passes the filtered list"
+    // apart from "passes the original entries" (both behave the same when
+    // at least one target is observed). Fire a mix of one observed and one
+    // unobserved target and pin exactly what the callback receives.
+    const fakeIO = makeFakeIntersectionObserver();
+    const observedTarget = document.createElement('div');
+    const unobservedTarget = document.createElement('div');
+    let received: IntersectionObserverEntry[] | null = null;
+    const observer = new fakeIO.Ctor((entries) => {
+      received = entries;
+    });
+    observer.observe(observedTarget);
+
+    const observedEntry = { isIntersecting: true, target: observedTarget };
+    const unobservedEntry = { isIntersecting: true, target: unobservedTarget };
+    fakeIO.fire([observedEntry, unobservedEntry]);
+
+    // toEqual compares deeply, and Vitest's deep-equality for DOM nodes
+    // uses isEqualNode — two empty <div>s are equal — so toEqual([observedEntry])
+    // would pass even if fire() delivered unobservedEntry instead: it
+    // checks only how many entries were delivered, not which one. Assert
+    // identity instead.
+    expect(received).toHaveLength(1);
+    expect(received![0]).toBe(observedEntry);
+  });
+});
+
 describe('scion-page-project-detail — lazy file tabs', () => {
   let element: TestElement | null = null;
 
@@ -343,22 +488,8 @@ describe('scion-page-project-detail — lazy file tabs', () => {
   it('defers the whole Files section until the placeholder is observed as visible', async () => {
     // Simulate a real IntersectionObserver so we can control when the
     // section is revealed, proving it does not mount eagerly.
-    const observedTargets: Element[] = [];
-    let capturedCallback: IntersectionObserverCallback | null = null;
-    class FakeIntersectionObserver {
-      constructor(cb: IntersectionObserverCallback) {
-        capturedCallback = cb;
-      }
-      observe(target: Element): void {
-        observedTargets.push(target);
-      }
-      unobserve(): void {}
-      disconnect(): void {}
-      takeRecords(): IntersectionObserverEntry[] {
-        return [];
-      }
-    }
-    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+    const fakeIO = makeFakeIntersectionObserver();
+    vi.stubGlobal('IntersectionObserver', fakeIO.Ctor);
 
     const { el, listingCalls } = await createComponent();
     element = el;
@@ -368,13 +499,10 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(el.shadowRoot?.querySelector('.files-section-placeholder')).not.toBeNull();
     expect(fileBrowsers(el).length).toBe(0);
     expect(listingCalls.workspace).toBe(0);
-    expect(observedTargets.length).toBeGreaterThan(0);
+    expect(fakeIO.observedTargets.length).toBeGreaterThan(0);
 
     // Simulate the placeholder scrolling into view.
-    capturedCallback!(
-      [{ isIntersecting: true, target: observedTargets[0] } as IntersectionObserverEntry],
-      new FakeIntersectionObserver(() => {}) as unknown as IntersectionObserver
-    );
+    fakeIO.fire([{ isIntersecting: true, target: fakeIO.observedTargets[0] }]);
     await el.updateComplete;
     await new Promise((r) => setTimeout(r, 0));
     await el.updateComplete;
@@ -389,26 +517,11 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // shouldShowFilesSection() flips to false before the placeholder was
     // ever revealed (e.g. the last shared dir is removed via a live
     // update), observeFilesSection() used to return early on `!placeholder`
-    // without unobserving the now-detached element, leaking the reference
-    // in the observer and in observedFilesPlaceholder indefinitely.
-    const observedTargets: Element[] = [];
-    const unobserveCalls: Element[] = [];
-    class FakeIntersectionObserver {
-      constructor(_cb: IntersectionObserverCallback) {
-        // Not fired in this test — the section never reveals.
-      }
-      observe(target: Element): void {
-        observedTargets.push(target);
-      }
-      unobserve(target: Element): void {
-        unobserveCalls.push(target);
-      }
-      disconnect(): void {}
-      takeRecords(): IntersectionObserverEntry[] {
-        return [];
-      }
-    }
-    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+    // without unobserving the now-detached element, holding the reference
+    // in the observer and in observedFilesPlaceholder until the section
+    // reappeared or the element disconnected.
+    const fakeIO = makeFakeIntersectionObserver();
+    vi.stubGlobal('IntersectionObserver', fakeIO.Ctor);
 
     const { el } = await createComponent('member', {
       gitRemote: 'https://example.com/repo.git',
@@ -419,15 +532,69 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     // Not yet revealed: the placeholder exists and is being observed.
     const placeholder = el.shadowRoot?.querySelector('.files-section-placeholder');
     expect(placeholder).not.toBeNull();
-    expect(observedTargets).toContain(placeholder);
-    expect(unobserveCalls.length).toBe(0);
+    expect(fakeIO.observedTargets).toContain(placeholder);
+    expect(fakeIO.unobserveCalls.length).toBe(0);
 
     // The only shared dir is removed before the section was ever revealed —
     // shouldShowFilesSection() goes false and Lit tears the placeholder down.
     await pushProjectUpdate(el, { sharedDirs: [] });
 
     expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
-    expect(unobserveCalls).toContain(placeholder);
+    expect(fakeIO.unobserveCalls).toContain(placeholder);
+  });
+
+  it('re-observes a fresh placeholder and still reveals correctly after the section reappears', async () => {
+    // Round-1 Gemini-fix review, NB-1: the leak fix above changes how the
+    // old placeholder is released when the section goes
+    // false -> (one or more updates) -> true. Before the fix, the
+    // "replaced" branch (observedFilesPlaceholder set but pointing at a
+    // different element than the current placeholder) released it on
+    // flip-back; now the new early-return branch releases it while the
+    // section is hidden, leaving observedFilesPlaceholder null by the time
+    // it reappears. Nothing in the suite covered that flip-back path.
+    const fakeIO = makeFakeIntersectionObserver();
+    vi.stubGlobal('IntersectionObserver', fakeIO.Ctor);
+
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }],
+    });
+    element = el;
+
+    const firstPlaceholder = el.shadowRoot?.querySelector('.files-section-placeholder');
+    expect(firstPlaceholder).not.toBeNull();
+
+    // Remove the only shared dir: the section disappears before being
+    // revealed (this is what the leak fix unobserves).
+    await pushProjectUpdate(el, { sharedDirs: [] });
+    expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
+    expect(fakeIO.unobserveCalls).toContain(firstPlaceholder);
+
+    // Re-add it: the section reappears, still unrevealed, with a brand-new
+    // placeholder element.
+    await pushProjectUpdate(el, { sharedDirs: [{ name: SHARED_DIR_A }] });
+    const secondPlaceholder = el.shadowRoot?.querySelector('.files-section-placeholder');
+    expect(secondPlaceholder).not.toBeNull();
+    expect(secondPlaceholder).not.toBe(firstPlaceholder);
+
+    // The new placeholder must actually be (re-)observed — not silently
+    // skipped because the field was left looking like it already pointed
+    // at something. And unobserveCalls must be exactly [firstPlaceholder]:
+    // not unobserved a second time now that it's long gone, and nothing
+    // else (in particular not secondPlaceholder) spuriously unobserved.
+    expect(fakeIO.observedTargets).toContain(secondPlaceholder);
+    expect(fakeIO.unobserveCalls).toEqual([firstPlaceholder]);
+
+    // Firing the intersection callback on the new placeholder must still
+    // reveal the section and mount/load the active tab — flip-back didn't
+    // just stop leaking, it still works.
+    fakeIO.fire([{ isIntersecting: true, target: secondPlaceholder! }]);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
   });
 
   // ── Regression coverage: activeFileTab can drift from the rendered tab
