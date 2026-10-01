@@ -108,6 +108,32 @@ unchanged.
   this environment, not a test issue; confirmed by re-running individually
   and by the flag alone fixing it.)
 
+## Round 1 review fixes (slow-list-lists-rev-p1a-1)
+
+Commit `6552bb88c1d18e43f11f75844abee64e871bb79a`, rebased on `origin/main`
+(f06ccbc). Full disposition table is in the updated gs report
+(`lists-p1a-dev.md`); summary:
+
+- **B1** (`sseConnected` resolved at once right after `setScope`, before the
+  new generation actually connected): fixed with a `connectedGeneration`
+  tracker, reset in `setScope`/`disconnected`/`disconnect()`.
+- **B2** (a seed epoch lost SSE deltas for IDs not yet in `state.agents` —
+  the normal first-drain case): fixed. The unknown-ID branch now also
+  records into open seed epochs; `seedAgents` applies a recorded delta
+  through a new shared `mergeAgentDelta` helper (extracted from
+  `handleAgentEvent`) and clears the consumed `pendingAgentDeltas` entry.
+- **B3** (the W2 fuzz flushed once for all 10k events, making its per-flush
+  claims vacuous): rewritten to interleave rAF/100ms flush points with
+  per-flush assertions, fuzzed `_capabilities`, and a new
+  setScope-discards-dirty test.
+- **N1-N5, nits**: all fixed (tombstoned IDs dropped outright; epoch
+  finally-rule documented and `seedAgents` self-ends its epoch;
+  `disconnect()` rejects waiters; `exposedPorts` compared by value; the
+  report's lint claim corrected to match reality). See the gs report's
+  disposition table for exact file:function locations.
+- **FYI** (created-after-delete in one flush): fixed — a re-upsert now
+  removes the ID from `dirty.deleted`.
+
 ## Deviations from the brief
 
 - `seedAgents`'s existing (pre-P1a) callers use the single-argument form with
