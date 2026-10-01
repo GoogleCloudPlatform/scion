@@ -122,6 +122,11 @@ return an error instead of blocking.`,
 		if parentName == "project" {
 			requiresProject = false
 		}
+		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
+		// above — --handoff-template never touches the project or the Hub.
+		if isReincarnateHandoffTemplateInvocation(cmd) {
+			requiresProject = false
+		}
 
 		// For commands that require project context, use RequireProjectPath
 		// to error if no project found and --global not specified
@@ -495,6 +500,13 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 		return nil
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+		return nil
+	}
+	// design Amendment A26.2 O1: `scion reincarnate --handoff-template` is a
+	// pure local print (no Hub, no env, no target resolution — see its RunE),
+	// so it must work regardless of container/Hub context, exactly like the
+	// informational commands above.
+	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return nil
 	}
 

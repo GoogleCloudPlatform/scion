@@ -106,6 +106,27 @@ func TestBuiltinResources(t *testing.T) {
 	}
 }
 
+// TestPlatformSkillsFS_ScionAgentManageLifecycleReferencesReincarnate is the
+// design §3.9 / Amendment A25's "2b" bullet skill-embedding test: "the
+// one-line pointer in the scion-agent-manage lifecycle reference." It
+// exercises the actual embedded path (PlatformSkillsFS, the same accessor
+// pkg/agent/provision.go and pkg/hub/platform_skills_seed.go use to inject
+// this skill into agents), so it fails if the pointer only exists in the
+// source tree but was never wired into go:embed, and it fails if the
+// pointer stops naming the right command.
+func TestPlatformSkillsFS_ScionAgentManageLifecycleReferencesReincarnate(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-agent-manage/references/agent-lifecycle.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-agent-manage lifecycle reference: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "scion reincarnate") {
+		t.Errorf("embedded scion-agent-manage/references/agent-lifecycle.md does not mention `scion reincarnate`; " +
+			"coordinators need a pointer to it as an alternative to delete-and-recreate")
+	}
+}
+
 func TestSourceURLFormat(t *testing.T) {
 	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"
