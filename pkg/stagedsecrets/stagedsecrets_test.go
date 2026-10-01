@@ -374,7 +374,8 @@ func TestWriteAs_DirectInHomeTargetChowned(t *testing.T) {
 
 	// With the test's own uid/gid (an unprivileged self-chown always
 	// succeeds), the write must succeed end to end and land the content —
-	// proving the fix doesn't just fail differently, it actually works.
+	// proving the chown-eligible path doesn't just fail differently, it
+	// actually works.
 	staged2 := &Staged{FileSecrets: []FileSecret{
 		{Name: "NETRC", Target: target, Value: base64.StdEncoding.EncodeToString([]byte("machine example.com"))},
 	}}
@@ -394,8 +395,9 @@ func TestWriteAs_DirectInHomeTargetChowned(t *testing.T) {
 // parent directory IS homeDir itself (dir == root) is chown-eligible
 // exactly like any other under-home target, while a target whose parent
 // merely shares homeDir's own string prefix (a sibling directory, not a
-// descendant) is never chowned. The fix for the direct-in-home case must
-// not loosen containment for a path that only looks similar as a string.
+// descendant) is never chowned. Treating the direct-in-home case as
+// chown-eligible must not loosen containment for a path that only looks
+// similar as a string.
 func TestWriteAs_ContainmentTable(t *testing.T) {
 	parent := t.TempDir()
 	homeDir := filepath.Join(parent, "home")

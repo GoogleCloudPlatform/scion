@@ -461,10 +461,10 @@ func TestEnsureDirNoFollowUnderRoot_PathEqualsRootButSymlinkRefused(t *testing.T
 }
 
 // TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment is the
-// LEAD-REQUIRED table: path == root counts as under-root, but a sibling
+// containment table: path == root counts as under-root, but a sibling
 // path that merely shares root's own string prefix (not a real descendant)
-// must NOT — the fix for the root-itself case must not loosen containment
-// for anything that isn't genuinely root or beneath it.
+// must NOT — treating root itself as under-root must not loosen
+// containment for anything that isn't genuinely root or beneath it.
 func TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "home")
