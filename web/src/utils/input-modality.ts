@@ -69,6 +69,7 @@ export class TouchPrimaryController implements ReactiveController {
   }
 
   hostConnected(): void {
+    if (typeof window === 'undefined') return;
     this.mediaQueryList = window.matchMedia(TOUCH_PRIMARY_QUERY);
     this._isTouch = this.mediaQueryList.matches;
     this.mediaQueryList.addEventListener('change', this.handleChange);

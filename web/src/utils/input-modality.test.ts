@@ -157,6 +157,15 @@ describe('TouchPrimaryController', () => {
     expect(host.requestUpdateCalls).toBe(0);
   });
 
+  it('does not throw and leaves isTouch false when window is unavailable', () => {
+    vi.stubGlobal('window', undefined);
+    const host = new FakeHost();
+    const controller = new TouchPrimaryController(host);
+
+    expect(() => host.connect()).not.toThrow();
+    expect(controller.isTouch).toBe(false);
+  });
+
   it('requests a host update on reconnect after the query flipped while detached', () => {
     // While detached, hostDisconnected has already torn down the listener,
     // so nothing observes a flip during that window — a host reconnecting
