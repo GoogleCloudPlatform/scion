@@ -153,15 +153,21 @@ ever mattered for the blur handler, where it's still cleared, now only by
 
 **R2-1 [High] — duplicate package-level `nonPortableTimezoneNames` with task
 10's open PR (ptone/scion#2526): `pkg/hub` stops compiling once both are
-merged.** Both branches declare the same name independently, so neither
-PR's own CI catches it, but a scratch merge of the two fails to build.
-tz-lead/tz-em's sequencing ruling: task 10 lands first; this branch then
-stacks on `scion/tz-t10`, deletes its own `nonPortableTimezoneNames`, and
-both validators move to one shared `validateIANATimezone` extracted into a
-small file (`pkg/hub/timezone_validate.go`), reusing both existing handler
-test tables. **Pending** — rebase lands once tz-em supplies the post-rebase
-task 10 SHA; the PR body carries a "Depends on PR ptone/scion#2526 (merge
-first)" note until then.
+merged.** Both branches declared the same name independently, so neither
+PR's own CI caught it, but a scratch merge of the two failed to build.
+tz-lead/tz-em's sequencing ruling: task 10 lands first; this branch stacks
+on `scion/tz-t10` (rebased onto it at `f3bd9a5`), deletes its own
+`nonPortableTimezoneNames`, and both validators move to one shared
+`validateIANATimezone(tz string) error`, extracted into a new file
+(`pkg/hub/timezone_validate.go`) holding the denylist and the
+`time.LoadLocation` check. `validateDefaultTimezone`
+(`admin_settings.go`) and task 10's `validateUserTimezone`
+(`handlers_users_core.go`) both delegate to it and keep their own message
+wrapping — the right wording differs, since only the per-user preference's
+"" means Auto. Both existing handler test tables are unchanged and both
+pass. Until task 10 merges upstream, this PR's diff includes its commits
+too; the PR body carries a "Depends on PR ptone/scion#2526 (merge first)"
+note, to be dropped after a post-merge rebase onto upstream main.
 
 **R2-2 [Medium] — `isValidTimeZone` still accepted lowercase *aliases*
 Go rejects (R1-3 incomplete).** R1-3's case check only caught a name that
@@ -222,7 +228,9 @@ Documented in `time.test.ts` and exercised by the picker's R1-4 tests.
 | `pkg/config/hub_config.go` | Added `GlobalConfig.DefaultTimezone`, filled from raw settings.yaml (R1-1) |
 | `pkg/hub/operational_settings.go` | `BuildLayer1SnapshotFromFile` now sets `DefaultTimezone`; doc comments corrected (R1-1) |
 | `pkg/hub/hub_agent_defaults.go` | Corrected `hubAgentDefaults()`'s stale file-mode doc comment (R1-1) |
-| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2) |
+| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2); delegates to the shared `validateIANATimezone` (R2-1) |
+| `pkg/hub/timezone_validate.go` | New: shared `nonPortableTimezoneNames` denylist and `validateIANATimezone`, extracted so this PR and tz-refactor task 10 don't each declare their own copy (R2-1) |
+| `pkg/hub/handlers_users_core.go` | Task 10's `validateUserTimezone` now delegates to the shared `validateIANATimezone` instead of its own copy of the denylist (R2-1) |
 | `pkg/hub/admin_settings_db.go` | DB-mode 422 now calls the shared `validateDefaultTimezone` (R1-2, "On Local") |
 | `pkg/hub/admin_settings_test.go` | New file-mode tests: persisted+applied, clear round-trip, invalid-rejected (incl. denylist), valid-persisted (incl. aliases) |
 | `pkg/hub/admin_settings_db_test.go` | New: `TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected` |
@@ -267,14 +275,31 @@ full `make ci`/`ci-full` or full suites — fork CI covers those.
 
 - `npm run typecheck` — clean.
 - `npx vitest run` on `time.test.ts`, `timezone-picker.test.ts` and
-  `admin-server-config.test.ts` — 86 passed (same 86 as round 1: R2-2's and
-  R2-3's new tests replace/extend existing ones in the same files rather
-  than adding net-new counts beyond what round 1 already added).
-- `go build -buildvcs=false -p 2 ./pkg/hub/...` — clean.
-- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 ./pkg/hub -run 'TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode'` — pass, including the new post-clear re-dispatch assertion (R2-6).
-- R2-1 (sequencing with task 10's PR) is **not yet applied** — pending the
-  rebase onto `scion/tz-t10` once tz-em supplies the post-rebase SHA; see
-  the Round 2 review fixes section above.
+  `admin-server-config.test.ts` — 91 passed (round 1's 86, plus R2-2's and
+  R2-3's net-new cases).
+- `npx prettier --check` on the four changed web files — clean.
+- `go build -buildvcs=false -p 2 ./...` — clean (confirms the stack onto
+  `scion/tz-t10` plus the R2-1 extraction actually fixes the redeclaration
+  build break, not just removes the symptom locally).
+- `gofmt -l` on all five changed/added Go files — clean. `go vet
+  -buildvcs=false ./pkg/hub/...` — clean. `GOGC=40 golangci-lint run
+  --new-from-rev=origin/scion/tz-t10 --concurrency=1 ./pkg/hub/...` — 0
+  issues.
+- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 ./pkg/hub -run
+  'DefaultTimezone|TimeZone|Timezone|TZInjection|LocalRejected'` (both
+  validators' full handler test tables, together): **all pass**, including
+  task 10's `TestValidateUserTimezone`, `TestUpdateUser_Preferences_*` and
+  `TestAPIAuthMe_IncludesPreferencesTimezone`, and this task's
+  `TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode` with its new
+  post-clear re-dispatch assertion (R2-6).
+- Same selection under `TZ=Asia/Kathmandu`: every non-`createTestStore`
+  test still passes (including both validators' pure-function tables). The
+  `createTestStore`-backed tests fail with the identical documented
+  baseline error — now including some of task 10's own tests
+  (`TestUpdateUser_Preferences_*`, `TestAPIAuthMe_IncludesPreferencesTimezone`)
+  alongside this task's four `TZInjection_*` tests, since they share the
+  same `createTestStore` helper. Pre-existing, tz-refactor task 2's scope,
+  not either task's.
 
 ## Deferred / out of scope
 
