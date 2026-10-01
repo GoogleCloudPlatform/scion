@@ -267,3 +267,40 @@ Probes were not committed.
 Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
 110 files, 3146 tests passed; the previously-flaky
 `agent-create-projects.test.ts` passed this run too.
+
+## Round 5 review addendum
+
+Review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1c-rev-5.md`
+(**APPROVE** at `facf6486`: 0 critical, 0 required, 2 optional (N1'''',
+N2''''), 2 nits). Range-diff confirmed a pure rebase (all 7 round-4
+commits patch-identical). N2'''/N3'''/N4''' reconfirmed closed; N1''' was
+closed for the non-OK-response path as filed, but two adjacent failure
+paths could still replay a stale cursor. Fixed in one commit, rebased onto
+P1a's latest head (`987d2969`); final SHA `243bb5bbb`. Full mapping in the
+dev report addendum: `gs://scion-xproject-exchange/slow-list/reports/lists-p1c-dev.md`.
+
+Summary:
+
+- **N1'''':** hoisted cursor invalidation into one helper,
+  `onViewChangeFailed(trigger)`, called from every failure branch of a
+  paged `view-change` request — the network-error catch and the non-OK
+  branch in `loadAgentsForViewImpl`, plus the matching branches in
+  `loadLegacyAgentsImpl` (the 422-then-legacy-failure path round 4 missed).
+- **N2'''':** `refresh()` now refetches page 0 (always cursor-free, so it
+  can't mismatch) instead of the current page when the cursor stack is
+  invalid; a successful page-0 fetch marks the stack valid again. Gives the
+  user a way off a stranded page via the resync chip.
+- **nit 1/nit 2:** added the missing `hasPrev`-on-page>0 unit test, and
+  reworded a misleading test comment ("retrying" implied the same phase;
+  it's actually a different one).
+
+Reran all probes from rounds 1-5 (29 tests across 6 probe files) twice —
+pre-rebase and post-rebase onto P1a's `987d2969` — all passing both times.
+Probes were not committed.
+
+Full suite (`npx vitest run --no-file-parallelism`) after the rebase: all
+110 files, 3150 tests passed, including P1a's previously-flaky
+`state-compaction-fuzz.test.ts` (now has explicit timeouts upstream) and
+the pre-existing `agent-create-projects.test.ts` flake.
+
+Round 6 is the last review round allowed per the EM's instruction.
