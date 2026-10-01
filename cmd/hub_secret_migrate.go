@@ -49,6 +49,9 @@ the GCP SM secrets instead of storing values locally.
 
 This operation is idempotent - existing GCP SM secrets will be overwritten.
 
+Does not require a scion project; it can be run from any directory or
+environment, for example a Cloud Run job.
+
 Examples:
   # Dry run to see what would be migrated
   scion hub secret migrate --gcp-project=my-project --dry-run

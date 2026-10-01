@@ -106,6 +106,14 @@ return an error instead of blocking.`,
 			if parentName == "hub" {
 				requiresProject = false
 			}
+		case "migrate-names", "migrate":
+			// hub secret migrate-names (GCP SM name migration) and hub secret
+			// migrate (DB -> GCP SM value migration) operate directly against
+			// the Hub DB and GCP Secret Manager; neither reads or resolves
+			// the current directory's scion project (ptone/scion#2396).
+			if parentName == "secret" && commandInSubtree(cmd, "hub") {
+				requiresProject = false
+			}
 		case "scion":
 			// Root command itself doesn't require project
 			requiresProject = false
