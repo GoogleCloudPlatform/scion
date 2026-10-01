@@ -433,3 +433,85 @@ describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => 
     expect(okEdge).toBeTruthy();
   });
 });
+
+describe('hover/relatedIds highlighting (#2388 review Gemini G1)', () => {
+  let el: ScionAgentTreeView;
+
+  // r1 (root) -> m1 -> l1 (m1's descendant); s1 is m1's *sibling* (another
+  // child of r1), not related to m1. orphan's parent id ('ghost') does not
+  // exist in the set — the missing-parent case: the ancestor walk must stop
+  // cleanly there instead of throwing or treating it as related.
+  function fixture(): Agent[] {
+    return [
+      agent('r1', 'root', ['user-1']),
+      agent('m1', 'mid', ['user-1', 'r1']),
+      agent('l1', 'leaf', ['user-1', 'r1', 'm1']),
+      agent('s1', 'sibling', ['user-1', 'r1']),
+      agent('orphan', 'orphan', ['user-1', 'ghost']),
+    ];
+  }
+
+  function isDim(agentId: string): boolean {
+    const link = el.shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"]`);
+    return !!link && link.classList.contains('dim');
+  }
+
+  /** Counts edges by class, without needing to identify which edge is which. */
+  function edgeClassCounts(): { lit: number; dim: number; neither: number } {
+    const counts = { lit: 0, dim: 0, neither: 0 };
+    for (const p of el.shadowRoot!.querySelectorAll('svg path.edge')) {
+      if (p.classList.contains('lit')) counts.lit++;
+      else if (p.classList.contains('dim')) counts.dim++;
+      else counts.neither++;
+    }
+    return counts;
+  }
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el.agents = fixture();
+    document.body.appendChild(el);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  it('lights the hovered node, its ancestors and its descendants; dims everything else', async () => {
+    (el as unknown as { hoverId: string | null }).hoverId = 'm1';
+    await el.updateComplete;
+
+    expect(isDim('m1')).toBe(false); // hovered
+    expect(isDim('r1')).toBe(false); // ancestor
+    expect(isDim('l1')).toBe(false); // descendant
+    expect(isDim('s1')).toBe(true); // sibling: neither ancestor nor descendant
+    expect(isDim('orphan')).toBe(true); // unrelated
+
+    // r1->m1 and m1->l1 have both endpoints related (lit); r1->s1 doesn't.
+    expect(edgeClassCounts()).toEqual({ lit: 2, dim: 1, neither: 0 });
+  });
+
+  it('stops cleanly at a missing parent: hovering the orphan relates only itself', async () => {
+    (el as unknown as { hoverId: string | null }).hoverId = 'orphan';
+    await el.updateComplete;
+
+    expect(isDim('orphan')).toBe(false); // the hovered node is never dimmed
+    // The orphan's parent ('ghost') doesn't exist, so the ancestor walk
+    // stops immediately; nothing points to the orphan as a parent, so the
+    // descendant BFS finds nothing either. Everything else is unrelated.
+    expect(isDim('r1')).toBe(true);
+    expect(isDim('m1')).toBe(true);
+    expect(isDim('l1')).toBe(true);
+    expect(isDim('s1')).toBe(true);
+    expect(edgeClassCounts()).toEqual({ lit: 0, dim: 3, neither: 0 });
+  });
+
+  it('dims nothing when no node is hovered', () => {
+    expect(isDim('r1')).toBe(false);
+    expect(isDim('m1')).toBe(false);
+    expect(isDim('orphan')).toBe(false);
+    expect(edgeClassCounts()).toEqual({ lit: 0, dim: 0, neither: 3 });
+  });
+});
