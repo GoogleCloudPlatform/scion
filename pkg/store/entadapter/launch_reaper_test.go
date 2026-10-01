@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/launchreaperstate"
@@ -69,6 +71,28 @@ func setLaunchReaperArmedSince(t *testing.T, ctx context.Context, s *AgentStore,
 	t.Helper()
 	_, err := s.client.LaunchReaperState.UpdateOneID(launchReaperStateID).SetArmedSince(at).Save(ctx)
 	require.NoError(t, err)
+}
+
+// readStoreNow reads the store clock exactly the way RunLaunchReaperTick does
+// (storeNow in launch_store.go: "SELECT now()" on Postgres, time.Now() on
+// SQLite), so a test can anchor a backdated timestamp to the same clock a
+// later tick's DisarmedFor computation will compare it against. Using the
+// test process's own time.Now() instead would be vulnerable to clock skew
+// between the test host and a remote Postgres server.
+func readStoreNow(t *testing.T, ctx context.Context, s *AgentStore) time.Time {
+	t.Helper()
+	isPG := s.dialect(ctx) == dialect.Postgres
+	db := s.sqlDB()
+	require.NotNil(t, db)
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	now, err := storeNow(ctx, tx, isPG)
+	require.NoError(t, err)
+	return now
 }
 
 func TestReaper_FreshStateIsDisarmed_DeadlineRuleStillApplies(t *testing.T) {
@@ -134,10 +158,13 @@ func TestReaper_ArmsAfterFirstTick_ThenReapsStaleness(t *testing.T) {
 
 // TestReaper_DisarmedForReflectsElapsedSinceArmedSince proves DisarmedFor
 // reports storeNow - armed_since while disarmed, not the time remaining
-// until the cluster would re-arm. armed_since is
-// backdated directly rather than by sleeping, so the assertion is exact
-// enough to distinguish the two formulas without being sensitive to
-// scheduling jitter.
+// until the cluster would re-arm. armed_since is backdated relative to the
+// store's own clock (readStoreNow), not the test process's time.Now(), so
+// clock skew between the test host and a remote Postgres server can't
+// inflate the observed DisarmedFor. The assertion is a one-sided band rather
+// than a tight InDelta: a lower bound (DisarmedFor must be at least elapsed)
+// that query latency only ever pushes up, never down, and an upper bound
+// chosen to stay clear of the wrong formula's value even under latency.
 func TestReaper_DisarmedForReflectsElapsedSinceArmedSince(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -147,19 +174,32 @@ func TestReaper_DisarmedForReflectsElapsedSinceArmedSince(t *testing.T) {
 	_, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
 
-	// Backdate armed_since to well under the 8x keepalive arming threshold
-	// (8*20ms=160ms), so the next tick observes a still-disarmed cluster.
-	elapsed := 3 * testReaperParams.KeepaliveInterval
-	setLaunchReaperArmedSince(t, ctx, s, time.Now().Add(-elapsed))
+	// Use a small elapsed (1x keepalive = 20ms), well under the 8x keepalive
+	// arming threshold (160ms), so the two candidate formulas land far apart:
+	// the correct formula (storeNow - armed_since) reports ~20ms plus
+	// whatever latency elapses before the next tick's storeNow read, while
+	// the wrong formula (8*KeepaliveInterval - elapsed) would report a fixed
+	// ~140ms regardless of latency.
+	elapsed := testReaperParams.KeepaliveInterval
+	dbNow := readStoreNow(t, ctx, s)
+	setLaunchReaperArmedSince(t, ctx, s, dbNow.Add(-elapsed))
 
 	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
 	require.False(t, result.Armed, "setup: elapsed must stay under the 8x keepalive arming threshold")
-	// The wrong formula (8*KeepaliveInterval - elapsed) would report ~100ms
-	// here instead of ~60ms; a 40ms delta comfortably separates the two even
-	// with scheduling jitter.
-	assert.InDelta(t, elapsed.Milliseconds(), result.DisarmedFor.Milliseconds(), 20,
-		"DisarmedFor must equal storeNow - armed_since while disarmed, not time remaining until arming")
+	// Lower bound: DisarmedFor = storeNow - armed_since can only grow from
+	// elapsed as latency between readStoreNow above and this tick's own
+	// storeNow read adds on top of it; allow a couple of ms of slack for
+	// timestamp quantization. The wrong formula does not satisfy this bound
+	// (it would read ~140ms high, which does pass >= elapsed, but is caught
+	// by the upper bound below instead).
+	assert.GreaterOrEqual(t, result.DisarmedFor.Milliseconds(), elapsed.Milliseconds()-2,
+		"DisarmedFor must be at least elapsed since armed_since (storeNow - armed_since), not time remaining until arming")
+	// Upper bound: stay comfortably below the wrong formula's ~140ms
+	// (8*20ms - 20ms) so ordinary query latency on the correct formula can't
+	// cross into the wrong formula's range and make the two indistinguishable.
+	assert.Less(t, result.DisarmedFor.Milliseconds(), int64(100),
+		"DisarmedFor must stay far below the wrong formula's value (8*KeepaliveInterval-elapsed ~= 140ms); a value this high suggests the wrong formula is in effect")
 }
 
 // TestReaper_DisarmedForZeroWhenArmed proves DisarmedFor is 0 once the
