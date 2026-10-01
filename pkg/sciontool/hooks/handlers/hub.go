@@ -223,9 +223,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	elapsedMs := time.Since(callStart).Milliseconds()
 	if err != nil {
-		log.Error("Hub status update failed: %v", err)
+		// One structured line, not two: slog.Default() routes through this
+		// package's own log handler (see pkg/sciontool/log), so this already
+		// reaches agent.log and stderr exactly like the former log.Error call
+		// did — adding a second line here would double-log every failure,
+		// and hook events can fire once per tool call while the hub is down.
 		// Don't return error - we don't want Hub failures to break the hook chain
-		slog.Warn("hub status update failed", "event", event.Name, "elapsed_ms", elapsedMs)
+		slog.Error("hub status update failed", "event", event.Name, "elapsed_ms", elapsedMs, "error", err)
 	} else {
 		log.Debug("Hub status update sent successfully")
 		// SessionStart is the one event currently used for start-time

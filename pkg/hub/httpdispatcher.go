@@ -208,6 +208,9 @@ type HTTPAgentDispatcher struct {
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
 func NewHTTPAgentDispatcher(s store.Store, debug bool, log *slog.Logger) *HTTPAgentDispatcher {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &HTTPAgentDispatcher{
 		store:  s,
 		client: NewHTTPRuntimeBrokerClientWithDebug(debug),
@@ -218,6 +221,9 @@ func NewHTTPAgentDispatcher(s store.Store, debug bool, log *slog.Logger) *HTTPAg
 
 // NewHTTPAgentDispatcherWithClient creates a new HTTP-based agent dispatcher with a custom client.
 func NewHTTPAgentDispatcherWithClient(s store.Store, client RuntimeBrokerClient, debug bool, log *slog.Logger) *HTTPAgentDispatcher {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &HTTPAgentDispatcher{
 		store:  s,
 		client: client,

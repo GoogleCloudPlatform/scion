@@ -163,6 +163,33 @@ func TestComputePodLifecycleTimings(t *testing.T) {
 				containerStartedMs: podTimingUnavailable,
 			},
 		},
+		{
+			// Clock skew plus whole-second truncation across the apiserver,
+			// scheduler, kubelet and container runtime can make a condition's
+			// LastTransitionTime land before the pod's own CreationTimestamp.
+			// The result must clamp to 0, not a negative duration, and must
+			// not collide with the podTimingUnavailable (-1) sentinel.
+			name: "condition timestamp before creation clamps to zero, not the sentinel",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						condition(corev1.PodScheduled, corev1.ConditionTrue, -1*time.Second),
+						condition(corev1.PodInitialized, corev1.ConditionTrue, -1*time.Millisecond),
+					},
+					ContainerStatuses: []corev1.ContainerStatus{
+						runningContainerStatus("agent", -500*time.Millisecond),
+					},
+				},
+			},
+			container: "agent",
+			want: podLifecycleTimings{
+				scheduledMs:        0,
+				initializedMs:      0,
+				containersReadyMs:  podTimingUnavailable,
+				containerStartedMs: 0,
+			},
+		},
 	}
 
 	for _, tc := range cases {

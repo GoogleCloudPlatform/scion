@@ -96,10 +96,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 
 		// Observability only: start-time attribution from agent.Created to the
 		// first "running"/"working" status report, logged at whichever of two
-		// known sources actually reaches here first (live int2 data showed
-		// the harness-level one below never fires for no-auth/drop-to-shell
-		// agents, since there is no harness session to emit SessionStart —
-		// see ptone/scion#2519 r1 discussion):
+		// known sources actually reaches here first. A no-auth/drop-to-shell
+		// agent never runs a harness session, so it never emits SessionStart
+		// and only ever reaches the first case below (see ptone/scion#2519):
 		//
 		//  - "Agent started": sciontool init's own report, right after the
 		//    supervised child process starts (same request that carries

@@ -727,7 +727,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 		err  error
 	}, 1)
 
-	slog.Info("sciontool init: launching harness", "elapsed_ms", time.Since(initStart).Milliseconds())
+	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
+	// above): this is the time since process start, the same quantity as
+	// startup_ms below, not the duration of a single step. Naming it
+	// differently keeps a step-line summation from silently double-counting
+	// it.
+	slog.Info("sciontool init: launching harness", "since_init_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)
 		exitChan <- struct {

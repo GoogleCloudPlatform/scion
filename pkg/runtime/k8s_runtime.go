@@ -2025,11 +2025,32 @@ const podTimingUnavailable int64 = -1
 // API calls. Any field left at podTimingUnavailable means the corresponding
 // condition or container state was missing (e.g. not yet reported) when the
 // pod snapshot was taken.
+//
+// Precision note: CreationTimestamp and the condition/container timestamps
+// below are all metav1.Time, serialized at whole-second (RFC3339) precision
+// by the API server, scheduler, kubelet and container runtime respectively.
+// So on a real cluster these values are always a multiple of 1000 with up to
+// about ±1s of rounding error, despite the _ms suffix — they are not
+// sub-second measurements.
 type podLifecycleTimings struct {
 	scheduledMs        int64
 	initializedMs      int64
 	containersReadyMs  int64
 	containerStartedMs int64
+}
+
+// nonNegativeMs converts d to milliseconds, clamping negative results to 0.
+// LastTransitionTime/StartedAt and CreationTimestamp are written by
+// different components (apiserver, scheduler, kubelet, container runtime)
+// on different clocks, all at whole-second precision, so clock skew plus
+// truncation can occasionally make a "later" event look earlier than pod
+// creation. Clamping avoids both logging a misleading negative duration and
+// an unlucky -1ms colliding with the podTimingUnavailable sentinel.
+func nonNegativeMs(d time.Duration) int64 {
+	if d < 0 {
+		return 0
+	}
+	return d.Milliseconds()
 }
 
 // computePodLifecycleTimings derives podLifecycleTimings for containerName
@@ -2057,11 +2078,11 @@ func computePodLifecycleTimings(pod *corev1.Pod, containerName string) podLifecy
 		}
 		switch cond.Type {
 		case corev1.PodScheduled:
-			t.scheduledMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+			t.scheduledMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
 		case corev1.PodInitialized:
-			t.initializedMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+			t.initializedMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
 		case corev1.ContainersReady:
-			t.containersReadyMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+			t.containersReadyMs = nonNegativeMs(cond.LastTransitionTime.Sub(created))
 		}
 	}
 
@@ -2070,7 +2091,7 @@ func computePodLifecycleTimings(pod *corev1.Pod, containerName string) podLifecy
 			continue
 		}
 		if cs.State.Running != nil && !cs.State.Running.StartedAt.IsZero() {
-			t.containerStartedMs = cs.State.Running.StartedAt.Sub(created).Milliseconds()
+			t.containerStartedMs = nonNegativeMs(cs.State.Running.StartedAt.Sub(created))
 		}
 	}
 
