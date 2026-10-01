@@ -39,6 +39,7 @@ type AccessConstraintStore struct {
 	client      *ent.Client
 	dialectOnce sync.Once
 	dialectName string
+	inTx        bool
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.

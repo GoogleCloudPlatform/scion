@@ -18,11 +18,13 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -77,7 +79,7 @@ func TestConstraintHistory_PrunesDeterministicallyPerConstraint(t *testing.T) {
 		if err := tx.AppendConstraintHistoryTx(ctx, historyTestEntry(second.ID, "other-constraint-event", occurredAt.Add(-time.Hour))); err != nil {
 			return err
 		}
-		return tx.PruneConstraintHistoryTx(ctx, first.ID)
+		return nil
 	}))
 
 	firstRows, err := composite.ListConstraintHistory(ctx, first.ID)
@@ -105,7 +107,9 @@ func TestConstraintHistory_CascadesWithLiveConstraint(t *testing.T) {
 	composite := NewCompositeStore(enttest.NewClient(t))
 	constraint, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-cascade"))
 	require.NoError(t, err)
-	require.NoError(t, composite.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "cascade-event", time.Now().UTC())))
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "cascade-event", time.Now().UTC()))
+	}))
 	require.NoError(t, composite.DeleteAccessConstraint(ctx, constraint.ID))
 	rows, err := composite.ListConstraintHistory(ctx, constraint.ID)
 	require.NoError(t, err)
@@ -117,7 +121,9 @@ func TestConstraintHistory_InsertFailureRollsBackConstraintCreate(t *testing.T) 
 	composite := NewCompositeStore(enttest.NewClient(t))
 	existing, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-existing"))
 	require.NoError(t, err)
-	require.NoError(t, composite.AppendConstraintHistoryTx(ctx, historyTestEntry(existing.ID, "duplicate-event", time.Now().UTC())))
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(existing.ID, "duplicate-event", time.Now().UTC()))
+	}))
 
 	var attemptedID string
 	err = composite.WithTx(ctx, func(tx store.Store) error {
@@ -133,6 +139,55 @@ func TestConstraintHistory_InsertFailureRollsBackConstraintCreate(t *testing.T) 
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+func TestConstraintHistory_AppendRequiresTransaction(t *testing.T) {
+	ctx := context.Background()
+	composite := NewCompositeStore(enttest.NewClient(t))
+	constraint, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-requires-tx"))
+	require.NoError(t, err)
+
+	err = composite.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "outside-tx", time.Now().UTC()))
+	require.Error(t, err)
+	rows, listErr := composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, listErr)
+	assert.Empty(t, rows)
+}
+
+func TestConstraintHistory_PruneDeleteFailureRollsBackCreateAndHistory(t *testing.T) {
+	ctx := context.Background()
+	composite := NewCompositeStore(enttest.NewClient(t))
+	sentinel := errors.New("injected history prune delete failure")
+	composite.client.AccessConstraintHistory.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, mutation ent.Mutation) (ent.Value, error) {
+			if mutation.Op() == ent.OpDelete {
+				return nil, sentinel
+			}
+			return next.Mutate(ctx, mutation)
+		})
+	})
+
+	var attemptedID string
+	err := composite.WithTx(ctx, func(tx store.Store) error {
+		created, createErr := tx.CreateAccessConstraint(ctx, historyTestConstraint("history-prune-rolled-back"))
+		if createErr != nil {
+			return createErr
+		}
+		attemptedID = created.ID
+		occurredAt := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+		for i := 0; i < 1001; i++ {
+			if appendErr := tx.AppendConstraintHistoryTx(ctx, historyTestEntry(created.ID, fmt.Sprintf("rollback-event-%04d", i), occurredAt)); appendErr != nil {
+				return appendErr
+			}
+		}
+		return nil
+	})
+	require.ErrorIs(t, err, sentinel)
+	_, err = composite.GetAccessConstraint(ctx, attemptedID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	rows, listErr := composite.ListConstraintHistory(ctx, attemptedID)
+	require.NoError(t, listErr)
+	assert.Empty(t, rows)
+}
+
 func TestConstraintHistory_SurvivesRestartAndSecondStoreInstance(t *testing.T) {
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "history.db")
@@ -142,7 +197,9 @@ func TestConstraintHistory_SurvivesRestartAndSecondStoreInstance(t *testing.T) {
 	firstStore := NewCompositeStore(client)
 	constraint, err := firstStore.CreateAccessConstraint(ctx, historyTestConstraint("history-restart"))
 	require.NoError(t, err)
-	require.NoError(t, firstStore.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "restart-event", time.Now().UTC())))
+	require.NoError(t, firstStore.WithTx(ctx, func(tx store.Store) error {
+		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "restart-event", time.Now().UTC()))
+	}))
 
 	replicaStore := NewCompositeStore(client)
 	rows, err := replicaStore.ListConstraintHistory(ctx, constraint.ID)
@@ -158,4 +215,53 @@ func TestConstraintHistory_SurvivesRestartAndSecondStoreInstance(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "restart-event", rows[0].EventID)
+}
+
+func TestConstraintHistory_ConcurrentCapPostgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("SCION_TEST_POSTGRES_URL is required for the PostgreSQL cap race")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dsn := enttest.NewSchemaURL(t)
+	clientA, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientA.Close() })
+	clientB, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientB.Close() })
+	storeA := NewCompositeStore(clientA)
+	storeB := NewCompositeStore(clientB)
+
+	constraint, err := storeA.CreateAccessConstraint(ctx, historyTestConstraint("history-postgres-race"))
+	require.NoError(t, err)
+	occurredAt := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, storeA.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < 999; i++ {
+			if err := tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, fmt.Sprintf("event-%04d", i), occurredAt)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	appendConcurrent := func(composite *CompositeStore, eventID string) {
+		<-start
+		errs <- composite.WithTx(ctx, func(tx store.Store) error {
+			return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, eventID, occurredAt))
+		})
+	}
+	go appendConcurrent(storeA, "event-0999")
+	go appendConcurrent(storeB, "event-1000")
+	close(start)
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+
+	rows, err := storeA.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1000)
+	assert.Equal(t, "event-1000", rows[0].EventID)
+	assert.Equal(t, "event-0001", rows[len(rows)-1].EventID)
 }

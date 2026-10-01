@@ -2520,14 +2520,10 @@ type AccessConstraintStore interface {
 	DisableAccessConstraint(ctx context.Context, id string) error
 
 	// AppendConstraintHistoryTx appends one purpose-specific live-boundary
-	// history row. Callers use the Store passed by WithTx so the row and the
+	// history row and atomically enforces the newest-1,000-row retention cap.
+	// Callers must use the Store passed by WithTx so the row, retention, and
 	// boundary mutation share a transaction.
 	AppendConstraintHistoryTx(ctx context.Context, entry *AccessConstraintHistory) error
-
-	// PruneConstraintHistoryTx retains the newest 1,000 rows for one live
-	// constraint by occurred-at/event-ID ordering. It must share the mutation
-	// transaction.
-	PruneConstraintHistoryTx(ctx context.Context, constraintID string) error
 
 	// ListConstraintHistory returns retained rows newest-first. The milestone-1
 	// writer tests use this method; API pagination is owned by #2405.

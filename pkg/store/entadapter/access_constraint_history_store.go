@@ -16,25 +16,39 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const accessConstraintHistoryLimit = 1000
 
-// AppendConstraintHistoryTx inserts one live-boundary history row using this
-// store's client. When invoked on the Store supplied by WithTx, the insert is
-// part of that ambient transaction.
+var errConstraintHistoryTransactionRequired = errors.New("access constraint history append requires Store.WithTx")
+
+// AppendConstraintHistoryTx inserts one live-boundary history row and enforces
+// the retention cap as one transactionally inseparable operation. Locking the
+// live constraint serializes concurrent PostgreSQL writers for that constraint.
 func (s *AccessConstraintStore) AppendConstraintHistoryTx(ctx context.Context, entry *store.AccessConstraintHistory) error {
+	if !s.inTx {
+		return errConstraintHistoryTransactionRequired
+	}
 	constraintID, err := uuid.Parse(entry.ConstraintID)
 	if err != nil {
 		return fmt.Errorf("invalid constraint ID: %w", store.ErrInvalidInput)
+	}
+	constraintQuery := s.client.AccessConstraint.Query().Where(accessconstraint.IDEQ(constraintID))
+	if s.usesRowLocks(ctx) {
+		constraintQuery = constraintQuery.ForUpdate()
+	}
+	if _, err := constraintQuery.Only(ctx); err != nil {
+		return fmt.Errorf("lock access constraint for history append: %w", mapError(err))
 	}
 	builder := s.client.AccessConstraintHistory.Create().
 		SetID(entry.EventID).
@@ -45,7 +59,7 @@ func (s *AccessConstraintStore) AppendConstraintHistoryTx(ctx context.Context, e
 	if _, err := builder.Save(ctx); err != nil {
 		return mapError(err)
 	}
-	return nil
+	return s.pruneConstraintHistory(ctx, constraintID)
 }
 
 func setOptionalHistoryFields(builder *ent.AccessConstraintHistoryCreate, entry *store.AccessConstraintHistory) {
@@ -80,14 +94,9 @@ func setOptionalHistoryFields(builder *ent.AccessConstraintHistoryCreate, entry 
 	}
 }
 
-// PruneConstraintHistoryTx removes rows outside the newest retained window.
-func (s *AccessConstraintStore) PruneConstraintHistoryTx(ctx context.Context, constraintID string) error {
-	uid, err := uuid.Parse(constraintID)
-	if err != nil {
-		return fmt.Errorf("invalid constraint ID: %w", store.ErrInvalidInput)
-	}
+func (s *AccessConstraintStore) pruneConstraintHistory(ctx context.Context, constraintID uuid.UUID) error {
 	ids, err := s.client.AccessConstraintHistory.Query().
-		Where(accessconstrainthistory.ConstraintIDEQ(uid)).
+		Where(accessconstrainthistory.ConstraintIDEQ(constraintID)).
 		Order(
 			accessconstrainthistory.ByOccurredAt(sql.OrderDesc()),
 			accessconstrainthistory.ByID(sql.OrderDesc()),
