@@ -27,11 +27,13 @@
  * so it always reflects whatever the host's live-update path
  * (`onAgentsUpdated`) last assigned — including an SSE delta that arrived
  * after the last trigger, with no re-adoption step and no `pageIndex` reset.
- * `setSmall()` only flips the state machine; it never resets `pageIndex`,
- * because an unrelated small-state render (a view-state change, or a fresh
- * `setSmall()` call from a later trigger while already small) must not throw
- * the user back to page 0 (that only happens through `setViewState`, a
- * deliberate filter/sort change, exactly as a paged page-0 reset does).
+ * `setSmall()` never resets `pageIndex` on a small -> small call, because an
+ * unrelated small-state render (a view-state change, or a fresh `setSmall()`
+ * call from a later trigger while already small) must not throw the user
+ * back to page 0 (that only happens through `setViewState`, a deliberate
+ * filter/sort change, exactly as a paged page-0 reset does); it resets on a
+ * paged -> small call instead, since that always swaps in a different data
+ * set (round 3 review B1'').
  */
 
 import type { Agent, AgentPhase } from '../shared/types.js';
@@ -95,6 +97,8 @@ export class AgentListWindow extends EventTarget {
   private _pageIndex = 0;
   private _totalCount = 0;
   private _hasNext = false;
+  /** Cleared by `invalidateCursors()` (round 4 review N1'''); restored by the next `setPaged()`. */
+  private _cursorsValid = true;
   private _loading = false;
   private _error: string | null = null;
   private _updatesAvailable = false;
@@ -140,11 +144,12 @@ export class AgentListWindow extends EventTarget {
   }
 
   get hasPrev(): boolean {
+    if (this._state === 'paged' && !this._cursorsValid) return false;
     return this._pageIndex > 0;
   }
 
   get hasNext(): boolean {
-    if (this._state === 'paged') return this._hasNext;
+    if (this._state === 'paged') return this._cursorsValid && this._hasNext;
     return (this._pageIndex + 1) * this.viewState.pageSize < this.display.length;
   }
 
@@ -186,6 +191,7 @@ export class AgentListWindow extends EventTarget {
     this.cursors = [undefined, result.nextCursor];
     this.pageOffsets = [0, result.agents.length];
     this._pageIndex = 0;
+    this._cursorsValid = true;
     this._updatesAvailable = false;
     this._error = null;
     this._loading = false;
@@ -331,7 +337,10 @@ export class AgentListWindow extends EventTarget {
       }
       return;
     }
-    if (!this._hasNext) return;
+    // Uses the public `hasNext` getter, not `_hasNext` directly, so an
+    // invalidated cursor stack (round 4 review N1''') blocks this the same
+    // way it blocks the pager's own UI guard.
+    if (!this.hasNext) return;
     await this.fetchPageAt(this._pageIndex + 1);
   }
 
@@ -343,7 +352,8 @@ export class AgentListWindow extends EventTarget {
       }
       return;
     }
-    if (this._pageIndex === 0) return;
+    // Uses the public `hasPrev` getter (see `next()`'s comment above).
+    if (!this.hasPrev) return;
     await this.fetchPageAt(this._pageIndex - 1);
   }
 
@@ -393,6 +403,20 @@ export class AgentListWindow extends EventTarget {
   /** `agents-resync` (design §6.2, §7): the zero-cost stale signal. Issues no request. */
   markResync(): void {
     this._updatesAvailable = true;
+    this.notifyChange();
+  }
+
+  /**
+   * Clears paged navigation after a failed view-change request (round 4
+   * review N1'''): the stored cursors were minted under the previous
+   * phase/label/dir (design §4.4's cursor-binding contract) and would 400
+   * if replayed under the new, now-current params. `hasNext`/`hasPrev`
+   * report `false` until the next successful `setPaged()` mints a fresh
+   * cursor stack. A no-op in the small state, which has no cursors.
+   */
+  invalidateCursors(): void {
+    if (this._state !== 'paged') return;
+    this._cursorsValid = false;
     this.notifyChange();
   }
 

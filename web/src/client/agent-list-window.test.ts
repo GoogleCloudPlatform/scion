@@ -777,3 +777,62 @@ describe('AgentListWindow — round 2 review fixes', () => {
     expect(d5).not.toBe(d3); // held identity changed: recomputed even though content is equal
   });
 });
+
+describe('AgentListWindow — round 4 review fixes', () => {
+  function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
+    return {
+      agents,
+      totalCount: agents.length,
+      stats: {
+        total: agents.length,
+        running: agents.filter((a) => a.phase === 'running').length,
+        agents: agents.map((a) => [a.id, a.phase]),
+      },
+      ...opts,
+    };
+  }
+
+  it("N1''': invalidateCursors() clears hasNext/hasPrev while paged, until the next setPaged (probe R4-3)", async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
+      !params.cursor
+        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+        : pagedResult(page1, { totalCount: 4 })
+    );
+    const { win } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    expect(win.hasNext).toBe(true);
+    expect(win.hasPrev).toBe(false);
+
+    // Simulate a failed view-change request (e.g. a phase change that 500s)
+    // while still on a page fetched under the old params.
+    win.invalidateCursors();
+    expect(win.hasNext).toBe(false); // would otherwise replay a cursor minted under the old params
+    expect(win.hasPrev).toBe(false);
+
+    // Next is now a no-op: fetchPage is not called again, and the window
+    // stays exactly where it was (no error, same page, same rows).
+    const callsBefore = fetchPage.mock.calls.length;
+    await win.next();
+    expect(fetchPage.mock.calls.length).toBe(callsBefore);
+    expect(win.pageIndex).toBe(0);
+    expect(win.error).toBeNull();
+    expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
+
+    // The next successful setPaged (e.g. retrying the view-change) restores
+    // navigation.
+    win.setPaged(pagedResult(page1, { totalCount: 4 }), '');
+    expect(win.hasNext).toBe(false); // page1 happens to be the last page here
+    expect(win.hasPrev).toBe(false); // setPaged always re-adopts at page 0
+  });
+
+  it("N1''': invalidateCursors() is a no-op in the small state", () => {
+    const { win, setHeld } = createWindow({ viewState: makeViewState() });
+    setHeld([agent('a'), agent('b')]);
+    expect(win.state).toBe('small');
+    win.invalidateCursors();
+    expect(win.state).toBe('small');
+    expect(win.hasNext).toBe(false); // unaffected — governed by display.length, not cursors
+  });
+});

@@ -1270,10 +1270,12 @@ describe('project-detail — agent list window (P1c)', () => {
      * so the resulting request bound a stale cursor to new params and the
      * server legitimately 400'd it (design §4.4) — round 3 review B2''. The
      * fix going forward is the opposite of round 2's: disable navigation
-     * (and the chip) outright while either the window's own fetch or a
-     * page-level load is in flight, via `.loading=${agentWindow.loading ||
-     * agentsLoading}`, so the race can never start. `onPagerNav`/the
-     * `agentsLoadGen` bump are removed entirely.
+     * (and the chip) outright while either the window's own fetch or, while
+     * paged, a page-level load is in flight, via `.loading=${agentWindow.loading
+     * || (agentWindow.state === 'paged' && agentsLoading)}` (round 4 review
+     * N2''' narrowed the page-level half to the paged state only, so a held
+     * refresh never blocks small-state local paging). The `agentsLoadGen`
+     * bump is removed; `onPagerNav` only refuses while loading.
      */
     function pagerLoading(el: TestEl): boolean {
       return (el.shadowRoot!.querySelector('scion-agent-pager') as unknown as { loading: boolean })
@@ -1363,6 +1365,91 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
 
+    it("N2''': small-state local Next/Prev stay enabled, and work, during a held lifecycle refresh (probe R4-5)", async () => {
+      // Small-state pagination is a pure local slice of `display` (design
+      // §6.3) and sends no request, so it has nothing to race with a
+      // page-level load — round 4 review N2''' narrowed the `.loading` gate
+      // (and `onPagerNav`'s guard) to the paged state only, so this no
+      // longer gets disabled for the duration of every agent action.
+      const projectId = 'p-n2-prime-small';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      let holdNextSorted = false;
+      let heldResolve: ((r: Response) => void) | null = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            if (holdNextSorted) {
+              holdNextSorted = false;
+              requests.push({ url: rawUrl });
+              return new Promise<Response>((resolve) => {
+                heldResolve = resolve;
+              });
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small'); // 30 agents fits well under the fit=500 threshold
+
+      const requestsBeforeRefresh = requests.length;
+      holdNextSorted = true;
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(pagerLoading(el)).toBe(false); // unlike the paged state, the gate does not fire here
+      expect(requests.length).toBe(requestsBeforeRefresh + 1); // the held refresh request was sent
+
+      clickNext(el); // the pager's own real guard — must not be disabled
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(1); // local paging worked
+      expect(requests.length).toBe(requestsBeforeRefresh + 1); // Next sent nothing
+
+      heldResolve!(
+        jsonResponse({
+          agents,
+          totalCount: agents.length,
+          complete: true,
+          stats: {
+            total: agents.length,
+            running: agents.filter((a) => a.phase === 'running').length,
+            agents: agents.map((a) => [a.id, a.phase]),
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(pagerLoading(el)).toBe(false);
+      expect(internals(el).agentWindow.pageIndex).toBe(1); // small -> small: unaffected by the refresh (B1'')
+      // Paging continues to work normally once the refresh has landed.
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onPrev(): void;
+      };
+      pg.onPrev();
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(0);
+      clickNext(el);
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(1);
+    });
+
     for (const kind of ['phase', 'dir', 'label', 'pagesize'] as const) {
       it(`R3-B: a ${kind} change while paged disables Next until its own fit response lands, so no mismatched-cursor request is ever sent`, async () => {
         const projectId = `p-r3b-${kind}`;
@@ -1441,6 +1528,75 @@ describe('project-detail — agent list window (P1c)', () => {
         expect(internals(el).agentWindow.error).toBeNull();
       });
     }
+  });
+
+  describe("a failed view-change request while paged invalidates cursors, so Next can't replay a stale one (round 4 review N1''', probe R4-3)", () => {
+    it('a phase change that 500s leaves the window paged with no error; Next then no-ops instead of sending a mismatched cursor', async () => {
+      const projectId = 'p-n1-triple-prime';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      let failNextSorted = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (failNextSorted && !u.searchParams.has('cursor')) {
+              failNextSorted = false;
+              requests.push({ url: rawUrl });
+              return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      failNextSorted = true;
+      internals(el).setPhaseFilter('stopped');
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // The failed view-change request keeps the previous page (design §6.3
+      // N2) but must no longer claim Next is possible: the stored cursor was
+      // minted under the old (unfiltered) phase, and a Next now would bind
+      // it to `phase=stopped` and get a 400 (design §4.4).
+      expect(internals(el).agentWindow.error).toBeNull(); // the failure itself is silent (previous data kept)
+      expect(internals(el).agentWindow.hasNext).toBe(false); // N1''': invalidated
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext(); // the pager's own guard refuses: hasNext is false
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request was ever sent
+      expect(internals(el).agentWindow.error).toBeNull(); // in particular, no 400
+      expect(internals(el).agentWindow.pageIndex).toBe(0);
+
+      // Retrying the same change (now succeeding) restores navigation via setPaged.
+      internals(el).setPhaseFilter('running');
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+    });
   });
 
   describe("fit-path label 400 restores the previous committedLabel (round 1 review N3, round 2 N3')", () => {

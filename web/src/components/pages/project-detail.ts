@@ -1599,6 +1599,12 @@ export class ScionPageProjectDetail extends LitElement {
         this.agentScopeCapabilities = undefined;
         this.listViewUsesWindow = false;
       }
+      if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
+        // The stored cursors were minted under the previous phase/dir/label
+        // and would 400 if replayed under the new params (round 4 review
+        // N1'''); disable Prev/Next until the next successful request.
+        this.agentWindow.invalidateCursors();
+      }
       // Other triggers keep the previous data (design §6.3 N2).
       return;
     }
@@ -3015,7 +3021,8 @@ export class ScionPageProjectDetail extends LitElement {
           .pageSize=${this.pagerPageSize}
           .hasNext=${this.agentWindow.hasNext}
           .hasPrev=${this.agentWindow.hasPrev}
-          .loading=${this.agentWindow.loading || this.agentsLoading}
+          .loading=${this.agentWindow.loading ||
+          (this.agentWindow.state === 'paged' && this.agentsLoading)}
           .error=${this.agentWindow.error}
           .showChip=${this.agentWindow.updatesAvailable}
           @prev=${() => this.onPagerNav(() => this.agentWindow.prev())}
@@ -3037,11 +3044,17 @@ export class ScionPageProjectDetail extends LitElement {
    * pager's own guard covers a real click; this one covers an event
    * dispatched directly on the host). Unlike the removed round-2 `onPagerNav`,
    * this never bumps `agentsLoadGen` — it simply refuses to navigate while
-   * either the window's own fetch or a page-level load is in flight, so the
-   * mismatched-cursor race (design §4.4) can never start in the first place.
+   * either the window's own fetch or, while paged, a page-level load is in
+   * flight, so the mismatched-cursor race (design §4.4) can never start in
+   * the first place. A page-level load alone never gates small-state
+   * navigation (round 4 review N2'''): small-state Prev/Next is a purely
+   * local slice of `display` and sends no request, so a held refresh or
+   * lifecycle load has nothing to race.
    */
   private onPagerNav(action: () => Promise<void>): void {
-    if (this.agentWindow.loading || this.agentsLoading) return;
+    if (this.agentWindow.loading || (this.agentWindow.state === 'paged' && this.agentsLoading)) {
+      return;
+    }
     void action();
   }
 
