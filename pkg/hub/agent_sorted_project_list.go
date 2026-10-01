@@ -518,7 +518,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	s.enrichAgents(ctx, plainAgents)
 	for i := range agents {
 		agents[i].Agent = plainAgents[i]
-		agents[i].Agent.AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, capabilityAllows(agents[i].Cap, ActionAttach))
+		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, capabilityAllows(agents[i].Cap, ActionAttach))
 	}
 
 	// A complete response IS the whole set: a step 5a drop (missing row,

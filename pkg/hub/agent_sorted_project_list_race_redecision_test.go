@@ -124,7 +124,7 @@ func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 		return nil, err
 	}
 	o.once.Do(func() {
-		a, gerr := o.Store.GetAgent(ctx, o.agentID)
+		a, gerr := o.GetAgent(ctx, o.agentID)
 		if gerr != nil {
 			return
 		}
