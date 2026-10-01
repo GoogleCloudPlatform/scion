@@ -145,6 +145,32 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
     expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
   });
 
+  it('an array-shaped experiments value is ignored end to end', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url.includes('/api/v1/experiments')) {
+          // typeof [] === 'object', so the call site's truthy/typeof check
+          // alone would let this through; setServerFlags() itself rejects
+          // an array argument (see feature-flags.test.ts), and this is the
+          // full-chain check for that.
+          return Promise.resolve(jsonResponse({ experiments: ['web.terminal_workspace'] }));
+        }
+        return Promise.resolve(jsonResponse({ nativeChatEnabled: true }));
+      })
+    );
+
+    await applyServerFeatureFlags();
+
+    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true); // compiled default, untouched
+    // Without setServerFlags()'s own Array.isArray guard, Object.entries()
+    // on the array would set a bogus '0' key (the array's own index) in the
+    // bag; checking the bag directly, rather than through isFeatureEnabled's
+    // non-boolean filtering, is what actually distinguishes the fixed
+    // behavior.
+    expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
+  });
+
   it('a failed settings/public fetch does not prevent the experiments map from applying', async () => {
     vi.stubGlobal(
       'fetch',

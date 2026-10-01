@@ -72,6 +72,7 @@ export async function applyServerFeatureFlags(): Promise<void> {
 
   if (exp.status === 'fulfilled' && exp.value) {
     const body = exp.value as { experiments?: Record<string, boolean> };
+    // setServerFlags() itself rejects a null, non-object, or array argument.
     if (body.experiments && typeof body.experiments === 'object') {
       setServerFlags(body.experiments);
     }
