@@ -128,6 +128,35 @@ describe('scion-admin-experiments', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('shows "Loading experiments…" while the initial GET is pending, not the empty state', async () => {
+    let resolveGet!: (r: Response) => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((r) => {
+          resolveGet = r;
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    element = await createElement();
+    element.active = true;
+    await element.updateComplete;
+    // Setting `active` triggers a render, then `updated()` calls `load()`,
+    // which synchronously flips `loading` before the first `await` inside
+    // it — a cascading update that this `updateComplete` resolution doesn't
+    // itself wait for, so flush one more microtask/update cycle.
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+
+    expect(shadowText(element)).toContain('Loading experiments');
+    expect(shadowText(element)).not.toContain('No experiments are currently registered.');
+
+    resolveGet(jsonResponse(makeResponse()));
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+    expect(shadowText(element)).not.toContain('Loading experiments');
+  });
+
   it('renders the normal state: title, description, badges, issue link, switch', async () => {
     vi.stubGlobal(
       'fetch',
@@ -290,14 +319,20 @@ describe('scion-admin-experiments', () => {
       title: 'Test gate',
       layers: ['server'],
     });
+    // Recorded here and asserted outside the mock: a failing `expect` inside
+    // the mock throws into `apiFetch`, and the component's own `catch` in
+    // `setOverride` swallows it (reverts and reloads) instead of failing the
+    // test, so this body cannot be inspected safely from inside the mock.
+    const putBodies: Array<{ overrides: Record<string, boolean | null>; expected_revision: number }> =
+      [];
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === 'PUT') {
         const body = JSON.parse(init.body as string) as {
           overrides: Record<string, boolean | null>;
           expected_revision: number;
         };
+        putBodies.push(body);
         if ('web.terminal_workspace' in body.overrides) {
-          expect(body.expected_revision).toBe(1);
           return Promise.resolve(
             jsonResponse(
               makeResponse({
@@ -311,14 +346,14 @@ describe('scion-admin-experiments', () => {
             )
           );
         }
-        expect(body.expected_revision).toBe(2);
         return Promise.resolve(
           jsonResponse(
             makeResponse({
               revision: 3,
-              experiments: [rowA, rowB].map((e) =>
-                e.name === 'hub.test_gate' ? { ...e, override: false, enabled: false } : e
-              ),
+              experiments: [
+                { ...rowA, override: false, enabled: false },
+                { ...rowB, override: false, enabled: false },
+              ],
             })
           )
         );
@@ -343,8 +378,21 @@ describe('scion-admin-experiments', () => {
     await new Promise((r) => setTimeout(r, 0));
     await element.updateComplete;
 
-    const putCalls = fetchMock.mock.calls.filter((c) => (c[1] as RequestInit)?.method === 'PUT');
-    expect(putCalls).toHaveLength(2);
+    // The real assertion: the second write's expected_revision is the
+    // revision the first write's response returned (2), not the
+    // original-GET revision (1) both rows started with.
+    expect(putBodies).toEqual([
+      { overrides: { 'web.terminal_workspace': false }, expected_revision: 1 },
+      { overrides: { 'hub.test_gate': false }, expected_revision: 2 },
+    ]);
+    // Neither write reverted (no error banner, both rows show "overridden"),
+    // which would not hold if either write had been rejected and reloaded.
+    expect(element.shadowRoot?.querySelector('sl-alert[variant="danger"]')).toBeNull();
+    expect(shadowText(element)).toContain('Test gate');
+    const captions = Array.from(element.shadowRoot?.querySelectorAll('.caption') ?? []).map(
+      (c) => c.textContent
+    );
+    expect(captions.filter((c) => c?.includes('overridden'))).toHaveLength(2);
   });
 
   it('while a write is pending, every switch and the reset button are disabled and a click has no effect', async () => {

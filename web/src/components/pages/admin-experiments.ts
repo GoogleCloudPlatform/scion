@@ -71,6 +71,9 @@ export class ScionAdminExperiments extends LitElement {
   /** Set by the parent tab panel; the component fetches on the first `true`. */
   @property({ type: Boolean }) active = false;
 
+  /** True once the first load has been kicked off, so it is never repeated. */
+  @state() private requested = false;
+  /** True once a load has completed successfully at least once. */
   @state() private loaded = false;
   @state() private loading = false;
   @state() private forbidden = false;
@@ -138,8 +141,8 @@ export class ScionAdminExperiments extends LitElement {
   `;
 
   protected override updated(changed: PropertyValues): void {
-    if (changed.has('active') && this.active && !this.loaded && !this.loading) {
-      this.loaded = true;
+    if (changed.has('active') && this.active && !this.requested) {
+      this.requested = true;
       void this.load();
     }
   }
@@ -173,6 +176,7 @@ export class ScionAdminExperiments extends LitElement {
   }
 
   private applyResponse(data: AdminExperimentsResponse): void {
+    this.loaded = true;
     this.experiments = data.experiments ?? [];
     this.revision = data.revision ?? 0;
     this.malformed = data.malformed ?? false;
