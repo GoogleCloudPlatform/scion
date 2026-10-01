@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -2536,9 +2537,46 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		StateVersion int64                  `json:"stateVersion"`
 	}
 
-	if err := readJSON(r, &updates); err != nil {
+	// The body is read into a buffer, rather than decoded straight off
+	// r.Body via readJSON, because recordExplicitEdits (ptone/scion#2493)
+	// needs a second, raw look at the same bytes: which keys the request's
+	// "config" object actually contains, not just what updates.Config
+	// decoded to (every ScionConfig field is `omitempty`, so an omitted key
+	// and an explicit zero value are otherwise indistinguishable).
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+	}
+	if err := json.Unmarshal(body, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// presentConfigKeys mirrors the keys present in the request's raw
+	// "config" JSON object, for recordExplicitEdits' "present keys only"
+	// rule (see its doc comment). Left nil (and therefore inert) when
+	// updates.Config is nil or the raw object can't be recovered for
+	// whatever reason -- recordExplicitEdits treats a nil/empty map as
+	// "nothing present", which is always the safe direction here.
+	var presentConfigKeys map[string]bool
+	if updates.Config != nil {
+		var rawTop struct {
+			Config json.RawMessage `json:"config"`
+		}
+		if err := json.Unmarshal(body, &rawTop); err == nil && len(rawTop.Config) > 0 {
+			var rawFields map[string]json.RawMessage
+			if err := json.Unmarshal(rawTop.Config, &rawFields); err == nil {
+				presentConfigKeys = make(map[string]bool, len(rawFields))
+				for k := range rawFields {
+					presentConfigKeys[k] = true
+				}
+			}
+		}
 	}
 
 	// Check version for optimistic locking
@@ -2592,19 +2630,42 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
 		cfg := updates.Config
-		if cfg.Image != "" {
-			agent.AppliedConfig.Image = cfg.Image
-		}
-		if cfg.Model != "" {
-			resolved := s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
-			agent.AppliedConfig.Model = resolved
-			cfg.Model = resolved // ensures InlineConfig (set later) also carries resolved value
-		}
 		if cfg.ThinkingLevel != nil {
 			if tl := *cfg.ThinkingLevel; tl < 0 || tl > 100 {
 				BadRequest(w, "thinking_level must be between 0 and 100")
 				return
 			}
+		}
+		if cfg.Model != "" {
+			// Resolved here, ahead of both recordExplicitEdits and the live
+			// write below, so both compare/store the same resolved value
+			// the requester's alias (if any) maps to -- not the raw alias
+			// they typed. This also ensures InlineConfig (set later)
+			// carries the resolved value.
+			cfg.Model = s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
+		}
+
+		// old is a snapshot of the live config exactly as it stood before
+		// any of the writes below, for recordExplicitEdits' diff (Option C,
+		// ptone/scion#2493, invariant E). Taken after thinking-level
+		// validation and model-alias resolution (pure reads) but before the
+		// first assignment into agent.AppliedConfig itself.
+		old := *agent.AppliedConfig
+
+		// SEAM for ptone/scion#2457 task #16 (I2): once that task lands, its
+		// PATCH config.env["TZ"] strip belongs HERE, between the `old`
+		// snapshot above and the recordExplicitEdits call below -- never
+		// after it. See recordExplicitEdits' doc comment for why.
+		if agent.AppliedConfig.CreateInputs != nil {
+			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
+				dispatchImageRegistry(s.GetDispatcher()))
+		}
+
+		if cfg.Image != "" {
+			agent.AppliedConfig.Image = cfg.Image
+		}
+		if cfg.Model != "" {
+			agent.AppliedConfig.Model = cfg.Model
 		}
 		// Always apply thinking level from config (nil = explicit unset)
 		agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel

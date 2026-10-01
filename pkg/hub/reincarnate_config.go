@@ -40,12 +40,17 @@ import (
 //   - the requester's original explicit inputs (Image, Model, Env,
 //     InlineConfig, HarnessConfig, HarnessAuth, Profile, ThinkingLevel), from
 //     AppliedConfig.CreateInputs, or a heuristic reconstruction for an agent
-//     that predates that field. HarnessConfig and HarnessAuth are
-//     dual-purpose exactly like Model, NOT kept fields — left empty here
-//     (rather than copied from the live config) is what lets
-//     deriveAgentConfig's project/template/hub resolution below fill them
-//     fresh from the CURRENT catalog when the requester never set them,
-//     instead of freezing in whatever generation N happened to resolve;
+//     that predates that field. Since Option C (ptone/scion#2493),
+//     CreateInputs also picks up any later PATCH /api/v1/agents/{id} edit
+//     that changed one of these fields' (or an Env key's) live value — see
+//     recordExplicitEdits — so "explicit inputs" here means the create
+//     request plus any explicit edit made since, not just what create itself
+//     saw. HarnessConfig and HarnessAuth are dual-purpose exactly like Model,
+//     NOT kept fields — left empty here (rather than copied from the live
+//     config) is what lets deriveAgentConfig's project/template/hub
+//     resolution below fill them fresh from the CURRENT catalog when the
+//     requester never set them, instead of freezing in whatever generation N
+//     happened to resolve;
 //   - then deriveAgentConfig run on THAT fresh config: harness-config
 //     resolution, applyProjectDefaults, applyHubAgentDefaults, then
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
