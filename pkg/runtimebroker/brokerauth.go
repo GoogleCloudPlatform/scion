@@ -38,8 +38,8 @@ type authenticatingHubConnCtxKey struct{}
 // authenticatingHubConnFromContext returns the name of the hub connection
 // whose secret key verified the request's HMAC signature, or "" when
 // authentication is disabled, unauthenticated requests are allowed through,
-// or no context value was set (e.g. a request built by a test that bypasses
-// the middleware).
+// or no context value was set (e.g. a request built by a test without
+// routing it through the middleware).
 func authenticatingHubConnFromContext(ctx context.Context) string {
 	name, _ := ctx.Value(authenticatingHubConnCtxKey{}).(string)
 	return name

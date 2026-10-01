@@ -992,28 +992,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
 
-	// If WorkspaceStoragePath is set, download workspace from GCS (non-git
-	// bootstrap). Factored into downloadWorkspaceFromGCS so the async-launch
-	// path (runLaunch) performs exactly the same step, in its goroutine,
-	// instead of here (design §3.1: "Launch is the GCS workspace download...
-	// plus Manager.Start, in a goroutine").
-	if req.WorkspaceStoragePath != "" {
-		var attemptMsg string
-		var dlErr error
-		opts, attemptMsg, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
-		if dlErr != nil {
-			span.SetStatus(codes.Error, dlErr.Error())
-			if errors.Is(dlErr, errInvalidWorkspaceDir) {
-				markAttemptFailed(http.StatusBadRequest, attemptMsg)
-				BadRequest(w, dlErr.Error())
-				return
-			}
-			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
-			RuntimeError(w, dlErr.Error())
-			return
-		}
-	}
-
 	// Inject skill resolver from Hub connection for skill provisioning.
 	ctx = s.attachSkillResolver(ctx, r, skillResolverInputs{
 		HubEndpoint:          req.HubEndpoint,
@@ -1030,14 +1008,47 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).
 	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
-	// With AsyncLaunch absent, or no LaunchID to track the launch by (a
-	// non-conforming caller), behavior is unchanged from here down.
+	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
+	// LaunchTimeoutSeconds too small to leave any budget after the broker's
+	// 20s abort margin (review r1 F-13 — ctx' would already be expired when
+	// the 201 is sent), fall back to the synchronous path rather than accept
+	// a launch that cannot possibly succeed. Behavior is unchanged from here
+	// down for all of these non-conforming cases.
 	if req.AsyncLaunch && !req.ProvisionOnly && !req.Reprovision {
-		if req.LaunchID == "" {
+		switch {
+		case req.LaunchID == "":
 			s.agentLifecycleLog.Warn("async launch requested with no launchId; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name)
-		} else {
+		case req.LaunchTimeoutSeconds <= minAsyncLaunchTimeoutSeconds:
+			s.agentLifecycleLog.Warn("async launch requested with too small a launchTimeoutSeconds; falling back to synchronous create",
+				"agent_id", req.ID, "name", req.Name, "launch_timeout_seconds", req.LaunchTimeoutSeconds)
+		default:
 			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
+			return
+		}
+	}
+
+	// If WorkspaceStoragePath is set, download workspace from GCS (non-git
+	// bootstrap). Factored into downloadWorkspaceFromGCS so the async-launch
+	// path (runLaunch) performs exactly the same step, in its own goroutine
+	// (design §3.1: "Launch is the GCS workspace download ... plus
+	// Manager.Start, in a goroutine"). This only runs here on paths that fall
+	// through the async gate above (flag absent, ProvisionOnly, Reprovision,
+	// or no LaunchID), so an eligible async create never downloads twice
+	// (review r1 F-3).
+	if req.WorkspaceStoragePath != "" {
+		var attemptMsg, httpMessage string
+		var dlErr error
+		opts, attemptMsg, httpMessage, dlErr = s.downloadWorkspaceFromGCS(ctx, req, opts)
+		if dlErr != nil {
+			span.SetStatus(codes.Error, dlErr.Error())
+			if errors.Is(dlErr, errInvalidWorkspaceDir) {
+				markAttemptFailed(http.StatusBadRequest, attemptMsg)
+				BadRequest(w, httpMessage)
+				return
+			}
+			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
+			RuntimeError(w, httpMessage)
 			return
 		}
 	}
@@ -1203,12 +1214,15 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // workspace download ... plus Manager.Start, in a goroutine").
 //
 // Returns opts unchanged when WorkspaceStoragePath is empty. On error it
-// returns the short status string the synchronous caller records on the
-// dispatch attempt, and an error whose Error() is the exact user-facing
-// message the synchronous caller writes with RuntimeError.
-func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, error) {
+// returns: the short status string the synchronous caller records on the
+// dispatch attempt; httpMessage, the exact user-facing text the synchronous
+// path wrote with RuntimeError before this was extracted (byte-identical,
+// capitalized, no wrapped error — design's "byte-identical to today" for the
+// asyncLaunch-absent path, review r1 F-2); and err, a normal lowercase Go
+// error for the async path's failure report and logging.
+func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
-		return opts, "", nil
+		return opts, "", "", nil
 	}
 
 	// For hub-managed projects (ProjectSlug set), use the conventional path
@@ -1216,9 +1230,10 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	var workspaceDir string
 	var workspaceRoot string
 	if req.ProjectSlug != "" {
-		globalDir, err := config.GetGlobalDir()
-		if err != nil {
-			return opts, "failed to resolve global dir", fmt.Errorf("failed to get global dir: %w", err)
+		globalDir, gdErr := config.GetGlobalDir()
+		if gdErr != nil {
+			return opts, "failed to resolve global dir", "Failed to get global dir: " + gdErr.Error(),
+				fmt.Errorf("failed to get global dir: %w", gdErr)
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
@@ -1235,17 +1250,20 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// everything below, not the original join.
 	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
 	if verr != nil {
-		return opts, "invalid workspace directory", fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
+		return opts, "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
+			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
 	}
 	workspaceDir = resolvedWorkspaceDir
 
-	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
-		return opts, "failed to create workspace directory", fmt.Errorf("failed to create workspace directory: %w", err)
+	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
+		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
+			fmt.Errorf("failed to create workspace directory: %w", mkErr)
 	}
 
 	bucket := s.config.StorageBucket
 	if bucket == "" {
-		return opts, "storage bucket not configured", errors.New("storage bucket not configured for workspace bootstrap")
+		return opts, "storage bucket not configured", "Storage bucket not configured for workspace bootstrap",
+			errors.New("storage bucket not configured for workspace bootstrap")
 	}
 
 	if s.config.Debug {
@@ -1257,8 +1275,9 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if err := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); err != nil {
-		return opts, "failed to download workspace from GCS", fmt.Errorf("failed to download workspace from GCS: %w", err)
+	if syncErr := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
+			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
 	}
 
 	opts.Workspace = workspaceDir
@@ -1273,7 +1292,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
-	return opts, "", nil
+	return opts, "", "", nil
 }
 
 // hydrateTemplate resolves a Hub template to a local directory for provisioning.

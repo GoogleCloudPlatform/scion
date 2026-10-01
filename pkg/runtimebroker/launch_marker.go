@@ -49,11 +49,27 @@ func writeLaunchMarker(projectDir string, sharedWorkspace bool, slug, launchID s
 		return err
 	}
 	path := filepath.Join(dir, slug)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(launchID), 0644); err != nil {
+	// A fixed "<slug>.tmp" name would collide if two brokers (or two
+	// launches racing on the same replica) write the same slug's marker at
+	// once (review r1 F-25); os.CreateTemp gives each writer its own name in
+	// the same directory, so the final os.Rename is still the atomic,
+	// same-filesystem rename the marker's guarantee depends on.
+	tmp, err := os.CreateTemp(dir, slug+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpPath := tmp.Name()
+	_, writeErr := tmp.Write([]byte(launchID))
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		_ = os.Remove(tmpPath)
+		return writeErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return closeErr
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // readLaunchMarker returns the launch ID currently recorded for slug, or ""

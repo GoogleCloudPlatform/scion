@@ -28,6 +28,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// minAsyncLaunchTimeoutSeconds is the smallest LaunchTimeoutSeconds the
+// broker accepts for an async launch: the broker aborts 20s before the
+// deadline (design §3.8.2 step 4), so anything at or below that would leave
+// ctx' already expired before runLaunch's first claim (review r1 F-13).
+const minAsyncLaunchTimeoutSeconds = 20
+
 // beginAsyncLaunch implements design t1-async-create-v11.md §3.8.2 for a
 // createAgent request with AsyncLaunch set (and not ProvisionOnly or
 // Reprovision, which createAgent's caller has already excluded). Admission
@@ -65,8 +71,14 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// against the budget. context.WithoutCancel detaches from the request's
 	// own cancellation (the response is about to be written and r's
 	// lifecycle ends), while WithDeadline still bounds the goroutine.
+	//
+	// Derived from ctx (the admission context createAgent built), not
+	// r.Context(): ctx carries the values attachSkillResolver and
+	// withHubAgentDefaults attached after r.Context() was read, which
+	// Manager.Start needs just as much on the async path as on the
+	// synchronous one (review r1 F-4).
 	deadline := receivedAt.Add(time.Duration(req.LaunchTimeoutSeconds) * time.Second)
-	runCtx, cancel := context.WithDeadline(context.WithoutCancel(r.Context()), deadline.Add(-20*time.Second))
+	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-20*time.Second))
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
 	supersededDone := s.launchRegistry.Begin(key, rec)

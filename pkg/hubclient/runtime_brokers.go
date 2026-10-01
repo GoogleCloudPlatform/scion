@@ -85,7 +85,7 @@ type AgentLaunchReport struct {
 	Message    string                 `json:"message,omitempty"`
 	ErrorCode  string                 `json:"errorCode,omitempty"`
 	Agent      *AgentLaunchReportInfo `json:"agent,omitempty"` // succeeded only
-	At         time.Time              `json:"at,omitempty"`
+	At         time.Time              `json:"at,omitzero"`
 }
 
 // AgentLaunchReport.State values.
@@ -97,12 +97,28 @@ const (
 	AgentLaunchReportStateFailed     = "failed"
 )
 
-// AgentLaunchReportInfo is the succeeded report's agent echo. Only the
-// subset the Hub's P1a-ii ApplyLaunchReport applies (Runtime) is defined
-// here; the Hub ignores unknown JSON fields, so there is nothing to gain by
-// sending more before a later phase consumes it.
+// AgentLaunchReportInfo is the succeeded report's agent echo (design §3.2's
+// AgentLaunchReport.Agent, a RemoteAgentInfo on the Hub side). Fuller
+// broker-response application (the complete echo) is explicitly P1b-1's
+// wire-plumbing job (pkg/store.LaunchReport's doc comment); the Hub's P1a-ii
+// ApplyLaunchReport applies only Runtime and RuntimeState from it today
+// (store.LaunchReport's two documented fields) and ignores the rest, so
+// sending the full shape now is forward-compatible and costs nothing.
 type AgentLaunchReportInfo struct {
-	Runtime string `json:"runtime,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Slug            string `json:"slug,omitempty"`
+	ContainerID     string `json:"containerId,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Template        string `json:"template,omitempty"`
+	HarnessConfig   string `json:"harnessConfig,omitempty"`
+	HarnessAuth     string `json:"harnessAuth,omitempty"`
+	Image           string `json:"image,omitempty"`
+	Runtime         string `json:"runtime,omitempty"`
+	RuntimeState    string `json:"runtimeState,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	Activity        string `json:"activity,omitempty"`
+	ContainerStatus string `json:"containerStatus,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
@@ -134,14 +150,14 @@ const (
 
 // AgentLaunchReportResult.Reason values (409 stale_launch only).
 const (
-	AgentLaunchReportReasonSuperseded = "superseded"
-	AgentLaunchReportReasonDeleted    = "deleted"
-	AgentLaunchReportReasonStopped    = "stopped"
-	AgentLaunchReportReasonTimedOut   = "timed_out"
-	AgentLaunchReportReasonLost       = "lost"
-	AgentLaunchReportReasonFailed     = "failed"
+	AgentLaunchReportReasonSuperseded  = "superseded"
+	AgentLaunchReportReasonDeleted     = "deleted"
+	AgentLaunchReportReasonStopped     = "stopped"
+	AgentLaunchReportReasonTimedOut    = "timed_out"
+	AgentLaunchReportReasonLost        = "lost"
+	AgentLaunchReportReasonFailed      = "failed"
 	AgentLaunchReportReasonNotLaunched = "not_launched"
-	AgentLaunchReportReasonOtherOwner = "other_owner"
+	AgentLaunchReportReasonOtherOwner  = "other_owner"
 )
 
 // MessageFailure is one buffered delivery that failed on the broker.
@@ -409,7 +425,22 @@ func (s *runtimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, 
 			// launch.
 			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "no_endpoint", Message: "launch report route not found"}
 		}
+		if resp.StatusCode == http.StatusConflict && body.Code != AgentLaunchReportCodeStaleLaunch {
+			// Review r1 F-19: a 409 the wire contract does not define (its
+			// code is not stale_launch) is not something the sender can
+			// classify by Reason; treat it as retryable rather than guessing.
+			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "unrecognized_conflict", Message: "409 response had an unrecognized code"}
+		}
 		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode, Code: body.Code, Reason: body.Reason}, nil
+
+	case http.StatusBadRequest, http.StatusUnauthorized:
+		// Review r1 F-19: these are definitive protocol/auth failures, never
+		// transient like an unreachable Hub or a 5xx -- retrying them would
+		// not help, so the sender must not loop on them like it does for
+		// errLaunchReportUnreachable. Reported as a result (nil error) so
+		// classifyGateAnswer's default case aborts and cleans up instead of
+		// retrying forever.
+		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode}, nil
 
 	default:
 		return nil, apiclient.ParseErrorResponse(resp)

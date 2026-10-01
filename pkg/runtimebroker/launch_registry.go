@@ -141,6 +141,12 @@ func WaitSuperseded(ctx context.Context, supersededDone <-chan struct{}) {
 // CancelLocal wakes the record held for key, if any (design §3.8.1: stop and
 // delete on the same replica call this to wake long waits).
 func (r *launchRegistry) CancelLocal(key launchKey) {
+	if r == nil {
+		// A *Server built directly (e.g. by a test that does not go through
+		// New()) has a nil registry; treat it the same as "no launch held
+		// for this key" rather than panicking (review r1 F-21).
+		return
+	}
 	r.mu.Lock()
 	rec := r.records[key]
 	r.mu.Unlock()

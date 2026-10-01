@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 )
 
 // ResourceHandle identifies one runtime resource created during a launch
@@ -59,13 +60,20 @@ func (m *AgentManager) CleanupLaunch(ctx context.Context, handles []ResourceHand
 
 	var errs []error
 	for _, h := range handles {
-		var err error
-		if supportsUIDPrecondition {
-			err = deleter.DeleteResource(ctx, h)
-		} else {
-			err = m.Runtime.Delete(ctx, h.Name)
+		if !supportsUIDPrecondition {
+			// Review r1 F-9: a plain Delete(ctx, h.Name) has no UID check,
+			// which is exactly what the precondition exists to prevent (a
+			// stale launch's cleanup deleting a newer launch's same-named
+			// resource), and once a handle can name something other than
+			// the agent itself (a Kubernetes Secret, say), Delete(name)
+			// would wrongly treat that name as an agent/container ID. Skip
+			// the handle instead of guessing.
+			slog.Warn("CleanupLaunch: runtime has no UID-precondition delete; skipping handle rather than deleting unconditionally by name",
+				"kind", h.Kind, "namespace", h.Namespace, "name", h.Name)
+			errs = append(errs, fmt.Errorf("cleanup launch resource %s %s/%s: runtime %s does not support UID-precondition delete", h.Kind, h.Namespace, h.Name, m.Runtime.Name()))
+			continue
 		}
-		if err != nil {
+		if err := deleter.DeleteResource(ctx, h); err != nil {
 			errs = append(errs, fmt.Errorf("cleanup launch resource %s %s/%s: %w", h.Kind, h.Namespace, h.Name, err))
 		}
 	}
