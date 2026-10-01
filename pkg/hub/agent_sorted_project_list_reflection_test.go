@@ -143,7 +143,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // assertNonSkippedFieldsNonZero fails closed on every field not in this map.
 var reflectFillStoreAgentSkipFields = map[string]bool{
 	"Project": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
-	"DeletedAt": true,
+	"DeletedAt":        true,
 	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
@@ -158,10 +158,10 @@ func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 
 	skip := reflectFillStoreAgentSkipFields
 	special := map[string]func(reflect.Value){
-		"ID":        func(f reflect.Value) { f.SetString(uuid.New().String()) },
-		"ProjectID": func(f reflect.Value) { f.SetString(projectID) },
-		"OwnerID":   func(f reflect.Value) { f.SetString(uuid.New().String()) },
-		"CreatedBy": func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"ID":          func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"ProjectID":   func(f reflect.Value) { f.SetString(projectID) },
+		"OwnerID":     func(f reflect.Value) { f.SetString(uuid.New().String()) },
+		"CreatedBy":   func(f reflect.Value) { f.SetString(uuid.New().String()) },
 		"MessageMode": func(f reflect.Value) { f.SetString("project") },
 		"AppliedConfig": func(f reflect.Value) {
 			f.Set(reflect.ValueOf(&store.AgentAppliedConfig{Image: "reflect-image", Task: "reflect-task"}))
