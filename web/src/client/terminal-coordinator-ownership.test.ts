@@ -829,9 +829,8 @@ describe('generation validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// claimOwnership() / subscribeSessions() / restoreEntries() — design
-// ptone/scion#2278 section 3.5.0, added for the terminal-persistence restore
-// path.
+// claimOwnership() / subscribeSessions() / restoreEntries() — added for the
+// terminal-persistence restore path.
 // ---------------------------------------------------------------------------
 const agentId2 = '22222222-2222-4222-8222-222222222222';
 

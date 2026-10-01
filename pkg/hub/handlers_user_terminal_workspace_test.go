@@ -375,9 +375,8 @@ func TestTerminalWorkspace_Pruning(t *testing.T) {
 	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
 	resp := decodeTWResponse(t, getRec)
 
-	// Order preserved (design section 3.2.2: "pruned, stored order
-	// preserved"): Equal, not ElementsMatch, so a regression that rebuilds
-	// the list from the agents map (unordered) would fail this.
+	// Order preserved: Equal, not ElementsMatch, so a regression that
+	// rebuilds the list from the agents map (unordered) would fail this.
 	assert.Equal(t, []string{agentA.ID, agentE.ID}, resp.AgentIDs)
 	assert.Equal(t, 3, resp.Pruned, "B (soft-deleted), C (missing) and D (denied) must be pruned")
 	assert.Nil(t, resp.FrontmostAgentID, "the saved frontmost (B) was pruned")
@@ -391,10 +390,10 @@ func TestTerminalWorkspace_Pruning(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Error-derived denies keep entries (design section 3.3): an access check
-// that could not be decided (a store/resolution fault on one of the four
-// tagged paths, see authz_resolution_error_test.go) must not prune. These
-// reuse the fail*Store wrappers defined there, binding a fresh AuthzService
+// Error-derived denies keep entries: an access check that could not be
+// decided (a store/resolution fault on one of the four tagged paths, see
+// authz_resolution_error_test.go) must not prune. These reuse the fail*Store
+// wrappers defined there, binding a fresh AuthzService
 // to the same underlying store so only the targeted authz sub-call fails.
 // ---------------------------------------------------------------------------
 
@@ -486,7 +485,7 @@ func TestTerminalWorkspace_Pruning_KeepsErrorDerivedDenies(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Store errors on GET → 500, row unchanged (design section 3.2.2)
+// Store errors on GET → 500, row unchanged
 // ---------------------------------------------------------------------------
 
 // failGetAgentsByIDsStore fails GetAgentsByIDs.

@@ -26,8 +26,7 @@ import (
 
 // UserTerminalWorkspaceStore implements store.UserTerminalWorkspaceStore using
 // Ent ORM. There is exactly one row per user, keyed on the unique user_id
-// column; writes are unconditional upserts (last-writer-wins, design
-// ptone/scion#2278 section 3.4).
+// column; writes are unconditional upserts (last-writer-wins).
 type UserTerminalWorkspaceStore struct {
 	client *ent.Client
 }
@@ -87,8 +86,8 @@ func (s *UserTerminalWorkspaceStore) GetUserTerminalWorkspace(ctx context.Contex
 // GetUserTerminalWorkspace call (the upsert and the read are not in a single
 // transaction). Under concurrent writers this can echo a revision or list
 // from a write that raced with this one; that is harmless under
-// last-writer-wins (design section 3.4), since the response is informational
-// and the caller does not compare against an expected revision.
+// last-writer-wins, since the response is informational and the caller does
+// not compare against an expected revision.
 func (s *UserTerminalWorkspaceStore) PutUserTerminalWorkspace(ctx context.Context, userID string, agentIDs []string, frontmostAgentID string) (*store.UserTerminalWorkspace, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {

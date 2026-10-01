@@ -1,6 +1,5 @@
 /**
- * Playwright browser tests for per-user terminal list persistence
- * (ptone/scion#2278, design section 4).
+ * Playwright browser tests for per-user terminal list persistence.
  *
  * There is no hub in this harness, so the new route
  * (`/api/v1/users/me/terminal-workspace`) is faked in-memory, held in the
@@ -10,9 +9,8 @@
  * standing in for the real hub's per-user row persisting across devices.
  *
  * Hub-side pruning (missing, soft-deleted, access-denied, error-derived) is
- * covered by the Go tests, not here (design section 4). These tests only
- * exercise what the client does with a GET/PUT response shaped like the
- * hub's.
+ * covered by the Go tests, not here. These tests only exercise what the
+ * client does with a GET/PUT response shaped like the hub's.
  */
 import { test, expect, type Page, type BrowserContext } from '@playwright/test';
 
@@ -63,9 +61,9 @@ interface WorkspaceFakeState {
   revision: number;
   /** IDs the next GET (and every GET after it, until changed) should
    *  report as pruned: present in storedAgentIds but left out of the GET
-   *  response, with pruned counting them. Mirrors the hub's "prune on
-   *  read, no side effect" rule (design section 3.3): storedAgentIds is
-   *  not modified by a GET, only by a PUT. */
+   *  response, with pruned counting them. Mirrors the hub's "prune on read,
+   *  no side effect" rule: storedAgentIds is not modified by a GET, only by
+   *  a PUT. */
   prunedIds: ReadonlySet<string>;
   puts: WorkspacePut[];
   waitForState(predicate: () => boolean): Promise<void>;
@@ -235,7 +233,7 @@ async function navigateToTerminal(page: Page, agentId: string): Promise<void> {
   );
 }
 
-/** Rail order, as agent names (design's fixture names, e.g. "alpha"). A
+/** Rail order, as agent names (this file's fixture names, e.g. "alpha"). A
  *  Locator, not resolved text: callers assert on it with toHaveText(),
  *  Playwright's own auto-retrying web-first assertion, rather than
  *  re-evaluating this in a manual expect.poll(). */
@@ -255,7 +253,7 @@ async function clickRailEntry(page: Page, name: string): Promise<void> {
 }
 
 // ===========================================================================
-// Case 1: round trip across two browser contexts (design section 4)
+// Case 1: round trip across two browser contexts
 // ===========================================================================
 test('round trip: entries saved by one context are restored, in order, by another; only the frontmost attaches', async ({
   browser,
@@ -286,7 +284,7 @@ test('round trip: entries saved by one context are restored, in order, by anothe
 
   // Wait for the saved state to reach its final shape. The exact number of
   // PUTs along the way depends on real-time debounce coalescing between the
-  // three navigations above (Phase 1's debounce/baseline behaviour is
+  // three navigations above (the debounce/baseline behaviour itself is
   // covered precisely by vitest's fake timers); what matters here is that
   // it converges to the live rail. waitForState re-checks this predicate
   // every time a PUT lands, so it resolves the instant it becomes true
@@ -323,7 +321,7 @@ test('round trip: entries saved by one context are restored, in order, by anothe
 });
 
 // ===========================================================================
-// Case 2: pruning write-back (design section 4)
+// Case 2: pruning write-back
 // ===========================================================================
 test('pruning write-back: a GET reporting pruned entries restores only the survivors and writes them back once', async ({
   browser,
@@ -359,7 +357,7 @@ test('pruning write-back: a GET reporting pruned entries restores only the survi
 });
 
 // ===========================================================================
-// Case 3: URL intent (design section 4, 3.5.3)
+// Case 3: URL intent
 // ===========================================================================
 test('URL intent: opening an unsaved agent path appends it as frontmost, exactly one PUT', async ({
   browser,
@@ -380,8 +378,8 @@ test('URL intent: opening an unsaved agent path appends it as frontmost, exactly
   await expect(railNameEntries(page)).toHaveText(['alpha', 'beta', 'gamma', 'delta'], {
     timeout: FIRST_RENDER_TIMEOUT,
   });
-  // Only delta attaches — an explicit URL connects nothing else (design
-  // section 3.5.3): alpha, beta and gamma are restored idle.
+  // Only delta attaches — an explicit URL connects nothing else: alpha,
+  // beta and gamma are restored idle.
   await socket.waitForAttach(1);
   expect(socket.attachedAgentIds).toEqual([agentD]);
 
@@ -401,7 +399,7 @@ test('URL intent: opening an unsaved agent path appends it as frontmost, exactly
 });
 
 // ===========================================================================
-// Case 4: owner only (design section 4)
+// Case 4: owner only
 // ===========================================================================
 test('owner only: PUTs come only from the owning page, never the non-owner', async ({
   browser,

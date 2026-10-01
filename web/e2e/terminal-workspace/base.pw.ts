@@ -44,9 +44,8 @@ test('direct legacy load and history retain the deployment base', async ({ page 
   expect(attaches).toBe(1);
 });
 
-// ptone/scion#2278 (design section 4): the restore's onRestoredSelection
-// replaceState must keep the deployment base path, the same as the legacy
-// rewrite case above.
+// The restore's onRestoredSelection replaceState must keep the deployment
+// base path, the same as the legacy rewrite case above.
 test('bare /terminals restore keeps the deployment base in the URL', async ({ page }) => {
   let attaches = 0;
   await page.addInitScript(() => {

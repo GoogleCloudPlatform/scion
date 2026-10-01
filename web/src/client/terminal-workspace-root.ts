@@ -115,8 +115,8 @@ export class TerminalWorkspaceRoot {
 
   /**
    * True while restore() is creating background (deferConnect) entries via
-   * the coordinator (design ptone/scion#2278 section 3.5.2). Suppresses
-   * syncSessions()'s auto-select-last-session behavior so a restored entry
+   * the coordinator. Suppresses syncSessions()'s auto-select-last-session
+   * behavior so a restored entry
    * does not steal the frontmost slot; the persistence module selects the
    * saved frontmost explicitly, outside this suspension.
    */
@@ -328,10 +328,10 @@ export class TerminalWorkspaceRoot {
     try {
       const session = pane.open(registry, agentId, options);
       this.panes.set(session.state.key, pane);
-      // deferConnect entries are restored in the background (design
-      // ptone/scion#2278 section 3.5.2): they must not become visible or
-      // selected, so layoutManager.open() (which would show/select them) is
-      // skipped. The caller selects the frontmost entry separately.
+      // deferConnect entries are restored in the background: they must not
+      // become visible or selected, so layoutManager.open() (which would
+      // show/select them) is skipped. The caller selects the frontmost
+      // entry separately.
       if (!options?.deferConnect) {
         // Check overflow: if the current multi preset is at capacity, switch to
         // single so the newly opened agent is visible.  Multi-pane assignments
@@ -452,9 +452,8 @@ export class TerminalWorkspaceRoot {
             // Idle entries (restored, not yet connected) stay idle while
             // their agent is stopped: marking a never-connected entry
             // unavailable would strand it, since noteAgentAvailable()'s
-            // re-arm requires everConnected (design ptone/scion#2278
-            // section 3.5.2). Selecting it later behaves like opening a
-            // stopped agent's terminal today.
+            // re-arm requires everConnected. Selecting it later behaves like
+            // opening a stopped agent's terminal today.
             entry.session.state.connection !== 'idle'
           ) {
             if (entry.session.state.connection !== 'unavailable') {
@@ -843,7 +842,7 @@ export class TerminalWorkspaceRoot {
       entry.state.connection === 'connected' ||
       entry.state.connection === 'closed' ||
       // Idle entries connect via selection (setFrontmost), not the rail's
-      // manual Reconnect action (design ptone/scion#2278 section 3.5.2).
+      // manual Reconnect action.
       entry.state.connection === 'idle' ||
       entry.state.disconnectReason === 'agent-deleted';
     reconnect.addEventListener('click', (event) => {

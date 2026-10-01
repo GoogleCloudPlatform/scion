@@ -236,7 +236,7 @@ describe('terminal sessions', () => {
   });
 });
 
-describe('idle sessions (design ptone/scion#2278)', () => {
+describe('idle sessions', () => {
   it('deferConnect gives idle and does not call the initializer', () => {
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize, { deferConnect: true });

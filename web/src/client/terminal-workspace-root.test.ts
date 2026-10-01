@@ -711,7 +711,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
   });
 });
 
-describe('idle entries (design ptone/scion#2278)', () => {
+describe('idle entries', () => {
   class FakeSocket {
     static instances: FakeSocket[] = [];
     readyState = 0;
@@ -786,9 +786,8 @@ describe('idle entries (design ptone/scion#2278)', () => {
   // layoutManager.open() call; syncSessions()'s separate "no active
   // session" auto-select fallback would otherwise still pick up a lone new
   // entry. The real restore path always wraps entry creation in
-  // withAutoSelectSuspended (design ptone/scion#2278 section 3.5.2) for
-  // exactly this reason, so these tests do the same to observe a
-  // deliberately-idle, unselected entry.
+  // withAutoSelectSuspended for exactly this reason, so these tests do the
+  // same to observe a deliberately-idle, unselected entry.
   it('deferConnect leaves layoutManager state unchanged and creates no socket', async () => {
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,
@@ -844,11 +843,11 @@ describe('idle entries (design ptone/scion#2278)', () => {
     expect(fetcher).not.toHaveBeenCalled();
 
     // Selecting moves the pane into the visible slot, which drives
-    // setFrontmost(true) and, from 'idle', connect() (design ptone/scion#2278
-    // section 3.5.2). The session-level mechanics of a connect attempt are
-    // already covered by terminal-sessions.test.ts; here it is enough to
-    // prove selection is what triggers it, by observing the agent-fetch and
-    // pty-preflight requests.
+    // setFrontmost(true) and, from 'idle', connect(). The session-level
+    // mechanics of a connect attempt are already covered by
+    // terminal-sessions.test.ts; here it is enough to prove selection is
+    // what triggers it, by observing the agent-fetch and pty-preflight
+    // requests.
     root.select(session);
     await flush();
     expect(session.state.connection).not.toBe('idle');

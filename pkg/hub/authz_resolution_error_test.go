@@ -27,16 +27,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Tests for DenyCauseResolutionError and Decision.IsIndeterminate(), added for
-// design ptone/scion#2278 section 3.3: the terminal-workspace GET handler
-// must not prune an agent whose access check could not be decided (a store
-// or resolution fault), only one that was denied by policy.
+// Tests for DenyCauseResolutionError and Decision.IsIndeterminate(): the
+// terminal-workspace GET handler must not prune an agent whose access check
+// could not be decided (a store or resolution fault), only one that was
+// denied by policy.
 //
 // Each wrapper below fails exactly one store call on the path decide() takes
-// for a user principal requesting agent.attach, matching the four paths
-// enumerated in the design: principal resolution (Step 2), role-binding
-// resolution (Step 3), role-definition resolution (Step 4), and
-// access-constraint load (Step 7c).
+// for a user principal requesting agent.attach: principal resolution
+// (Step 2), role-binding resolution (Step 3), role-definition resolution
+// (Step 4), and access-constraint load (Step 7c).
 
 // failEffectiveGroupsStore fails GetEffectiveGroups (Step 2: principal
 // resolution).
@@ -181,11 +180,10 @@ func TestAuthz_IsIndeterminate_AccessConstraintLoadError(t *testing.T) {
 	assert.Equal(t, "relationship grant restricted by access_constraint_error", decision.Reason)
 }
 
-// TestAuthz_AgentAttachPermissionResolves pins the §3.3 completeness argument:
-// a user principal requesting agent.attach resolves to exactly one
-// permission, so a registry mistake would show up here as an "unresolvable
-// permission" reason rather than silently changing the resolution-error
-// completeness analysis.
+// TestAuthz_AgentAttachPermissionResolves pins that a user principal
+// requesting agent.attach resolves to exactly one permission, so a registry
+// mistake would show up here as an "unresolvable permission" reason rather
+// than silently changing which paths above can produce a resolution error.
 func TestAuthz_AgentAttachPermissionResolves(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()

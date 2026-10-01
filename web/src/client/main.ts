@@ -974,7 +974,7 @@ async function renderRoute(path: string): Promise<void> {
       // ── Persisted terminal list restore (ptone/scion#2278) ──────────
       // Runs for every render into /terminals…, before the URL-driven code
       // below: an explicit URL decides what is visible and connected, and
-      // the saved list decides rail membership only (design section 3.5.3).
+      // the saved list decides rail membership only.
       if (coordinator && terminalPersistence) {
         await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
         if (thisNav !== navigationId) return;

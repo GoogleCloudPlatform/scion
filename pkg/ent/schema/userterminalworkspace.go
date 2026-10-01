@@ -27,8 +27,7 @@ import (
 
 // UserTerminalWorkspace holds the schema definition for the
 // UserTerminalWorkspace entity: one row per user, storing the ordered list of
-// open terminal agents the terminal viewer (/terminals) restores on open. See
-// design ptone/scion#2278 section 3.1.
+// open terminal agents the terminal viewer (/terminals) restores on open.
 type UserTerminalWorkspace struct {
 	ent.Schema
 }

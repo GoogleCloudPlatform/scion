@@ -121,8 +121,7 @@ func UserDomain() Domain[store.User] {
 // descriptor: the store's contract (a single upserted row per user, keyed by
 // user ID rather than by an entity ID the store assigns, with an atomically
 // incrementing revision and no List/Delete of its own) does not match the
-// generic Create/Read/Update/Delete/List categories the harness drives. See
-// design ptone/scion#2278 section 4.
+// generic Create/Read/Update/Delete/List categories the harness drives.
 func UserTerminalWorkspaceConformance(t *testing.T, factory Factory) {
 	t.Helper()
 	ctx := context.Background()

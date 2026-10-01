@@ -2487,8 +2487,7 @@ type ExternalIdentityStore interface {
 
 // UserTerminalWorkspace is the persisted, per-user state of the terminal
 // viewer's (/terminals) open-terminal rail: the ordered list of open agent
-// IDs, plus which one was frontmost when it was last saved. See design
-// ptone/scion#2278 section 3.1.
+// IDs, plus which one was frontmost when it was last saved.
 type UserTerminalWorkspace struct {
 	UserID           string    `json:"userId"`
 	AgentIDs         []string  `json:"agentIds"`         // ordered, lowercase canonical UUIDs

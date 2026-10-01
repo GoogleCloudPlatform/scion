@@ -31,13 +31,12 @@ import (
 // Per-user terminal workspace persistence (/api/v1/users/me/terminal-workspace)
 //
 // Stores the ordered list of open terminal agents the terminal viewer
-// (/terminals) restores on open, plus which one was frontmost. See design
-// ptone/scion#2278, sections 3.1-3.3.
+// (/terminals) restores on open, plus which one was frontmost.
 // =============================================================================
 
 // terminalWorkspaceMaxAgentIDs is the maximum number of entries accepted on a
 // PUT. The rail has no cap today; this is well above realistic use and bounds
-// the per-read access checks (design section 3.1.4).
+// the per-read access checks below.
 const terminalWorkspaceMaxAgentIDs = 32
 
 // terminalWorkspaceMaxBodyBytes bounds the PUT request body. 32 IDs at 38
@@ -49,8 +48,7 @@ const terminalWorkspaceMaxBodyBytes = 16 * 1024
 // this form is accepted; braces, URNs and bare 32-hex forms are rejected.
 var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// terminalWorkspaceResponse is the wire shape for both GET and PUT, per
-// design section 3.2.
+// terminalWorkspaceResponse is the wire shape for both GET and PUT.
 type terminalWorkspaceResponse struct {
 	AgentIDs         []string   `json:"agentIds"`
 	FrontmostAgentID *string    `json:"frontmostAgentId"`
@@ -74,9 +72,8 @@ func emptyTerminalWorkspaceResponse() terminalWorkspaceResponse {
 
 // handleUserMeTerminalWorkspace routes GET/PUT on
 // /api/v1/users/me/terminal-workspace. Both methods require an interactive
-// session or dev credential (design section 3.2.1): the path names no user,
-// so the subject is always the authenticated caller. There is no admin
-// override.
+// session or dev credential: the path names no user, so the subject is
+// always the authenticated caller. There is no admin override.
 func (s *Server) handleUserMeTerminalWorkspace(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -95,10 +92,10 @@ func (s *Server) handleUserMeTerminalWorkspace(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// getUserTerminalWorkspace handles GET. Pruning is authoritative here (design
-// section 3.3): agents that no longer exist, are soft-deleted, or that the
-// caller can no longer attach to are dropped from the response. GET has no
-// side effects — the pruned list is not written back; the client does that.
+// getUserTerminalWorkspace handles GET. Pruning is authoritative here:
+// agents that no longer exist, are soft-deleted, or that the caller can no
+// longer attach to are dropped from the response. GET has no side effects —
+// the pruned list is not written back; the client does that.
 func (s *Server) getUserTerminalWorkspace(w http.ResponseWriter, r *http.Request, actor UserIdentity) {
 	ctx := r.Context()
 
@@ -146,8 +143,8 @@ func (s *Server) getUserTerminalWorkspace(w http.ResponseWriter, r *http.Request
 		}
 		if decision.IsIndeterminate() {
 			// An indeterminate answer keeps the entry and is not counted as
-			// pruned (design section 3.3): a store fault must not turn into
-			// permanent loss of the list once the client writes back.
+			// pruned: a store fault must not turn into permanent loss of the
+			// list once the client writes back.
 			survivors = append(survivors, id)
 			continue
 		}
@@ -173,19 +170,19 @@ func (s *Server) getUserTerminalWorkspace(w http.ResponseWriter, r *http.Request
 }
 
 // terminalWorkspacePutRequest is the strict PUT body. Unknown fields are
-// rejected (design section 3.1.4). AgentIDs is a pointer so a missing field
-// is distinguishable from an explicit empty list: a client bug that omits
-// the field (or sends a JSON null) must not silently wipe the saved list.
+// rejected. AgentIDs is a pointer so a missing field is distinguishable from
+// an explicit empty list: a client bug that omits the field (or sends a
+// JSON null) must not silently wipe the saved list.
 type terminalWorkspacePutRequest struct {
 	AgentIDs         *[]string `json:"agentIds"`
 	FrontmostAgentID *string   `json:"frontmostAgentId"`
 }
 
 // putUserTerminalWorkspace handles PUT. The write is unconditional
-// (last-writer-wins, design section 3.4): there is no If-Match or revision in
-// the request. PUT does not prune and does not check that agents exist
-// (design section 3.1.4) — a well-formed but non-existent UUID is accepted,
-// so the endpoint cannot be used as an existence oracle.
+// (last-writer-wins): there is no If-Match or revision in the request. PUT
+// does not prune and does not check that agents exist — a well-formed but
+// non-existent UUID is accepted, so the endpoint cannot be used as an
+// existence oracle.
 func (s *Server) putUserTerminalWorkspace(w http.ResponseWriter, r *http.Request, actor UserIdentity) {
 	ctx := r.Context()
 

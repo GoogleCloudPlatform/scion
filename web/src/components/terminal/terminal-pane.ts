@@ -118,8 +118,8 @@ export class ScionTerminalPane extends LitElement {
 
   /**
    * True while the underlying session's connection is 'idle': restored but
-   * not yet connected (design ptone/scion#2278 section 3.5.2). No Reconnect
-   * button and no error styling — just a neutral "select to connect" prompt.
+   * not yet connected. No Reconnect button and no error styling — just a
+   * neutral "select to connect" prompt.
    */
   @state()
   private idle = false;

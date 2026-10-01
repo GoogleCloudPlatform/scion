@@ -15,7 +15,7 @@
  */
 
 /**
- * Per-user terminal workspace persistence (design ptone/scion#2278).
+ * Per-user terminal workspace persistence.
  *
  * Restores the saved list of open terminal agents (and which one was
  * frontmost) from the Hub when the terminal viewer opens, and saves it back
@@ -23,10 +23,11 @@
  *
  * Scope: GET, the "no write before read" invariant, the snapshot, the
  * debounce, and keepalive PUTs; `urlIntent` and the URL-driven merge table
- * (design section 3.5.3); the first-attempt restore budget with late merge,
- * and the rate-limited background retry after a failed GET (section 3.5.1).
- * There is no unload listener (design section 3.4: every PUT is keepalive,
- * and a change still in the debounce window at unload is an accepted loss).
+ * (an explicit URL decides what connects; the saved list only decides rail
+ * membership); the first-attempt restore budget with late merge, and the
+ * rate-limited background retry after a failed GET. There is no unload
+ * listener: every PUT is keepalive, and a change still in the debounce
+ * window at unload is an accepted loss.
  */
 
 import { apiFetch, type ApiFetchOptions } from './api.js';
@@ -41,12 +42,11 @@ const TERMINAL_AGENT_PATH =
   /^\/terminals\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Pure helper (design section 3.5.3): true when the URL names an agent path
- * or parses to a layout query (even one naming a preset but no slots). In
- * either case an explicit URL decides what is visible and connected, so
- * restore() must not auto-connect the saved frontmost — every restored
- * entry stays idle, and the URL-driven code that runs after restore() is
- * what connects something.
+ * Pure helper: true when the URL names an agent path or parses to a layout
+ * query (even one naming a preset but no slots). In either case an explicit
+ * URL decides what is visible and connected, so restore() must not
+ * auto-connect the saved frontmost — every restored entry stays idle, and
+ * the URL-driven code that runs after restore() is what connects something.
  */
 export function restoreUrlIntent(pathname: string, search: string): boolean {
   return TERMINAL_AGENT_PATH.test(pathname) || parseLayoutUrl(search) !== null;
@@ -58,7 +58,7 @@ interface TerminalWorkspaceDoc {
   readonly frontmostAgentId: string | null;
 }
 
-/** The full response shape from GET/PUT (design section 3.2). */
+/** The full response shape from GET/PUT. */
 interface ServerTerminalWorkspace extends TerminalWorkspaceDoc {
   readonly revision: number;
   readonly updatedAt: string | null;
@@ -83,10 +83,9 @@ export interface TerminalWorkspacePersistenceDeps {
   workspace: TerminalWorkspaceRoot;
   /**
    * Called when restore selects the frontmost into an empty viewer. The
-   * caller (main.ts) does the base-path-aware URL update (design section
-   * 3.5.2): replaceState to `<base>/terminals/<agentId>` and
-   * terminalWorkspace.setCurrentPath, only while the route is still bare
-   * `/terminals`.
+   * caller (main.ts) does the base-path-aware URL update: replaceState to
+   * `<base>/terminals/<agentId>` and terminalWorkspace.setCurrentPath, only
+   * while the route is still bare `/terminals`.
    */
   onRestoredSelection: (agentId: string) => void;
   /** Injectable for tests; default apiFetch (GET and PUT). */
@@ -94,11 +93,10 @@ export interface TerminalWorkspacePersistenceDeps {
   /** Trailing debounce over snapshot changes. Default 1000ms. */
   debounceMs?: number;
   /** How long the first restore() call in a generation waits for its GET
-   *  before returning regardless (design section 3.5.1). Default 1500ms. */
+   *  before returning regardless. Default 1500ms. */
   restoreBudgetMs?: number;
-  /** Minimum gap between GET attempts after a failure (design section
-   *  3.5.1). GET only; PUTs have no retry timer (section 3.5.4). Default
-   *  10000ms. */
+  /** Minimum gap between GET attempts after a failure. GET only; PUTs have
+   *  no retry timer. Default 10000ms. */
   retryIntervalMs?: number;
 }
 
@@ -118,8 +116,8 @@ function isValidDoc(body: unknown): body is {
     return false;
   if (b.frontmostAgentId !== null) {
     // The hub validates this on write, but the response is otherwise
-    // untrusted (design section 3.5.0): a frontmost that is not a member of
-    // agentIds must not be treated as valid, or merge() would pick a
+    // untrusted: a frontmost that is not a member of agentIds must not be
+    // treated as valid, or merge() would pick a
     // connectId that restoreEntries never creates (every restored entry
     // would be deferConnect, auto-select suspended, and nothing selected).
     if (typeof b.frontmostAgentId !== 'string' || !b.agentIds.includes(b.frontmostAgentId))
@@ -141,8 +139,8 @@ function sameDoc(a: TerminalWorkspaceDoc, b: TerminalWorkspaceDoc): boolean {
 
 /**
  * Resolves after `p` settles or after `ms`, whichever comes first — never
- * rejects (design section 3.5.1's restore budget: the first restore() call
- * in a generation returns whether or not the GET has finished). Clears the
+ * rejects. This backs the restore budget: the first restore() call in a
+ * generation returns whether or not the GET has finished. Clears the
  * timeout once `p` settles first, so a fast GET does not leave a dangling
  * timer running under fake timers in tests.
  */
@@ -180,15 +178,14 @@ export class TerminalWorkspacePersistence {
   private state: GenerationState | null = null;
   private inflightGet: Promise<void> | null = null;
   /** When the current or most recent GET attempt in this generation
-   *  started, for the retryIntervalMs gate (design section 3.5.1). Reset on
-   *  a new generation. */
+   *  started, for the retryIntervalMs gate. Reset on a new generation. */
   private lastAttemptAt: number | null = null;
   /** Set once the very first restore() call in this generation has started
    *  its attempt: a race between the GET and the restore budget, shared by
    *  every restore() call in the generation so none of them, including the
-   *  first, waits on the network more than once (design section 3.5.1,
-   *  "every later call returns at once"). Awaiting it after it has already
-   *  settled resolves in a microtask, not a network round trip. */
+   *  first, waits on the network more than once — every later call returns
+   *  at once. Awaiting it after it has already settled resolves in a
+   *  microtask, not a network round trip. */
   private firstAttemptGate: Promise<void> | null = null;
 
   private unsubscribeSessions: (() => void) | null = null;
@@ -205,13 +202,12 @@ export class TerminalWorkspacePersistence {
    *  successful one — coordinator.restoreEntries/workspace.select can throw,
    *  for example on a disposed registry) has been logged for the current
    *  generation, so a repeated failure on the rate-limited background retry
-   *  (design section 3.5.1, up to once per retryIntervalMs — both failure
-   *  modes leave status 'failed', so both are retried the same way, see
-   *  performRestore's catch block) does not spam the console. Reset on a
-   *  new generation only: unlike putFailureLogged, a failed restore never
-   *  "succeeds and then fails again" within one generation to reset it
-   *  early — once this generation's restore succeeds it is 'merged' for
-   *  good (section 3.4). */
+   *  (up to once per retryIntervalMs — both failure modes leave status
+   *  'failed', so both are retried the same way, see performRestore's catch
+   *  block) does not spam the console. Reset on a new generation only:
+   *  unlike putFailureLogged, a failed restore never "succeeds and then
+   *  fails again" within one generation to reset it early — once this
+   *  generation's restore succeeds it is 'merged' for good. */
   private restoreFailureLogged = false;
 
   constructor(deps: TerminalWorkspacePersistenceDeps) {
@@ -225,8 +221,8 @@ export class TerminalWorkspacePersistence {
   }
 
   /**
-   * Restores the saved list for the current owner generation (design
-   * section 3.5.1). The first call in a generation starts the GET and waits
+   * Restores the saved list for the current owner generation. The first
+   * call in a generation starts the GET and waits
    * for it for at most restoreBudgetMs; it returns whether or not the GET
    * has finished by then; a GET that finishes later still merges on
    * arrival. Every later call in the same generation returns at once and
@@ -312,14 +308,13 @@ export class TerminalWorkspacePersistence {
   }
 
   /**
-   * Before the merge, notifications are ignored and never arm the debounce
-   * (design section 3.5.5): the merge reads the live snapshot anyway. Also
-   * requires this.generation to still be the coordinator's current
-   * generation: a stale generation's 'merged' status must not authorize a
-   * write in a generation this instance has not restored in. Today the
-   * coordinator cannot regain ownership after losing it (only stop()
-   * releases, and it disables re-claiming); this guard keeps the section
-   * 3.4 invariant if that ever changes.
+   * Before the merge, notifications are ignored and never arm the debounce:
+   * the merge reads the live snapshot anyway. Also requires this.generation
+   * to still be the coordinator's current generation: a stale generation's
+   * 'merged' status must not authorize a write in a generation this
+   * instance has not restored in. Today the coordinator cannot regain
+   * ownership after losing it (only stop() releases, and it disables
+   * re-claiming); this guard keeps that invariant if that ever changes.
    */
   private onChange(generation: string): void {
     if (this.disposed || generation !== this.generation) return;
@@ -339,8 +334,8 @@ export class TerminalWorkspacePersistence {
     if (this.disposed || generation !== this.generation || this.coordinator.tornDown) return;
     if (!doc) {
       this.state = { status: 'failed' };
-      // Logged once per generation (design section 3.5.4), not on every
-      // failed background retry (up to once per retryIntervalMs) — a
+      // Logged once per generation, not on every failed background retry
+      // (up to once per retryIntervalMs) — a
       // long-lived generation against a hub that keeps 404ing during a
       // rolling deploy would otherwise warn every 10s while the user
       // navigates the viewer.
@@ -379,13 +374,13 @@ export class TerminalWorkspacePersistence {
   }
 
   /**
-   * Merge algorithm (design section 3.5.2). With urlIntent false and
-   * nothing already open (the bare `/terminals` case), the saved frontmost
-   * (or the last saved entry) connects. With urlIntent true, or when the
-   * caller (main.ts's URL/path-open code, running either before a late
-   * merge or after this one) already has entries open, nothing here
-   * connects: every restored entry stays idle, and the URL-driven code is
-   * what selects and connects something (design section 3.5.3).
+   * Merge algorithm. With urlIntent false and nothing already open (the
+   * bare `/terminals` case), the saved frontmost (or the last saved entry)
+   * connects. With urlIntent true, or when the caller (main.ts's URL/path-
+   * open code, running either before a late merge or after this one)
+   * already has entries open, nothing here connects: every restored entry
+   * stays idle, and the URL-driven code is what selects and connects
+   * something.
    */
   private merge(generation: string, doc: ServerTerminalWorkspace, urlIntent: boolean): void {
     const alreadyOpen = this.coordinator.sessions.map((session) => session.state.agentId);
@@ -437,9 +432,8 @@ export class TerminalWorkspacePersistence {
     // hit the sameDoc early return and never mark dirty — so once the
     // in-flight PUT lands and advances the baseline to what it sent, the
     // user's revert is never saved, silently leaving the hub out of sync
-    // with what the viewer shows (design section 3.4: "A change during an
-    // in-flight PUT marks the state dirty"). Marking dirty unconditionally
-    // here is safe even when the change is ultimately a no-op against
+    // with what the viewer shows. Marking dirty unconditionally here is
+    // safe even when the change is ultimately a no-op against
     // whatever baseline the in-flight PUT settles on: the re-armed fire()
     // re-evaluates snapshot() against the (by then current) baseline itself.
     if (this.putInFlight) {
@@ -466,11 +460,11 @@ export class TerminalWorkspacePersistence {
         };
         this.putFailureLogged = false;
       } else {
-        // A rejected/failed PUT does not advance the baseline (design
-        // section 3.5.4): the unsaved snapshot goes out with the next
-        // debounced send, which the next change triggers. There is no PUT
-        // retry timer. Logged once per generation (design section 3.5.4)
-        // so a persistent failure does not spam the console on every send.
+        // A rejected/failed PUT does not advance the baseline: the unsaved
+        // snapshot goes out with the next debounced send, which the next
+        // change triggers. There is no PUT retry timer. Logged once per
+        // generation so a persistent failure does not spam the console on
+        // every send.
         this.logPutFailure(result.status);
       }
     } catch (err) {
@@ -514,9 +508,9 @@ export class TerminalWorkspacePersistence {
   /**
    * Snapshot = { agentIds, frontmostAgentId }. agentIds is the coordinator's
    * session list (insertion/"added" order), excluding any entry whose
-   * metadata availability is 'deleted' (design section 3.3 (3)). Truncated
-   * to the frontmost plus the 31 most recently added, in original insertion
-   * order, when over MAX_AGENT_IDS (section 3.5.5).
+   * metadata availability is 'deleted'. Truncated to the frontmost plus the
+   * 31 most recently added, in original insertion order, when over
+   * MAX_AGENT_IDS.
    */
   private snapshot(): TerminalWorkspaceDoc {
     const sessions = this.coordinator.sessions.filter(
@@ -579,8 +573,8 @@ export class TerminalWorkspacePersistence {
   /**
    * Validated before use: status 200 (checked by the caller), JSON,
    * agentIds an array of UUID strings, frontmostAgentId a string or null.
-   * Anything else counts as a failed request (design section 3.5.0) — this
-   * also covers a dev server or proxy answering with an HTML fallback, or
+   * Anything else counts as a failed request — this also covers a dev
+   * server or proxy answering with an HTML fallback, or
    * the Vite mock's `200 []`.
    */
   private async parseResponse(response: Response): Promise<ServerTerminalWorkspace | null> {

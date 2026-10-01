@@ -27,8 +27,8 @@ export interface TerminalScope {
 }
 
 export type TerminalConnectionState =
-  // Restored (from the persisted terminal list, design ptone/scion#2278),
-  // not yet connected. No socket or renderer has ever been allocated for
+  // Restored (from the persisted terminal list), not yet connected. No
+  // socket or renderer has ever been allocated for
   // this entry. Connects when it becomes frontmost (Session.setFrontmost)
   // or on an explicit connect() call, exactly like a fresh open() — from
   // that point on 'idle' never recurs for this session.
@@ -241,8 +241,7 @@ export class TerminalSessionRegistry {
    * never rebind/reconnect (options is ignored when returning an existing
    * session). options.deferConnect creates the entry in the 'idle' state
    * without calling connect() — no socket or renderer is allocated until the
-   * session becomes frontmost or connect() is called explicitly (design
-   * ptone/scion#2278 section 3.5.2).
+   * session becomes frontmost or connect() is called explicitly.
    */
   open(
     agentId: string,
@@ -517,10 +516,9 @@ class Session implements TerminalSession {
       this.clearBackgroundResetTimer();
       // An idle (restored, never-connected) entry connects the first time it
       // becomes frontmost — via selection, placing it in a visible slot, or
-      // the tab foregrounding while it is visible (design ptone/scion#2278
-      // section 3.5.2). maybeAutoAttempt() would no-op here regardless
-      // (everConnected is false for an idle session), so this is a distinct
-      // path, not a special case of it.
+      // the tab foregrounding while it is visible. maybeAutoAttempt() would
+      // no-op here regardless (everConnected is false for an idle session),
+      // so this is a distinct path, not a special case of it.
       if (this.state.connection === 'idle') {
         void this.connect();
         return;
