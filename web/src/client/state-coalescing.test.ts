@@ -105,9 +105,10 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
       if (rand() < 0.2) {
         // Partial, not always both fields together: a buffered/recorded
         // delta whose `detail` differs in shape from the previous one for
-        // the same ID is exactly what Gemini's promoteDetailFields fix (§7)
-        // targets — always pairing message+currentTurns would never
-        // exercise a later delta dropping a field the earlier one set.
+        // the same ID is exactly what the promoteDetailFields fix for
+        // Gemini #4151811134/#4151811140 (§7) targets — always pairing
+        // message+currentTurns would never exercise a later delta dropping
+        // a field the earlier one set.
         const detail: Partial<AgentDetail> = {};
         if (rand() < 0.5) detail.message = `m${i}`;
         if (rand() < 0.5 || Object.keys(detail).length === 0) detail.currentTurns = i % 7;
@@ -161,71 +162,101 @@ function promoteDetailFieldsRef(delta: Partial<Agent>): Partial<Agent> {
 }
 
 /**
- * Independent reference reducer mirroring the documented merge semantics
- * (sticky activity, detail promotion, capability preservation, buffering of
- * early deltas, tombstones) with NO equality-skip and NO coalescing. Used to
- * check that the production code's final `state.agents` content is exactly
- * what applying every delta immediately would produce — i.e. the new
- * shallow-equal no-op never causes a real change to be dropped.
+ * Apply one raw delta to a real base via the known-agent merge semantics
+ * (sticky activity, then `promoteDetailFieldsRef`). This — one delta at a
+ * time, each against whatever base the previous step produced — is the
+ * actual definition of "immediate sequential application" the fuzz checks
+ * against, not an implementation shortcut.
  */
-function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
-  const agents = new Map<string, Agent>();
-  const pending = new Map<string, Partial<Agent>>();
-  // Mirrors state.deletedAgentIds: never cleared per-ID, only by setScope.
-  const deletedIds = new Set<string>();
+function applyKnown(base: Agent, rawDelta: Partial<Agent>, id: string): Agent {
+  let delta: Partial<Agent> = { ...rawDelta };
+  const incomingActivity = delta.activity as string | undefined;
+  if (
+    incomingActivity !== undefined &&
+    (incomingActivity === 'working' || incomingActivity === '') &&
+    base.activity &&
+    STICKY_ACTIVITIES.has(base.activity)
+  ) {
+    delete delta.activity;
+  }
+  delta = promoteDetailFieldsRef(delta);
+  const updated = { ...base, ...delta, id } as Agent;
+  if (!delta._capabilities && base._capabilities) {
+    updated._capabilities = base._capabilities;
+  }
+  return updated;
+}
 
-  for (const ev of events) {
+/**
+ * Independent, incremental reference model mirroring the documented merge
+ * semantics (sticky activity, detail promotion, capability preservation,
+ * buffering of early deltas, tombstones) with NO equality-skip and NO
+ * coalescing. `applyOne` lets a run be checked against production at many
+ * points during a single pass (round 6 review N1), not only once at the end.
+ *
+ * Round 6 review N2: a buffered ID's deltas are kept raw, in arrival order,
+ * and replayed one at a time through `applyKnown` once `created` supplies a
+ * base — not accumulated via a promote-then-spread shortcut. That shortcut
+ * is production's own optimization (and this file's own
+ * `promoteDetailFieldsRef`/accumulation copy of it would no longer be an
+ * independent oracle for it); replaying one at a time is the actual
+ * definition of sequential application being checked.
+ */
+class ReferenceModel {
+  readonly agents = new Map<string, Agent>();
+  private readonly pendingDeltas = new Map<string, Partial<Agent>[]>();
+  // Mirrors state.deletedAgentIds: never cleared per-ID, only by setScope.
+  private readonly deletedIds = new Set<string>();
+
+  applyOne(ev: FuzzEvent): void {
     if (ev.kind === 'deleted') {
-      agents.delete(ev.id);
-      pending.delete(ev.id);
-      deletedIds.add(ev.id);
-      continue;
+      this.agents.delete(ev.id);
+      this.pendingDeltas.delete(ev.id);
+      this.deletedIds.add(ev.id);
+      return;
     }
     if (ev.kind === 'ports') {
-      const existing = agents.get(ev.id);
+      const existing = this.agents.get(ev.id);
       if (existing) {
-        agents.set(ev.id, { ...existing, exposedPorts: ev.ports } as Agent);
+        this.agents.set(ev.id, { ...existing, exposedPorts: ev.ports } as Agent);
       }
-      continue;
+      return;
     }
 
-    const existing = agents.get(ev.id);
+    const existing = this.agents.get(ev.id);
     const isCreated = ev.kind === 'created';
     if (!existing && !isCreated) {
       // A status/ports delta for an ID already known to be deleted (and
       // not yet recreated) is dropped outright, not buffered.
-      if (deletedIds.has(ev.id)) continue;
-      const delta = promoteDetailFieldsRef(fuzzEventToDelta(ev));
-      const prev = pending.get(ev.id);
-      pending.set(ev.id, prev ? { ...prev, ...delta } : delta);
-      continue;
+      if (this.deletedIds.has(ev.id)) return;
+      const list = this.pendingDeltas.get(ev.id) ?? [];
+      list.push(fuzzEventToDelta(ev));
+      this.pendingDeltas.set(ev.id, list);
+      return;
     }
 
-    const base = existing || ({} as Agent);
-    let delta = fuzzEventToDelta(ev);
     if (isCreated) {
-      const p = pending.get(ev.id);
-      if (p) delta = { ...delta, ...p };
-      pending.delete(ev.id);
+      let base = applyKnown(existing ?? ({} as Agent), fuzzEventToDelta(ev), ev.id);
+      const buffered = this.pendingDeltas.get(ev.id);
+      this.pendingDeltas.delete(ev.id);
+      if (buffered) {
+        for (const raw of buffered) {
+          base = applyKnown(base, raw, ev.id);
+        }
+      }
+      this.agents.set(ev.id, base);
+      return;
     }
 
-    const incomingActivity = delta.activity as string | undefined;
-    if (
-      incomingActivity !== undefined &&
-      (incomingActivity === 'working' || incomingActivity === '') &&
-      base.activity &&
-      STICKY_ACTIVITIES.has(base.activity)
-    ) {
-      delete delta.activity;
-    }
-    delta = promoteDetailFieldsRef(delta);
-    const updated = { ...base, ...delta, id: ev.id } as Agent;
-    if (!delta._capabilities && base._capabilities) {
-      updated._capabilities = base._capabilities;
-    }
-    agents.set(ev.id, updated);
+    this.agents.set(ev.id, applyKnown(existing as Agent, fuzzEventToDelta(ev), ev.id));
   }
-  return agents;
+}
+
+/** Convenience wrapper over `ReferenceModel` for an all-at-once comparison. */
+function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
+  const model = new ReferenceModel();
+  for (const ev of events) model.applyOne(ev);
+  return model.agents;
 }
 
 let rafCallbacks: FrameRequestCallback[];
@@ -301,6 +332,38 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       expect(actual.get(id)).toEqual(agent);
     }
   });
+
+  it('final state equals immediate application at every periodic checkpoint, not just at the end (round 6 review N1)', () => {
+    // The test above compares only once, after all 10,000 events. With a
+    // fixed 24-ID pool and ~400 events per ID, a transient divergence for
+    // one ID (e.g. a dropped promoted `message` field, the
+    // promoteDetailFields bug the partial-detail generator above targets)
+    // gets silently overwritten by a later event for that same ID long
+    // before the run ends, so that test alone could never catch it.
+    // Checking every 25 events — confirmed against both seeds below by
+    // stashing state.ts back to the pre-fix commit and re-running (see the
+    // gs report for the exact failing checkpoint/seed) — does.
+    const CHECK_EVERY = 25;
+    for (const seed of [0xc0ffee, 1234567]) {
+      const events = genEvents(10_000, seed);
+      const sm = new StateManager();
+      sm.setScope({ type: 'dashboard' });
+      const model = new ReferenceModel();
+
+      for (let i = 0; i < events.length; i++) {
+        const ev = events[i] as FuzzEvent;
+        applyEvent(sm, ev);
+        model.applyOne(ev);
+        if ((i + 1) % CHECK_EVERY !== 0) continue;
+
+        const actual = new Map(sm.getAgents().map((a) => [a.id, a]));
+        expect(actual.size, `seed ${seed}, event ${i + 1}`).toBe(model.agents.size);
+        for (const [id, agent] of model.agents) {
+          expect(actual.get(id), `seed ${seed}, event ${i + 1}, id ${id}`).toEqual(agent);
+        }
+      }
+    }
+  }, 30_000); // two 10k-event passes with checkpoints; the default 5s test timeout is too tight here
 
   it('B3 (round 1 review): 10k-event fuzz with interleaved rAF/timeout flush points, verified at every flush', () => {
     // The previous version of this test applied all 10,000 events and then

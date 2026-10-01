@@ -140,6 +140,38 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
  * delta is idempotent: it only overwrites a top-level field when the current
  * `detail` provides a value for it, never clears one.
  */
+/**
+ * Process one raw delta against the activity a base (real or pseudo)
+ * already holds: suppress a working/empty activity transition when that
+ * base's activity is sticky, then promote detail fields
+ * (`promoteDetailFields`). Returns a new delta; never touches `base`.
+ *
+ * Shared by `mergeAgentDelta` (a real `Agent` base) and by
+ * `bufferAgentDelta`/`recordSeedEpochDelta` (the accumulator built so far,
+ * as a pseudo-base — there is no real `Agent` yet for an unknown ID).
+ * Sticky-activity preservation is one of the documented merge semantics
+ * (§7) applied "immediately" to every delta; a buffered/recorded delta that
+ * sets a sticky activity must protect a later one in the same buffer from
+ * resetting it to working/empty, the same way it would if the agent had
+ * already existed when both arrived.
+ */
+function applyDeltaStep(
+  baseActivity: string | undefined,
+  rawDelta: Partial<Agent>
+): Partial<Agent> {
+  const delta: Partial<Agent> = { ...rawDelta };
+  const incomingActivity = delta.activity as string | undefined;
+  if (
+    incomingActivity !== undefined &&
+    (incomingActivity === 'working' || incomingActivity === '') &&
+    baseActivity &&
+    STICKY_ACTIVITIES.has(baseActivity)
+  ) {
+    delete delta.activity;
+  }
+  return promoteDetailFields(delta);
+}
+
 function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail;
   if (!detail) return delta;
@@ -812,21 +844,7 @@ export class StateManager extends EventTarget {
     rawDelta: Partial<Agent>,
     agentId: string
   ): { updated: Agent; finalizedDelta: Partial<Agent> } {
-    let delta: Partial<Agent> = { ...rawDelta };
-
-    // Preserve sticky activities: if the incoming activity is working/empty
-    // but the existing activity is sticky, keep the existing value.
-    const incomingActivity = delta.activity as string | undefined;
-    if (
-      incomingActivity !== undefined &&
-      (incomingActivity === 'working' || incomingActivity === '') &&
-      base.activity &&
-      STICKY_ACTIVITIES.has(base.activity)
-    ) {
-      delete delta.activity;
-    }
-    // Promote detail fields from SSE detail to top-level agent
-    delta = promoteDetailFields(delta);
+    const delta = applyDeltaStep(base.activity, rawDelta);
     // Ensure id is always set
     const updated = { ...base, ...delta, id: agentId } as Agent;
     // Preserve _capabilities from existing state when the delta doesn't
@@ -839,17 +857,14 @@ export class StateManager extends EventTarget {
 
   /**
    * Buffer a delta for an agent not yet known to state, refreshing its 30s
-   * TTL (§7). The delta is run through `promoteDetailFields` before being
-   * folded in, so a later buffered delta's full-object replacement of
-   * `detail` cannot erase an earlier delta's already-promoted top-level
-   * field (see `promoteDetailFields`'s doc comment) — the accumulated entry
-   * must equal what immediate sequential application onto a real base would
-   * produce.
+   * TTL (§7). Each delta goes through `applyDeltaStep` before being folded
+   * in, using the accumulator built so far as the pseudo-base — see that
+   * helper's doc comment for why.
    */
   private bufferAgentDelta(agentId: string, delta: Partial<Agent>): void {
-    const promoted = promoteDetailFields(delta);
     const prev = this.pendingAgentDeltas.get(agentId);
-    this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...promoted } : promoted);
+    const processed = applyDeltaStep(prev?.activity as string | undefined, delta);
+    this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...processed } : processed);
 
     const prevTimer = this.pendingAgentDeltaTimers.get(agentId);
     if (prevTimer !== undefined) {
@@ -893,20 +908,16 @@ export class StateManager extends EventTarget {
    * yet for that one, so `seedAgents` runs it through `mergeAgentDelta`
    * itself once the REST snapshot provides a base.
    *
-   * Each delta is run through `promoteDetailFields` before being folded into
-   * the epoch's accumulator, for the same reason `bufferAgentDelta` does:
-   * without it, a later recorded delta's full-object replacement of `detail`
-   * could erase an earlier delta's already-promoted top-level field, which
-   * immediate sequential application never does (see `promoteDetailFields`'s
-   * doc comment). Re-running it on an already-finalized delta (the
-   * known-agent call site) is idempotent.
+   * Each delta goes through `applyDeltaStep` before being folded in, using
+   * the accumulator built so far (per epoch) as the pseudo-base — see that
+   * helper's doc comment for why.
    */
   private recordSeedEpochDelta(agentId: string, delta: Partial<Agent>): void {
     if (this.seedEpochs.size === 0) return;
-    const promoted = promoteDetailFields(delta);
     for (const epoch of this.seedEpochs.values()) {
       const prev = epoch.deltas.get(agentId);
-      epoch.deltas.set(agentId, prev ? { ...prev, ...promoted } : promoted);
+      const processed = applyDeltaStep(prev?.activity as string | undefined, delta);
+      epoch.deltas.set(agentId, prev ? { ...prev, ...processed } : processed);
     }
   }
 

@@ -262,3 +262,51 @@ Fixed all three. Full disposition table and commands/results:
   (`referenceApply`) to mirror the same promote-before-accumulate fix via a
   duplicated `promoteDetailFieldsRef` helper (the production helper isn't
   exported).
+
+## Round 6 review (APPROVE; N1, N2, nit1, nit2 all closed)
+
+Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-6.md`.
+New head, addendum and full disposition:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+
+- **N1** (the changed fuzz still couldn't catch the bug it was changed for —
+  one final-only comparison let a transient divergence get overwritten by a
+  later event long before the run ended): added a second fuzz test that
+  checks every 25 events (the interval the reviewer used to independently
+  confirm the gap) against an incremental reference model, for both existing
+  seeds.
+- **N2** (the reference's buffered-path accumulator copied production's own
+  promote-then-spread design, so it wasn't independent for that path):
+  replaced it with a `ReferenceModel` that stores buffered raw deltas in
+  arrival order and replays them one at a time through the known-agent merge
+  path once `created` supplies a base — the actual definition of sequential
+  application, not an accumulator shortcut.
+- Implementing N2 exactly as directed exposed a **real, separate,
+  pre-existing bug** the N1 checkpoint test then caught: sticky-activity
+  preservation was never extended to buffered/recorded deltas. Two SSE
+  status deltas can race the `created` event for the same unknown ID
+  (documented as reachable, state.ts's own comment on the unknown-ID
+  branch); if the first sets a sticky activity (e.g. `completed`) and the
+  second tries to reset it to `working`/`''`, `bufferAgentDelta` (and
+  `recordSeedEpochDelta`) flattened both into one delta via a plain
+  top-level spread *before* any sticky check ran, so the first delta's
+  sticky activity was silently lost — something sequential application
+  (applying each delta immediately, one at a time, to a real base) never
+  does. The design doc (§7) lists sticky activity alongside detail promotion
+  as one of the "documented merge semantics" that must apply when "buffering
+  early deltas"; this was a gap in that, not a design choice, and leaving it
+  in would have meant either leaving the new, more-rigorous N2 oracle
+  permanently red or weakening it back into another production-shaped copy.
+  Fixed it the same way as the Gemini fixes: extracted a shared
+  `applyDeltaStep` helper (sticky-activity suppression, then
+  `promoteDetailFields`) used by `mergeAgentDelta` (real base) and by
+  `bufferAgentDelta`/`recordSeedEpochDelta` (the accumulator built so far, as
+  a pseudo-base). Verified against all three historical versions of
+  `state.ts` (pre-fix `78c7c9ef`, round-1 fix `043425ef`, and this round) —
+  see the gs report for the exact per-version pass/fail matrix.
+- **nit1**: fixed the misattribution — the comment now credits "the
+  promoteDetailFields fix for Gemini #4151811134/#4151811140", not Gemini
+  directly (Gemini proposed the deep-merge that was declined).
+- **nit2**: trimmed `bufferAgentDelta`'s and `recordSeedEpochDelta`'s doc
+  comments to one line each pointing at `promoteDetailFields`/
+  `applyDeltaStep`; the reasoning lives once, on the shared helpers.
