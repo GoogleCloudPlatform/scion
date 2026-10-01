@@ -719,13 +719,63 @@ class TestProvisionContext(unittest.TestCase):
         ctx = _make_ctx(candidates={"files": [{"container_path": "/path/a"}, {"container_path": "/path/b"}]})
         self.assertEqual(ctx.file_paths, ["/path/a", "/path/b"])
 
-    def test_model_resolution(self):
-        manifest = {
-            "harness_bundle_dir": "/tmp",
-            "model_resolution": {"resolved_model": "claude-sonnet"},
-        }
-        ctx = sh.ProvisionContext("test", manifest)
-        self.assertEqual(ctx.model_resolution["resolved_model"], "claude-sonnet")
+
+# ---------------------------------------------------------------------------
+# Model resolution (G3)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveModel(unittest.TestCase):
+    def test_unset_returns_empty(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SCION_MODEL", None)
+            self.assertEqual(sh.resolve_model(ctx), "")
+
+    def test_empty_string_returns_empty(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "   "}):
+            self.assertEqual(sh.resolve_model(ctx), "")
+
+    def test_tier_full_spelling(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-sonnet")
+
+    def test_tier_shorthand_letter(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "m"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-sonnet")
+
+    def test_tier_shorthand_xl(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"extra-large": "claude-opus"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "xl"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus")
+
+    def test_tier_case_insensitive(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"large": "claude-opus"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "LARGE"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus")
+
+    def test_concrete_model_passes_through(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "claude-opus-4-8"}):
+            self.assertEqual(sh.resolve_model(ctx), "claude-opus-4-8")
+
+    def test_unknown_alias_passes_through_normalized(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"medium": "claude-sonnet"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "Nonexistent-Tier"}):
+            self.assertEqual(sh.resolve_model(ctx), "nonexistent-tier")
+
+    def test_missing_alias_table_passes_tier_through(self):
+        ctx = _make_ctx(harness_config={})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
+
+    def test_tier_not_in_alias_table_passes_through(self):
+        ctx = _make_ctx(harness_config={"model_aliases": {"small": "claude-haiku"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
 
 
 # ---------------------------------------------------------------------------

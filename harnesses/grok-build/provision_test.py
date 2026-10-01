@@ -512,7 +512,8 @@ class ModelResolutionTest(unittest.TestCase):
         super().tearDown()
 
     def _resolve(self, scion_model: str = "") -> str:
-        """Simulate the model resolution logic from provision()."""
+        """Exercise the shared scion_harness.resolve_model helper, the way
+        provision() now does for the non-vertex-ai path."""
         if scion_model:
             os.environ["SCION_MODEL"] = scion_model
         else:
@@ -529,9 +530,7 @@ class ModelResolutionTest(unittest.TestCase):
                 },
             },
         })
-        raw = os.environ.get("SCION_MODEL", "").strip()
-        aliases = ctx.harness_config.get("model_aliases") or {}
-        return aliases.get(raw.lower(), raw) if raw else ""
+        return scion_harness.resolve_model(ctx)
 
     def test_small_alias_resolves_to_grok_3_mini(self) -> None:
         self.assertEqual(self._resolve("small"), "grok-3-mini")
@@ -554,6 +553,28 @@ class ModelResolutionTest(unittest.TestCase):
     def test_alias_is_case_insensitive(self) -> None:
         self.assertEqual(self._resolve("SMALL"), "grok-3-mini")
         self.assertEqual(self._resolve("Large"), "grok-4.6")
+
+    def test_shorthand_letters_now_expand_to_tiers(self) -> None:
+        """Behavior difference from the pre-G3 lowercase-only lookup: that
+        code did `aliases.get(raw.lower(), raw)` with no shorthand table, so
+        a bare "s"/"m"/"l"/"xl" never matched a model_aliases key and passed
+        straight through as a literal (invalid) model name. The shared
+        resolve_model helper expands shorthand the same way Go's
+        NormalizeModelAlias does, so these now resolve correctly.
+        """
+        self.assertEqual(self._resolve("s"), "grok-3-mini")
+        self.assertEqual(self._resolve("m"), "grok-4.5")
+        self.assertEqual(self._resolve("l"), "grok-4.6")
+        self.assertEqual(self._resolve("xl"), "grok-4.6")
+
+    def test_concrete_model_pass_through_is_now_lowercased(self) -> None:
+        """Behavior difference from the pre-G3 lookup: that code's fallback
+        was `raw` (original case) rather than `raw.lower()`, so a
+        mixed-case concrete model name passed through unchanged. The shared
+        resolve_model helper lowercases before the known-alias check, same
+        as Go's config.ResolveModelAlias, so this now comes back lowercased.
+        """
+        self.assertEqual(self._resolve("Grok-4-Turbo"), "grok-4-turbo")
 
 
 # ---------------------------------------------------------------------------

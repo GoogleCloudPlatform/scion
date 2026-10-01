@@ -661,13 +661,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         extra = _configure_vertex_ai(ctx, env)
 
     # --- Model resolution ---------------------------------------------------
-    # The Go side does not populate ctx.model_resolution for out-of-tree
-    # harnesses. Use the SCION_MODEL env var and resolve via model_aliases.
     # vertex-ai sets GROK_DEFAULT_MODEL in _configure_vertex_ai.
     if resolved.method != "vertex-ai":
-        raw_model = os.environ.get("SCION_MODEL", "").strip()
-        aliases = ctx.harness_config.get("model_aliases") or {}
-        resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
+        resolved_model = scion_harness.resolve_model(ctx)
         if resolved_model:
             env["GROK_DEFAULT_MODEL"] = resolved_model
 
