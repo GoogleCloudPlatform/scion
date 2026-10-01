@@ -216,3 +216,34 @@ ref).
 
 Full commands, results, and the S-test/design-bullet mapping:
 gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
+
+## B6(b) resolution (round-1 follow-up)
+
+The EM rejected the B6(b) deviation above: `ComputeCapabilitiesForActions` is
+a separate copy of `ComputeCapabilitiesBatch`'s loop, not shared code, so its
+`DecideFromContext` branch needed its own end-to-end identity-class proof,
+not just a pointer to pre-existing coverage of the batch path.
+
+Added `pkg/hub/agent_sorted_project_list_identity_classes_test.go` (test-only
+commit), four tests, each minting the identity via the real token/role-
+binding path:
+
+- scoped UAT (`agent:manage`) — the identity class that actually exercises
+  `DecideFromContext` instead of `CheckAccess`.
+- super-admin, not a project member.
+- hub-admin, not a project member — documents a real finding: hub-admin's
+  curated permission set does not include `agent.list`/`agent.read` (those
+  are project-scoped), so this case is a 403 at the gate (1 decision), not a
+  200. The literal brief wording ("hub admin (non-member)") turns out to
+  describe a denial test, not a capability-loop test.
+- hub-admin combined with ordinary project membership — the shape in which
+  hub-admin actually reaches the per-item capability loop.
+
+Each non-denial case asserts the sorted page's merged `_capabilities`
+deep-equal the legacy `ComputeCapabilitiesBatch` output (action order
+included) and that the decision/audit count matches `5+8n` exactly. All four
+pass; `go vet ./pkg/hub/...` clean. B6 is now fully closed, no open
+deviation.
+
+New head after this round: `e9f9585f2` (fast-forward push, no rebase
+needed). Round-2 review is picking this up.
