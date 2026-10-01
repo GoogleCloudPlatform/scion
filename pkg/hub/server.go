@@ -4472,7 +4472,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			s.stopPoolSampler = dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			s.mu.Lock()
+			s.stopPoolSampler = stop
+			s.mu.Unlock()
 		}
 	}
 
@@ -4579,6 +4582,7 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
 		cc := s.controlChannel
+		stopPoolSampler := s.stopPoolSampler
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
@@ -4587,8 +4591,14 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		// wraps either a context.CancelFunc or a no-op from
 		// StartPoolSampler. Lives in the Once body so combined mode (which
 		// only calls CleanupResources, never Shutdown) also stops it.
-		if s.stopPoolSampler != nil {
-			s.stopPoolSampler()
+		//
+		// Read under s.mu above rather than accessed directly here: in
+		// combined mode, StartBackgroundServices (which writes this field)
+		// runs in one goroutine while the CleanupResources-on-ctx.Done
+		// goroutine started earlier (see cmd/server_foreground.go) can race
+		// it, so the write and this read must share a lock.
+		if stopPoolSampler != nil {
+			stopPoolSampler()
 		}
 
 		// Cancel server-lifetime context to stop background goroutines
