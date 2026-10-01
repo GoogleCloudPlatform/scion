@@ -1596,8 +1596,11 @@ func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T
 	}
 
 	member := NewAuthenticatedUser(memberID, "r5-member@test.com", "Member", "member", "api")
+	member2ID := tid("r5-port-member-2")
+	createTestUserWithProjectRole(t, s, member2ID, "r5-member-2@test.com", projectID, store.ProjectRoleMember)
 	otherAgent := memberAgent
-	otherAgent.OwnerID, otherAgent.Ancestry = ownerID, []string{ownerID}
+	otherAgent.ID = tid("r5-member-2-agent")
+	otherAgent.OwnerID, otherAgent.Ancestry = member2ID, []string{member2ID}
 	d := authz.CheckAccess(ctx, member, otherAgent, ActionPortAccess)
 	assert.False(t, d.Allowed, "project-member must not gain port access on another member's agent: %s", d.Reason)
 }
