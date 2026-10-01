@@ -92,12 +92,33 @@ import (
 // requires building WITHOUT `-buildvcs=false` -- see perf/bench/README.md.
 //
 // bench-rev-4 N2: it ALSO requires building from a regular clone/checkout,
-// not a `git worktree add` checkout. Go's VCS auto-stamping only recognizes
-// a `.git` *directory*; a worktree's `.git` is a file pointing back at the
-// main checkout's metadata, which `go build` does not follow, so a binary
-// built from a worktree gets no VCS stamp at all -- confirmed by
-// bench-rev-4 reproducing this on a throwaway repo (plain repo and shallow
-// clone both stamped; worktree did not). See perf/bench/README.md.
+// not a `git worktree add` checkout -- but bench-rev-5 W1 found the actual
+// failure mode is worse than bench-rev-4 described, not merely absent:
+//
+//   - A worktree OUTSIDE any other git checkout gets NO VCS stamp at all
+//     (confirmed by bench-rev-4's reproduction: plain repo and shallow
+//     clone both stamped; this form of worktree did not).
+//   - A worktree NESTED INSIDE another checkout -- including a gitignored
+//     one, such as this repo's own `.claude/worktrees/<name>` (`.claude/`
+//     is in `.gitignore`) -- gets stamped with the commit of the
+//     ENCLOSING checkout instead, and can report `vcs.modified=false`
+//     ("clean") even though the nested worktree's own tree differs
+//     entirely (bench-rev-5 reproduced this on a throwaway nested-worktree
+//     repo: stamped revision was the enclosing checkout's HEAD, not the
+//     worktree's). This is the SAME wrong-but-plausible-looking failure
+//     RR3 fixed for `git rev-parse HEAD` in the caller's cwd -- a
+//     confidently wrong commit, not an absent one -- and it is plausibly
+//     the common case on a fleet that creates worktrees under `.claude/`.
+//
+// Neither case can be distinguished from a correct stamp by this function
+// alone: once Go reports a revision and a modified flag, there is no
+// signal left indicating whether that revision came from the right
+// checkout. Build from a plain `git clone` (not any form of `git
+// worktree`), or pass `-ldflags -X .../pkg/version.Commit=$(git rev-parse
+// HEAD)` explicitly for the hub, and independently verify with `go version
+// -m <binary> | grep vcs.revision` against `git rev-parse HEAD` in the
+// checkout you intended to build from before trusting a capture. See
+// perf/bench/README.md.
 func harnessBuildInfo() (commit string, dirty *bool, source string) {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -113,7 +134,7 @@ func harnessBuildInfo() (commit string, dirty *bool, source string) {
 		}
 	}
 	if revision == "" {
-		return "", nil, "unavailable: no vcs.revision in build info (built with -buildvcs=false, built from a git worktree rather than a regular clone -- Go does not VCS-stamp worktrees, see README -- or source is not a VCS checkout at all)"
+		return "", nil, "unavailable: no vcs.revision in build info (built with -buildvcs=false, built from a git worktree outside any other checkout -- Go does not VCS-stamp those, see README -- or source is not a VCS checkout at all; NOTE: a worktree NESTED inside another checkout, e.g. under .claude/worktrees/, does NOT hit this path -- it gets silently stamped with the ENCLOSING checkout's commit instead, see README)"
 	}
 	isDirty := modified == "true"
 	return revision, &isDirty, "go build VCS stamp"
@@ -121,16 +142,17 @@ func harnessBuildInfo() (commit string, dirty *bool, source string) {
 
 // hubHealth is the subset of pkg/hub's unauthenticated GET /health response
 // (pkg/hub/handlers_health.go's HealthResponse) this tool records.
+// hubHealth deliberately has no field for pkg/hub/handlers_health.go:86's
+// `HealthResponse.Version` -- a hard-coded `"0.1.0"` literal marked
+// `// TODO: Get from build info` in hub source, constant regardless of
+// which hub commit is actually running (bench-rev-4 R3). A field that
+// looks like provenance but is actually a constant is worse than no field
+// at all, the same lesson RR3 already applied to the harness's own commit
+// field. bench-rev-5 N-b: an earlier version decoded it anyway "so
+// json.Decode does not need a second type", which is not a real
+// constraint -- encoding/json silently ignores unknown response fields, so
+// omitting it here costs nothing and removes dead code.
 type hubHealth struct {
-	// Version is pkg/hub/handlers_health.go:86's `HealthResponse.Version`,
-	// which is a hard-coded `"0.1.0"` literal marked `// TODO: Get from
-	// build info` in hub source -- bench-rev-4 R3. It is deliberately NOT
-	// read into this tool's report: a field that looks like provenance but
-	// is actually a constant is worse than no field at all, the same lesson
-	// RR3 already applied to the harness's own commit field. Decoded here
-	// only so json.Decode does not need a second type for the rest of the
-	// response.
-	Version      string `json:"version"`
 	ScionVersion string `json:"scionVersion"`
 }
 

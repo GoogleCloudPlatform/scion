@@ -77,9 +77,14 @@ type APIBenchReport struct {
 	// is empty (bench-rev-3 RR3: "record empty with an explicit source
 	// rather than guessing"). Normally "go build VCS stamp"; see
 	// perf/bench/README.md for why `-buildvcs=false` must NOT be passed, and
-	// why the tools must be built from a regular clone rather than a `git
-	// worktree` checkout (bench-rev-4 R3/N2: Go does not VCS-stamp
-	// worktrees at all).
+	// why the tools must be built from a regular clone rather than any form
+	// of `git worktree` checkout. bench-rev-5 W1: a worktree OUTSIDE any
+	// other checkout gets no stamp at all (source is "unavailable: ...");
+	// a worktree NESTED inside another checkout -- including this repo's
+	// own gitignored `.claude/worktrees/<name>` -- is silently stamped with
+	// the ENCLOSING checkout's commit instead and can report clean, which
+	// this field alone cannot distinguish from a correct stamp. See the
+	// README for the independent `go version -m` verification step.
 	HarnessCommitSource string `json:"harnessCommitSource"`
 	// HubScionVersion identifies the hub binary under test, read from its
 	// own unauthenticated GET /health (pkg/hub/handlers_health.go's

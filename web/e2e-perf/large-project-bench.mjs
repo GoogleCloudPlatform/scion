@@ -191,6 +191,26 @@ function gitHeadSha() {
 // rather than silently assumed clean. `repoRoot` is resolved from
 // import.meta.url (this file's own location), not the caller's cwd, so
 // this is correct regardless of where the script is invoked from.
+//
+// bench-rev-4 N10 / bench-rev-5 W4: this counts UNTRACKED files as dirty
+// (plain `git status --porcelain`, no `--untracked-files=no`), so a stray
+// untracked file anywhere in the repo marks the harness dirty even with
+// zero tracked changes. bench-rev-4 claimed this was "documented" without
+// changing or writing anything; bench-rev-5 caught that gap. Verified
+// (not just asserted) before fixing anything: Go's OWN VCS auto-stamping
+// -- the thing `harnessCommit`/`harnessCommitDirty` on the Go side, and
+// the hub's own `hubScionVersion`, are both built on -- determines
+// `vcs.modified` via exactly `git status --porcelain` with no
+// `--untracked-files=no` either (see the Go toolchain's own
+// `cmd/go/internal/vcs/vcs.go`, the `git status --porcelain` call used for
+// dirty detection; confirmed empirically too: a tree with every tracked
+// file committed and exactly one new untracked file present still
+// VCS-stamps `vcs.modified=true`). So this function already matches Go's
+// real semantics exactly. Switching to `--untracked-files=no`, suggested
+// as one possible fix, would make the JS and Go sides of this harness
+// DISAGREE about what "dirty" means, not agree more closely -- kept as-is
+// instead. See perf/bench/README.md and measurements.md's section 3 for
+// the same reasoning stated for a reader of the published numbers.
 function gitIsDirty() {
   try {
     const out = execFileSync('git', ['status', '--porcelain'], {
@@ -738,12 +758,18 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
   // medians). Anchoring AND observing per agent removes that inflation
   // entirely, rather than merely measuring around it.
   //
-  // bench-rev-4 R4: this loop's own observation resolution has a floor --
-  // `page.waitForTimeout(100)` plus a deep shadow-DOM badge read, which
+  // bench-rev-4 R4, corrected by bench-rev-5 N-c: this is a SAMPLING
+  // INTERVAL, not a floor -- the first poll happens immediately after the
+  // POST resolves, so values well under 170ms are common (v3 per-agent
+  // minimums of 11-12ms; a bench-rev-5 smoke run saw a 5ms minimum), and
+  // "floor" wrongly implies they can't occur. What is true: each sample can
+  // LAG the true DOM update by up to one poll interval -- `page.
+  // waitForTimeout(100)` plus a deep shadow-DOM badge read, which
   // bench-rev-4's probe measured at ~14ms with one poller but ~68ms median
   // (p90 98ms) with `--burst-count` (default 15) concurrent pollers sharing
-  // one page. A reported settle time below roughly 170-200ms is at or near
-  // this floor and cannot distinguish hub-side speed differences; see
+  // one page. Differences smaller than that combined interval (roughly
+  // 170-200ms) cannot be used to rank hub speed, even though many
+  // individual samples will themselves read well below it; see
   // measurements.md section 3 for this caveat applied to actual numbers.
   const burstStartedAt = Date.now();
   const perAgent = await Promise.all(
@@ -1010,9 +1036,10 @@ async function main() {
       // denominator silently.
       const b = report.liveUpdateBurst;
       console.log(
-        `  median settle time: ${b.medianSettleMs}ms [${b.minSettleMs}, ${b.maxSettleMs}] ` +
-          `(median of ${b.medianOfRunMediansN} per-run medians; min/max is the true per-agent ` +
-          `range across all valid runs); ` +
+        `  median settle time: ${b.medianSettleMs}ms ` +
+          `[${b.perAgentMinSettleMs}, ${b.perAgentMaxSettleMs}] true per-agent range ` +
+          `(range of the ${b.medianOfRunMediansN} per-run medians themselves: ` +
+          `[${b.runMedianMinMs}, ${b.runMedianMaxMs}]); ` +
           `${b.fullySettledRunCount}/${b.validRunCount} valid runs fully settled, ` +
           `${b.fullyRestoredRunCount}/${b.runsAttempted} fully restored, ` +
           `${b.invalidRunCount}/${b.runsAttempted} invalid (prior restore unconfirmed), ` +

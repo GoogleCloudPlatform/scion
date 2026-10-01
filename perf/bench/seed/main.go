@@ -55,6 +55,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -106,7 +107,28 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := checkDBNotExists(*dbPath); err != nil {
+	// bench-rev-5 N-a: canonicalize ONCE, here, and use the result for both
+	// the existence check and the actual DSN construction (run ->
+	// openSQLiteForBench), as defense-in-depth alongside validateDBPathArg's
+	// explicit "//" prefix rejection above. The underlying problem is any
+	// --db value that os.Stat (the existence check) and the "file:" DSN's
+	// URI parsing (the actual open) resolve DIFFERENTLY: a leading "//" is
+	// the demonstrated case (os.Stat never finds a literal
+	// "//localhost/<path>", so wrongly reports "does not exist", while the
+	// DSN parser treats "localhost" as an empty host and resolves to the
+	// real, possibly EXISTING, "<path>"), but a character-by-character
+	// blocklist can only ever reject forms someone thought to try.
+	// filepath.Clean instead collapses any number of consecutive slashes
+	// ANYWHERE in the path to exactly one, so the stat check and the DSN
+	// parser are guaranteed to agree on the same canonical form regardless
+	// of which slash-count variant is used. For every ordinary single-slash
+	// or relative path (the only kind this tool's docs ever recommended),
+	// Clean is a no-op, so normal usage and `openSQLiteForBench`'s
+	// deliberately-unchanged production-matching construction are
+	// unaffected.
+	dbPathClean := filepath.Clean(*dbPath)
+
+	if err := checkDBNotExists(dbPathClean); err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(2)
 	}
@@ -115,7 +137,7 @@ func main() {
 	// info lines) -- this tool's own progress output is what matters here.
 	slog.SetLogLoggerLevel(slog.LevelError)
 
-	if err := run(*dbPath, *agents, *secret, *projectSlug, *projectName, *randSeed, *outPath); err != nil {
+	if err := run(dbPathClean, *agents, *secret, *projectSlug, *projectName, *randSeed, *outPath); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
 }
@@ -171,13 +193,38 @@ func normalizeDBPathForStat(dbPath string) string {
 // user: already exists" (no data-corruption was observed in that
 // reproduction, but the guard's entire job is to fail before that point,
 // not to rely on failing safely after it). Rejecting "#" and "%" outright,
-// like "?", closes both without touching `openSQLiteForBench`'s
-// production-matching construction.
+// like "?", closes both -- but NOT, on their own, every DSN-vs-filesystem
+// disagreement; see bench-rev-5 N-a below.
+//
+// bench-rev-5 N-a: `--db //localhost/<path-to-an-existing-db>` has none of
+// "file:"/"?"/"#"/"%", so the checks above correctly let it through, but it
+// is the exact same bypass class without the "file:" prefix: os.Stat never
+// finds a literal "//localhost/<path>" (reports "does not exist"), while
+// the "file:" DSN's URI parsing treats "localhost" as an empty host and
+// resolves to the real, possibly EXISTING, "<path>" -- reproduced
+// identically to the forms above (reaches Migrate/bootstrap, fails at
+// "already exists", no observed data corruption but the guard's job is to
+// fail before that point). Earlier comments on this function claimed
+// rejecting "#"/"%" "closes every such form" -- it did not, and this is
+// not an exhaustive enumeration of DSN-vs-filesystem disagreements either;
+// main() additionally canonicalizes the path with `filepath.Clean` before
+// using it for anything (see main()'s comment), which is what actually
+// closes this specific class, not a character blocklist. Rejecting a
+// leading "//" here as well costs nothing and makes the intent explicit at
+// the validation layer, not just the canonicalization layer.
 func validateDBPathArg(dbPath string) error {
 	if strings.HasPrefix(dbPath, "file:") {
 		return fmt.Errorf(
 			"--db %q must be a plain filesystem path, not a \"file:\" DSN -- this tool adds the "+
 				"\"file:\" prefix itself (see openSQLiteForBench)", dbPath)
+	}
+	if strings.HasPrefix(dbPath, "//") {
+		return fmt.Errorf(
+			"--db %q must not start with \"//\" -- a leading double slash can be reinterpreted "+
+				"as a URI authority (e.g. \"//localhost/...\") by the DSN parsing this tool's "+
+				"sqlite DSN goes through (openSQLiteForBench), resolving to a DIFFERENT "+
+				"filesystem path than a plain existence check sees; use a single-slash absolute "+
+				"path or a relative path", dbPath)
 	}
 	for _, special := range []string{"?", "#", "%"} {
 		if strings.Contains(dbPath, special) {

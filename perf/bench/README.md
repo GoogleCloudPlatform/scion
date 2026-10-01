@@ -64,20 +64,47 @@ directory, which is the bug RR3 fixed (an earlier version ran
 `git rev-parse HEAD` in the invoking shell's cwd and silently recorded
 whatever OTHER checkout happened to be there).
 
-**Also build from a regular clone/checkout, not a `git worktree add`
-checkout** (bench-rev-4 R3/N2). This applies to `./cmd/scion` (the hub
-binary under test) as much as to `apibench`/`seed`: Go's VCS auto-stamping
-only recognizes a `.git` *directory*; a worktree's `.git` is a file
-pointing back at the main checkout's metadata, which `go build` does not
-follow, so a binary built from a worktree gets NO VCS stamp at all --
-confirmed by bench-rev-4 reproducing this on a throwaway repo (a plain repo
-and a shallow clone both stamped correctly; a worktree did not). This is
-why every bench-rev-3 `browser-*-burstonly.json` recapture's
-`hubScionVersion` read `"unknown"` despite the hub being built from a known,
-pinned commit (`73ebd022`) -- the hub binary was built from a worktree. If
-you need the hub's own build identity recorded reliably, build it from a
-plain `git clone`/checkout, or stamp it explicitly via
-`-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`.
+**Also build from a regular clone/checkout, not any form of `git worktree`
+checkout** (bench-rev-4 R3/N2, corrected by bench-rev-5 W1). This applies
+to `./cmd/scion` (the hub binary under test) as much as to
+`apibench`/`seed`. Go's VCS auto-stamping only recognizes a `.git`
+*directory*; a worktree's `.git` is a file pointing back at another
+checkout's metadata. There are two different failure modes, not one, and
+the second is worse:
+
+- A worktree **outside** any other git checkout gets **no VCS stamp at
+  all** -- confirmed by bench-rev-4's reproduction (a plain repo and a
+  shallow clone both stamped correctly; this form of worktree did not).
+  This is why every bench-rev-3 `browser-*-burstonly.json` recapture's
+  `hubScionVersion` read `"unknown"` despite the hub being built from a
+  known, pinned commit (`73ebd022`).
+- A worktree **nested inside another checkout** -- including a gitignored
+  one, such as **this very repo's own `.claude/worktrees/<name>`**
+  (`.claude/` is in `.gitignore`, so this is plausibly the common case on
+  a fleet that creates worktrees there, not an edge case) -- gets silently
+  stamped with the commit of the **enclosing** checkout instead, and can
+  report `vcs.modified=false` ("clean") even though the nested worktree's
+  own tree is completely different. bench-rev-5 reproduced this on a
+  throwaway nested-worktree repo: the stamped revision was the enclosing
+  checkout's `HEAD`, not the worktree's own. **This is the exact failure
+  class RR3 fixed** for `git rev-parse HEAD` in the caller's cwd -- a
+  confidently wrong commit reported as fact, not an absent one -- just
+  moved to a different mechanism.
+
+Neither Go nor this harness can detect either case after the fact from
+inside the running binary: once a revision and a modified flag are
+reported, there is no remaining signal that distinguishes a correct stamp
+from a wrong one. If you need the build identity recorded reliably:
+
+1. Build from a plain `git clone`/checkout (not any `git worktree`), or
+   stamp explicitly via
+   `-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`.
+2. **Independently verify** before trusting a capture:
+   `go version -m /tmp/apibench-bin | grep vcs.revision` (or the hub
+   binary) and compare it against `git rev-parse HEAD` run in the checkout
+   you actually intended to build from. A mismatch means you built from a
+   worktree -- nested or not -- and the stamp does not mean what it looks
+   like it means.
 
 `scion server start` (the local test-hub subprocess this harness drives) is
 removed from the CLI's command tree in `SCION_CLI_MODE=agent` (see
@@ -361,6 +388,19 @@ is a hard-coded placeholder in hub source
 is actually running, and a field that always reads the same value no
 matter what is measured would be worse than no field at all.
 
+**`harnessCommitDirty`/the `.mjs` script's own dirty check count untracked
+files as dirty** (bench-rev-4 N10, verified and actually written down by
+bench-rev-5 W4 -- an earlier version claimed this was "documented" and
+changed nothing). This is intentional, not an oversight: Go's own VCS
+auto-stamping determines `vcs.modified` the same way, via plain `git status
+--porcelain` with no `--untracked-files=no` (see the Go toolchain's
+`cmd/go/internal/vcs/vcs.go`), confirmed empirically too (a tree with
+everything tracked committed and one new untracked file present still
+stamps `vcs.modified=true`). A stray untracked file anywhere in the repo --
+a log, a scratch note -- will mark a report dirty even with zero tracked
+changes; that is consistent with what the Go-side stamp on the hub binary
+itself would also report, not a bug to route around.
+
 **Always pass `--notes`** describing conditions the report fields do not
 capture on their own (bench-rev-3 O7): how many other hub instances were
 co-resident during this run (every capture to date has run 25/100/500
@@ -504,11 +544,16 @@ confirmed to fail against the old idx-only implementation):
    excluded from that run's settle tracking (`preStaleExcludedCount`) --
    this closes the hole regardless of whether (1) or the restore-wait is
    itself correct.
-3. The restore-wait now actually **gates**: if the previous run's restore
-   was not fully confirmed in the DOM (`restoreFullyConfirmed`), the next
-   run is marked `invalid` and excluded from the scenario's settle
-   statistics (`invalidRunCount`), rather than merely recording the gap
-   and proceeding anyway. The restore-wait's expected value is computed
+3. The restore-wait's RESULT now actually has an effect on the next run
+   (bench-rev-5 N-d: described precisely, not as "gates", to avoid
+   implying it blocks -- see point 2 at the top of this section for the
+   exact bounded-wait-then-proceed behavior). If the previous run's restore
+   was not fully confirmed in the DOM within the bound
+   (`restoreFullyConfirmed` is false), the next run is marked `invalid` and
+   excluded from the scenario's settle statistics (`invalidRunCount`),
+   rather than merely recording the gap and silently proceeding as if
+   nothing had happened -- which is what an earlier version did. The
+   restore-wait's expected value is computed
    the way the UI actually renders it (`displayStatusLabel` in `lib.mjs`:
    activity instead of phase for a `running` agent with non-empty
    activity) -- comparing against the literal phase, as an earlier version
@@ -523,26 +568,45 @@ only by review-time simulation against a fake hub and DOM.
 **bench-rev-4 R4: what the reported statistics mean, precisely.**
 `medianSettleMs` is the median OF THE PER-RUN MEDIANS (one sample per
 valid run -- a median of medians, not a median over every individual
-agent's settle time). `minSettleMs`/`maxSettleMs` are the TRUE per-agent
-range across all valid runs (the min of each run's own min and the max of
-each run's own max), not the range of the per-run medians. Each poll has an
-observation-resolution floor of roughly 170-200ms (a 100ms sleep plus a
-deep shadow-DOM badge read, which runs 14ms alone but ~68ms median -- p90
-98ms -- with `--burst-count` concurrent pollers sharing one page, per
-bench-rev-4's own measurement): a reported settle time below that floor
-cannot distinguish hub-side speed differences. `postFanOutMs` (POST-only
-completion spread) and `burstWallClockMs` (the whole per-agent
-POST-plus-poll sequence) are reported separately -- bench-rev-4 N8: an
-earlier version's single `burstSentMs` field silently changed from meaning
-the former to meaning the latter when bench-rev-3 RR4 moved polling inside
-the same per-agent `Promise.all`.
+agent's settle time). **bench-rev-5 W3:** the true per-agent range across
+all valid runs (the min of each run's own min and the max of each run's
+own max) is reported as `perAgentMinSettleMs`/`perAgentMaxSettleMs` --
+NOT as `minSettleMs`/`maxSettleMs`, because an earlier version used those
+names first for the range of the five per-run medians and then,
+without a rename, redefined them to mean the true per-agent range --
+exactly the kind of silently-redefined field name this tool's own
+`burstSentMs` fix (below) was supposed to have taught us to avoid. The
+range of the five per-run medians itself (the OLD meaning) is still
+available, under its own name: `runMedianMinMs`/`runMedianMaxMs`.
 
-**Settle times are environment-sensitive** (bench-rev-4 R4): a lower-load,
-single-hub reproduction measured roughly 4x lower settle times at the same
-agent counts than a three-co-resident-hub capture under higher load. The
-browser benchmark's report now records `os.loadavg()` at the start and end
-of the run (bench-rev-4 N11), matching `apibench`'s convention, so a reader
-can tell environment noise from an actual difference.
+**bench-rev-5 N-c:** each poll has a SAMPLING INTERVAL, not a "floor" --
+the first poll happens immediately after the POST resolves, so values well
+under 170ms are common (many individual per-agent samples read 11-20ms).
+What is true: each sample can LAG the true DOM update by up to one poll
+interval -- a 100ms sleep plus a deep shadow-DOM badge read, which runs
+14ms alone but ~68ms median (p90 98ms) with `--burst-count` concurrent
+pollers sharing one page, per bench-rev-4's own measurement. Differences
+smaller than that combined interval (roughly 170-200ms) cannot be used to
+rank hub speed, even though individual samples will themselves often read
+below it. `postFanOutMs` (POST-only completion spread) and
+`burstWallClockMs` (the whole per-agent POST-plus-poll sequence) are
+reported separately -- bench-rev-4 N8: an earlier version's single
+`burstSentMs` field silently changed from meaning the former to meaning the
+latter when bench-rev-3 RR4 moved polling inside the same per-agent
+`Promise.all`. **bench-rev-5 N-f:** `postFanOutMs` only reflects agents
+whose POST was accepted; a rejected POST records no `postCompletedAt` and
+is excluded from that spread, so a run with any rejection reports a
+narrower `postFanOutMs` than the full POST attempt actually took.
+
+**Settle times are environment-sensitive** (bench-rev-4 R4; ratio corrected
+by bench-rev-5 W2): a lower-load, single-hub reproduction measured about 4x
+lower settle times at 25 agents (39ms vs 164ms) but only about 2x lower at
+500 agents (320ms vs 619ms) than a three-co-resident-hub capture under
+higher load -- "roughly 4x" is not a single ratio that holds across agent
+counts. The browser benchmark's report now records `os.loadavg()` at the
+start and end of the run (bench-rev-4 N11), matching `apibench`'s
+convention, so a reader can tell environment noise from an actual
+difference.
 
 Raise `--populate-timeout-ms`/`--nav-timeout-ms` (default 120000/120000) for
 large agent counts; at 500 agents on unmodified `main`, some views exceed

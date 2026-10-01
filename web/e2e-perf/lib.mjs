@@ -336,12 +336,20 @@ export function computePreStaleIds(ids, preFireLabels, targetPhase) {
  * bench-rev-4 R4: `medianSettleMs` is the median OF THE PER-RUN MEDIANS
  * (one sample per valid run -- `n` of them, given by `validRunCount` below),
  * NOT a median over every individual agent's settle time; it is a median of
- * medians, a coarser but more outlier-resistant statistic. `minSettleMs`/
- * `maxSettleMs` are the TRUE per-agent range across all valid runs -- the
- * min of each run's own min and the max of each run's own max -- NOT the
- * range of the per-run medians, which an earlier version conflated with it
- * (e.g. reporting "51-227ms" for a column a reader would take as the settle
- * spread, when the true per-agent range for that data was 11-373ms).
+ * medians, a coarser but more outlier-resistant statistic.
+ *
+ * bench-rev-5 W3: the scenario-level min/max are named `perAgentMinSettleMs`/
+ * `perAgentMaxSettleMs` -- NOT `minSettleMs`/`maxSettleMs` -- specifically
+ * because an earlier version used those names for what was actually the
+ * range of the five per-run medians (e.g. "51-227ms"), then bench-rev-4 R4
+ * redefined the SAME field names to mean the true per-agent range across
+ * all valid runs (e.g. "11-373ms" for that same data) without a rename.
+ * Anyone comparing a new report's `minSettleMs` against an old raw file's
+ * `minSettleMs` field-by-field would silently compare two different
+ * statistics. A field name must not change what it means; `runMedianMinMs`/
+ * `runMedianMaxMs` are provided alongside for the (coarser, matching
+ * `medianSettleMs`'s own granularity) range-of-medians statistic, so both
+ * are available under names that only ever mean one thing.
  */
 export function summarizeBurstScenario(results) {
   const validResults = results.filter((r) => !r.invalid);
@@ -362,10 +370,23 @@ export function summarizeBurstScenario(results) {
     // n for medianSettleMs/stddevSettleMs: one sample per valid run.
     medianOfRunMediansN: medianSettleValues.length,
     medianSettleMs: median(medianSettleValues),
-    minSettleMs: perRunMins.length ? Math.min(...perRunMins) : null,
-    maxSettleMs: perRunMaxes.length ? Math.max(...perRunMaxes) : null,
+    // bench-rev-5 W3: true per-agent range across all valid runs (the min
+    // of each run's own min and the max of each run's own max).
+    perAgentMinSettleMs: perRunMins.length ? Math.min(...perRunMins) : null,
+    perAgentMaxSettleMs: perRunMaxes.length ? Math.max(...perRunMaxes) : null,
+    // bench-rev-5 W3: the coarser range-of-the-5-per-run-medians statistic,
+    // at the same granularity as medianSettleMs itself -- this is what an
+    // earlier version's "minSettleMs"/"maxSettleMs" actually computed.
+    runMedianMinMs: medianSettleValues.length ? Math.min(...medianSettleValues) : null,
+    runMedianMaxMs: medianSettleValues.length ? Math.max(...medianSettleValues) : null,
     stddevSettleMs: stddev(medianSettleValues),
-    fullySettledRunCount: validResults.filter((r) => !r.timedOut).length,
+    // bench-rev-5 N-g: `timedOut` is `settledCount < trackedCount`, which is
+    // vacuously false when `trackedCount` is 0 (every target excluded as
+    // pre-stale) -- a run with nothing to track would otherwise count as
+    // "fully settled" despite confirming nothing. Require `trackedCount > 0`
+    // too, so an all-pre-stale run is excluded from this count instead of
+    // silently inflating it.
+    fullySettledRunCount: validResults.filter((r) => !r.timedOut && r.trackedCount > 0).length,
     fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
   };
 }

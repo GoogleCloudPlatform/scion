@@ -254,14 +254,18 @@ func TestCheckDBNotExists(t *testing.T) {
 	})
 }
 
-// TestValidateDBPathArg covers bench-rev-3 O1 and bench-rev-4 N1: rather
-// than special-case every DSN form sqlite's URI parsing might accept (the
-// "file://localhost/<path>" authority form, and -- N1 -- "#fragment" and
-// "%XX"-escape forms, all of which let the literal --db string resolve to a
-// DIFFERENT filesystem path than the one checkDBNotExists just confirmed
-// doesn't exist), reject any "file:"-prefixed or "?"/"#"/"%"-containing
-// --db value outright. This closes every such form, not just the ones
-// demonstrated.
+// TestValidateDBPathArg covers bench-rev-3 O1, bench-rev-4 N1 and
+// bench-rev-5 N-a: a growing list of specific DSN forms whose string
+// content lets `--db`'s literal value resolve to a DIFFERENT filesystem
+// path than what `checkDBNotExists` just confirmed doesn't exist under
+// that same literal value ("file://localhost/<path>", "#fragment",
+// "%XX"-escapes, a bare leading "//" authority). bench-rev-5 N-a: an
+// earlier version of this function's doc comment claimed rejecting
+// "#"/"%" "closes every such form" -- it did not (the bare "//" form,
+// without "file:", was not caught at all) -- so this is deliberately NOT
+// claimed to be an exhaustive enumeration here either; main()'s
+// `filepath.Clean` canonicalization is the actual defense-in-depth for
+// whatever slash-count variant this list has not thought to add yet.
 func TestValidateDBPathArg(t *testing.T) {
 	valid := []string{
 		"/tmp/hub.db",
@@ -283,16 +287,77 @@ func TestValidateDBPathArg(t *testing.T) {
 		"file://localhost/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?mode=rw",
-		"/tmp/hub.db#frag",     // N1: URI fragment, silently dropped by the DSN parser
-		"/tmp/%76ictim.db",     // N1: percent-encoding, silently decoded by the DSN parser
-		"/tmp/hub.db#cache=rw", // fragment form disguised as a query-like suffix
-		"/tmp/100%done/hub.db", // "%" anywhere, not just a valid escape sequence
+		"/tmp/hub.db#frag",       // N1: URI fragment, silently dropped by the DSN parser
+		"/tmp/%76ictim.db",       // N1: percent-encoding, silently decoded by the DSN parser
+		"/tmp/hub.db#cache=rw",   // fragment form disguised as a query-like suffix
+		"/tmp/100%done/hub.db",   // "%" anywhere, not just a valid escape sequence
+		"//localhost/tmp/hub.db", // N-a: same bypass class as file://localhost/, no "file:" prefix
+		"//tmp/hub.db",           // N-a: leading "//" on its own, no "localhost" segment needed
 	}
 	for _, p := range rejected {
 		if err := validateDBPathArg(p); err == nil {
 			t.Errorf("validateDBPathArg(%q): want error, got nil", p)
 		}
 	}
+}
+
+// TestFilepathCleanClosesSlashCountBypass reproduces bench-rev-5 N-a's two
+// distinct slash-count variants end-to-end. `validateDBPathArg` now rejects
+// any leading "//" outright (see TestValidateDBPathArg), so this test
+// exercises main()'s SECOND, independent layer -- `filepath.Clean`, applied
+// before both `checkDBNotExists` and the actual DSN open in `run()` -- in
+// isolation, as if the first layer were not there, since a blocklist-only
+// fix can always miss a future variant the canonicalization layer would
+// still catch.
+//
+// The two forms behave differently after cleaning, and both are safe:
+//   - "//tmp/..." and "///tmp/..." (no authority-shaped segment) clean down
+//     to the REAL existing path, so checkDBNotExists correctly detects and
+//     refuses it.
+//   - "//localhost/tmp/..." cleans to a LITERAL "/localhost/tmp/..." path
+//     (filepath.Clean does not know about URI authorities; it only
+//     collapses slash counts), which is a different, non-existent path --
+//     not the victim. Because `run()` uses this SAME cleaned string for the
+//     actual DSN open, the open would land on that harmless non-existent
+//     path too, never on the real victim: the two operations agree, which
+//     is the actual property that closes the bug, not "always rediscovers
+//     the original attacker-intended target."
+func TestFilepathCleanClosesSlashCountBypass(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.db")
+	if err := os.WriteFile(victim, []byte("existing non-empty sqlite-shaped content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no-authority variants resolve to the real victim and are refused", func(t *testing.T) {
+		for _, v := range []string{"//" + victim[1:], "///" + victim[1:]} {
+			cleaned := filepath.Clean(v)
+			if cleaned != victim {
+				t.Errorf("filepath.Clean(%q) = %q, want the real victim path %q", v, cleaned, victim)
+				continue
+			}
+			if err := checkDBNotExists(cleaned); err == nil {
+				t.Errorf("checkDBNotExists(filepath.Clean(%q)): want error (existing non-empty "+
+					"file), got nil", v)
+			}
+		}
+	})
+
+	t.Run("authority-shaped variant cleans to a different, non-colliding path", func(t *testing.T) {
+		v := "//localhost" + victim
+		cleaned := filepath.Clean(v)
+		if cleaned == victim {
+			t.Fatalf("filepath.Clean(%q) = %q, unexpectedly equals the victim path -- "+
+				"re-check this test's assumptions", v, cleaned)
+		}
+		// The cleaned form must not itself already exist either -- otherwise
+		// THIS test's setup would be the one leaking data across runs, not
+		// a property of the fix.
+		if err := checkDBNotExists(cleaned); err != nil {
+			t.Errorf("checkDBNotExists(filepath.Clean(%q)) = %v, want nil (a fresh, "+
+				"non-colliding path)", v, err)
+		}
+	})
 }
 
 func TestNormalizeDBPathForStat(t *testing.T) {

@@ -332,6 +332,11 @@ function makeRun({
   timedOut = false,
   restoreFullyConfirmed = true,
   preStaleExcludedCount = 0,
+  // Default to a representative non-zero tracked count (a full 15-agent
+  // burst with nothing pre-stale-excluded) so existing tests that don't
+  // care about trackedCount aren't silently affected by the bench-rev-5
+  // N-g `trackedCount > 0` guard on fullySettledRunCount.
+  trackedCount = 15,
 } = {}) {
   return {
     invalid,
@@ -341,6 +346,7 @@ function makeRun({
     timedOut,
     restoreFullyConfirmed,
     preStaleExcludedCount,
+    trackedCount,
   };
 }
 
@@ -358,25 +364,32 @@ test('summarizeBurstScenario excludes invalid runs from medianSettleMs/min/max/s
   assert.equal(s.invalidRunCount, 1);
   assert.equal(s.medianOfRunMediansN, 2);
   assert.equal(s.medianSettleMs, 150); // median of [100, 200], NOT influenced by 99999
-  assert.equal(s.minSettleMs, 50); // true per-agent min across valid runs only
-  assert.equal(s.maxSettleMs, 220); // true per-agent max across valid runs only
+  assert.equal(s.perAgentMinSettleMs, 50); // true per-agent min across valid runs only
+  assert.equal(s.perAgentMaxSettleMs, 220); // true per-agent max across valid runs only
 });
 
-test('summarizeBurstScenario: minSettleMs/maxSettleMs are the true per-agent range, not the range of per-run medians', () => {
-  // bench-rev-4 R4: an earlier version computed minMax(medianSettleValues),
-  // which for these three runs would give [100, 110] (the range of the
-  // medians) -- very different from the true per-agent range, which must
-  // reach down to each run's own min (10) and up to each run's own max (900).
+test('summarizeBurstScenario: perAgentMin/MaxSettleMs are the true per-agent range; runMedianMin/MaxMs are the separate range-of-medians statistic (bench-rev-5 W3)', () => {
+  // bench-rev-4 R4: an earlier version's "minSettleMs"/"maxSettleMs" (now
+  // renamed perAgentMin/MaxSettleMs, bench-rev-5 W3) computed
+  // minMax(medianSettleValues), which for these three runs would give
+  // [100, 110] (the range of the medians) -- very different from the true
+  // per-agent range, which must reach down to each run's own min (10) and
+  // up to each run's own max (900). Both statistics are now available,
+  // under names that each only ever mean one thing: perAgentMin/MaxSettleMs
+  // for the true per-agent range, runMedianMin/MaxMs for the range of the
+  // five per-run medians (what the old, ambiguous field name computed).
   const results = [
     makeRun({ medianSettleMs: 100, minSettleMs: 10, maxSettleMs: 300 }),
     makeRun({ medianSettleMs: 105, minSettleMs: 20, maxSettleMs: 900 }),
     makeRun({ medianSettleMs: 110, minSettleMs: 15, maxSettleMs: 250 }),
   ];
   const s = summarizeBurstScenario(results);
-  assert.equal(s.minSettleMs, 10);
-  assert.equal(s.maxSettleMs, 900);
-  assert.notEqual(s.minSettleMs, 100); // not the range-of-medians bug
-  assert.notEqual(s.maxSettleMs, 110);
+  assert.equal(s.perAgentMinSettleMs, 10);
+  assert.equal(s.perAgentMaxSettleMs, 900);
+  assert.equal(s.runMedianMinMs, 100);
+  assert.equal(s.runMedianMaxMs, 110);
+  assert.notEqual(s.perAgentMinSettleMs, s.runMedianMinMs);
+  assert.notEqual(s.perAgentMaxSettleMs, s.runMedianMaxMs);
 });
 
 test('summarizeBurstScenario: fullySettledRunCount only counts valid, non-timed-out runs', () => {
@@ -388,6 +401,18 @@ test('summarizeBurstScenario: fullySettledRunCount only counts valid, non-timed-
   const s = summarizeBurstScenario(results);
   assert.equal(s.fullySettledRunCount, 1);
   assert.equal(s.validRunCount, 2);
+});
+
+test('summarizeBurstScenario: a run with every target pre-stale-excluded (trackedCount 0) does not count as fully settled (bench-rev-5 N-g)', () => {
+  // timedOut is `settledCount < trackedCount`, which is vacuously false
+  // when trackedCount is 0 -- a run that tracked and confirmed NOTHING
+  // must not be indistinguishable from a run that tracked and confirmed
+  // all 15 agents.
+  const nothingTracked = makeRun({ timedOut: false, trackedCount: 0, preStaleExcludedCount: 15 });
+  const normalRun = makeRun({ timedOut: false, trackedCount: 15 });
+  const s = summarizeBurstScenario([nothingTracked, normalRun]);
+  assert.equal(s.validRunCount, 2);
+  assert.equal(s.fullySettledRunCount, 1); // only normalRun, not nothingTracked
 });
 
 test('summarizeBurstScenario: fullyRestoredRunCount is counted over ALL runs, including invalid ones', () => {
@@ -418,6 +443,8 @@ test('summarizeBurstScenario handles an all-invalid scenario without crashing', 
   const s = summarizeBurstScenario(results);
   assert.equal(s.validRunCount, 0);
   assert.equal(s.medianSettleMs, null);
-  assert.equal(s.minSettleMs, null);
-  assert.equal(s.maxSettleMs, null);
+  assert.equal(s.perAgentMinSettleMs, null);
+  assert.equal(s.perAgentMaxSettleMs, null);
+  assert.equal(s.runMedianMinMs, null);
+  assert.equal(s.runMedianMaxMs, null);
 });
