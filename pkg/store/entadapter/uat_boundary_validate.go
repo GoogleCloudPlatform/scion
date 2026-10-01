@@ -21,50 +21,53 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
-// uatBoundaryValidatePageSize is a var, not a const, so a test can shrink it
-// to exercise pagination across multiple pages without creating hundreds of
-// rows.
-var uatBoundaryValidatePageSize = 500
+// defaultUATBoundaryValidatePageSize is used whenever a CompositeStore's
+// uatBoundaryValidatePageSize field is left at its zero value.
+const defaultUATBoundaryValidatePageSize = 500
 
-// ValidateUserAccessTokenBoundaries defends and reports on the
-// boundary_kind/project_id invariant after schema migration. It is
-// idempotent and safe to run on every startup, and it never writes "hub":
+func (c *CompositeStore) uatBoundaryValidatePageSizeOrDefault() int {
+	if c.uatBoundaryValidatePageSize > 0 {
+		return c.uatBoundaryValidatePageSize
+	}
+	return defaultUATBoundaryValidatePageSize
+}
+
+func (c *CompositeStore) uatBoundaryLoggerOrDefault() *slog.Logger {
+	if c.uatBoundaryLogger != nil {
+		return c.uatBoundaryLogger
+	}
+	return slog.Default()
+}
+
+// ValidateUserAccessTokenBoundaries reports user access token rows that
+// violate the boundary_kind/project_id invariant after schema migration. It
+// only reads: it never inserts, updates or deletes a row, so it is
+// idempotent and safe to run on every startup.
 //
-//  1. It repairs any row left with an empty boundary_kind (a partially
-//     applied migration, or a row written through a path that skipped the
-//     column's Go-level NotEmpty validation) to "project" — the same value
-//     the column's own schema default would have applied. This is
-//     defensive, not the primary mechanism: entc.AutoMigrate's ADD COLUMN
-//     already backfills every pre-existing row via that default.
-//  2. It then counts rows that still violate the kind/project-id invariant
-//     (via store.UserAccessToken.ValidateBoundary) and logs their sanitized
-//     IDs at Error. It does NOT auto-repair or delete these rows, and it
-//     does not fail boot: a row that fails ValidateBoundary is rejected at
-//     load by UserAccessTokenService.ValidateToken (fails closed per token),
-//     which keeps every other valid token working instead of bricking the
-//     hub or silently rewriting stored authority.
+// Every row is checked with store.UserAccessToken.ValidateBoundary. The IDs
+// of rows that fail are logged at Error; the IDs are server-issued record
+// identifiers, never key material or project IDs. Such a row is left as
+// stored and does not fail boot: UserAccessTokenService.ValidateToken
+// rejects it at load, so it never authenticates while every valid token
+// keeps authenticating.
+//
+// A row whose stored project_id cannot be scanned as a UUID at all (only a
+// hand-edited SQLite row can hold one; Postgres's uuid column and the API
+// cannot) fails the query, and this function returns that error, which
+// fails Migrate. In practice BackfillUATCeilings, which Migrate runs ahead
+// of this step, scans the same column and fails Migrate on such a row.
+// The remediation is to correct or delete the row.
 func (c *CompositeStore) ValidateUserAccessTokenBoundaries(ctx context.Context) error {
-	repaired, err := c.client.UserAccessToken.Update().
-		Where(useraccesstoken.BoundaryKindEQ("")).
-		SetBoundaryKind(string(permissions.BoundaryKindProject)).
-		Save(ctx)
-	if err != nil {
-		return fmt.Errorf("repair empty user access token boundary kind: %w", err)
-	}
-	if repaired > 0 {
-		slog.Warn("repaired empty user access token boundary_kind to project", "rows_updated", repaired)
-	}
-
+	pageSize := c.uatBoundaryValidatePageSizeOrDefault()
 	var lastID *ent.UserAccessToken
 	var invalidIDs []string
 
 	for {
 		q := c.client.UserAccessToken.Query().
 			Order(ent.Asc(useraccesstoken.FieldID)).
-			Limit(uatBoundaryValidatePageSize)
+			Limit(pageSize)
 		if lastID != nil {
 			q = q.Where(useraccesstoken.IDGT(lastID.ID))
 		}
@@ -82,13 +85,13 @@ func (c *CompositeStore) ValidateUserAccessTokenBoundaries(ctx context.Context) 
 			}
 		}
 		lastID = rows[len(rows)-1]
-		if len(rows) < uatBoundaryValidatePageSize {
+		if len(rows) < pageSize {
 			break
 		}
 	}
 
 	if len(invalidIDs) > 0 {
-		slog.Error("user access tokens with an invalid boundary were found; they are rejected at load, not repaired or deleted",
+		c.uatBoundaryLoggerOrDefault().Error("user access tokens with an invalid boundary were found; they are rejected at load, not repaired or deleted",
 			"count", len(invalidIDs), "token_ids", invalidIDs)
 	}
 	return nil

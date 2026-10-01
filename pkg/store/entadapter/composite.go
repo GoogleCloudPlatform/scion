@@ -124,6 +124,16 @@ type CompositeStore struct {
 	// rows, and without a package-level variable that every store instance
 	// (and every test running concurrently) would otherwise share.
 	uatCeilingBackfillPageSize int
+
+	// uatBoundaryValidatePageSize overrides ValidateUserAccessTokenBoundaries's
+	// page size when non-zero; see defaultUATBoundaryValidatePageSize. It is
+	// per instance for the same reason as uatCeilingBackfillPageSize.
+	uatBoundaryValidatePageSize int
+
+	// uatBoundaryLogger receives ValidateUserAccessTokenBoundaries's report
+	// of invalid rows. Nil means slog.Default(). Tests set it per instance
+	// to capture the report without replacing the process-wide logger.
+	uatBoundaryLogger *slog.Logger
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
