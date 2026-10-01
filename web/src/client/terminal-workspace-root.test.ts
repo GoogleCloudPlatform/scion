@@ -6,6 +6,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
@@ -856,6 +857,29 @@ describe('idle entries', () => {
     );
   });
 
+  // select() is also the path the saved-terminal-list restore feature uses
+  // to focus the persisted frontmost entry once it has been created idle
+  // (see terminal-persistence.ts), not just the user clicking a rail item —
+  // so a restored frontmost entering view must engage frame mode exactly
+  // like any other route into show(true), with no separate wiring needed.
+  it('selecting an idle entry also enters frame mode, the same as show(true)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'i3-frame',
+    });
+    const session = root.withAutoSelectSuspended(() =>
+      root.create(registry, agentId, { deferConnect: true })
+    );
+    await flush();
+    const start = _appFrameRefCountForTests();
+
+    root.select(session);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
   it('withAutoSelectSuspended: creating into an empty workspace selects nothing inside, but auto-selects outside', async () => {
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,
@@ -973,5 +997,49 @@ describe('idle entries', () => {
     await flush();
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-deleted');
+  });
+});
+
+describe('show() frame-mode ref counting', () => {
+  let root: TerminalWorkspaceRoot;
+  let startCount: number;
+
+  beforeEach(() => {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    startCount = _appFrameRefCountForTests();
+  });
+
+  afterEach(() => {
+    // show(false) only releases the ref if this root itself currently holds
+    // one (its own _frameEntered flag), so one call is enough regardless of
+    // which test ran — no loop needed. The count comparison (rather than a
+    // bare call) fails loudly if a test left the ref unbalanced instead of
+    // silently leaking state into other test files.
+    root.show(false);
+    root.element.remove();
+    expect(_appFrameRefCountForTests()).toBe(startCount);
+  });
+
+  it('enters frame mode on the first show(true) and exits on show(false)', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    expect(_appFrameRefCountForTests()).toBe(start + 1);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a repeated show(true) (successive /terminals navigations) does not inflate the count', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(true);
+    root.show(true);
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
+  });
+
+  it('a redundant show(false) before ever showing is a no-op', () => {
+    const start = _appFrameRefCountForTests();
+    root.show(false);
+    expect(_appFrameRefCountForTests()).toBe(start);
   });
 });

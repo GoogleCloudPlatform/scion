@@ -22,6 +22,7 @@ import {
   TERMINAL_DRAG_MIME,
   type TerminalSessionCountDetail,
 } from './terminal-workspace-events.js';
+import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
 import '../components/shared/header.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -124,11 +125,21 @@ export class TerminalWorkspaceRoot {
 
   private user: User | null = null;
 
+  /**
+   * Tracks whether this root currently holds a frame-mode reference, so
+   * `show()` only calls `enterAppFrame()`/`exitAppFrame()` on an actual
+   * visibility transition — repeated `show(true)` calls for successive
+   * `/terminals` navigations (see `main.ts`'s router) must not inflate the
+   * shared ref count.
+   */
+  private _frameEntered = false;
+
   constructor(user: User | null = null) {
     this.user = user;
     this.element.id = 'terminal-workspace';
     this.element.hidden = true;
-    this.element.style.cssText = 'height:100vh;min-height:0;display:none;flex-direction:column';
+    this.element.style.cssText =
+      'height:var(--scion-app-height, 100dvh);min-height:0;display:none;flex-direction:column';
     this.element.className = 'terminal-workspace-root';
     // Expose workspace root on the element for coordinator and test access.
     (this.element as HTMLElement & { workspaceRoot?: TerminalWorkspaceRoot }).workspaceRoot = this;
@@ -386,6 +397,13 @@ export class TerminalWorkspaceRoot {
   show(visible: boolean): void {
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
+    if (visible && !this._frameEntered) {
+      this._frameEntered = true;
+      enterAppFrame();
+    } else if (!visible && this._frameEntered) {
+      this._frameEntered = false;
+      exitAppFrame();
+    }
     this.refreshPaneVisibility();
   }
 
