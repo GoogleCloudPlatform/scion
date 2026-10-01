@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -303,6 +304,305 @@ func TestKubernetesRuntime_BuildPod_Env(t *testing.T) {
 	}
 	if !foundLogname {
 		t.Errorf("LOGNAME not found in pod env")
+	}
+}
+
+// TestKubernetesRuntime_BuildPod_DedupesEnv proves that SCION_AGENT_NAME,
+// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION each appear exactly once in
+// the built pod spec's container env, even though they are legitimately
+// contributed by two different sources (harness env / config.Env for
+// SCION_AGENT_NAME; config.Env / resolved auth for the GCP vars). It also
+// asserts every env name in the pod is unique, and that the three vars keep
+// the value Kubernetes would already select today for duplicate env names:
+// the last entry appended wins.
+func TestKubernetesRuntime_BuildPod_DedupesEnv(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+
+	config := RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Harness:      &MockHarness{Env: map[string]string{"SCION_AGENT_NAME": "agent-from-harness"}},
+		Env: []string{
+			"SCION_AGENT_NAME=agent-from-config-env",
+			"GOOGLE_CLOUD_PROJECT=project-from-config-env",
+			"GOOGLE_CLOUD_REGION=region-from-config-env",
+		},
+		ResolvedAuth: &api.ResolvedAuth{
+			Method: "vertex-ai",
+			EnvVars: map[string]string{
+				"GOOGLE_CLOUD_PROJECT": "project-from-resolved-auth",
+				"GOOGLE_CLOUD_REGION":  "region-from-resolved-auth",
+			},
+		},
+	}
+
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	envVars := pod.Spec.Containers[0].Env
+
+	counts := make(map[string]int, len(envVars))
+	values := make(map[string]string, len(envVars))
+	for _, e := range envVars {
+		counts[e.Name]++
+		values[e.Name] = e.Value
+	}
+
+	for name, count := range counts {
+		if count > 1 {
+			t.Errorf("env var %q appears %d times in pod spec, want 1", name, count)
+		}
+	}
+
+	// The two sources for these vars disagree on purpose; the effective
+	// value must match what Kubernetes already picks today for duplicate
+	// env names — the last one appended.
+	wantEffective := map[string]string{
+		"SCION_AGENT_NAME":     "agent-from-config-env",
+		"GOOGLE_CLOUD_PROJECT": "project-from-resolved-auth",
+		"GOOGLE_CLOUD_REGION":  "region-from-resolved-auth",
+	}
+	for name, want := range wantEffective {
+		if got := values[name]; got != want {
+			t.Errorf("effective value of %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestDedupeEnvVars pins the exact semantics of dedupeEnvVars: a duplicated
+// name keeps only its last occurrence, in that occurrence's original
+// position (not hoisted to the first), unless an entry from its first
+// through its last occurrence contains the substring "$(NAME)", in which
+// case all its occurrences are kept; the cases below also pin the bounds of
+// that exception. Non-duplicated entries keep their relative order
+// untouched.
+func TestDedupeEnvVars(t *testing.T) {
+	secretRef := &corev1.EnvVarSource{
+		SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "s"},
+			Key:                  "k",
+		},
+	}
+
+	tests := []struct {
+		name  string
+		input []corev1.EnvVar
+		want  []corev1.EnvVar
+	}{
+		{
+			name:  "nil input returns nil",
+			input: nil,
+			want:  nil,
+		},
+		{
+			name:  "empty input returns empty",
+			input: []corev1.EnvVar{},
+			want:  []corev1.EnvVar{},
+		},
+		{
+			name: "no duplicates preserves order",
+			input: []corev1.EnvVar{
+				{Name: "A", Value: "1"},
+				{Name: "B", Value: "2"},
+				{Name: "C", Value: "3"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "A", Value: "1"},
+				{Name: "B", Value: "2"},
+				{Name: "C", Value: "3"},
+			},
+		},
+		{
+			name: "duplicate survivor keeps its last position, not the first",
+			input: []corev1.EnvVar{
+				{Name: "FOO", Value: "first"},
+				{Name: "BAR", Value: "unrelated"},
+				{Name: "FOO", Value: "second"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "BAR", Value: "unrelated"},
+				{Name: "FOO", Value: "second"},
+			},
+		},
+		{
+			name: "three occurrences keeps only the last",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "X", Value: "b"},
+				{Name: "X", Value: "c"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "X", Value: "c"},
+			},
+		},
+		{
+			name: "later Value entry replaces earlier ValueFrom entry",
+			input: []corev1.EnvVar{
+				{Name: "SECRET", ValueFrom: secretRef},
+				{Name: "SECRET", Value: "plain"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "SECRET", Value: "plain"},
+			},
+		},
+		{
+			name: "later ValueFrom entry replaces earlier Value entry",
+			input: []corev1.EnvVar{
+				{Name: "SECRET", Value: "plain"},
+				{Name: "SECRET", ValueFrom: secretRef},
+			},
+			want: []corev1.EnvVar{
+				{Name: "SECRET", ValueFrom: secretRef},
+			},
+		},
+		{
+			// The survivor references its own earlier value via $(X), e.g.
+			// NODE_OPTIONS=$(NODE_OPTIONS) --foo appended after an earlier
+			// NODE_OPTIONS. Dropping the earlier occurrence would leave
+			// $(X) unresolved (kubelet does not fall back to a later
+			// occurrence), which changes behavior. Both must be kept.
+			name: "self-reference in survivor keeps both occurrences",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "X", Value: "$(X)b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "X", Value: "$(X)b"},
+			},
+		},
+		{
+			// An entry between X's two occurrences references $(X). That
+			// entry needs the earlier X value, so the earlier occurrence
+			// must be kept even though X itself would otherwise dedupe.
+			name: "intermediate reference to duplicated name keeps all occurrences",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$(X)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$(X)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// An escaped $$(X) is not a kubelet reference (it expands to
+			// the literal "$(X)"), but the substring check still counts
+			// it. That's intentionally conservative: it only keeps
+			// duplicates it didn't need to, never changes expansion.
+			name: "escaped reference is conservatively treated as a reference",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$$(X)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$$(X)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// A reference to a *different* name (Z, never duplicated) must
+			// not stop X from collapsing.
+			name: "reference to unrelated name does not block collapse",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$(Z)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "Y", Value: "$(Z)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// $(XY) is not the substring "$(X)": a name-boundary-aware
+			// match must not treat this as a reference to X.
+			name: "reference to a longer name sharing a prefix does not block collapse",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$(XY)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "Y", Value: "$(XY)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// A reference to a longer name ending in X: $(YX) is not the
+			// substring "$(X)" either — a suffix match would wrongly treat
+			// it as one.
+			name: "reference to a longer name ending in X does not block collapse",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "$(YX)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "Y", Value: "$(YX)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// Text without the leading $ is not a reference.
+			name: "text without the leading dollar sign is not a reference",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "a"},
+				{Name: "Y", Value: "(X)"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "Y", Value: "(X)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+		{
+			// A reference positioned after X's last occurrence resolves
+			// against the survivor either way; it must not force X's
+			// earlier occurrence to be kept (the scan must stop at last).
+			name: "reference after the last occurrence does not block collapse",
+			input: []corev1.EnvVar{
+				{Name: "X", Value: "1"},
+				{Name: "X", Value: "2"},
+				{Name: "Y", Value: "$(X)"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "X", Value: "2"},
+				{Name: "Y", Value: "$(X)"},
+			},
+		},
+		{
+			// A reference positioned before X's first occurrence resolves
+			// via service-link fallback or stays literal either way; it
+			// must not force an occurrence to be kept (the scan must not
+			// start before first).
+			name: "reference before the first occurrence does not block collapse",
+			input: []corev1.EnvVar{
+				{Name: "Y", Value: "$(X)"},
+				{Name: "X", Value: "a"},
+				{Name: "X", Value: "b"},
+			},
+			want: []corev1.EnvVar{
+				{Name: "Y", Value: "$(X)"},
+				{Name: "X", Value: "b"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dedupeEnvVars(tt.input)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("dedupeEnvVars(%+v) = %+v, want %+v", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 

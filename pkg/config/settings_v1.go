@@ -1156,6 +1156,9 @@ type V1CloudRunSandboxConfig struct {
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
+//
+// Env is parsed and round-tripped but not applied to agent containers; no
+// code reads it.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
 	Host              string            `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
