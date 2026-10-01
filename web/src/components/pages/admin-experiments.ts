@@ -395,7 +395,7 @@ export class ScionAdminExperiments extends LitElement {
           <span class="title">${exp.title}</span>
           <span class="name">${exp.name}</span>
           <sl-badge variant="neutral">${exp.stage}</sl-badge>
-          ${exp.layers.map(
+          ${(exp.layers ?? []).map(
             (l) => html`<sl-badge variant="primary">${l === 'web' ? 'UI' : 'Server'}</sl-badge>`
           )}
         </div>

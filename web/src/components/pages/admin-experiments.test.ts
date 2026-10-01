@@ -186,6 +186,22 @@ describe('scion-admin-experiments', () => {
     );
   });
 
+  it('renders a row without layer badges instead of throwing when layers is missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(makeResponse({ experiments: [makeEntry({ layers: undefined })] }))
+        )
+      )
+    );
+    element = await createElement();
+    await activate(element);
+
+    expect(shadowText(element)).toContain('Persistent terminal workspace');
+    expect(query(element, 'sl-badge[variant="primary"]')).toBeNull();
+  });
+
   it('shows the empty state when no experiments are registered', async () => {
     vi.stubGlobal(
       'fetch',
