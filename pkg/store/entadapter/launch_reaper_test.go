@@ -78,10 +78,17 @@ func setLaunchReaperArmedSince(t *testing.T, ctx context.Context, s *AgentStore,
 // SQLite), so a test can anchor a backdated timestamp to the same clock a
 // later tick's DisarmedFor computation will compare it against. Using the
 // test process's own time.Now() instead would be vulnerable to clock skew
-// between the test host and a remote Postgres server.
+// between the test host and a remote Postgres server. On SQLite, storeNow
+// never touches the database, so this skips the connection checkout and
+// transaction entirely and returns time.Now() directly, avoiding pointless
+// work and any pool-exhaustion or deadlock risk on single-connection SQLite
+// setups.
 func readStoreNow(t *testing.T, ctx context.Context, s *AgentStore) time.Time {
 	t.Helper()
 	isPG := s.dialect(ctx) == dialect.Postgres
+	if !isPG {
+		return time.Now()
+	}
 	db := s.sqlDB()
 	require.NotNil(t, db)
 	conn, err := db.Conn(ctx)
