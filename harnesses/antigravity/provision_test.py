@@ -87,7 +87,13 @@ def make_ctx(home: str, *, model: str | None = None) -> Any:
     return scion_harness.ProvisionContext("antigravity", manifest)
 
 
-def _invoke(home: str, *, env_vars: list[str], explicit_type: str = "") -> dict:
+def _invoke(
+    home: str,
+    *,
+    env_vars: list[str],
+    explicit_type: str = "",
+    harness_config: dict[str, Any] | None = None,
+) -> dict:
     bundle = os.path.join(home, ".scion", "harness")
     os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
     candidates = {"env_vars": env_vars}
@@ -105,7 +111,7 @@ def _invoke(home: str, *, env_vars: list[str], explicit_type: str = "") -> dict:
     ws = os.path.join(home, "workspace")
     os.makedirs(ws, exist_ok=True)
 
-    manifest = {"harness_bundle_dir": bundle, "harness_config": {}}
+    manifest = {"harness_bundle_dir": bundle, "harness_config": harness_config or {}}
     with temporary_home(home), unittest.mock.patch.dict(os.environ, {"SCION_WORKSPACE_PATH": ws}):
         ctx = scion_harness.ProvisionContext("antigravity", manifest)
         provision.provision(ctx)
@@ -437,6 +443,43 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         self.assertEqual(settings["modelProvider"], "gemini")
         self.assertIs(settings["onboardingComplete"], True)
         self.assertEqual(settings["trustedWorkspaces"], [workspace])
+
+
+class ProvisionModelWiringTest(unittest.TestCase):
+    """Review round 4, O1: every model test above calls _resolve_model or
+    _prestage_onboarding directly, so none pins the provision() call site
+    that actually had the #2453 bug (harness_config.get("model") passed raw,
+    SCION_MODEL never read). Drive the real provision() entry point via the
+    existing _invoke harness and assert the resolved model lands in
+    settings.json. Verified by hand: reverting the provision() call site to
+    main's raw expression (ctx.harness_config.get("model") or
+    os.environ.get("AGY_MODEL", "") or FLASH_MODEL) makes this test fail
+    while the rest of the suite (which exercises _resolve_model and
+    _prestage_onboarding directly, not through provision()) still passes.
+    """
+
+    def test_scion_model_tier_lands_in_settings_json_via_provision(self) -> None:
+        # Deliberately "large", not "medium": FLASH_MODEL's literal value is
+        # "Gemini 3.8 Flash (Medium)", the same string the "medium" alias
+        # resolves to, so a mutant that falls all the way back to FLASH_MODEL
+        # would coincidentally match and go undetected. "large" resolves to
+        # "Gemini 3.1 Pro (Low)", which differs from FLASH_MODEL, so the
+        # wiring mutant (reverting this call site to main's raw expression)
+        # is actually caught here -- confirmed by hand.
+        with tempfile.TemporaryDirectory() as tmp:
+            with env_vars(SCION_MODEL="large", AGY_MODEL=None):
+                _invoke(
+                    tmp,
+                    env_vars=[],
+                    explicit_type="none",
+                    harness_config={"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)},
+                )
+
+            settings_path = os.path.join(tmp, ".gemini", "antigravity-cli", "settings.json")
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], "Gemini 3.1 Pro (Low)")
 
 
 if __name__ == "__main__":
