@@ -1224,13 +1224,13 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 }
 
 // agentScopeRestriction builds a kernel Restriction from agent JWT token scopes.
-// Only permissions that map to the agent's declared scopes are allowed, with
-// one exception: permissions.PermissionGCPServiceAccountUse is
-// decided against the specific resource this restriction was built for
+// Only permissions that map to the agent's declared scopes are allowed, with one
+// exception: permissions.PermissionGCPServiceAccountUse is decided against the
+// specific resource this restriction was built for
 // (agentGCPServiceAccountUseScopeMatch), never against the static AgentScopes
 // map below -- see gcpServiceAccountUseBinding's doc comment for why a static
-// list cannot express a per-instance token scope. Every other permission's
-// behavior is unchanged.
+// list cannot express a per-instance token scope. Every other permission is
+// decided by the static AgentScopes map alone.
 func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 	scopes := agent.Scopes()
 	if len(scopes) == 0 {
@@ -1299,15 +1299,17 @@ func agentGCPServiceAccountUseScopeMatch(agent AgentIdentity, permissionID strin
 // user-scoped (scopeApplies always admits system scope) -- scope containment
 // here is not the point, the per-request resource-ID match already is.
 //
-// It is built fresh inside decide() on every call: never cached, never
-// derived from or returned by the target-agnostic agentScopesToPermissionIDs.
-// That separation matters because agentScopesToPermissionIDs also feeds
-// intersectCredentialCaveats/CanDelegate's caveat intersection, which decides
-// what an agent may delegate to something it creates -- a grant scoped to one
-// resource ID must never be read there as general, delegable
-// gcp_service_account.use authority. CanDelegate calls agentScopeRestriction
-// with a zero Resource, so agentGCPServiceAccountUseScopeMatch always denies
-// there and gcp_service_account.use is never in an agent's delegable set.
+// It is built fresh inside decide() on every call: never cached, and never
+// added to the static AgentScopes mapping that both agentScopesToPermissionIDs
+// (Step 5b's synthetic bindings) and agentScopeRestriction (its own walk of
+// Registry.AgentScopes) read. That separation matters because
+// agentScopeRestriction also filters, via intersectCredentialCaveats, what
+// CanDelegate lets an agent delegate to something it creates -- a grant scoped
+// to one resource ID must never be read there as general, delegable
+// gcp_service_account.use authority. intersectCredentialCaveats calls
+// agentScopeRestriction with a zero Resource, so
+// agentGCPServiceAccountUseScopeMatch always denies there and
+// gcp_service_account.use is never in an agent's delegable set.
 func gcpServiceAccountUseBinding(agent AgentIdentity, permissionID string, resource Resource) (*CandidateBinding, *RolePermissions) {
 	if !agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource) {
 		return nil, nil

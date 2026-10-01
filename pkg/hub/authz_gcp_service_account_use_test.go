@@ -365,11 +365,11 @@ func TestGCPServiceAccountUse_IndependentGrantStillRestricted(t *testing.T) {
 }
 
 // TestGCPServiceAccountUse_TargetAgnosticGrantNeverIncludesIt pins that
-// agentScopesToPermissionIDs -- the target-agnostic function that also feeds
-// CanDelegate's caveat intersection -- never grants gcp_service_account.use
-// from a per-SA scope. The request-local grant in decide() (Step 5b3) is
-// built by a different, resource-aware function and must never be folded
-// into this one.
+// agentScopesToPermissionIDs -- the target-agnostic mapping behind Step 5b's
+// synthetic bindings -- never grants gcp_service_account.use from a per-SA
+// scope. The request-local grant in decide() (Step 5b3) is built by a
+// different, resource-aware function and must never be folded into this one.
+// CanDelegate's side is pinned by TestGCPServiceAccountUse_CanDelegateUnaffected.
 func TestGCPServiceAccountUse_TargetAgnosticGrantNeverIncludesIt(t *testing.T) {
 	scopes := []AgentTokenScope{GCPTokenScopeForSA(tid("sa-agnostic"))}
 	for _, id := range agentScopesToPermissionIDs(scopes) {

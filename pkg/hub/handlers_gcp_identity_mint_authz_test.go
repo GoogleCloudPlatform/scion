@@ -15,11 +15,11 @@
 //go:build !no_sqlite
 
 // Package hub — ptone/scion#2129: handler-level tests for the live-mint
-// record recheck in handleAgentGCPToken and handleAgentGCPIdentityToken.
-// Each test starts from newGCPMintFixture's "everything current" baseline (a verified,
-// project-scoped, reachable service account assigned to a live agent whose
-// JWT carries the matching per-SA scope) and perturbs exactly one fact away
-// from it, then asserts both mint endpoints deny identically. See
+// record recheck in handleAgentGCPToken and handleAgentGCPIdentityToken. Each
+// test starts from newGCPMintFixture's "everything current" baseline (a
+// verified, project-scoped, reachable service account assigned to a live
+// agent whose JWT carries the matching per-SA scope) and perturbs exactly one
+// fact away from it, then asserts both mint endpoints deny identically. See
 // authz_gcp_service_account_use_test.go for the kernel-level Decide tests
 // behind the scope-mapping checks.
 package hub
@@ -127,10 +127,11 @@ func (f *gcpMintFixture) mutateSA(t *testing.T, mutate func(*store.GCPServiceAcc
 }
 
 // reassignSA creates a brand-new, verified GCP service account row with the
-// given scope/scopeID/email, points the fixture's agent at it (AppliedConfig.GCPIdentity),
-// reissues the agent token with the new SA's per-instance scope, and updates
-// f.SA/f.Token to match. Used instead of mutateSA when a test needs to vary
-// Scope or ScopeID, which UpdateGCPServiceAccount cannot persist.
+// given scope/scopeID/email, points the fixture's agent at it
+// (AppliedConfig.GCPIdentity), reissues the agent token with the new SA's
+// per-instance scope, and updates f.SA/f.Token to match. Used instead of
+// mutateSA when a test needs to vary Scope or ScopeID, which
+// UpdateGCPServiceAccount cannot persist.
 func (f *gcpMintFixture) reassignSA(t *testing.T, scope, scopeID, email string) {
 	t.Helper()
 	ctx := context.Background()
@@ -243,12 +244,13 @@ func TestAgentGCPToken_UnverifiedServiceAccountDenied(t *testing.T) {
 }
 
 // TestAgentGCPToken_VerificationStatusFailedDenied is
-// UnverifiedServiceAccountDenied's other half: a verification attempt that
-// ran and failed (VerificationStatus == failed) denies exactly like a row
-// that was never verified. store.normalizeGCPVerification (external_store.go)
-// forces VerificationStatus back to "verified" whenever Verified is true, so
-// this state requires Verified == false too -- the same store invariant
-// runGCPServiceAccountVerification relies on when it persists a failed check.
+// UnverifiedServiceAccountDenied's other half: a verification attempt that ran
+// and failed (VerificationStatus == failed) denies exactly like a row that was
+// never verified. entadapter.normalizeGCPVerification
+// (pkg/store/entadapter/external_store.go) forces VerificationStatus back to
+// "verified" whenever Verified is true, so this state requires Verified ==
+// false too -- the same store invariant runGCPServiceAccountVerification
+// relies on when it persists a failed check.
 func TestAgentGCPToken_VerificationStatusFailedDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "sa-verification-failed")
 	f.mutateSA(t, func(sa *store.GCPServiceAccount) {
@@ -366,8 +368,9 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 
 // TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies is the
 // production-like characterization this test pins: with the delegation-edge
-// backfill migration complete (the marker is not deleted, unlike every other
-// test in this file) and a real owner-to-agent delegation edge recorded --
+// backfill migration complete (this test re-creates the marker that testServer
+// deletes, unlike every other test in this file) and a real owner-to-agent
+// delegation edge recorded --
 // the shape every hub-attested agent has post-backfill -- a direct decision
 // against gcp_service_account.use through the agent's own credential still
 // denies, because the delegating owner does not itself hold
@@ -409,10 +412,11 @@ func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testi
 }
 
 // gcpMintFailingStore wraps a store.Store and injects an error into exactly
-// one of the two record lookups (GetAgent, GetGCPServiceAccount), for the
+// one of the two record lookups a mint request makes -- the handler's
+// GetAgent and resolveAgentGCPMintFacts's GetGCPServiceAccount -- for the
 // "every lookup error denies" tests above. Kept local to this file: it is
-// specific to the two calls resolveAgentGCPMintFacts makes and is not a
-// general-purpose fixture other test files need.
+// specific to those two calls and is not a general-purpose fixture other test
+// files need.
 type gcpMintFailingStore struct {
 	store.Store
 	getAgentErr             error
