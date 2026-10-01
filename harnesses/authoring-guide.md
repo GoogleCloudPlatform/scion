@@ -195,13 +195,18 @@ model = scion_harness.resolve_model(ctx) or "<your default>"
 `scion_harness.resolve_model(ctx)` (`harnesses/scion_harness.py`) is a Python
 port of `config.NormalizeModelAlias` / `config.ResolveModelAlias`
 (`pkg/config/templates.go`): it reads `SCION_MODEL`, normalizes shorthand
-(s/m/l/xl and case) the same way Go does, and maps the result through
-`ctx.harness_config["model_aliases"]`, returning `""` when nothing is set.
-Scion also passes `--model <resolved>` on the CLI command line when the agent
-has a model configured, so a harness-side spelling the Go side does not
-accept would make the two disagree — that is why the normalization must stay
-in lockstep with the Go side, which `resolve_model` already does for you.
-Then write the result to the tool's native settings file or the env overlay.
+(s/m/l/xl and case) the same way Go does to recognize a size tier, and maps
+a recognized tier through `ctx.harness_config["model_aliases"]`, returning
+`""` when nothing is set. Concrete, non-tier names are returned with their
+original case — unlike Go, which lower-cases them too — because `SCION_MODEL`
+can arrive un-normalized from a path Go never touches (an explicit
+template/hub `env:` entry), and case-sensitive concrete IDs are real (e.g.
+OpenAI fine-tuned model suffixes). Scion also passes `--model <resolved>` on
+the CLI command line when the agent has a model configured, so a harness-side
+spelling the Go side does not accept for a *tier* would make the two
+disagree — that is why tier normalization must stay in lockstep with the Go
+side, which `resolve_model` already does for you. Then write the result to
+the tool's native settings file or the env overlay.
 Do **not** pin the tool's model env var in the `env` block below — see the
 precedence note there.
 

@@ -708,9 +708,9 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     them with no upside. A tier alias is still safe to normalize: all five
     harnesses' model_aliases tables and the default pins are lowercase.
 
-    Unknown aliases and aliases missing from this harness's model_aliases
-    table pass through unchanged (as the normalized tier name), matching
-    Go's behavior.
+    A known tier missing from this harness's model_aliases passes through
+    as the normalized tier name, matching Go. An unknown or concrete value
+    passes through in its original spelling (see above).
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
     if not raw:

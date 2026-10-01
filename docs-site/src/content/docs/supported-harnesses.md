@@ -192,7 +192,7 @@ with `capture_auth.py`.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Hermes has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
 - **MCP**: `~/.hermes/mcp.json`. Project-scoped MCP servers are not supported.
 - **Model aliases**: `small` → `google/gemini-3.5-flash`, `medium` → `anthropic/claude-sonnet-4`, `large` → `anthropic/claude-opus-4`.
-- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. The `provision.py` script resolves it with `scion_harness.resolve_model`, which maps size aliases to the correct Nous Research endpoints.
+- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. The `provision.py` script resolves it with `scion_harness.resolve_model`, which maps size aliases to the provider/model strings above.
 
 ### Known Limitations
 - **System Prompt**: approximated via `AGENTS.md` (no native override).

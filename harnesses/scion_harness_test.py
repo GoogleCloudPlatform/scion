@@ -780,6 +780,19 @@ class TestResolveModel(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SCION_MODEL": "medium"}):
             self.assertEqual(sh.resolve_model(ctx), "medium")
 
+    def test_unmapped_tier_passes_through_normalized_not_raw(self):
+        """R2 round-2 nit N1: an unmapped tier must fall back to the
+        *normalized* tier name, not the caller's raw spelling — matching Go,
+        which always returns the normalized form for a known tier. Mutation
+        check: `aliases.get(normalized, raw)` instead of
+        `aliases.get(normalized, normalized)` survives every other test here
+        because they all pass an already-normalized tier spelling ("medium").
+        This one uses shorthand plus mixed case ("M") to catch that mutant.
+        """
+        ctx = _make_ctx(harness_config={"model_aliases": {"small": "claude-haiku"}})
+        with mock.patch.dict(os.environ, {"SCION_MODEL": "M"}):
+            self.assertEqual(sh.resolve_model(ctx), "medium")
+
     def test_concrete_model_case_is_preserved(self):
         """R1: concrete (non-tier) model names must not be lower-cased.
 
