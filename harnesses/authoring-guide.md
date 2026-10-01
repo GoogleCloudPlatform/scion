@@ -492,8 +492,12 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go generate ./harnesses/`, which stamps a `GENERATED FILE` header; external
-bundles just track the canonical file.)
+`go run ./harnesses/gen`, which stamps a `GENERATED FILE` header; external
+bundles just track the canonical file. Run it from the repo root — the
+`//go:generate` directive on this file resolves `gen`'s paths against the
+package directory, not the repo root, so `go generate ./harnesses/...`
+itself fails with "no such file or directory"; `go run ./harnesses/gen` is
+the command that actually works.)
 
 Key API surface:
 
@@ -532,8 +536,60 @@ Key API surface:
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
   `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
-  `toml_escape`, `toml_inline_table`, `toml_string_array`,
-  `strip_toml_sections` (tomllib is read-only, so TOML editing is manual).
+  `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
+  read-only, so TOML editing is manual, line-oriented text surgery).
+  `strip_toml_sections(content, header_predicate)` removes whole
+  `[table]`/`[[table]]` sections whose (comment-stripped,
+  whitespace-normalized) header matches the predicate; it tracks
+  bracket-nesting depth so a nested-array element line isn't mistaken for a
+  header, and it tracks multi-line (`"""`/`'''`) strings across lines —
+  including escaped closing-delimiter sequences inside a multi-line *basic*
+  string — so a header-shaped line, or an unbalanced bracket in ordinary
+  prose, inside one of those is correctly treated as string content rather
+  than TOML structure. It is still not a full TOML tokenizer, so every TOML
+  writer must still validate before persisting: parse the original and the
+  edited content with `tomllib` and require everything you don't own to be
+  unchanged. Use `toml_edit_preserves(original, content, managed_keys)` for
+  the check alone, or `write_toml_if_preserves(ctx, path, original,
+  content, managed_keys, what=...)` to check-and-write-or-warn-and-leave-
+  untouched in one call. `managed_keys` accepts two kinds of entries:
+  a bare top-level key (`str`), exempting the whole top-level table or
+  value (e.g. `{"mcp_servers"}` for an MCP writer that fully replaces that
+  table each time); or a key-path (`tuple[str, ...]`, e.g.
+  `("model", "vertex-grok")`), exempting only that one nested subtree while
+  still requiring every sibling under the same parent to stay unchanged —
+  use a key-path whenever your write owns only one sub-table of a larger,
+  potentially-shared top-level table, so it can't be fooled into accepting
+  damage to an unrelated sibling (e.g. another tool's `[model.custom]`).
+  `what` is a short label (e.g. `"vertex-ai auth/model config"`) included
+  in the warning on a rejected write, alongside the managed keys, so the
+  log names which step failed and what it owned. `strip_toml_top_level_key
+  (content, key)` and `insert_toml_top_level_line(content, line)` do the
+  equivalent surgery for bare top-level `key = value` lines rather than
+  whole sections (codex uses these for `model`/`model_reasoning_effort`);
+  both also skip lines inside a multi-line string (including a
+  backslash-escaped closing-delimiter sequence inside a `"""` (basic)
+  string, on any line including the one that opens it — `'''` (literal)
+  strings have no escapes in TOML at all, so no such handling applies
+  there), and correctly consume the 1-2 extra content quote characters
+  TOML allows immediately before a closing delimiter (`""""`/`'''''`, e.g.
+  `"""say "hi""""` is the content `say "hi"`) instead of stopping after the
+  first 3-quote run. There are no known residual gaps in this scanner as of
+  ptone/scion#2427; the `tomllib` round-trip check above remains the
+  backstop regardless, since this is still a line-oriented scanner rather
+  than a full TOML tokenizer. A seeded, bounded fuzz test
+  (`TestTomlScannerFuzz` in `harnesses/scion_harness_test.py`) checks
+  `strip_toml_sections`'s output against a fresh `tomllib` parse across a
+  generated corpus of tricky multi-line-string/bracket/quote fragments on
+  every test run, to catch the next scanner edge automatically rather than
+  by manual review. See `harnesses/scion_harness_test.py`'s
+  `TestStripTomlSections` / `TestTomlEnteringArrayDepths` /
+  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` /
+  `TestTomlScannerFuzz` for worked examples, including the fragility repro
+  cases (trailing comments on headers, nested arrays, multi-line strings
+  with header-shaped lines, unbalanced brackets, escaped delimiters, or
+  extra closing quotes, header whitespace variants like `[ models ]`) this
+  API was hardened against (ptone/scion#2426, ptone/scion#2427).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).
@@ -739,8 +795,8 @@ permanent; check whether they've been fixed.
   dialects; bundled `dialect.yaml` dialects work but are undocumented there.
 - **Vendored-lib drift for external bundles** is manual: nothing warns when
   your vendored `scion_harness.py` falls behind the canonical copy (in-repo
-  bundles are covered by `go generate` + a sync test). The host logs the
-  staged `LIB_VERSION` at provision time — check it when debugging.
+  bundles are covered by `go run ./harnesses/gen` + a sync test). The host
+  logs the staged `LIB_VERSION` at provision time — check it when debugging.
 - **`HasSystemPrompt`** checks for the native system-prompt file on disk, but
   the file is only written at pre-start, so host-side checks before first
   start can misreport.
