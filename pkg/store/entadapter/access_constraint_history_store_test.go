@@ -24,7 +24,9 @@ import (
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -245,23 +247,141 @@ func TestConstraintHistory_ConcurrentCapPostgres(t *testing.T) {
 		return nil
 	}))
 
-	start := make(chan struct{})
-	errs := make(chan error, 2)
-	appendConcurrent := func(composite *CompositeStore, eventID string) {
-		<-start
-		errs <- composite.WithTx(ctx, func(tx store.Store) error {
-			return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, eventID, occurredAt))
+	constraintID, err := parseUUID(constraint.ID)
+	require.NoError(t, err)
+	holderReady := make(chan int, 1)
+	holderDone := make(chan error, 1)
+	releaseHolder := make(chan struct{})
+	holderReleased := false
+	defer func() {
+		if !holderReleased {
+			close(releaseHolder)
+		}
+	}()
+	go func() {
+		holderDone <- storeA.WithTx(ctx, func(tx store.Store) error {
+			txStore := tx.(*CompositeStore)
+			pid, pidErr := constraintHistoryPostgresBackendPID(ctx, txStore)
+			if pidErr != nil {
+				return pidErr
+			}
+			_, lockErr := txStore.client.AccessConstraint.Query().
+				Where(
+					accessconstraint.IDEQ(constraintID),
+					func(selector *entsql.Selector) { selector.For(entsql.LockNoKeyUpdate) },
+				).
+				Only(ctx)
+			if lockErr != nil {
+				return fmt.Errorf("acquire holder row lock: %w", lockErr)
+			}
+			entry := historyTestEntry(constraint.ID, "event-0999", occurredAt)
+			builder := txStore.client.AccessConstraintHistory.Create().
+				SetID(entry.EventID).
+				SetConstraintID(constraintID).
+				SetOccurredAt(entry.OccurredAt).
+				SetOperation(entry.Operation)
+			setOptionalHistoryFields(builder, entry)
+			if _, saveErr := builder.Save(ctx); saveErr != nil {
+				return fmt.Errorf("insert holder history row: %w", saveErr)
+			}
+			holderReady <- pid
+			select {
+			case <-releaseHolder:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		})
+	}()
+
+	var holderPID int
+	select {
+	case holderPID = <-holderReady:
+	case holderErr := <-holderDone:
+		require.NoError(t, holderErr)
+		t.Fatal("holder transaction completed before publishing its lock")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
-	go appendConcurrent(storeA, "event-0999")
-	go appendConcurrent(storeB, "event-1000")
-	close(start)
-	require.NoError(t, <-errs)
-	require.NoError(t, <-errs)
+
+	writerReady := make(chan int, 1)
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- storeB.WithTx(ctx, func(tx store.Store) error {
+			txStore := tx.(*CompositeStore)
+			pid, pidErr := constraintHistoryPostgresBackendPID(ctx, txStore)
+			if pidErr != nil {
+				return pidErr
+			}
+			writerReady <- pid
+			return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "event-1000", occurredAt))
+		})
+	}()
+
+	var writerPID int
+	select {
+	case writerPID = <-writerReady:
+	case writerErr := <-writerDone:
+		require.NoError(t, writerErr)
+		t.Fatal("writer transaction completed before publishing its backend PID")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	observer := storeA.DB()
+	require.NotNil(t, observer)
+	for {
+		var blockedOnHolder bool
+		err := observer.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE pid = $1
+				  AND wait_event_type = 'Lock'
+				  AND $2::integer = ANY(pg_blocking_pids(pid))
+				  AND POSITION('FOR UPDATE' IN UPPER(query)) > 0
+			)`, writerPID, holderPID).Scan(&blockedOnHolder)
+		require.NoError(t, err)
+		if blockedOnHolder {
+			break
+		}
+		select {
+		case writerErr := <-writerDone:
+			require.NoError(t, writerErr)
+			t.Fatal("writer completed before waiting on the holder's row lock")
+		case <-ctx.Done():
+			t.Fatal("writer row-lock wait was not observed before the test deadline")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	close(releaseHolder)
+	holderReleased = true
+	require.NoError(t, <-holderDone)
+	require.NoError(t, <-writerDone)
 
 	rows, err := storeA.ListConstraintHistory(ctx, constraint.ID)
 	require.NoError(t, err)
 	require.Len(t, rows, 1000)
 	assert.Equal(t, "event-1000", rows[0].EventID)
 	assert.Equal(t, "event-0001", rows[len(rows)-1].EventID)
+	for _, row := range rows {
+		assert.NotEqual(t, "event-0000", row.EventID)
+	}
+}
+
+func constraintHistoryPostgresBackendPID(ctx context.Context, txStore *CompositeStore) (int, error) {
+	rows := &entsql.Rows{}
+	if err := txStore.client.Driver().Query(ctx, "SELECT pg_backend_pid()", []any{}, rows); err != nil {
+		return 0, fmt.Errorf("query PostgreSQL backend PID: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return 0, fmt.Errorf("query PostgreSQL backend PID: no row returned")
+	}
+	var pid int
+	if err := rows.Scan(&pid); err != nil {
+		return 0, fmt.Errorf("scan PostgreSQL backend PID: %w", err)
+	}
+	return pid, rows.Err()
 }
