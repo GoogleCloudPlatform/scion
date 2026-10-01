@@ -26,6 +26,32 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// loadUserPreferences reads a user's preferences live from the store (no
+// caching), for /auth/me on both the web server and the Hub API: a PATCH
+// from another tab, device or client is visible on the very next load. A nil
+// store or a store.ErrNotFound degrades to nil preferences rather than
+// failing the request (the caller's response then falls back to the session
+// or token fields alone, and the UI treats the display timezone as Auto).
+// Any other store error also degrades, but is logged, so a broken store does
+// not silently masquerade as "no preferences set" (review round 1, R1-5).
+func loadUserPreferences(ctx context.Context, st store.Store, uid string) *store.UserPreferences {
+	if st == nil || uid == "" {
+		return nil
+	}
+	dbUser, err := st.GetUser(ctx, uid)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "loadUserPreferences: store error reading user; degrading to no preferences",
+				"user_id", uid, "error", err)
+		}
+		return nil
+	}
+	if dbUser == nil {
+		return nil
+	}
+	return dbUser.Preferences
+}
+
 type ListUsersResponse struct {
 	Users        []UserWithCapabilities `json:"users"`
 	NextCursor   string                 `json:"nextCursor,omitempty"`
@@ -87,6 +113,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	totalCount := result.TotalCount
 	if identity != nil && len(users) < len(result.Items) {
 		totalCount = len(users)
+	}
+
+	for i := range users {
+		stripPreferencesForViewer(ctx, &users[i].User, users[i].Cap)
 	}
 
 	writeJSON(w, http.StatusOK, ListUsersResponse{
@@ -165,8 +195,31 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
 	}
+	stripPreferencesForViewer(ctx, &resp.User, resp.Cap)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// stripPreferencesForViewer clears u.Preferences in place unless the caller
+// in ctx is that same user, or cap (the capability set already computed by
+// the caller for this same resource — listUsers and getUser each compute it
+// once per user) includes ActionUpdate. That is the same permission
+// (user.update) that gates a cross-user PATCH, so read and write visibility
+// of preferences agree, and this does not issue a second Decide call or
+// duplicate its deny-audit record. Preferences (including the
+// display-timezone field) are personal: a member listing or viewing another
+// user must not see them (AC6).
+func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabilities) {
+	if u.Preferences == nil {
+		return
+	}
+	if userIdentity, ok := GetIdentityFromContext(ctx).(UserIdentity); ok && userIdentity.ID() == u.ID {
+		return
+	}
+	if capabilityAllows(cap, ActionUpdate) {
+		return
+	}
+	u.Preferences = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -234,10 +287,64 @@ func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Con
 
 // userPatchPayload is the strict set of allowed fields for PATCH /api/v1/users/{id}.
 type userPatchPayload struct {
-	DisplayName *string                `json:"displayName,omitempty"`
-	Role        *string                `json:"role,omitempty"`
-	Status      *string                `json:"status,omitempty"`
-	Preferences *store.UserPreferences `json:"preferences,omitempty"`
+	DisplayName *string `json:"displayName,omitempty"`
+	Role        *string `json:"role,omitempty"`
+	Status      *string `json:"status,omitempty"`
+}
+
+// userPreferencesPatch is a per-key partial update to store.UserPreferences.
+// A nil field means "leave unchanged"; a non-nil field (including a pointer
+// to "") is applied verbatim, so an explicit "" clears that preference.
+type userPreferencesPatch struct {
+	DefaultTemplate *string
+	DefaultProfile  *string
+	Theme           *string
+	Timezone        *string
+}
+
+// validateUserTimezone validates a user display-timezone preference value.
+// "" means Auto (the browser-detected zone) and is always valid. "Local" is
+// rejected because it resolves to the server process's zone rather than a
+// portable IANA name.
+// nonPortableTimezoneNames denylists zoneinfo entries that time.LoadLocation
+// accepts but that do not name a portable IANA zone: each one resolves to
+// something local to the server rather than to a fixed place, which is
+// exactly what the Auto/explicit-zone split exists to avoid, and which
+// task 11's Intl.DateTimeFormat-based formatters cannot render (review round
+// 1, R1-1). "Local" is also rejected as a map key here for symmetry, though
+// it is denied unconditionally below regardless of case.
+var nonPortableTimezoneNames = map[string]bool{
+	"Local":      true,
+	"localtime":  true,
+	"posixrules": true,
+	"Factory":    true,
+}
+
+// decodeStringPref unmarshals one preferences sub-field's raw JSON value
+// into a string, for the per-key preferences PATCH merge. A JSON null is a
+// no-op onto the freshly zero-valued result, so it decodes to "" — the same
+// as an explicit "" (both clear the preference). A non-string JSON value
+// (e.g. a number or object) is a decode error, which the caller reports as a
+// 400.
+func decodeStringPref(key string, rv json.RawMessage) (string, error) {
+	var v string
+	if err := json.Unmarshal(rv, &v); err != nil {
+		return "", fmt.Errorf("invalid preferences.%s: %w", key, err)
+	}
+	return v, nil
+}
+
+func validateUserTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if nonPortableTimezoneNames[tz] {
+		return fmt.Errorf("timezone %q is not allowed; use an IANA zone name, or \"\" for Auto", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("invalid timezone %q: %v", tz, err)
+	}
+	return nil
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -275,6 +382,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Re-parse into typed struct.
 	var updates userPatchPayload
+	var prefsPatch *userPreferencesPatch
 	for field, raw := range rawFields {
 		switch field {
 		case "displayName":
@@ -299,12 +407,53 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			}
 			updates.Status = &v
 		case "preferences":
-			var v store.UserPreferences
-			if err := json.Unmarshal(raw, &v); err != nil {
+			// Decode as a raw map, not the typed struct, so that an absent
+			// key (leave unchanged) can be told apart from an explicit ""
+			// (clear). The PATCH merges per-key onto the stored preferences
+			// rather than replacing the whole struct.
+			var rawPrefs map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawPrefs); err != nil {
 				BadRequest(w, "invalid preferences: "+err.Error())
 				return
 			}
-			updates.Preferences = &v
+			patch := &userPreferencesPatch{}
+			for key, rv := range rawPrefs {
+				switch key {
+				case "defaultTemplate":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultTemplate = &v
+				case "defaultProfile":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultProfile = &v
+				case "theme":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Theme = &v
+				case "timezone":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					if err := validateUserTimezone(v); err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Timezone = &v
+				}
+			}
+			prefsPatch = patch
 		}
 	}
 
@@ -335,7 +484,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	needsPromote := updates.Role != nil
 	needsSuspend := updates.Status != nil
-	needsUpdate := updates.DisplayName != nil || updates.Preferences != nil
+	needsUpdate := updates.DisplayName != nil || prefsPatch != nil
 
 	isSelf := actor.ID() == user.ID
 	needsCrossUserUpdate := needsUpdate && !isSelf
@@ -476,8 +625,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if updates.DisplayName != nil {
 			txUser.DisplayName = *updates.DisplayName
 		}
-		if updates.Preferences != nil {
-			txUser.Preferences = updates.Preferences
+		if prefsPatch != nil {
+			if txUser.Preferences == nil {
+				txUser.Preferences = &store.UserPreferences{}
+			}
+			if prefsPatch.DefaultTemplate != nil {
+				txUser.Preferences.DefaultTemplate = *prefsPatch.DefaultTemplate
+			}
+			if prefsPatch.DefaultProfile != nil {
+				txUser.Preferences.DefaultProfile = *prefsPatch.DefaultProfile
+			}
+			if prefsPatch.Theme != nil {
+				txUser.Preferences.Theme = *prefsPatch.Theme
+			}
+			if prefsPatch.Timezone != nil {
+				txUser.Preferences.Timezone = *prefsPatch.Timezone
+			}
 		}
 
 		// Persist all User record changes in the same transaction.

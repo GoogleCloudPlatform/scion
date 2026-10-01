@@ -960,7 +960,8 @@ type User struct {
 type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
-	Theme           string `json:"theme,omitempty"` // light, dark
+	Theme           string `json:"theme,omitempty"`    // light, dark
+	Timezone        string `json:"timezone,omitempty"` // IANA zone name; empty means Auto (browser zone)
 }
 
 // UserRole constants

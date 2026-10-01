@@ -398,6 +398,7 @@ type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
+	Timezone        string `json:"timezone,omitempty"`
 }
 
 // EnvVar represents an environment variable from the Hub API.
