@@ -55,8 +55,20 @@ env sources, or any warning: `resolveDispatchProjectInfo` is a pure,
 side-effect-free store read whose result isn't consulted by anything written
 into `resolvedEnv` before the workspace-mode block in either original
 function. It only changes the relative order of two independent store reads
-internal to `DispatchAgentStart`. The new golden test below asserts the
-output is unaffected.
+internal to `DispatchAgentStart`. The new golden test below cannot prove this
+on its own — both callers now run the same `buildStartEnv`, so it cannot
+detect a regression caused specifically by moving the call, and its fixture
+doesn't set a workspace mode label, so it never exercises the reordered
+block. The evidence for the reorder itself is the inspection argument above,
+plus the existing, unedited coverage of that exact block:
+`TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode`
+(`httpdispatcher_test.go:5065`),
+`TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode` (`:5186`),
+and `TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata`
+(`:2002`) — all pass unchanged. The golden test's role is narrower: it is a
+drift guard against a future caller-side divergence (for example a `TZ`
+write landing in only one of the two call sites in tasks #15/#16), not proof
+that today's reorder is neutral.
 
 ## Test evidence
 
@@ -75,14 +87,32 @@ output is unaffected.
   'TestHTTPAgentDispatcher_DispatchAgent(Start|Restart)|TestHTTPAgentDispatcher_TZInjection'`.
 - `gofmt -l` clean on both changed files; `go vet -buildvcs=false -p 2
   ./pkg/hub/...` clean.
-- `GOFLAGS="-buildvcs=false -p=2" make ci` — see the report to tz-em for the
-  exact run and result.
 - This is a pure refactor of env assembly with no timestamp handling added
   or touched, so the dev-common both-TZ requirement ("wherever a timestamp
   crosses a store or wire boundary in your change") does not apply to new
   logic here. As a belt-and-suspenders check anyway, the targeted dispatch
   tests above (including the new golden test) were re-run under
-  `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` with identical results.
+  `TZ=Asia/Tokyo`: pass, identical to UTC. Under `TZ=Asia/Kathmandu` every
+  `createTestStore`-backed test in `pkg/hub` — not just this change's tests —
+  fails in store migration: `failed to migrate test store: empty agent role
+  backfill: sql: Scan error on column index 6, name "create_time": unsupported
+  Scan, storing driver.Value type string into type *time.Time`. This
+  reproduces identically on upstream main at e572e72, so it is a pre-existing
+  store/`Time.Scan` gap (store-boundary work, task #2 territory), not a
+  signal about this change. Confirmed by tz-t14-rev-1 in round-1 review.
+- `GOFLAGS="-buildvcs=false -p=2" make ci`: `fmt-check`/`lint`/`check-custom`
+  and `pkg/hub` all pass. `test-fast` fails in `./cmd`, `pkg/harness` and
+  `pkg/sciontool/supervisor` due to this sandbox session's own leaked
+  `SCION_*`/`CLAUDE_CODE_*` container env vars (a real hub endpoint plus a
+  native-telemetry-policy conflict), not from this change — confirmed by
+  rerunning each with the offending vars stripped (`env -u ...`), all green,
+  and the same 4 tests fail the same way on upstream main with the raw
+  container env. `go build -buildvcs=false -p 2 ./...` is green separately
+  (`make ci` never reaches the `build` step once `test-fast` fails first).
+  So `make ci` is not green end-to-end in this container as shipped; it is
+  green once the sandbox's own leaked env vars are excluded, and the one
+  package this change touches (`pkg/hub`) was green from the first run with
+  no scrubbing needed.
 
 ## Follow-ups / adjacent observations (not fixed, per scope)
 

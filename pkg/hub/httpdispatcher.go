@@ -2426,8 +2426,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		task = agent.AppliedConfig.Task
 	}
 
-	// Resolve env vars from Hub storage (user/project/broker scopes) so that
-	// API keys and other secrets are available when restarting an agent.
+	// Assemble the resolved env (shared with DispatchAgentRestart; see
+	// buildStartEnv).
 	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
