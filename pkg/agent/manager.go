@@ -231,6 +231,46 @@ func pasteBufferArgv(target, bufName string) []string {
 	return []string{"tmux", "paste-buffer", "-t", target, "-p", "-d", "-b", bufName}
 }
 
+// submitBufferPrefix is the base name for the named tmux buffer that holds
+// the CR used to submit a delivered message. Like msgBufferPrefix it is made
+// unique per delivery (see submitBufferName), so two overlapping deliveries to
+// one agent can never paste, and with -d consume, each other's CR.
+const submitBufferPrefix = "scion-submit"
+
+// submitBufferName derives the submit buffer name for the delivery whose
+// message buffer is msgBufName, reusing its unique nonce-and-sequence suffix.
+func submitBufferName(msgBufName string) string {
+	return submitBufferPrefix + strings.TrimPrefix(msgBufName, msgBufferPrefix)
+}
+
+// submitArgvs returns the commands that submit whatever is in the harness's
+// input without disturbing copy-mode. A pane in copy-mode dispatches
+// send-keys through the mode's key table, so a send-keys Enter never reaches
+// the harness; paste-buffer writes to the pane's pty directly and bypasses
+// the mode, so the operator's scroll position and selection also survive.
+//
+// A literal CR rather than LF, so this does not depend on paste-buffer's
+// LF->CR default, and no -p: a bracketed paste would hand the harness the CR
+// as pasted text instead of a submit. -d consumes the buffer as it is pasted,
+// so each submit sets it afresh and a named buffer never lingers on top of
+// the operator's buffer stack.
+func submitArgvs(bufName string) [][]string {
+	return [][]string{
+		{"tmux", "set-buffer", "-b", bufName, "--", "\r"},
+		{"tmux", "paste-buffer", "-t", "scion:0", "-d", "-b", bufName},
+	}
+}
+
+// exitCopyModeArgv returns the tmux command that leaves copy-mode. Real keys
+// (interrupts and the bare Enter) are dispatched through the
+// mode's key table rather than to the harness, so those paths cancel the mode
+// first. -q is a no-op when the pane is not in a mode. Callers treat its
+// failure as non-fatal: tmux before 3.1 has no -q, and failing a delivery
+// over it would lose input that older tmux would otherwise have taken.
+func exitCopyModeArgv() []string {
+	return []string{"tmux", "copy-mode", "-q", "-t", "scion:0"}
+}
+
 func NewManager(rt runtime.Runtime) Manager {
 	mgr := &AgentManager{
 		Runtime: rt,
@@ -1279,14 +1319,20 @@ func kubernetesUID(a api.AgentInfo) string {
 type deliveryStepKind int
 
 const (
-	// stepSendKeys runs argv via Exec: an interrupt key, a bare Enter, or one
-	// of the trailing confirmation Enters.
+	// stepSendKeys runs argv via Exec: an interrupt key or a bare Enter.
 	stepSendKeys deliveryStepKind = iota
 	// stepLoadBuffer runs argv via ExecWithStdin, streaming the message body.
 	stepLoadBuffer
 	// stepPasteBuffer runs argv via Exec. Its success marks the message as
 	// delivered; its failure triggers best-effort buffer cleanup.
 	stepPasteBuffer
+	// stepExitCopyMode runs argv via Exec before real keys are sent. Its
+	// failure is tolerated (see exitCopyModeArgv).
+	stepExitCopyMode
+	// stepSubmit submits the pasted message with a pasted CR (submitArgvs);
+	// argv is unused. It replaces a send-keys Enter, which a pane in
+	// copy-mode would swallow.
+	stepSubmit
 )
 
 // deliveryStep is one command in a deliverImmediate call.
@@ -1361,6 +1407,12 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// 3. Prepare commands
 	var steps []deliveryStep
 
+	// Only the paths that send real KEYS need the mode cancelled; the message
+	// path submits via paste instead and leaves a reading operator alone.
+	if interrupt || message == "" {
+		steps = append(steps, deliveryStep{kind: stepExitCopyMode, argv: exitCopyModeArgv()})
+	}
+
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
 			for _, key := range seq {
@@ -1375,7 +1427,8 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// bufName names the tmux buffer used below, if this delivery pastes a
 	// message. It is computed once (nextMsgBufferName) and reused for both
 	// the load and paste steps, and for cleanup if the paste step fails.
-	var bufName string
+	// submitBuf names this delivery's CR buffer and shares bufName's suffix.
+	var bufName, submitBuf string
 
 	if message == "" {
 		// Empty messages send a bare Enter keypress to trigger confirmations
@@ -1400,10 +1453,15 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		// loaded for the other. "-d" removes the per-delivery buffer after a
 		// successful paste; on paste failure it is deleted explicitly below,
 		// since "-d" does not run when paste-buffer itself fails.
+		//
+		// The paste is submitted with a pasted CR (stepSubmit), not a
+		// send-keys Enter, so that a pane left in copy-mode by a scroll still
+		// receives it.
 		bufName = nextMsgBufferName()
+		submitBuf = submitBufferName(bufName)
 		steps = append(steps, deliveryStep{kind: stepLoadBuffer, argv: loadBufferArgv(bufName)})
 		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv("scion:0", bufName)})
-		steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}})
+		steps = append(steps, deliveryStep{kind: stepSubmit})
 	}
 
 	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
@@ -1416,9 +1474,15 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	delivered := false
 	for _, step := range steps {
 		var err error
-		if step.kind == stepLoadBuffer {
+		switch step.kind {
+		case stepLoadBuffer:
 			_, err = m.Runtime.ExecWithStdin(ctx, agent.ContainerID, step.argv, strings.NewReader(message))
-		} else {
+		case stepSubmit:
+			err = m.submit(ctx, agent.ContainerID, submitBuf)
+		case stepExitCopyMode:
+			// Best-effort: see exitCopyModeArgv.
+			_, _ = m.Runtime.Exec(ctx, agent.ContainerID, step.argv)
+		default:
 			_, err = m.Runtime.Exec(ctx, agent.ContainerID, step.argv)
 		}
 		if err != nil {
@@ -1426,17 +1490,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 				// load-buffer succeeded (or this step wouldn't have run), but
 				// the paste itself failed, so paste-buffer's own "-d" never
 				// fired to clean up the per-delivery buffer named above.
-				// Named buffers aren't evicted by buffer-limit, so without
-				// this they would accumulate on the tmux server. Best-effort:
-				// the failure is already being reported below, so a further
-				// error here is ignored. Uses a ctx detached from the
-				// caller's (context.WithoutCancel, with its own short
-				// timeout) so the cleanup still runs when the caller's ctx
-				// is already cancelled — which may be why paste-buffer
-				// itself failed.
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				_, _ = m.Runtime.Exec(cleanupCtx, agent.ContainerID, []string{"tmux", "delete-buffer", "-b", bufName})
-				cancel()
+				m.deleteBufferBestEffort(ctx, agent.ContainerID, bufName)
 			}
 			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
 			if delivered {
@@ -1449,25 +1503,54 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		}
 	}
 
-	// After sending a message, send two extra Enter keypresses with a brief delay
-	// to ensure the input is accepted by the agent. This runs only once the
-	// message (if any) has already been pasted, so any failure here is
-	// necessarily partial delivery too.
+	// After sending a message, submit twice more with a brief delay to ensure
+	// the input is accepted by the agent. Like the first, these submits are
+	// pasted CRs rather than send-keys Enters (see submitArgvs). This runs
+	// only once the message (if any) has already been pasted, so any failure
+	// here is necessarily partial delivery too.
 	if message != "" {
-		enterCmd := []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}
 		for range 2 {
 			select {
 			case <-ctx.Done():
 				return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending Enter to agent '%s': %w", agent.Name, ctx.Err())}
 			case <-time.After(300 * time.Millisecond):
 			}
-			if _, err := m.Runtime.Exec(ctx, agent.ContainerID, enterCmd); err != nil {
+			if err := m.submit(ctx, agent.ContainerID, submitBuf); err != nil {
 				return &PartialDeliveryError{Err: fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)}
 			}
 		}
 	}
 
 	return nil
+}
+
+// submit runs submitArgvs for the named CR buffer. If the paste fails, its
+// -d never fires, so the buffer is deleted explicitly (best-effort) to keep
+// named buffers from accumulating on the tmux server.
+func (m *AgentManager) submit(ctx context.Context, containerID, bufName string) error {
+	argvs := submitArgvs(bufName)
+	if _, err := m.Runtime.Exec(ctx, containerID, argvs[0]); err != nil {
+		return err
+	}
+	if _, err := m.Runtime.Exec(ctx, containerID, argvs[1]); err != nil {
+		m.deleteBufferBestEffort(ctx, containerID, bufName)
+		return err
+	}
+	return nil
+}
+
+// deleteBufferBestEffort deletes the named tmux buffer after a failed
+// paste-buffer, whose own "-d" did not fire. Named buffers aren't evicted by
+// buffer-limit, so without this they would accumulate on the tmux server.
+// The failure is already being reported by the caller, so a further error
+// here is ignored. Uses a ctx detached from the caller's
+// (context.WithoutCancel, with its own short timeout) so the cleanup still
+// runs when the caller's ctx is already cancelled, which may be why the
+// paste itself failed.
+func (m *AgentManager) deleteBufferBestEffort(ctx context.Context, containerID, bufName string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, _ = m.Runtime.Exec(cleanupCtx, containerID, []string{"tmux", "delete-buffer", "-b", bufName})
 }
 
 func matchesAgentID(a api.AgentInfo, id string) bool {
