@@ -495,16 +495,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	"/api/v1/chat/threads": {
-		Pattern: "/api/v1/chat/threads", RouteID: "chat.threads.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads/": {
-		Pattern: "/api/v1/chat/threads/", RouteID: "chat.threads.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
 	"/api/v1/chat/spaces": {
 		Pattern: "/api/v1/chat/spaces", RouteID: "chat.spaces.list",
 		Classification: RoutePolicy,
@@ -1098,6 +1088,15 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// The handler performs per-resource authorization with full context.
 			// The declarative guard classifies the route; enforcement stays in
 			// the handler where resource IDs, ownership, and visibility are known.
+			if agentSubRouteGuardedRoutes[meta.RouteID] {
+				// Agent sub-routes resolve once here, for every caller
+				// kind; handlers dispatch on the stored value.
+				resolved, ok := resolveAgentSubRouteForRequest(w, r)
+				if !ok {
+					return
+				}
+				r = resolved
+			}
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" && s.authzService != nil {

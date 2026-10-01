@@ -528,26 +528,12 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.restoreAllMocks();
   });
 
-  it('a v1 page (isV2 false) never subscribes to or reads chatRecentFiles', () => {
-    const subscribeSpy = vi.spyOn(chatRecentFiles, 'subscribe');
-    const snapshotSpy = vi.spyOn(chatRecentFiles, 'snapshot');
-    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
-    const el = createPage();
-    el.isV2 = false;
-
-    document.body.appendChild(el);
-
-    expect(subscribeSpy).not.toHaveBeenCalled();
-    expect(snapshotSpy).not.toHaveBeenCalled();
-  });
-
   it('a v2 page seeds the Documents group from the current snapshot on connect', () => {
     const file = documentFile();
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue({ records: [file], persistent: true });
     vi.spyOn(chatRecentFiles, 'subscribe').mockReturnValue(() => {});
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
 
     document.body.appendChild(el);
 
@@ -561,7 +547,6 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
 
     document.body.appendChild(el);
 
@@ -577,7 +562,6 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
     document.body.appendChild(el);
     expect(el.v2PaletteGroups.documents?.candidates).toHaveLength(0);
 
@@ -593,7 +577,6 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
     document.body.appendChild(el);
     expect(unsubscribe).not.toHaveBeenCalled();
 
@@ -612,7 +595,6 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
 
     document.body.appendChild(el);
     el.remove();
@@ -629,7 +611,6 @@ describe('Documents group: chatRecentFiles subscription lifecycle', () => {
     vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
     vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
     const el = createPage();
-    el.isV2 = true;
     document.body.appendChild(el);
 
     el.remove();
@@ -779,7 +760,6 @@ describe('_handlePaletteSelect: Document targets', () => {
 
   it('_handlePaletteAfterHide opens the preview from a pending document target and leaves the invoker captured for later', () => {
     const el = createPage();
-    el.isV2 = true;
     vi.spyOn(el, '_isOnChatRoute').mockReturnValue(true);
     vi.spyOn(el, '_isPageVisible').mockReturnValue(true);
     vi.spyOn(el, '_isUnrelatedModalActive').mockReturnValue(false);
@@ -1161,7 +1141,6 @@ describe('_loadPalettePeople', () => {
       async (_label, pageData) => {
         window.history.pushState({}, '', '/chat/alpha/topic-1');
         const el = createPage();
-        el.isV2 = true;
         el.pageData = pageData;
         el._slugToProjectId.set('alpha', 'p1');
 

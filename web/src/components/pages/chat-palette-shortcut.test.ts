@@ -31,6 +31,9 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
+import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => ({
@@ -128,7 +131,7 @@ afterEach(() => {
  * `createUnattachedPage()` directly, at the default (non-`/chat`) test
  * document URL, would let `_isOnChatRoute()` reject the event regardless of
  * whether the guard actually under test did anything — the same vacuity
- * that would otherwise mask the terminal-surface/visibility-call/isV2
+ * that would otherwise mask the terminal-surface/visibility-call
  * guards. Every test below uses this fixture and ends with a positive
  * control (the identical event with only the condition under test flipped)
  * to prove the rest of the guard chain is actually live.
@@ -286,32 +289,6 @@ describe('the _isPageVisible() call site in _handleGlobalKeydown, isolated from 
     ancestor.hidden = false;
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
     expect(togglePalette).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('the isV2 guard in _handleGlobalKeydown', () => {
-  it('v1 (isV2 false) never toggles the palette or calls preventDefault, even on /chat and visible', () => {
-    // Asserting only that no switcher element renders proves nothing about
-    // this guard (v1 never renders one). Without it, v1 Ctrl+K would call
-    // preventDefault (stealing the browser's native Ctrl+K) and still run
-    // togglePalette (lazy import + agents/DM GETs).
-    const page = createUnattachedPage();
-    window.history.pushState({}, '', '/chat');
-    page.isV2 = false;
-    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
-    const event = makeKeydownEvent({ metaKey: true });
-
-    page._handleGlobalKeydown(event);
-
-    expect(togglePalette).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
-
-    // Positive control: flip isV2 back on, identical event does toggle and preventDefault.
-    page.isV2 = true;
-    const event2 = makeKeydownEvent({ metaKey: true });
-    page._handleGlobalKeydown(event2);
-    expect(togglePalette).toHaveBeenCalledTimes(1);
-    expect(event2.defaultPrevented).toBe(true);
   });
 });
 
@@ -1631,5 +1608,298 @@ describe('palette load is cancelled on every close path', () => {
     const cancelSpy = vi.spyOn(page._paletteDataController, 'cancel');
     page._closePaletteWithoutFocusRestore();
     expect(cancelSpy).toHaveBeenCalled();
+  });
+});
+
+describe('_handlePaletteOpenRequest: the header button opens with { mode: "open" }, guarded the same as the shortcut', () => {
+  it('dispatches togglePalette({ mode: "open" }) when every guard holds', () => {
+    const page = createEligiblePage();
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledWith({ mode: 'open' });
+  });
+
+  it('does nothing — no togglePalette call — when the route guard fails, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isOnChatRoute).mockReturnValue(true);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when the page is not visible, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isPageVisible).mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isPageVisible).mockReturnValue(true);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when an unrelated modal is active, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(false);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('a blocked open-request issues no fetch — same no-state-change guarantee as the shortcut', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+    const loadSpy = vi.spyOn(page, '_openPalette');
+
+    page._handlePaletteOpenRequest();
+
+    expect(loadSpy).not.toHaveBeenCalled();
+    expect(page.v2PaletteOpen).toBe(false);
+  });
+
+  it('the document-level listener registered in connectedCallback dispatches through to togglePalette', () => {
+    // Spies on togglePalette, not _handlePaletteOpenRequest itself: the
+    // document listener is a reference bound once in a field initializer,
+    // captured before any spy from inside a test could replace it — exactly
+    // like the existing keydown-listener tests below (dynamic `this.`
+    // dispatch inside the handler is what spying relies on instead).
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    document.body.appendChild(page);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).toHaveBeenCalledWith({ mode: 'open' });
+  });
+
+  it('a reconnected page reacts to exactly one dispatch, not a leaked extra listener from the first connect', () => {
+    // Re-adding the identical bound function via addEventListener is a
+    // silent no-op (the DOM dedupes it), so a stale listener left behind by
+    // a missing removeEventListener would not actually double-fire here —
+    // it would just make the *disconnected* page's listener a leak with no
+    // observable symptom in this specific reconnect shape. The dedicated
+    // "disconnected page does not react at all" test below is what actually
+    // proves removeEventListener ran; this test only establishes that a
+    // normal reconnect still works at all.
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    document.body.appendChild(page);
+    document.body.removeChild(page);
+    document.body.appendChild(page);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('a disconnected (removed) page does not react to an open-request dispatch at all', () => {
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.body.appendChild(page);
+    document.body.removeChild(page);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).not.toHaveBeenCalled();
+  });
+});
+
+describe('togglePalette({ mode: "open" }): the button never closes or cancels, only ever (re)queues an open', () => {
+  it('open -> no-op: the palette stays open and the data controller is not cancelled', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    const cancelSpy = vi.spyOn(page._paletteDataController, 'cancel');
+
+    await page.togglePalette({ mode: 'open' });
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(cancelSpy).not.toHaveBeenCalled();
+  });
+
+  it('pending-open -> no-op: a second button press during the first-open lazy import does not cancel it', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
+
+    const first = page.togglePalette({ mode: 'open' });
+    const second = page.togglePalette({ mode: 'open' }); // must not cancel `first`
+    await Promise.all([first, second]);
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('closing (close-animating) -> queue set to true twice and still true: a double press during a closing animation does not cancel itself out', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    page._paletteCloseAnimating = true;
+
+    await page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+
+    await page.togglePalette({ mode: 'open' }); // a 'toggle' here would flip this back to false
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it('closing (document-preview queue) -> queue set to true twice and still true', () => {
+    const page = createUnattachedPage();
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+
+    void page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+
+    void page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it("the existing 'toggle' behaviour (default, no options) is unchanged: open then toggle-close", async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+  });
+});
+
+describe('touch focus handoff: a conversation selection on touch does not focus the composer', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Stubs `window.matchMedia(TOUCH_PRIMARY_QUERY)` to report touch/desktop, independent of the real test environment. */
+  function stubTouchPrimary(matches: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY && matches,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  it('on touch, a selection close falls back instead of focusing the composer', () => {
+    stubTouchPrimary(true);
+    const page = createUnattachedPage();
+    // TouchPrimaryController only reads matchMedia() once connected (it
+    // ties the query's change listener to the host's connected lifetime),
+    // so the stub above is only observed once the page is actually in the
+    // document -- an unconnected page would see the controller's default
+    // (false) regardless of the stub, defeating this test.
+    document.body.appendChild(page);
+    const focusComposerSpy = vi.spyOn(page, '_focusComposerAfterPaletteSelection');
+    const fallbackSpy = vi.spyOn(page, '_focusPaletteFallback').mockImplementation(() => {});
+    page._paletteClosedBySelection = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(fallbackSpy).toHaveBeenCalledTimes(1);
+    expect(focusComposerSpy).not.toHaveBeenCalled();
+    expect(page._paletteClosedBySelection).toBe(false);
+  });
+
+  it('on desktop (the default/positive control), a selection close still focuses the composer as before', () => {
+    stubTouchPrimary(false);
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const focusComposerSpy = vi
+      .spyOn(page, '_focusComposerAfterPaletteSelection')
+      .mockResolvedValue(undefined);
+    const fallbackSpy = vi.spyOn(page, '_focusPaletteFallback');
+    page._paletteClosedBySelection = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(focusComposerSpy).toHaveBeenCalledTimes(1);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it('on touch, a reopen queued behind a selection-triggered close does not retarget the invoker to the new composer', async () => {
+    // The direct selection-close path above is not the only one that can
+    // hand focus to a composer: a reopen queued during the close (e.g. a
+    // second button press while the close from a selection is still
+    // animating) takes over instead, and has its own, separate retarget
+    // call — _retargetPaletteInvokerToNewComposer — that must respect the
+    // same touch rule, or a phone keyboard would pop open on the eventual
+    // close of the *reopened* palette instead.
+    stubTouchPrimary(true);
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+    const retargetSpy = vi.spyOn(page, '_retargetPaletteInvokerToNewComposer');
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(retargetSpy).not.toHaveBeenCalled();
+  });
+
+  it('on desktop (positive control), the same queued reopen does retarget the invoker to the new composer', async () => {
+    stubTouchPrimary(false);
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+    const retargetSpy = vi
+      .spyOn(page, '_retargetPaletteInvokerToNewComposer')
+      .mockResolvedValue(undefined);
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(retargetSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -15,8 +15,7 @@
 /**
  * Chromium, real xterm: hidden mounted chat plus terminal Ctrl+K yields
  * normal PTY control-K and zero palette state/fetch changes; Meta+K does not
- * open the chat palette. An unrelated open dialog prevents activation. v1
- * (native_chat_v2 off) remains unaffected.
+ * open the chat palette. An unrelated open dialog prevents activation.
  */
 
 import { test, expect, type Page } from '@playwright/test';
@@ -287,43 +286,6 @@ test('a real modal dialog opening while the palette is open closes it', async ({
           .v2PaletteOpen
     );
   await expect.poll(paletteOpenState, { timeout: 2_000 }).toBe(false);
-});
-
-test('v1 (native_chat_v2 off) remains unaffected: Ctrl+K renders nothing, makes no palette requests, and does not steal the native shortcut', async ({
-  page,
-}) => {
-  const requests = await setupApiMocks(page);
-  await page.goto('/e2e/chat-palette/fixture.html?v2=0', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
-
-  // Asserting only `scion-chat-switcher` count 0 proves
-  // nothing about the isV2 guard — the v1 render path never produces that
-  // element regardless of whether the guard exists. Register a bubble-phase
-  // document listener *after* scion-page-chat's own (already attached by
-  // the connectedCallback the waitForFunction above waited on) so it
-  // observes the final `defaultPrevented` state chat.ts's guard chain left
-  // behind: without the isV2 guard, v1 Ctrl+K would call preventDefault
-  // (stealing the browser's own Ctrl+K) and still run togglePalette (lazy
-  // import + agents/DM GETs).
-  await page.evaluate(() => {
-    document.addEventListener('keydown', (e) => {
-      if (e.key.toLowerCase() === 'k') {
-        (window as unknown as { ctrlKDefaultPrevented?: boolean }).ctrlKDefaultPrevented =
-          e.defaultPrevented;
-      }
-    });
-  });
-  const requestCountBefore = requests.length;
-
-  await page.keyboard.press('Control+k');
-  await page.waitForTimeout(150);
-
-  await expect(page.locator('scion-chat-switcher')).toHaveCount(0);
-  expect(requests.length).toBe(requestCountBefore);
-  const defaultPrevented = await page.evaluate(
-    () => (window as unknown as { ctrlKDefaultPrevented?: boolean }).ctrlKDefaultPrevented
-  );
-  expect(defaultPrevented).toBe(false);
 });
 
 test('chat is genuinely hidden (display:none) while on /terminals — Ctrl+K with focus actually outside the terminal has zero effect', async ({

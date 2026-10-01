@@ -337,13 +337,19 @@ func (a *AuthzService) canDelegateAgent(ctx context.Context, actor Identity, gra
 
 // canAgentDelegateToAgent checks that an agent creating a sub-agent holds
 // at least the scopes being delegated.
+//
+// Compares against effectiveAgentScopes(agentActor), not agentActor.Scopes()
+// directly, so a verified legacy token (isLegacyPreSplitAgentJWT,
+// ptone/scion#2339) is judged by the same effective scopes the synthetic
+// grant and the credential-scope restriction use, rather than its literal,
+// pre-split scope list.
 func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant GrantDescriptor) Decision {
 	// Resolve the requested role to scopes.
 	requestedRole := AgentRole(grant.AgentRole)
 	requestedScopes := ScopesForRole(requestedRole)
 	requestedScopes = append(requestedScopes, grant.AgentScopes...)
 
-	actorScopes := agentActor.Scopes()
+	actorScopes := effectiveAgentScopes(agentActor)
 	actorScopeSet := make(map[AgentTokenScope]bool, len(actorScopes))
 	for _, s := range actorScopes {
 		actorScopeSet[s] = true
@@ -450,7 +456,13 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 			restriction = &r
 		}
 	case AgentIdentity:
-		r := agentScopeRestriction(v)
+		// Zero Resource: CanDelegate reasons about a target-agnostic
+		// permission set, never one resource instance, so the
+		// gcp_service_account.use per-SA match (agentScopeRestriction's one
+		// resource-aware exception) can never engage here, so
+		// gcp_service_account.use is always filtered out of an agent's
+		// delegable set.
+		r := agentScopeRestriction(v, Resource{})
 		restriction = &r
 	}
 

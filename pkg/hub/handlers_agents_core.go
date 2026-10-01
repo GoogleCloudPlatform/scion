@@ -221,6 +221,14 @@ type CreateAgentRequest struct {
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
+	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in (design
+	// §3.2). Persisted as store.Agent.LaunchAsyncOptIn because env finalize
+	// and workspace finalize launch in later requests. This field is only
+	// accepted and persisted here: it has no effect until hub.asyncAgentLaunch
+	// and the dispatch path that reads it both exist. Scheduled creates do
+	// not set it today; when they adopt async launch, the scheduler will set
+	// it server-side rather than from client input.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // GCPIdentityAssignment specifies GCP identity configuration for agent creation.
@@ -439,7 +447,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
 		item := items[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(cap, ActionAttach))
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
 
@@ -1281,6 +1289,10 @@ func (s *Server) createAgentInProject(
 		CreatedBy:       createdBy,
 		OwnerID:         createdBy,
 		Ancestry:        ancestry,
+		// Async agent create (design §3.2): persisted so a later env/workspace
+		// finalize request can still see the client's opt-in. No dispatch path
+		// reads this yet; the async dispatch path will.
+		LaunchAsyncOptIn: req.AcceptAsyncLaunch,
 	}
 
 	// Store human-friendly slug instead of UUID for display
@@ -2192,7 +2204,10 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	}
 
 	// Enrich agents
+	now := time.Now()
 	for i := range agents {
+		// The client-facing `launch` view (design §3.2), computed fresh per response.
+		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -2227,6 +2242,11 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	if agent == nil {
 		return
 	}
+
+	// The client-facing `launch` view (design §3.2), computed fresh at
+	// response time so remainingSeconds reflects "now", not whenever the row
+	// was last written.
+	agent.Launch = store.ComputeAgentLaunch(agent, time.Now())
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {
@@ -2285,117 +2305,137 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 }
 
 func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
-	id, action := extractAction(r, "/api/v1/agents")
-
-	if id == "" {
-		NotFound(w, "Agent")
+	// routeGuard resolves the agent sub-route once and stores it in the
+	// request context; dispatch switches on that value only.
+	route, ok := requireAgentSubRoute(w, r)
+	if !ok {
 		return
 	}
+	id := route.AgentID
 
-	// Handle stop-all (POST /api/v1/agents/stop-all)
-	if id == "stop-all" {
+	switch route.RouteID {
+	case AgentRouteStopAll:
 		s.handleStopAllAgents(w, r, "")
-		return
-	}
 
-	// Handle PTY connections (WebSocket upgrade and auth preflight)
-	if action == "pty" {
+	case AgentRoutePTY:
+		// PTY connections (WebSocket upgrade and auth preflight). The
+		// handler distinguishes preflight from upgrade by its headers.
 		s.handleAgentPTY(w, r)
-		return
-	}
 
-	// Handle workspace routes (supports GET for status and POST for sync operations)
-	if action == "workspace" || strings.HasPrefix(action, "workspace/") {
-		// Require user authentication for workspace operations
+	case AgentRouteWorkspace:
+		// Workspace routes (GET for status and POST for sync operations)
+		// require user authentication.
 		if GetUserIdentityFromContext(r.Context()) == nil {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user authentication", nil)
 			return
 		}
-		// Extract workspace sub-action (sync-from, sync-to, sync-to/finalize)
-		workspaceAction := strings.TrimPrefix(action, "workspace")
-		workspaceAction = strings.TrimPrefix(workspaceAction, "/")
-		s.handleWorkspaceRoutes(w, r, id, workspaceAction)
-		return
-	}
+		workspaceAction, ok := route.Suffix.DecodedOpaque()
+		if !ok {
+			NotFound(w, "Workspace action")
+			return
+		}
+		s.handleWorkspaceRoutes(w, r, id, strings.TrimPrefix(workspaceAction, "/"))
 
-	// Handle groups query
-	if action == "groups" {
+	case AgentRouteGroups:
 		s.handleAgentGroups(w, r, id)
-		return
-	}
 
-	// Handle agent port-forward registration, tunnel, and proxy routes.
-	if action == "ports" || strings.HasPrefix(action, "ports/") {
-		s.handleAgentPorts(w, r, id, strings.TrimPrefix(strings.TrimPrefix(action, "ports"), "/"))
-		return
-	}
+	case AgentRoutePorts:
+		s.handleAgentPorts(w, r, id, "")
+	case AgentRoutePortsTunnel:
+		s.handleAgentPorts(w, r, id, "tunnel")
+	case AgentRoutePortItem:
+		s.handleAgentPorts(w, r, id, route.Suffix.Param)
+	case AgentRoutePortProxy:
+		subpath, ok := route.Suffix.DecodedOpaque()
+		if !ok {
+			NotFound(w, "Port")
+			return
+		}
+		s.handleAgentPorts(w, r, id, route.Suffix.Param+"/proxy"+subpath)
 
-	// Handle agent logs relay (GET, proxied to broker)
-	if action == "logs" {
+	case AgentRouteLogs:
+		// Agent logs relay (GET, proxied to broker).
 		s.handleAgentLogs(w, r, id)
-		return
-	}
-
-	// Handle cloud-logs (GET endpoints, handled before the POST-only action gate)
-	if action == "cloud-logs" {
+	case AgentRouteCloudLogs:
 		s.handleAgentCloudLogs(w, r, id)
-		return
-	}
-	if action == "cloud-logs/stream" {
+	case AgentRouteCloudLogsStream:
 		s.handleAgentCloudLogsStream(w, r, id)
-		return
-	}
-
-	// Handle message-logs (GET endpoints for message audit log)
-	if action == api.AgentActionMessageLogs {
+	case AgentRouteMessageLogs:
 		s.handleAgentMessageLogs(w, r, id)
-		return
-	}
-	if action == api.AgentActionMessageLogsStream {
+	case AgentRouteMessageLogsStream:
 		s.handleAgentMessageLogsStream(w, r, id)
-		return
-	}
 
-	// Handle per-agent messages (GET endpoints, handled before the
-	// POST-only action gate). Both the list and the real-time stream
-	// are backed by the hub message store / event bus and work without
-	// Cloud Logging being configured.
-	if action == api.AgentActionMessagesStream {
+	case AgentRouteMessagesStream:
+		// Per-agent messages (GET). Both the list and the real-time stream
+		// are backed by the hub message store / event bus and work without
+		// Cloud Logging being configured.
 		s.handleAgentMessagesStream(w, r, id)
-		return
-	}
-	if action == api.AgentActionMessages {
+	case AgentRouteMessages:
 		s.handleAgentMessages(w, r, id)
-		return
-	}
 
-	// Handle agent-scoped secret creation: PUT /api/v1/agents/{id}/secrets/{key}
-	if action == "secrets" || strings.HasPrefix(action, "secrets/") {
-		s.handleAgentSecrets(w, r, id, strings.TrimPrefix(action, "secrets"))
-		return
-	}
+	case AgentRouteSecrets:
+		// Agent-scoped secrets: /api/v1/agents/{id}/secrets[/{key}].
+		key, ok := route.Suffix.DecodedOpaque()
+		if !ok {
+			NotFound(w, "Secret")
+			return
+		}
+		s.handleAgentSecrets(w, r, id, key)
 
-	// Handle agent session metrics summary (GET /api/v1/agents/{id}/metrics/summary)
-	if action == "metrics/summary" {
+	case AgentRouteMetricsSummary:
 		s.handleAgentMetricsSummary(w, r, id)
-		return
-	}
 
-	// Handle actions
-	if action != "" {
-		s.handleAgentAction(w, r, id, action)
-		return
-	}
+	case AgentRouteActionStatus:
+		s.handleAgentAction(w, r, id, api.AgentActionStatus)
+	case AgentRouteActionStart:
+		s.handleAgentAction(w, r, id, api.AgentActionStart)
+	case AgentRouteActionStop:
+		s.handleAgentAction(w, r, id, api.AgentActionStop)
+	case AgentRouteActionSuspend:
+		s.handleAgentAction(w, r, id, api.AgentActionSuspend)
+	case AgentRouteActionRestart:
+		s.handleAgentAction(w, r, id, api.AgentActionRestart)
+	case AgentRouteActionMessage:
+		s.handleAgentAction(w, r, id, api.AgentActionMessage)
+	case AgentRouteActionExec:
+		s.handleAgentAction(w, r, id, api.AgentActionExec)
+	case AgentRouteActionRestore:
+		s.handleAgentAction(w, r, id, api.AgentActionRestore)
+	case AgentRouteActionEnv:
+		s.handleAgentAction(w, r, id, api.AgentActionEnv)
+	case AgentRouteActionTokenRefresh:
+		s.handleAgentAction(w, r, id, api.AgentActionTokenRefresh)
+	case AgentRouteActionRefreshToken:
+		s.handleAgentAction(w, r, id, api.AgentActionRefreshToken)
+	case AgentRouteActionOutbound:
+		s.handleAgentAction(w, r, id, api.AgentActionOutboundMessage)
+	case AgentRouteActionMetrics:
+		s.handleAgentAction(w, r, id, api.AgentActionMetrics)
+	case AgentRouteActionMessageMode:
+		s.handleAgentAction(w, r, id, api.AgentActionSetMessageMode)
+	case AgentRouteActionReincarnate:
+		s.handleAgentAction(w, r, id, api.AgentActionReincarnate)
+	case AgentRouteActionResetAuth:
+		s.handleAgentAction(w, r, id, api.AgentActionResetAuth)
+	case AgentRouteActionKeys:
+		s.handleAgentAction(w, r, id, api.AgentActionKeys)
 
-	switch r.Method {
-	case http.MethodGet:
-		s.getAgent(w, r, id)
-	case http.MethodPatch:
-		s.updateAgent(w, r, id)
-	case http.MethodDelete:
-		s.deleteAgent(w, r, id)
+	case AgentRouteRoot:
+		switch r.Method {
+		case http.MethodGet:
+			s.getAgent(w, r, id)
+		case http.MethodPatch:
+			s.updateAgent(w, r, id)
+		case http.MethodDelete:
+			s.deleteAgent(w, r, id)
+		default:
+			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		}
+
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+		// A route resolved for another path form (or a row with no
+		// dispatch here) is not served by this handler.
+		NotFound(w, "Agent route")
 	}
 }
 
@@ -2473,7 +2513,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		}
 	}
 
-	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, capabilityAllows(resp.Cap, ActionAttach))
+	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -2786,35 +2826,20 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		attribute.String("scion.agent.id", agent.ID),
 	)
 
-	// Authorize by caller kind: users by delete policy, agents by lifecycle
-	// scope + same-project isolation (as in handleAgentAction). Fail closed
-	// for a caller that is neither — a user-only check would silently skip
-	// agent callers, which do not satisfy the UserIdentity interface.
-	switch ident := GetIdentityFromContext(ctx).(type) {
-	case UserIdentity:
-		decision := s.authzService.CheckAccess(ctx, ident, agentResource(agent), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Only the agent's creator can delete it", nil)
-			return
-		}
-	case AgentIdentity:
-		if !ident.HasScope(ScopeAgentLifecycle) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Missing required scope: project:agent:lifecycle", nil)
-			return
-		}
-		// An empty project ID on either side must never authorize: two empty
-		// strings compare equal, so a malformed token or corrupted record would
-		// otherwise slip past the isolation gate.
-		if agent.ProjectID == "" || ident.ProjectID() == "" || agent.ProjectID != ident.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Agents can only manage agents within their own project", nil)
-			return
-		}
+	// Authorize through the shared agent-target rule: agent.delete on this
+	// agent for every caller kind (an agent caller also needs the lifecycle
+	// scope within the agent's project, and the delegation ceiling of every
+	// live ancestor applies). Unknown caller kinds are denied.
+	identity := GetIdentityFromContext(ctx)
+	switch identity.(type) {
+	case UserIdentity, AgentIdentity:
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"This action requires user or agent authentication", nil)
+		return
+	}
+	if denial := s.authorizeAgentTargetAction(ctx, identity, agent, ActionDelete); denial != nil {
+		writeAgentTargetDenial(w, r, identity, agent, ActionDelete, denial)
 		return
 	}
 
@@ -2909,15 +2934,54 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	s.cancelScheduledEventsForAgent(ctx, agent)
 
 	if softDelete {
-		// Soft delete: mark agent as deleted with timestamp
+		// alreadyDeleted is set when the version-conflict retry below finds a
+		// concurrent soft delete already won the race: PublishAgentDeleted
+		// must fire at most once per delete.
+		var alreadyDeleted bool
+
+		// Soft delete: mark agent as deleted with timestamp.
+		//
+		// Delete during an in-flight launch is expected: the conflict window
+		// is one terminal write (a report or the reaper ending the launch
+		// between this handler's read and its write). Retry once with a
+		// fresh read rather than surfacing a 409 to the caller for what is,
+		// from their perspective, an ordinary delete. This retry is not
+		// specific to launch conflicts: it fires on any concurrent version
+		// conflict on this row.
 		agent.Phase = string(state.PhaseStopped)
 		agent.DeletedAt = now
 		agent.Updated = now
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+			if !errors.Is(err, store.ErrVersionConflict) {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			fresh, getErr := s.store.GetAgent(ctx, agent.ID)
+			if getErr != nil {
+				writeErrorFromErr(w, getErr, "")
+				return
+			}
+			if !fresh.DeletedAt.IsZero() {
+				// Another concurrent soft delete already won: adopt its
+				// DeletedAt rather than overwriting it (which would shift the
+				// retention/purge window) and skip publishing a second
+				// AgentDeleted event for the same delete.
+				agent = fresh
+				alreadyDeleted = true
+			} else {
+				fresh.Phase = string(state.PhaseStopped)
+				fresh.DeletedAt = now
+				fresh.Updated = now
+				if err := s.store.UpdateAgent(ctx, fresh); err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				agent = fresh
+			}
 		}
-		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
+		if !alreadyDeleted {
+			s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
+		}
 	} else {
 		// Hard delete: publish deletion event BEFORE removing the record so
 		// notification subscribers can be resolved while subscriptions still exist.
@@ -3127,36 +3191,18 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
 			return
 		}
-		// If the caller is an agent, verify scope and project isolation for lifecycle actions
-		if agentIdent != nil && userIdent == nil {
-			if !agentIdent.HasScope(ScopeAgentLifecycle) {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:lifecycle", nil)
-				return
-			}
-			// Look up target agent for project isolation check
-			targetAgent, err := s.store.GetAgent(r.Context(), id)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if targetAgent.ProjectID != agentIdent.ProjectID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage agents within their own project", nil)
-				return
-			}
+		// Every caller needs the action's exact permission on the target
+		// through the shared agent-target rule.
+		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
 		}
-		// For user callers, enforce policy-based authorization on interactive actions
-		if userIdent != nil {
-			targetAgent, err := s.store.GetAgent(r.Context(), id)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(targetAgent), agentActionPermission(action))
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"Only the agent's creator can interact with it", nil)
-				return
-			}
+		identity := GetIdentityFromContext(r.Context())
+		authzAction := agentActionPermission(action)
+		if denial := s.authorizeAgentTargetAction(r.Context(), identity, targetAgent, authzAction); denial != nil {
+			writeAgentTargetDenial(w, r, identity, targetAgent, authzAction, denial)
+			return
 		}
 	}
 

@@ -2149,6 +2149,251 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
 }
 
+// startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart
+// consumes all of it (env, classifications and secrets for the broker call,
+// projectInfo for projectPath/projectSlug/sharedDirs/sharedWorkspace, and
+// workspace for StartExtras.Workspace); DispatchAgentRestart consumes only
+// env and classifications, since RestartAgent takes neither secrets nor a
+// project path, and restart never recreates the workspace.
+type startEnvResult struct {
+	env             map[string]string
+	classifications map[string]api.EnvKind
+	secrets         []ResolvedSecret
+	storageEnvCount int
+	projectInfo     projectDispatchInfo
+	workspace       WorkspaceDispatchSpec
+}
+
+// buildStartEnv assembles the full resolved environment used to start or
+// restart an agent on the runtime broker: applied-config env, model/
+// thinking-level overrides, Hub-storage env (user/project/hub/broker scopes,
+// plus progeny), type-aware secrets (environment-type ones merged into env),
+// agent identity and hub-connectivity vars, workspace sharing mode and
+// git-ness, GCP identity vars, a fresh Hub auth token, a transport token, and
+// any GitHub App lifecycle token.
+//
+// DispatchAgentStart and DispatchAgentRestart previously each assembled this
+// independently; this is the single assembly both now call, so the two
+// dispatch paths cannot drift from each other on precedence or on a
+// warning's wording.
+//
+// caller is the log-message prefix ("DispatchAgentStart" or
+// "DispatchAgentRestart"); startedVerb is "start" or "restart", used only in
+// the secrets-resolution failure message, the one warning whose wording
+// differs (agent will <verb> without injected secrets) between the two
+// callers.
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) startEnvResult {
+	resolvedEnv := make(map[string]string)
+	var envClassifications map[string]api.EnvKind
+
+	// Start with agent's applied config env (template/config-level vars).
+	if agent.AppliedConfig != nil {
+		for k, v := range agent.AppliedConfig.Env {
+			resolvedEnv[k] = v
+		}
+		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
+	}
+
+	injectModelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_MODEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_MODEL", api.EnvKindPlain)
+	}
+	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
+	if _, ok := resolvedEnv["SCION_THINKING_LEVEL"]; ok {
+		classifyEnv(&envClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
+	}
+
+	// Merge env vars from Hub storage; storage vars fill in keys not already
+	// set (with a non-empty value) by explicit config env vars.
+	// Empty-value config entries are passthrough markers — storage values
+	// should override them so that hub-stored secrets (API keys, etc.) are
+	// available to the agent.
+	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	if err != nil {
+		if d.debug {
+			d.log.Warn(caller+": failed to resolve env from storage", "error", err)
+		}
+	} else if len(envFromStorage) > 0 {
+		for k, v := range envFromStorage {
+			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
+				resolvedEnv[k] = v
+				if envFromStoragePlain[k] {
+					classifyEnv(&envClassifications, k, api.EnvKindPlain)
+				} else {
+					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
+				}
+			}
+		}
+	}
+
+	// Resolve type-aware secrets and inject environment-type secrets.
+	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	if err != nil {
+		d.log.ErrorContext(ctx, caller+": failed to resolve secrets; agent will "+startedVerb+" without injected secrets",
+			"agent_id", agent.ID, "error", err)
+	} else {
+		for _, s := range resolvedSecrets {
+			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
+				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
+					resolvedEnv[s.Target] = s.Value
+					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
+				}
+			}
+		}
+	}
+
+	// Include agent identity and hub connectivity so the container can
+	// report status to the Hub. The createAgent path sets these via the
+	// request body, but the startAgent/restartAgent path on the broker
+	// doesn't — so we inject them here as resolved env vars.
+	if agent.ID != "" {
+		resolvedEnv["SCION_AGENT_ID"] = agent.ID
+		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
+	}
+	if agent.ProjectID != "" {
+		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
+		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
+	}
+	if agent.Slug != "" {
+		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
+		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
+	}
+	// Include hub endpoint so the broker can inject it into the container.
+	// The createAgent path sends this as req.HubEndpoint, but the
+	// startAgent/restartAgent path relies on the broker's own config which
+	// may be empty for standalone brokers. Including it here ensures the
+	// broker always has the endpoint.
+	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
+		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
+		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
+	}
+	// Include hub name so agents can label their Cloud Logging entries with
+	// the hub identity, matching the hub-scoped log query filter (labels.hub).
+	if d.hubName != "" {
+		resolvedEnv["SCION_HUB_NAME"] = d.hubName
+		classifyEnv(&envClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
+	}
+
+	// Inject canonical workspace sharing mode and git-ness so the broker can
+	// surface them in the container env on the start/restart path. The
+	// createAgent path carries these via WorkspaceMode in the request body;
+	// the startAgent/restartAgent path relies on resolvedEnv injection (this
+	// block) following the existing SCION_AGENT_ID / SCION_METADATA_MODE
+	// pattern.
+	//
+	// Resolve once so the switch below uses canonical constants —
+	// unrecognized or future wire labels safely fall back to shared-plain
+	// behavior.
+	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
+	if projectInfo.workspaceMode != "" {
+		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
+	}
+	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
+	switch resolvedMode {
+	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
+		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case store.SharingModeSharedPlain:
+		// For shared-plain, git-ness is detected from the applied GitClone config.
+		// Note: broker-local linked projects where the workspace is already a
+		// git repo on disk but has no HTTPS GitClone config cannot be detected
+		// as git-backed here. The broker's on-disk util.IsGitRepoDir check in
+		// buildStartContext covers this for the create path; on start/restart paths
+		// SCION_WORKSPACE_GIT will be absent for such workspaces. This is an
+		// acknowledged limitation noted in the design doc.
+		if wsSpec.GitClone != nil {
+			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
+		}
+	}
+
+	// Inject GCP identity env vars so the broker can configure the
+	// metadata-server sidecar correctly on (re-)start. During the
+	// createAgent path this information travels inside CreateAgentConfig,
+	// but the startAgent/restartAgent path doesn't carry that struct, so we
+	// surface the values through resolvedEnv instead.
+	if agent.AppliedConfig != nil {
+		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
+			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
+			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
+				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
+				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
+				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
+				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+			}
+			// RequireLocalRuntime doesn't travel inside CreateAgentConfig on
+			// this path either (see above), so surface it the same way: the
+			// broker re-checks a hub-default-granted passthrough against the
+			// runtime it resolves for this (re)start and downgrades to block
+			// itself if that runtime turns out not to be a local container
+			// runtime. Absent when false, matching this env's own convention
+			// — cleared, not just left unset, so that only this grant, not a
+			// value merged in above from stored env or a secret (both fill
+			// absent keys only; resolvedEnv itself is rebuilt fresh on every
+			// dispatch), can set it.
+			if gcpID.RequireLocalRuntime {
+				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
+				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
+			} else {
+				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
+			}
+		}
+	}
+
+	// Generate a fresh agent token for Hub authentication.
+	if d.tokenGenerator != nil {
+		agentRole, additionalScopes := agentRoleAndScopes(agent)
+		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		if err != nil {
+			if d.debug {
+				d.log.Warn(caller+": failed to generate agent token", "error", err)
+			}
+		} else if token != "" {
+			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
+			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
+			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
+		}
+	}
+
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker).
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn(caller+": failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
+			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
+			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
+			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
+			if d.transportMode != "" {
+				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
+			}
+		}
+	}
+
+	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+
+	return startEnvResult{
+		env:             resolvedEnv,
+		classifications: envClassifications,
+		secrets:         resolvedSecrets,
+		storageEnvCount: len(envFromStorage),
+		projectInfo:     projectInfo,
+		workspace:       wsSpec,
+	}
+}
+
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
@@ -2181,208 +2426,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		task = agent.AppliedConfig.Task
 	}
 
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	// Assemble the resolved env (shared with DispatchAgentRestart; see
+	// buildStartEnv).
+	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	resolvedEnv := startEnv.env
+	envClassifications := startEnv.classifications
+	resolvedSecrets := startEnv.secrets
+	projectInfo := startEnv.projectInfo
 	projectPath := projectInfo.projectPath
 	projectSlug := projectInfo.projectSlug
-
-	// Resolve env vars from Hub storage (user/project/broker scopes) so that
-	// API keys and other secrets are available when restarting an agent.
-	resolvedEnv := make(map[string]string)
-	var envClassifications map[string]api.EnvKind
-
-	// Start with agent's applied config env (template/config-level vars)
-	if agent.AppliedConfig != nil {
-		for k, v := range agent.AppliedConfig.Env {
-			resolvedEnv[k] = v
-		}
-		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
-	}
-
-	injectModelEnv(resolvedEnv, agent.AppliedConfig)
-	if _, ok := resolvedEnv["SCION_MODEL"]; ok {
-		classifyEnv(&envClassifications, "SCION_MODEL", api.EnvKindPlain)
-	}
-	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
-	if _, ok := resolvedEnv["SCION_THINKING_LEVEL"]; ok {
-		classifyEnv(&envClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
-	}
-
-	// Merge env vars from Hub storage; storage vars fill in keys not already
-	// set (with a non-empty value) by explicit config env vars.
-	// Empty-value config entries are passthrough markers — storage values
-	// should override them so that hub-stored secrets (API keys, etc.) are
-	// available to the agent.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
-	if err != nil {
-		if d.debug {
-			d.log.Warn("DispatchAgentStart: failed to resolve env from storage", "error", err)
-		}
-	} else if len(envFromStorage) > 0 {
-		for k, v := range envFromStorage {
-			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
-				resolvedEnv[k] = v
-				if envFromStoragePlain[k] {
-					classifyEnv(&envClassifications, k, api.EnvKindPlain)
-				} else {
-					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
-				}
-			}
-		}
-	}
-
-	// Resolve type-aware secrets and inject environment-type secrets
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
-	if err != nil {
-		d.log.ErrorContext(ctx, "DispatchAgentStart: failed to resolve secrets; agent will start without injected secrets",
-			"agent_id", agent.ID, "error", err)
-	} else {
-		for _, s := range resolvedSecrets {
-			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
-				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
-					resolvedEnv[s.Target] = s.Value
-					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
-				}
-			}
-		}
-	}
-
-	// Include agent identity and hub connectivity so the container can
-	// report status to the Hub. The createAgent path sets these via the
-	// request body, but the startAgent path on the broker doesn't — so
-	// we inject them here as resolved env vars.
-	if agent.ID != "" {
-		resolvedEnv["SCION_AGENT_ID"] = agent.ID
-		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
-	}
-	if agent.ProjectID != "" {
-		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
-	}
-	if agent.Slug != "" {
-		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
-		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
-	}
-	// Include hub endpoint so the broker can inject it into the container.
-	// The createAgent path sends this as req.HubEndpoint, but the startAgent
-	// path relies on the broker's own config which may be empty for standalone
-	// brokers. Including it here ensures the broker always has the endpoint.
-	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
-		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
-	}
-	// Include hub name so agents can label their Cloud Logging entries with
-	// the hub identity, matching the hub-scoped log query filter (labels.hub).
-	if d.hubName != "" {
-		resolvedEnv["SCION_HUB_NAME"] = d.hubName
-		classifyEnv(&envClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
-	}
-
-	// Inject canonical workspace sharing mode and git-ness so the broker can
-	// surface them in the container env on the start path.  The createAgent
-	// path carries these via WorkspaceMode in the request body; the startAgent
-	// path relies on resolvedEnv injection (this block) following the existing
-	// SCION_AGENT_ID / SCION_METADATA_MODE pattern.
-	//
-	// Resolve once so the switch below uses canonical constants — unrecognized
-	// or future wire labels safely fall back to shared-plain behavior.
-	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
-	if projectInfo.workspaceMode != "" {
-		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
-		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
-	}
-	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
-	switch resolvedMode {
-	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
-		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
-		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
-	case store.SharingModeSharedPlain:
-		// For shared-plain, git-ness is detected from the applied GitClone config.
-		// Note: broker-local linked projects where the workspace is already a
-		// git repo on disk but has no HTTPS GitClone config cannot be detected
-		// as git-backed here. The broker's on-disk util.IsGitRepoDir check in
-		// buildStartContext covers this for the create path; on start/restart paths
-		// SCION_WORKSPACE_GIT will be absent for such workspaces. This is an
-		// acknowledged limitation noted in the design doc.
-		if wsSpec.GitClone != nil {
-			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
-			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
-		}
-	}
-
-	// Inject GCP identity env vars so the broker can configure the
-	// metadata-server sidecar correctly on (re-)start.  During the
-	// createAgent path this information travels inside CreateAgentConfig,
-	// but the startAgent path doesn't carry that struct, so we surface
-	// the values through resolvedEnv instead.
-	if agent.AppliedConfig != nil {
-		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
-			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
-				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
-				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
-				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
-				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
-			}
-			// RequireLocalRuntime doesn't travel inside CreateAgentConfig on
-			// this path either (see above), so surface it the same way: the
-			// broker re-checks a hub-default-granted passthrough against the
-			// runtime it resolves for this (re)start and downgrades to block
-			// itself if that runtime turns out not to be a local container
-			// runtime. Absent when false, matching this env's own convention
-			// — cleared, not just left unset, so that only this grant, not a
-			// value merged in above from stored env or a secret (both fill
-			// absent keys only; resolvedEnv itself is rebuilt fresh on every
-			// dispatch), can set it.
-			if gcpID.RequireLocalRuntime {
-				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
-				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
-			} else {
-				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
-			}
-		}
-	}
-
-	// Generate a fresh agent token for Hub authentication
-	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
-		if err != nil {
-			if d.debug {
-				d.log.Warn("DispatchAgentStart: failed to generate agent token", "error", err)
-			}
-		} else if token != "" {
-			resolvedEnv["SCION_AUTH_TOKEN"] = token
-			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
-			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
-			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		}
-	}
-
-	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
-	if d.transportMinter != nil && d.transportAudience != "" {
-		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
-		if tErr != nil {
-			if d.debug {
-				d.log.Warn("DispatchAgentStart: failed to mint transport token", "error", tErr)
-			}
-		} else if tToken != "" {
-			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
-			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
-			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
-			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
-			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
-		}
-	}
-
-	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, "DispatchAgentStart")
 
 	if d.debug {
 		configEnvCount := 0
@@ -2391,7 +2443,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 		d.log.Debug("DispatchAgentStart: env resolution summary",
 			"configEnvCount", configEnvCount,
-			"storageEnvCount", len(envFromStorage),
+			"storageEnvCount", startEnv.storageEnvCount,
 			"totalResolvedEnv", len(resolvedEnv),
 		)
 	}
@@ -2443,7 +2495,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
-		Workspace:            wsSpec,
+		Workspace:            startEnv.workspace,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -2507,173 +2559,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	resolvedEnv := make(map[string]string)
-	var envClassifications map[string]api.EnvKind
-
-	// Start with agent's applied config env (template/config-level vars) —
-	// same as DispatchAgentStart.
-	if agent.AppliedConfig != nil {
-		for k, v := range agent.AppliedConfig.Env {
-			resolvedEnv[k] = v
-		}
-		classifyEnvKeys(&envClassifications, agent.AppliedConfig.Env, api.EnvKindPlain)
-	}
-
-	injectModelEnv(resolvedEnv, agent.AppliedConfig)
-	if _, ok := resolvedEnv["SCION_MODEL"]; ok {
-		classifyEnv(&envClassifications, "SCION_MODEL", api.EnvKindPlain)
-	}
-	injectThinkingLevelEnv(resolvedEnv, agent.AppliedConfig)
-	if _, ok := resolvedEnv["SCION_THINKING_LEVEL"]; ok {
-		classifyEnv(&envClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
-	}
-
-	// Merge env vars from Hub storage; storage vars fill in keys not already
-	// set (with a non-empty value) — same precedence as DispatchAgentStart.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
-	if err != nil {
-		if d.debug {
-			d.log.Warn("DispatchAgentRestart: failed to resolve env from storage", "error", err)
-		}
-	} else if len(envFromStorage) > 0 {
-		for k, v := range envFromStorage {
-			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
-				resolvedEnv[k] = v
-				if envFromStoragePlain[k] {
-					classifyEnv(&envClassifications, k, api.EnvKindPlain)
-				} else {
-					classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
-				}
-			}
-		}
-	}
-
-	// Resolve type-aware secrets and inject environment-type secrets —
-	// same as DispatchAgentStart.
-	resolvedSecrets, _, secretErr := d.resolveSecrets(ctx, agent)
-	if secretErr != nil {
-		d.log.ErrorContext(ctx, "DispatchAgentRestart: failed to resolve secrets; agent will restart without injected secrets",
-			"agent_id", agent.ID, "error", secretErr)
-	} else {
-		for _, s := range resolvedSecrets {
-			if (s.Type == "environment" || s.Type == "") && s.Target != "" {
-				if existing, exists := resolvedEnv[s.Target]; !exists || existing == "" {
-					resolvedEnv[s.Target] = s.Value
-					classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
-				}
-			}
-		}
-	}
-
-	// Identity vars at highest precedence (set after storage/secrets merge).
-	if agent.ID != "" {
-		resolvedEnv["SCION_AGENT_ID"] = agent.ID
-		classifyEnv(&envClassifications, "SCION_AGENT_ID", api.EnvKindPlain)
-	}
-	if agent.ProjectID != "" {
-		resolvedEnv["SCION_PROJECT_ID"] = agent.ProjectID
-		classifyEnv(&envClassifications, "SCION_PROJECT_ID", api.EnvKindPlain)
-	}
-	if agent.Slug != "" {
-		resolvedEnv["SCION_AGENT_SLUG"] = agent.Slug
-		classifyEnv(&envClassifications, "SCION_AGENT_SLUG", api.EnvKindPlain)
-	}
-	if ep := d.effectiveAgentHubEndpoint(); ep != "" {
-		resolvedEnv["SCION_HUB_ENDPOINT"] = ep
-		classifyEnv(&envClassifications, "SCION_HUB_ENDPOINT", api.EnvKindPlain)
-	}
-	// Include hub name so agents can label their Cloud Logging entries with
-	// the hub identity, matching the hub-scoped log query filter (labels.hub).
-	if d.hubName != "" {
-		resolvedEnv["SCION_HUB_NAME"] = d.hubName
-		classifyEnv(&envClassifications, "SCION_HUB_NAME", api.EnvKindPlain)
-	}
-
-	// Inject canonical workspace sharing mode and git-ness so the broker can
-	// surface them in the container env on the restart path.  Follows the same
-	// pattern as DispatchAgentStart (resolve once, switch on canonical constants).
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
-	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
-	if projectInfo.workspaceMode != "" {
-		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
-		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
-	}
-	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
-	switch resolvedMode {
-	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
-		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
-		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
-	case store.SharingModeSharedPlain:
-		// See DispatchAgentStart for the acknowledged limitation: broker-local
-		// linked projects without a GitClone config cannot be detected as
-		// git-backed here.
-		if wsSpec.GitClone != nil {
-			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
-			classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
-		}
-	}
-
-	// Inject GCP identity env vars so the broker can configure the
-	// metadata-server sidecar correctly on restart — same as DispatchAgentStart.
-	if agent.AppliedConfig != nil {
-		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
-			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
-				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
-				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
-				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
-				classifyEnv(&envClassifications, "SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
-			}
-			// See the identical comment and clear in DispatchAgentStart.
-			if gcpID.RequireLocalRuntime {
-				resolvedEnv["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
-				classifyEnv(&envClassifications, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
-			} else {
-				delete(resolvedEnv, "SCION_METADATA_REQUIRE_LOCAL_RUNTIME")
-			}
-		}
-	}
-
-	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
-		if err != nil {
-			if d.debug {
-				d.log.Warn("DispatchAgentRestart: failed to generate agent token", "error", err)
-			}
-		} else if token != "" {
-			resolvedEnv["SCION_AUTH_TOKEN"] = token
-			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
-			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
-			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		}
-	}
-
-	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
-	if d.transportMinter != nil && d.transportAudience != "" {
-		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
-		if tErr != nil {
-			if d.debug {
-				d.log.Warn("DispatchAgentRestart: failed to mint transport token", "error", tErr)
-			}
-		} else if tToken != "" {
-			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
-			// Bootstrap: IN argv. No diversion exists. Google-signed OIDC, 1h,
-			// lifetime NOT boundable (GenerateIdTokenRequest has no Lifetime field).
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN", api.EnvKindSecretBootstrap)
-			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
-			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
-			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
-		}
-	}
-
-	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, "DispatchAgentRestart")
+	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	resolvedEnv := startEnv.env
+	envClassifications := startEnv.classifications
 
 	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,

@@ -1102,8 +1102,8 @@ export class ScionPageProjectDetail extends LitElement {
       // shouldShowFilesSection() flipped to false before reveal (e.g. the
       // last shared dir was removed via a live project update), so Lit tore
       // down the placeholder without replacing it. Stop watching the
-      // detached element instead of leaving a stale reference that is
-      // never unobserved.
+      // detached element now, instead of holding it until the section
+      // reappears (the "replaced" branch below) or the element is disconnected.
       if (this.observedFilesPlaceholder) {
         this.filesSectionObserver?.unobserve(this.observedFilesPlaceholder);
         this.observedFilesPlaceholder = null;

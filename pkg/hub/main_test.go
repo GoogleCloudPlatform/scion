@@ -1,0 +1,35 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !integration
+
+package hub
+
+import (
+	"os"
+	"testing"
+)
+
+// TestMain isolates $HOME for the whole (non-integration) pkg/hub test
+// binary so tests keep scion state off the real developer/agent HOME (see
+// ptone/scion#2417). The integration build has its own TestMain in
+// main_integration_test.go, which applies the same isolation alongside the
+// ent test database setup — Go allows only one TestMain per package per
+// build, so the two are kept behind mutually exclusive build tags.
+func TestMain(m *testing.M) {
+	teardown := isolateTestHome()
+	code := m.Run()
+	teardown()
+	os.Exit(code)
+}

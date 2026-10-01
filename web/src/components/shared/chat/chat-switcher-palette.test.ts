@@ -26,12 +26,13 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 await import('./chat-switcher.js');
 type ScionChatSwitcher = import('./chat-switcher.js').ScionChatSwitcher;
 import type { GroupState, PaletteTarget } from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 
 function agentsGroup(
   candidates: Array<{
@@ -994,5 +995,123 @@ describe('scion-chat-switcher: renders a grouped Agents list', () => {
     await el.updateComplete;
     active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Gamma');
+  });
+});
+
+describe('scion-chat-switcher: keyboard-affordance legend and aria-describedby follow touch modality', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  /** Stubs `window.matchMedia` before mounting — `TouchPrimaryController` reads it in `hostConnected`, which fires on `document.body.appendChild`. */
+  function stubTouchPrimary(isTouch: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY && isTouch,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  it('desktop: the keyboard-help legend is present and the input has aria-describedby pointing at it', async () => {
+    stubTouchPrimary(false);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+
+    const legend = el.shadowRoot?.querySelector('#palette-keyboard-help');
+    expect(legend).not.toBeNull();
+    const input = el.shadowRoot?.querySelector('#palette-query-input');
+    expect(input?.getAttribute('aria-describedby')).toBe('palette-keyboard-help');
+  });
+
+  it('touch: the keyboard-help legend is absent and the input has no aria-describedby', async () => {
+    stubTouchPrimary(true);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+
+    expect(el.shadowRoot?.querySelector('#palette-keyboard-help')).toBeNull();
+    const input = el.shadowRoot?.querySelector('#palette-query-input');
+    expect(input?.hasAttribute('aria-describedby')).toBe(false);
+  });
+});
+
+describe('scion-chat-switcher: --palette-vvh tracks window.visualViewport while open', () => {
+  /** happy-dom has no real `visualViewport` — a minimal fake the test can resize with `fire()`. */
+  class FakeVisualViewport {
+    height = 700;
+    private listeners = new Set<() => void>();
+    addEventListener(_type: 'resize', listener: () => void): void {
+      this.listeners.add(listener);
+    }
+    removeEventListener(_type: 'resize', listener: () => void): void {
+      this.listeners.delete(listener);
+    }
+    fire(height: number): void {
+      this.height = height;
+      for (const listener of this.listeners) listener();
+    }
+    get listenerCount(): number {
+      return this.listeners.size;
+    }
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  it('seeds --palette-vvh on open and updates it on a visualViewport resize', async () => {
+    const vv = new FakeVisualViewport();
+    vi.stubGlobal('visualViewport', vv);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+
+    expect(el.style.getPropertyValue('--palette-vvh')).toBe('700px');
+
+    vv.fire(400);
+    expect(el.style.getPropertyValue('--palette-vvh')).toBe('400px');
+  });
+
+  it('stops listening once the palette closes', async () => {
+    const vv = new FakeVisualViewport();
+    vi.stubGlobal('visualViewport', vv);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    expect(vv.listenerCount).toBe(1);
+
+    el.open = false;
+    await el.updateComplete;
+
+    expect(vv.listenerCount).toBe(0);
+  });
+
+  it('stops listening on disconnect', async () => {
+    const vv = new FakeVisualViewport();
+    vi.stubGlobal('visualViewport', vv);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    expect(vv.listenerCount).toBe(1);
+
+    el.remove();
+
+    expect(vv.listenerCount).toBe(0);
+  });
+
+  it('restarts listening on reconnect while still open', async () => {
+    // `open` never actually changes value across this remove/re-append (it
+    // stays `true` throughout), so willUpdate's own `changed.has('open')`
+    // check alone would never restart tracking here — only
+    // connectedCallback's own explicit check does.
+    const vv = new FakeVisualViewport();
+    vi.stubGlobal('visualViewport', vv);
+    const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    expect(vv.listenerCount).toBe(1);
+
+    el.remove();
+    expect(vv.listenerCount).toBe(0);
+
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(vv.listenerCount).toBe(1);
   });
 });

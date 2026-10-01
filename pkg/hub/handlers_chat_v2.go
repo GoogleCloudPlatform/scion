@@ -35,12 +35,9 @@
 //   - Storage uses the dual-dialect store (webchannel_store.go for SQLite,
 //     webchannel_store_postgres.go for Postgres) with new webchat_topic,
 //     webchat_read_state, webchat_user_prefs, and webchat_dm tables.
-//   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place
-//     but receive no new writes when the v2 flag is ON (write-stop).
-//
-// Feature flag: web.native_chat_v2 (default ON as of W9). When OFF, the
-// frontend falls back to the wave-1 UI and endpoints in handlers_chat.go.
-// The v2 API endpoints remain registered regardless of the flag state.
+//   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place.
+//     webchat_thread is still written by TouchThread (broker-inbound and
+//     legacy web channel paths) but no longer has a production reader.
 
 package hub
 
@@ -282,10 +279,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleChatTopicRoutes dispatches routes under /api/v1/chat/threads/ for
+// handleChatTopicRoutes dispatches routes under /api/v1/chat/topics/ for
 // wave-2 topic-level operations (PATCH, DELETE by topicId).
-// The existing handleChatThreadRoutes handles the wave-1 {agentId}/read path.
-// We register this separately on a path that doesn't conflict.
 func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse: /api/v1/chat/topics/{topicId}
 	topicID := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/topics/")
@@ -5025,4 +5020,16 @@ type attachmentUploadResult struct {
 	MimeType string `json:"mime"`
 	Size     int64  `json:"size"`
 	URL      string `json:"url"`
+}
+
+// truncatePreview truncates a message to maxLen runes for preview display.
+func truncatePreview(s string, maxLen int) string {
+	if maxLen < 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }

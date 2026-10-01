@@ -125,6 +125,29 @@ type HubServerConfig struct {
 	// only hub-scoped paths are checked; legacy paths are never consulted.
 	// Enable this after all resources have been migrated to namespaced paths.
 	DisableLegacyStorageFallback bool `json:"disableLegacyStorageFallback" yaml:"disableLegacyStorageFallback" koanf:"disableLegacyStorageFallback"`
+
+	// --- Async agent create (design §3.7) ---
+
+	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
+	// by default; even when on, a launch is only non-blocking for a request
+	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
+	// stay synchronous permanently, regardless of this flag.
+	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
+
+	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
+	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
+	// between this deadline and +15s; the broker aborts 20s before it. The
+	// API already advertises the remaining budget (`launch.remainingSeconds`,
+	// design §3.2) so a client can size its own wait around it, but no
+	// client does that yet (planned CLI behavior, design §3.11).
+	LaunchTimeout time.Duration `json:"launchTimeout" yaml:"launchTimeout" koanf:"launchTimeout"`
+
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
+	// (design §3.7). Today it only sets the reaper's staleness window (8x
+	// this value); it will also be sent to the broker as
+	// launchKeepaliveSeconds in the create request once the async dispatch
+	// path lands. Default 15.
+	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1036,6 +1059,57 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	return gc, true
 }
 
+// serverConfigSources resolves the actual server.yaml/server.yml file path(s)
+// loadGlobalConfigLegacy reads (global dir plus the effective local config
+// location) for the unused-keys warning's dedup key and log message. This
+// mirrors what that function actually loads (step 2 and step 3 below,
+// including loadServerConfigFile's own yaml/yml lookup), not just the
+// directories it looks in: a directory with no server config file is
+// omitted, matching settingsHierarchySources, and a relative configPath (or
+// the default ".") is resolved to an absolute path so it isn't ambiguous in
+// a hub or broker log where the process's cwd isn't obvious. Like
+// settingsHierarchySources, a resolved path already seen (e.g. configPath, or
+// the cwd it defaults to, is the global dir itself) is not listed twice.
+func serverConfigSources(configPath string) []string {
+	seen := make(map[string]struct{}, 2)
+	add := func(out []string, path string) []string {
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			return out
+		}
+		seen[clean] = struct{}{}
+		return append(out, path)
+	}
+
+	var out []string
+	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
+		if path := GetServerConfigPath(globalDir); path != "" {
+			out = add(out, path)
+		}
+	}
+
+	dir := configPath
+	if dir == "" {
+		dir = "."
+	}
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		// configPath names a file directly; loadGlobalConfigLegacy loads it
+		// as-is in that case (see step 3 below).
+		path := dir
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	} else if path := GetServerConfigPath(dir); path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	}
+
+	return out
+}
+
 // loadGlobalConfigLegacy loads global configuration from server.yaml files using the legacy path.
 func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	k := koanf.New(".")
@@ -1136,7 +1210,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	// produce false-positive warnings if the check ran after merging env vars.
 	{
 		var probe GlobalConfig
-		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config")
+		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
 
 	// 4. Load environment variables (SCION_SERVER_ prefix)
@@ -1298,6 +1372,7 @@ var camelCaseFields = map[string]string{
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
+	"asyncagentlaunch":              "asyncAgentLaunch",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",
@@ -1327,6 +1402,8 @@ var camelCaseFields = map[string]string{
 	"hubname":                       "hubName",
 	"installationurl":               "installationUrl",
 	"jwksurl":                       "jwksURL",
+	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
+	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"logformat":                     "logFormat",
 	"loglevel":                      "logLevel",

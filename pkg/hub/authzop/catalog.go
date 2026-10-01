@@ -816,10 +816,16 @@ var Catalog = []OperationSpec{
 		ResourceResolver: "project-from-body",
 		BasePermission:   "agent.create",
 		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); " +
+			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
+			{Package: "pkg/hub", Function: "TestAgentCreate_RequiresLiveDelegator"},
+		},
 	},
 	{
 		ID:          "agent.lifecycle.delete",
@@ -843,6 +849,124 @@ var Catalog = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+	},
+
+	// Agent actions on the by-id and project alias forms. Every entry point
+	// resolves through ResolveAgentSubRoute (pkg/hub/agent_routes.go);
+	// TestAgentSubRoute_CatalogDrift checks these against that table.
+	{
+		ID:          "agent.lifecycle.control",
+		Domain:      "agent",
+		Description: "Start, stop, suspend or restart an agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/start", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/stop", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/suspend", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/restart", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/start", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/stop", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/suspend", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/restart", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.lifecycle",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+	},
+	{
+		ID:          "agent.lifecycle.restore",
+		Domain:      "agent",
+		Description: "Restore a soft-deleted agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/restore", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/restore", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.lifecycle",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+	},
+	{
+		ID:          "agent.lifecycle.exec",
+		Domain:      "agent",
+		Description: "Run a command in an agent's container",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/exec", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/exec", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.attach",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+	},
+	{
+		ID:          "agent.lifecycle.env",
+		Domain:      "agent",
+		Description: "Submit environment values to an agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/env", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/env", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.attach",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+	},
+	{
+		ID:          "agent.lifecycle.resetauth",
+		Domain:      "agent",
+		Description: "Reset an agent's harness authentication",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/reset-auth", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/reset-auth", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.attach",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+	},
+	{
+		ID:          "agent.lifecycle.reincarnate",
+		Domain:      "agent",
+		Description: "Reincarnate an agent",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/reincarnate", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/reincarnate", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.lifecycle",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
 	},
 
 	// =====================================================================
@@ -917,9 +1041,8 @@ var Catalog = []OperationSpec{
 		Description: "Send a message to an agent",
 		EntryPoints: []EntryPoint{
 			// "/api/v1/chat/threads/{id}/messages" was never a registered
-			// route (handleChatThreadRoutes, handlers_chat.go, only accepts
-			// POST .../{agentId}/read); there is no live HTTP entry point
-			// for this operation today, only the broker-call path below.
+			// route; there is no live HTTP entry point for this operation
+			// today, only the broker-call path below.
 			{Kind: EntryPointBrokerCall, Pattern: "broker.inbound"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
@@ -2488,12 +2611,6 @@ var Catalog = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/prefs", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads", Method: "GET"},
-			// "/chat/threads/{id}" (bare) was never a registered route;
-			// handleChatThreadRoutes (deprecated wave-1) only accepts POST
-			// .../{agentId}/read, on the same project.read permission
-			// (route_metadata.go: chat.threads.byId).
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/threads/{id}/read", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/spaces", Method: "GET"},
 			// handleChatSpaceRoutes requires a sub-action after the space
 			// ID; there is no bare GET "/chat/spaces/{id}".

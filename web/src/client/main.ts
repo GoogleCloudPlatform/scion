@@ -35,7 +35,8 @@ import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
-import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
+import { applyServerFeatureFlags } from './server-feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -243,29 +244,6 @@ async function fetchCurrentUser(): Promise<User | null> {
     };
   } catch {
     return null;
-  }
-}
-
-/**
- * Apply server-published public settings to the client feature-flag layer.
- *
- * The hub owns the native chat toggle (server.native_chat.enabled); when it is
- * off the chat API endpoints are not even registered, so the UI must not offer
- * chat. Resolving this before the first render keeps the /chat route gate in
- * renderRoute() honest. Failures leave the compiled defaults in place — a
- * transient settings fetch error should not hide a working feature.
- */
-async function applyServerFeatureFlags(): Promise<void> {
-  try {
-    const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
-    if (!res.ok) return;
-    const settings = (await res.json()) as { nativeChatEnabled?: boolean };
-    if (settings.nativeChatEnabled === false) {
-      setFeatureFlag('web.native_chat', false);
-      setFeatureFlag('web.native_chat_v2', false);
-    }
-  } catch {
-    // Public settings unavailable — keep the compiled defaults.
   }
 }
 
@@ -828,7 +806,7 @@ async function init(): Promise<void> {
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
   await featureFlagsReady;
-  terminalWorkspaceEnabled = isFeatureEnabled('web.terminal_workspace');
+  terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
   // The tab-title unread badge is unread state, not notification state: it

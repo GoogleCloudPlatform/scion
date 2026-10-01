@@ -296,20 +296,6 @@ SELECT agent_id, COALESCE(last_message_id, ''), last_activity_at, last_read_at
 	return threads, rows.Err()
 }
 
-// MarkThreadRead advances the last_read_at watermark to now.
-func (s *pgWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
-	const query = `
-UPDATE webchat_thread
-   SET last_read_at = NOW()
- WHERE user_id = $1 AND project_id = $2 AND agent_id = $3
-`
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark thread read: %w", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Wave-2 Topic methods (Postgres)
 // ---------------------------------------------------------------------------

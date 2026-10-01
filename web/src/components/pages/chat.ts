@@ -17,12 +17,10 @@
 /**
  * Chat page component — top-level chat mode.
  *
- * Wave-2 Architecture (default, web.native_chat_v2 ON):
- *
- * This is the primary entry point for Native Chat. Wave-2 adds shared spaces
- * (one per project), multi-participant threads, DMs (agent and human),
- * a members sidebar with presence indicators, typing indicators,
- * notifications, file attachments, and message search.
+ * This is the primary entry point for Native Chat: shared spaces (one per
+ * project), multi-participant threads, DMs (agent and human), a members
+ * sidebar with presence indicators, typing indicators, notifications, file
+ * attachments, and message search.
  *
  * Key design decisions:
  * - **Dual-dialect store**: webchat_topic, webchat_read_state, webchat_dm,
@@ -32,17 +30,8 @@
  *   inprocess spoke; the web channel bus only updates watermarks.
  * - **SSE via stateManager**: a single multiplexed SSE connection per client
  *   replaces per-thread EventSource streams. Events are project-scoped.
- * - **Feature flag**: `web.native_chat_v2` (default ON as of W9). Setting
- *   it OFF reverts to the wave-1 agent-per-thread UI for rollback safety.
  *
- * Renders inside `<scion-chat-shell>` and supports two modes:
- *
- * **V1 (web.native_chat_v2 OFF):**
- * - Thread rail listing agents with last-message preview and unread dot
- * - `/chat` shows the rail with no thread selected
- * - `/chat/:agentId` opens the thread for that agent
- *
- * **V2 (web.native_chat_v2 ON):**
+ * Renders inside `<scion-chat-shell>`:
  * - Space rail (chat-space-rail) with project grouping, threads, DMs
  * - Conversation view keyed by conversationKey (topic UUID or DM key)
  * - Routes: `/chat`, `/chat/space/{projectId}`, `/chat/space/{projectId}/thread/{topicId}`, `/chat/dm/{key}`
@@ -53,14 +42,14 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
-import type { PageData, Capabilities, Agent } from '../../shared/types.js';
-import { canMessageAgent } from '../../shared/types.js';
+import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
-import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   ChatPaletteDataController,
@@ -71,7 +60,6 @@ import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
-import { hashColor, getInitials } from '../shared/chat/chat-avatar.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -198,25 +186,6 @@ function agentDetailMessage(a: { detail?: { message?: string }; message?: string
   return a.detail?.message || a.message || '';
 }
 
-// ---- V1 types ----
-// DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
-
-/** Shape of a thread entry from GET /api/v1/chat/threads */
-interface ChatThread {
-  agentId: string;
-  agentSlug: string;
-  agentName: string;
-  phase: string;
-  activity: string;
-  lastMessage?: {
-    msg: string;
-    sender: string;
-    createdAt: string;
-    type: string;
-  };
-  hasUnread: boolean;
-}
-
 // ---- V2 types ----
 
 interface V2ConversationState {
@@ -255,23 +224,12 @@ export class ScionPageChat extends LitElement {
   @property({ type: Object })
   pageData: PageData | null = null;
 
-  // ---- Shared state ----
-  private isV2 = isFeatureEnabled(NATIVE_CHAT_V2_FLAG);
-
   /** Layout density: 'dense' is the compact default, 'comfy' bumps font sizes ~20-25%. */
   @property({ type: String, attribute: 'data-density', reflect: true })
   private density: 'dense' | 'comfy' = 'dense';
 
-  // ---- V1 state ----
-  @state() private threads: ChatThread[] = [];
-  @state() private loadingThreads = false;
-  @state() private selectedAgentId = '';
-  @state() private selectedAgentName = '';
-  @state() private selectedAgentCanSend = false;
-  private agentCapabilities = new Map<string, Capabilities | undefined>();
-  private _onUserMessage = this.handleUserMessage.bind(this);
+  /** Debounce handle shared by rail-refresh triggers (e.g. a new chat message). */
   private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private _cachedProjectId = '';
 
   // ---- V2 state ----
   @state() private v2Conversation: V2ConversationState | null = null;
@@ -314,6 +272,10 @@ export class ScionPageChat extends LitElement {
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
+  /** Bound handler for the header palette button's open-request event. */
+  private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
+  /** Whether the device's primary pointer is touch -- see `_selectionHandsFocusToComposer`. */
+  private touchPrimary = new TouchPrimaryController(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -559,112 +521,8 @@ export class ScionPageChat extends LitElement {
       --chat-lh-tight: 1.5rem;
     }
 
-    /* ---- V1 Layout ---- */
-
-    .thread-rail {
-      width: 300px;
-      min-width: 240px;
-      max-width: 360px;
-      border-right: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-surface, #ffffff);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    /* Section heading, styled like the dashboard nav's section titles. */
-    .rail-header {
-      display: flex;
-      align-items: center;
-      padding: 0.75rem 1rem 0.5rem;
-      font-size: var(--chat-fs-sm);
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .thread-list {
-      flex: 1;
-      overflow-y: auto;
-      padding: 0.25rem 0;
-    }
-
-    .thread-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.625rem;
-      padding: 0.625rem 1rem;
-      cursor: pointer;
-      transition: background 0.1s;
-      border-left: 3px solid transparent;
-      position: relative;
-    }
-
-    .thread-item:hover {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .thread-item.selected {
-      background: var(--scion-primary-50, #eff6ff);
-      border-left-color: var(--scion-primary, #3b82f6);
-    }
-
-    .agent-avatar {
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: var(--chat-fs-base);
-      font-weight: 600;
-      color: #fff;
-      flex-shrink: 0;
-      text-transform: uppercase;
-    }
-
-    .thread-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .thread-name {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: var(--chat-fs-md);
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .thread-name .unread-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--scion-primary, #3b82f6);
-      flex-shrink: 0;
-    }
-
-    .thread-preview {
-      font-size: var(--chat-fs-base);
-      color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-top: 0.125rem;
-    }
-
-    .thread-time {
-      font-size: var(--chat-fs-sm);
-      color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
     /* ---- Shared layout ---- */
 
-    .thread-content,
     .v2-content {
       flex: 1;
       display: flex;
@@ -849,22 +707,8 @@ export class ScionPageChat extends LitElement {
         display: inline;
       }
 
-      /* V1: one screen at a time, driven by the thread-open host class. */
-      .thread-rail {
-        width: 100%;
-        max-width: none;
-      }
-
-      :host(.thread-open) .thread-rail {
-        display: none;
-      }
-
-      :host(:not(.thread-open)) .thread-content {
-        display: none;
-      }
-
       /*
-       * V2: each panel is absolutely positioned at one viewport wide and
+       * Each panel is absolutely positioned at one viewport wide and
        * translated into or out of view based on data-panel. A 300%-wide
        * sliding track does not survive the nested flex ancestors
        * (:host inside chat-shell inside app-shell), which force the width
@@ -1045,6 +889,10 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
+    // Header palette button: a composed custom event rather than a direct
+    // reference, since the header renders as a sibling (slotted into
+    // scion-chat-shell), not an ancestor.
+    document.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     // Reactive half of the modal/route interaction: if another modal opens
     // or route hides chat while the palette is open, close it without
     // restoring focus into hidden chat. The guard itself
@@ -1052,29 +900,18 @@ export class ScionPageChat extends LitElement {
     // these events — see its doc comment for why.
     document.addEventListener('sl-show', this._onDocumentModalShow);
     window.addEventListener('popstate', this._onPopState);
-    if (this.isV2) {
-      this._handleRecentFilesSnapshot(chatRecentFiles.snapshot());
-      this._paletteDocumentsUnsubscribe = chatRecentFiles.subscribe((snapshot) =>
-        this._handleRecentFilesSnapshot(snapshot)
-      );
-      void this.initV2();
-    } else {
-      // Guard: redirect v2 routes to /chat when v2 flag is OFF (O3)
-      const path = window.location.pathname;
-      if (path.startsWith('/chat/space/') || path.startsWith('/chat/dm/')) {
-        navigateTo('/chat');
-        return;
-      }
-      this.parseRoute();
-      void this.loadThreads();
-      stateManager.addEventListener('user-message-created', this._onUserMessage);
-    }
+    this._handleRecentFilesSnapshot(chatRecentFiles.snapshot());
+    this._paletteDocumentsUnsubscribe = chatRecentFiles.subscribe((snapshot) =>
+      this._handleRecentFilesSnapshot(snapshot)
+    );
+    void this.initV2();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     document.removeEventListener('keydown', this._onKeydown);
+    document.removeEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     document.removeEventListener('sl-show', this._onDocumentModalShow);
     window.removeEventListener('popstate', this._onPopState);
     this._paletteDocumentsUnsubscribe?.();
@@ -1099,38 +936,34 @@ export class ScionPageChat extends LitElement {
     this._palettePendingOpen = false;
     this._palettePendingReopen = false;
     this._paletteCloseAnimating = false;
-    if (this.isV2) {
-      stateManager.removeEventListener('chat-message-received', this._onChatMessage);
-      stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
-      stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
-      stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
-      stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
-      stateManager.removeEventListener('agent-created', this._onAgentCreated);
-      stateManager.removeEventListener('scope-changed', this._onScopeChanged);
-      stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
-      stateManager.removeEventListener('chat-read-state-updated', this._onOwnReadStateSSE);
-      this.removeEventListener('rail-loaded', this._onRailLoaded);
-      this.removeEventListener('read-state-updated', this._onReadStateUpdated);
-      this.removeEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
-      this.stopPresenceHeartbeat();
-      // Clean up the fallback poll
-      if (this._fallbackPollInterval) {
-        clearInterval(this._fallbackPollInterval);
-        this._fallbackPollInterval = null;
-      }
-      // Clean up the canAttach refresh timer
-      if (this._canAttachRefreshTimer != null) {
-        clearTimeout(this._canAttachRefreshTimer);
-        this._canAttachRefreshTimer = null;
-      }
-      // Clean up typing timers
-      for (const timer of this._typingTimers.values()) {
-        clearTimeout(timer);
-      }
-      this._typingTimers.clear();
-    } else {
-      stateManager.removeEventListener('user-message-created', this._onUserMessage);
+    stateManager.removeEventListener('chat-message-received', this._onChatMessage);
+    stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
+    stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
+    stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
+    stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
+    stateManager.removeEventListener('agent-created', this._onAgentCreated);
+    stateManager.removeEventListener('scope-changed', this._onScopeChanged);
+    stateManager.removeEventListener('chat-dm-promoted', this._onDMPromoted);
+    stateManager.removeEventListener('chat-read-state-updated', this._onOwnReadStateSSE);
+    this.removeEventListener('rail-loaded', this._onRailLoaded);
+    this.removeEventListener('read-state-updated', this._onReadStateUpdated);
+    this.removeEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
+    this.stopPresenceHeartbeat();
+    // Clean up the fallback poll
+    if (this._fallbackPollInterval) {
+      clearInterval(this._fallbackPollInterval);
+      this._fallbackPollInterval = null;
     }
+    // Clean up the canAttach refresh timer
+    if (this._canAttachRefreshTimer != null) {
+      clearTimeout(this._canAttachRefreshTimer);
+      this._canAttachRefreshTimer = null;
+    }
+    // Clean up typing timers
+    for (const timer of this._typingTimers.values()) {
+      clearTimeout(timer);
+    }
+    this._typingTimers.clear();
     if (this._refreshTimer) {
       clearTimeout(this._refreshTimer);
       this._refreshTimer = null;
@@ -1141,11 +974,7 @@ export class ScionPageChat extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('pageData') && this.pageData) {
-      if (this.isV2) {
-        this.parseV2Route();
-      } else {
-        this.parseRoute();
-      }
+      this.parseV2Route();
     }
     // A message arriving in the conversation already on screen should not
     // also pop a desktop notification about it. Reported from updated()
@@ -1173,150 +1002,6 @@ export class ScionPageChat extends LitElement {
         setProjectChimeEnabled(projectId, this.projectChimeOn);
       }
     }
-  }
-
-  // =========================================================================
-  // DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON.
-  // V1 Methods — preserved for rollback when web.native_chat_v2 is OFF.
-  // =========================================================================
-
-  private handleUserMessage(): void {
-    if (this._refreshTimer) {
-      clearTimeout(this._refreshTimer);
-    }
-    this._refreshTimer = setTimeout(() => {
-      this._refreshTimer = null;
-      void this.loadThreads();
-    }, 2000);
-  }
-
-  private parseRoute(): void {
-    const path = this.pageData?.path || window.location.pathname;
-    const match = path.match(/\/chat\/([^/]+)/);
-    const newAgentId = match ? decodeURIComponent(match[1]) : '';
-
-    if (newAgentId !== this.selectedAgentId) {
-      this.selectedAgentId = newAgentId;
-      if (newAgentId) {
-        this.classList.add('thread-open');
-        void this.fetchAgentCapabilities(newAgentId);
-      } else {
-        this.classList.remove('thread-open');
-        this.selectedAgentCanSend = false;
-      }
-    }
-  }
-
-  private async loadThreads(): Promise<void> {
-    this.loadingThreads = true;
-
-    try {
-      const projectId = await this.resolveProjectId();
-      if (!projectId) {
-        this.loadingThreads = false;
-        return;
-      }
-
-      const res = await apiFetch(
-        `/api/v1/chat/threads?projectId=${encodeURIComponent(projectId)}&limit=50`
-      );
-
-      if (res.ok) {
-        const data = (await res.json()) as { threads: ChatThread[] };
-        this.threads = data.threads || [];
-
-        if (this.selectedAgentId) {
-          this.resolveSelectedAgentName();
-        }
-      }
-    } catch {
-      // Silently fail
-    } finally {
-      this.loadingThreads = false;
-    }
-  }
-
-  private async resolveProjectId(): Promise<string> {
-    if (this._cachedProjectId) return this._cachedProjectId;
-
-    const url = new URL(window.location.href);
-    const qProject = url.searchParams.get('projectId');
-    if (qProject) {
-      this._cachedProjectId = qProject;
-      return qProject;
-    }
-
-    try {
-      const res = await apiFetch('/api/v1/projects?limit=1');
-      if (res.ok) {
-        const data = (await res.json()) as { items?: { id: string }[] };
-        if (data.items && data.items.length > 0) {
-          this._cachedProjectId = data.items[0].id;
-          return this._cachedProjectId;
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    return '';
-  }
-
-  private resolveSelectedAgentName(): void {
-    const thread = this.threads.find(
-      (t) => t.agentId === this.selectedAgentId || t.agentSlug === this.selectedAgentId
-    );
-    if (thread) {
-      this.selectedAgentName = thread.agentName || thread.agentSlug || thread.agentId;
-      dispatchPageTitle(this, this.selectedAgentName, 'Chat');
-    }
-  }
-
-  private async fetchAgentCapabilities(agentId: string): Promise<void> {
-    if (this.agentCapabilities.has(agentId)) {
-      this.selectedAgentCanSend = canMessageAgent(this.agentCapabilities.get(agentId));
-      return;
-    }
-
-    try {
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}`);
-      if (res.ok) {
-        const agent = (await res.json()) as { _capabilities?: Capabilities };
-        this.agentCapabilities.set(agentId, agent._capabilities);
-        this.selectedAgentCanSend = canMessageAgent(agent._capabilities);
-      }
-    } catch {
-      this.selectedAgentCanSend = false;
-    }
-  }
-
-  private async markThreadRead(agentId: string): Promise<void> {
-    const projectId = await this.resolveProjectId();
-    if (!projectId) return;
-
-    try {
-      await apiFetch(
-        `/api/v1/chat/threads/${encodeURIComponent(agentId)}/read?projectId=${encodeURIComponent(projectId)}`,
-        { method: 'POST' }
-      );
-      this.threads = this.threads.map((t) =>
-        t.agentId === agentId ? { ...t, hasUnread: false } : t
-      );
-    } catch {
-      // Non-critical
-    }
-  }
-
-  private selectThread(thread: ChatThread): void {
-    const agentRef = thread.agentSlug || thread.agentId;
-    navigateTo(`/chat/${encodeURIComponent(agentRef)}`);
-    this.selectedAgentId = thread.agentId;
-    this.selectedAgentName = thread.agentName || thread.agentSlug || thread.agentId;
-    this.classList.add('thread-open');
-    dispatchPageTitle(this, this.selectedAgentName, 'Chat');
-
-    void this.fetchAgentCapabilities(thread.agentId);
-    void this.markThreadRead(thread.agentId);
   }
 
   // =========================================================================
@@ -1468,7 +1153,6 @@ export class ScionPageChat extends LitElement {
         peerId: '',
         peerKind: 'user',
       };
-      this.classList.add('thread-open');
       this.mobilePanel = 'center';
       void this.loadV2Members(projectId);
       this.applyThreadMeta(topicId, known);
@@ -1484,7 +1168,6 @@ export class ScionPageChat extends LitElement {
         navigateTo(`/chat/${encodeURIComponent(slug)}`);
         return;
       }
-      this.classList.add('thread-open');
       return;
     }
 
@@ -1513,7 +1196,6 @@ export class ScionPageChat extends LitElement {
         return;
       }
 
-      this.classList.add('thread-open');
       this.mobilePanel = 'center';
       dispatchPageTitle(this, 'DM', 'Chat');
 
@@ -1597,7 +1279,6 @@ export class ScionPageChat extends LitElement {
           peerId: '',
           peerKind: 'user',
         };
-        this.classList.add('thread-open');
         this.mobilePanel = 'center';
         void this.loadV2Members(projectId);
         this.applyThreadMeta(threadId, known);
@@ -1617,27 +1298,24 @@ export class ScionPageChat extends LitElement {
       const projectId = this._slugToProjectId.get(segment);
       if (projectId) {
         // It's a space — select it (the rail will open #general)
-        this.classList.add('thread-open');
         void this.selectSpaceBySlug(segment, projectId);
         return;
       }
 
       // If slug map isn't populated yet (cold load), try resolving via API.
-      // If it turns out not to be a project slug, resolveSlugAndOpenSpace is a no-op
-      // and the URL stays as-is for V1 agent compat.
+      // If it turns out not to be a project slug, resolveSlugAndOpenSpace is a
+      // no-op and the URL stays as-is.
       if (this._slugToProjectId.size === 0) {
         void this.resolveSlugAndOpenSpace(segment);
         return;
       }
 
       // Not a project slug — fall through to clear conversation state.
-      // (V1 agent slugs are not handled in V2 mode.)
     }
 
     // /chat — no conversation selected, show hub-level members
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
-    this.classList.remove('thread-open');
     // No conversation to show — put the mobile view back on the rail.
     this.mobilePanel = 'left';
     void this.loadHubMembers();
@@ -1663,7 +1341,6 @@ export class ScionPageChat extends LitElement {
       peerId: '',
       peerKind: 'user',
     };
-    this.classList.add('thread-open');
     this.mobilePanel = 'center';
     void this.loadV2Members(projectId);
     this.applyThreadMeta(threadId, known);
@@ -1676,11 +1353,9 @@ export class ScionPageChat extends LitElement {
   private async resolveSlugAndOpenSpace(slug: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
     if (projectId) {
-      this.classList.add('thread-open');
       void this.selectSpaceBySlug(slug, projectId);
     }
-    // If resolution fails, leave the URL in place — the V1 parseRoute() may
-    // handle it as an agent slug when v2 flag is off (or it's just a 404 space).
+    // If resolution fails, leave the URL in place — it's just a 404 space.
   }
 
   /**
@@ -2180,7 +1855,6 @@ export class ScionPageChat extends LitElement {
       peerId: '',
       peerKind: 'user',
     };
-    this.classList.add('thread-open');
     this.mobilePanel = 'center';
 
     // Update the URL with pushState to avoid page recreation flicker
@@ -2202,7 +1876,6 @@ export class ScionPageChat extends LitElement {
   private handleResetView(): void {
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view
-    this.classList.remove('thread-open');
     // No conversation to show — put the mobile view back on the rail.
     this.mobilePanel = 'left';
     // Navigate to bare /chat
@@ -2353,7 +2026,6 @@ export class ScionPageChat extends LitElement {
             peerKind: dm.peerKind,
             muted: dm.muted === true,
           };
-          this.classList.add('thread-open');
           this.mobilePanel = 'center';
           dispatchPageTitle(this, peerName, 'Chat');
           return;
@@ -2399,7 +2071,6 @@ export class ScionPageChat extends LitElement {
         peerId,
         peerKind,
       };
-      this.classList.add('thread-open');
       this.mobilePanel = 'center';
       dispatchPageTitle(this, displayName || 'DM', 'Chat');
       return;
@@ -2960,7 +2631,6 @@ export class ScionPageChat extends LitElement {
         peerId: memberId,
         peerKind: memberKind,
       };
-      this.classList.add('thread-open');
       this.mobilePanel = 'center';
 
       // Update the URL with the full DM key so parseV2Route can use it directly.
@@ -3077,9 +2747,23 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * The header palette button's open-request handler. Shares the same route/
+   * visibility/modal guard as the shortcut, but skips
+   * `_eventFromTerminalSurface`: that guard exists to let Ctrl+K keep
+   * reaching the terminal's PTY, which only makes sense for a keystroke — a
+   * click on the header button is never a keypress the terminal could want.
+   * Opens with `{ mode: 'open' }` rather than toggling: see `togglePalette`'s
+   * doc comment for why the button must never close an already-open palette.
+   */
+  private _handlePaletteOpenRequest(): void {
+    if (!this._paletteOpenGuardsHold()) return;
+    void this.togglePalette({ mode: 'open' });
+  }
+
+  /**
    * The conditions that must hold for the palette to actually be allowed
-   * open: the v2 experience, on the chat route, the page actually visible,
-   * and no unrelated modal already up. Shared between a fresh Cmd/Ctrl+K
+   * open: on the chat route, the page actually visible, and no unrelated
+   * modal already up. Shared between a fresh Cmd/Ctrl+K
    * (`_handleGlobalKeydown`, above) and the moment a reopen queued behind a
    * still-animating close (`_palettePendingReopen`) is about to actually run
    * (`_handlePaletteAfterHide`) — real time passes between the press that
@@ -3088,9 +2772,7 @@ export class ScionPageChat extends LitElement {
    * finally settles.
    */
   private _paletteOpenGuardsHold(): boolean {
-    return (
-      this.isV2 && this._isOnChatRoute() && this._isPageVisible() && !this._isUnrelatedModalActive()
-    );
+    return this._isOnChatRoute() && this._isPageVisible() && !this._isUnrelatedModalActive();
   }
 
   /** True when the event's real (composedPath) origin is inside a terminal pane / xterm surface. */
@@ -3275,13 +2957,32 @@ export class ScionPageChat extends LitElement {
    * queued (`_paletteCloseAnimating`) rather than opened immediately: see
    * `_handlePaletteAfterHide`, which runs the deferred open once that close
    * actually finishes.
+   *
+   * `mode` defaults to `'toggle'` (the shortcut's behaviour, unchanged byte
+   * for byte). `'open'` is the header button's contract: it never closes an
+   * already-open palette and never cancels an in-flight open, so a double
+   * tap or double click — common on touch, and not reliably distinguishable
+   * from two deliberate presses — can only ever leave the palette open,
+   * never toggle it shut. It differs from `'toggle'` at exactly three
+   * points, every one of them a no-op or an unconditional set in place of a
+   * toggle; everything else (`_openPalette`, the epoch, the watchdog, the
+   * lazy load, the after-hide queue and the focus handoff) runs through the
+   * same code for both modes.
    */
-  private async togglePalette(): Promise<void> {
+  private async togglePalette(options: { mode?: 'toggle' | 'open' } = {}): Promise<void> {
+    const mode = options.mode ?? 'toggle';
     if (this.v2PaletteOpen) {
+      // 'open': the palette is already open and visible — nothing to do.
+      if (mode === 'open') return;
       this._closePaletteAndCancelLoad();
       return;
     }
     if (this._palettePendingOpen) {
+      // 'open': a first-open lazy import is already in flight from an
+      // earlier press — let it finish rather than cancelling it (a 'toggle'
+      // here would cancel it instead, see below). This is exactly the race
+      // a double tap on the button hits during the very first open.
+      if (mode === 'open') return;
       // A second Ctrl+K arrived while the first press's lazy import was
       // still in flight — cancel the pending open rather
       // than opening a second time (or doing nothing, which would silently
@@ -3301,8 +3002,10 @@ export class ScionPageChat extends LitElement {
       // all. Queue it instead, the same way a still-animating palette close
       // is queued; `_closePaletteFilePreview` serves it once that close
       // actually arrives. Toggled, not set, for the same even-presses-end-
-      // closed reason as the palette's own queue below.
-      this._palettePendingReopen = !this._palettePendingReopen;
+      // closed reason as the palette's own queue below — except for 'open',
+      // which sets the queue unconditionally: a button press can only ever
+      // ask for open, never cancel a previously queued one.
+      this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
       return;
     }
     if (this._paletteCloseAnimating) {
@@ -3317,8 +3020,9 @@ export class ScionPageChat extends LitElement {
       // the shortcut is a toggle, so a second press during the same pending
       // close cancels the first press's queued reopen rather than leaving it
       // queued — an even number of presses while closing must still end
-      // closed, the same as it would with no close in flight at all.
-      this._palettePendingReopen = !this._palettePendingReopen;
+      // closed, the same as it would with no close in flight at all. 'open'
+      // sets it unconditionally instead, for the same reason as above.
+      this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
       return;
     }
     await this._openPalette();
@@ -3811,7 +3515,7 @@ export class ScionPageChat extends LitElement {
         // start (and bump it again) before the retarget's own await below
         // resolves.
         void this._openPalette({ skipInvokerCapture: true });
-        if (wasClosedBySelection) {
+        if (wasClosedBySelection && this._selectionHandsFocusToComposer()) {
           void this._retargetPaletteInvokerToNewComposer(this._paletteOpenEpoch);
         }
       } else {
@@ -3860,7 +3564,11 @@ export class ScionPageChat extends LitElement {
     }
     if (this._paletteClosedBySelection) {
       this._paletteClosedBySelection = false;
-      void this._focusComposerAfterPaletteSelection();
+      if (this._selectionHandsFocusToComposer()) {
+        void this._focusComposerAfterPaletteSelection();
+      } else {
+        this._focusPaletteFallback();
+      }
       return;
     }
     this._restorePaletteInvokerFocus();
@@ -4020,6 +3728,22 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Whether a palette selection should hand focus to the newly-selected
+   * conversation's composer. False on touch: focusing the composer would
+   * raise the on-screen keyboard immediately after the user just dismissed
+   * the palette, which is not what tapping a result is for on a phone.
+   * Shared by the ordinary selection-close path below and the queued-reopen
+   * path that can supersede it (`_handlePaletteAfterHide`'s
+   * `_palettePendingReopen` branch) — without sharing it, a reopen queued
+   * during a touch selection's close animation would silently re-target the
+   * invoker to the composer anyway, bypassing the touch rule the direct path
+   * enforces.
+   */
+  private _selectionHandsFocusToComposer(): boolean {
+    return !this.touchPrimary.isTouch;
+  }
+
+  /**
    * After a DM selection, `openDM` has already updated `v2Conversation` and
    * pushed the new URL without recreating the page. Wait for this page (and
    * the newly (re)rendered thread/composer beneath it) to settle, then focus
@@ -4091,81 +3815,7 @@ export class ScionPageChat extends LitElement {
   // =========================================================================
 
   override render() {
-    if (this.isV2) {
-      return this.renderV2();
-    }
-    return this.renderV1();
-  }
-
-  // ---- DEPRECATED(wave-1): Remove after v2 is stable and flag is permanently ON. ----
-
-  private renderV1() {
-    return html`
-      <div class="thread-rail">
-        <div class="rail-header"><span>Conversations</span></div>
-        <div class="thread-list">
-          ${this.loadingThreads
-            ? html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`
-            : this.threads.length === 0
-              ? html`<div class="loading-rail" style="font-size: var(--chat-fs-md)">
-                  No conversations yet
-                </div>`
-              : this.threads.map((t) => this.renderThreadItem(t))}
-        </div>
-      </div>
-
-      <div class="thread-content">
-        ${this.selectedAgentId
-          ? this.renderSelectedThread()
-          : html`
-              <div class="empty-state">
-                <sl-icon name="chat-dots"></sl-icon>
-                <span class="title">Select a conversation</span>
-                <span class="subtitle">Choose an agent from the left to start chatting</span>
-              </div>
-            `}
-      </div>
-    `;
-  }
-
-  private renderThreadItem(thread: ChatThread) {
-    const isSelected =
-      thread.agentId === this.selectedAgentId || thread.agentSlug === this.selectedAgentId;
-    const displayName = thread.agentName || thread.agentSlug || thread.agentId;
-    const avatarColor = hashColor(thread.agentId);
-    const initials = getInitials(displayName);
-    const timeStr = thread.lastMessage?.createdAt
-      ? this.formatRelativeTime(thread.lastMessage.createdAt)
-      : '';
-
-    return html`
-      <div
-        class="thread-item ${isSelected ? 'selected' : ''}"
-        @click=${() => this.selectThread(thread)}
-      >
-        <div class="agent-avatar" style="background: ${avatarColor}">${initials}</div>
-        <div class="thread-info">
-          <div class="thread-name">
-            <span>${displayName}</span>
-            ${thread.hasUnread ? html`<span class="unread-dot"></span>` : nothing}
-          </div>
-          ${thread.lastMessage
-            ? html`<div class="thread-preview">${thread.lastMessage.msg}</div>`
-            : nothing}
-        </div>
-        ${timeStr ? html`<span class="thread-time">${timeStr}</span>` : nothing}
-      </div>
-    `;
-  }
-
-  private renderSelectedThread() {
-    return html`
-      <scion-chat-thread
-        agentId=${this.selectedAgentId}
-        agentName=${this.selectedAgentName}
-        ?canSend=${this.selectedAgentCanSend}
-      ></scion-chat-thread>
-    `;
+    return this.renderV2();
   }
 
   // ---- V2 Render ----
@@ -4741,7 +4391,6 @@ export class ScionPageChat extends LitElement {
       peerId: '',
       peerKind: 'user',
     };
-    this.classList.add('thread-open');
     this.mobilePanel = 'center';
 
     // Update URL
@@ -4863,25 +4512,6 @@ export class ScionPageChat extends LitElement {
         status: 'active' as const,
       }));
     return this.mentionAgents;
-  }
-
-  // ---- Shared utilities ----
-
-  private formatRelativeTime(iso: string): string {
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'now';
-    if (diffMin < 60) return `${diffMin}m`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs}h`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d`;
-
-    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
   }
 
   // ---------------------------------------------------------------------------
