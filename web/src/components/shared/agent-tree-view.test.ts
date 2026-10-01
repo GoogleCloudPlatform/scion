@@ -525,10 +525,10 @@ describe('hover/relatedIds highlighting', () => {
     const layout = layoutForestWithUsers(buildLineageForest(agents));
     const user = layout.users.find((u) => u.id === userId);
     expect(user, `no computed user node for ${userId}`).toBeTruthy();
-    const style = `left: ${user!.px}px; top: ${user!.py}px`;
-    const node = Array.from(el.shadowRoot!.querySelectorAll('.node.user')).find(
-      (n) => n.getAttribute('style') === style
-    );
+    const node = Array.from(el.shadowRoot!.querySelectorAll('.node.user')).find((n) => {
+      const htmlEl = n as HTMLElement;
+      return htmlEl.style.left === `${user!.px}px` && htmlEl.style.top === `${user!.py}px`;
+    });
     expect(node, `no rendered user node for ${userId}`).toBeTruthy();
     return node!;
   }
