@@ -316,10 +316,7 @@ func agentRouteGrammarSegmentOK(seg string) bool {
 			return false
 		}
 	}
-	if strings.Contains(seg, `\`) {
-		return false
-	}
-	return true
+	return !strings.Contains(seg, `\`)
 }
 
 // decodeAgentRouteSegment validates and unescapes one grammar segment.
