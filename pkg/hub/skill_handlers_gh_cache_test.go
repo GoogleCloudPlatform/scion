@@ -450,7 +450,15 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion,
 		"must serve the stale value immediately, without waiting on a refresh")
 
-	<-refreshed // deterministic wait for the background refresh's final GitHub call
+	<-refreshed // the refresh's GitHub calls have completed, but Put may not have landed yet
+
+	// Deterministically wait for the refresh's Put to land by joining its
+	// flight: ghResolveFlight is keyed by cacheKey on the hub (unlike the
+	// broker, which separates the flight key from the cache key), so a Do
+	// call for the same key either joins the still-running refresh (and so
+	// blocks until its Put completes) or, if it already finished, runs this
+	// no-op immediately — either way, Put has landed once this returns.
+	_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
 
 	entry, hit, err := srv.ghResolutionStore.Get(ctx, cacheKey)
 	require.NoError(t, err)
