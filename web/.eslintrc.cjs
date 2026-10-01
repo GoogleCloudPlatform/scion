@@ -43,6 +43,31 @@ module.exports = {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
+        // e2e-perf/*.mjs (the large-project performance harness's browser
+        // benchmark) isn't part of the tsconfig.json TS program the root
+        // parserOptions.project requires, so it needs the plain ESLint
+        // parser and non-type-checked rules rather than inheriting the
+        // root @typescript-eslint/recommended-requiring-type-checking
+        // config, which would fail to parse it. Mixes Node-side
+        // orchestration code with inline functions passed to Playwright's
+        // page.evaluate()/addInitScript(), which run in the browser -- both
+        // sets of globals are legitimately used in this one file.
+        {
+            files: ['e2e-perf/**/*.mjs'],
+            env: { node: true, browser: true, es2022: true },
+            parser: 'espree',
+            parserOptions: { ecmaVersion: 'latest', sourceType: 'module', project: null },
+            extends: [
+                'eslint:recommended',
+                'plugin:@typescript-eslint/disable-type-checked',
+                'plugin:prettier/recommended',
+            ],
+            rules: {
+                'no-console': 'off',
+                // Return-type annotations aren't meaningful in plain (non-TS) JS.
+                '@typescript-eslint/explicit-function-return-type': 'off',
+            },
+        },
     ],
     plugins: ['@typescript-eslint', 'prettier'],
     extends: [
