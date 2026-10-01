@@ -91,6 +91,42 @@ What's left after both carve-outs, and what this change implements:
   those now pass vs. which still hit the agent-store/schedule-store
   thresholds owned by #2470/#2476).
 
+## Fixed: two test harnesses bypassed the store boundary entirely
+
+While validating the Kathmandu acceptance criterion, found that
+`pkg/hub/ge_exchange_signin_policy_test.go`'s `newSignInPolicyHarness`
+and `pkg/hub/ge_exchange_test.go`'s `newPersistentTestExchangeService`
+each built their own `*ent.Client` via a raw `sql.Open("sqlite", dsn)` +
+`ent.NewClient(ent.Driver(entsql.OpenDB(...)))`, instead of going through
+`entc.OpenSQLite`. Neither this PR's DSN option nor its mutation hook
+could reach them, so under `TZ=Asia/Kathmandu` a bare `time.Now()`
+default (`ExternalIdentity.CreatedAt`, `User.Created`, etc.) stored a
+numeric-zone-abbreviation wall clock that ent then failed to `Scan` back
+— 15 failing tests (`TestExternalBearer_*`, `TestGEExchange_*`,
+`TestGoogleIdentityResolver_*`), with the same error shape as the known
+agent-store/schedule-store baseline (`unsupported Scan, storing
+driver.Value type string into type *time.Time`) but on different
+columns/tables (`external_identities.created_at`, `users.created`,
+`groups.created`) and via a live `Create()` call during the test rather
+than the startup migration backfill — so a distinct bug, not the
+baseline, and per dev-common.md's "any Kathmandu failure that is NOT
+this baseline error is yours to fix," in scope here.
+
+Fixed (commit `fb3fe12`) by routing both harnesses through
+`entc.OpenSQLite`. Their hand-rolled `_journal_mode=WAL&_busy_timeout=5000`
+DSN query params were never modernc-recognised keys (modernc only reads
+`_dqs`, `_error_rc`, `_pragma`, `_time_format`, `_time_integer_format`,
+`_timezone`, `_txlock`, `_inttotime`, `_texttotime`), so they were
+already no-ops — `entc.OpenSQLite`'s explicit `PRAGMA foreign_keys`/
+`PRAGMA journal_mode = WAL` calls replace them with something that
+actually works, in addition to adding `_timezone=UTC` and the hook.
+Confirmed no other `pkg/hub` test file wraps a raw `sql.Open` in an
+`ent.Client` — grepped every other `sql.Open(` site in `pkg/hub/*_test.go`
+(about 20 files); all are the raw `webchat_*` stores, task #3 (U2b)
+territory, untouched. All 15 tests pass individually after the fix
+(`go test -p 2 -count=1 -timeout 120s -v -run <names>` under
+`TZ=Asia/Kathmandu`).
+
 ## Decided: no change at the other predicate sites (tz-lead ruling, 2026-10-01)
 
 Several other entadapter stores bind unconverted `time.Time` thresholds
