@@ -15,8 +15,8 @@
  */
 
 /**
- * `mergeChanged` (design §6.2, §7, §9 W2/W3, §13 A10): applying a coalesced
- * `agents-changed` payload to a held agent array with identity preserved.
+ * `mergeChanged` (design §6.2, §7): applying a coalesced `agents-changed`
+ * payload to a held agent array with identity preserved.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -182,6 +182,27 @@ describe('mergeChanged', () => {
     expect(result[0]._capabilities).toBe(otherCaps);
   });
 
+  it('carries an existing member capabilities forward when the incoming update has none of its own', () => {
+    // The regression this guards: an SSE-created agent gets scope
+    // capabilities inherited onto the page's own copy (a new ID, via
+    // `scopeCapabilities` below), but `stateManager`'s own object for that
+    // ID never gained them, since inheritance is a page-level display
+    // concern. The agent's next delta must not silently drop the
+    // capabilities the user could already act on.
+    const caps: Capabilities = { actions: ['stop', 'delete'] };
+    const created = agent('a1', { _capabilities: caps }); // held after an earlier new-ID upsert.
+    const nextDelta = agent('a1', { phase: 'stopped' }); // no _capabilities of its own.
+    const held = [created];
+
+    const result = mergeChanged(held, changeOf({ upserted: ['a1'] }), {
+      getAgent: () => nextDelta,
+    });
+
+    expect(result[0].phase).toBe('stopped'); // the delta's own fields still apply.
+    expect(result[0]._capabilities).toBe(caps); // capabilities are not dropped.
+    expect(result[0]).not.toBe(created); // still a new object (something changed).
+  });
+
   it('does not inherit scope capabilities onto a new agent that already carries its own', () => {
     const caps: Capabilities = { actions: ['read'] };
     const ownCaps: Capabilities = { actions: ['manage'] };
@@ -221,7 +242,7 @@ describe('mergeChanged', () => {
     expect(result).toBe(held);
   });
 
-  it('a burst of many deltas in one flush yields exactly one merged array (W2 coalescing)', () => {
+  it('a burst of many deltas in one flush yields exactly one merged array', () => {
     const base = Array.from({ length: 20 }, (_, i) => agent(`a${i}`));
     const updated2 = agent('a2', { phase: 'stopped' });
     const updated7 = agent('a7', { phase: 'error' });

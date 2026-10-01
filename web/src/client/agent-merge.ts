@@ -57,11 +57,14 @@ export interface MergeChangedOptions {
   /**
    * Scope-level capabilities to inherit onto a brand-new agent when its own
    * object carries none (design §7: "scope-capability inheritance for
-   * SSE-created agents … applies to new IDs only"). An agent already in
-   * `held` keeps whatever capabilities it already resolved, even if this
-   * update's object is itself missing them — `stateManager`'s own merge
-   * already preserves a prior truthy `_capabilities`, so this only ever
-   * fires for an ID the held array has never seen before.
+   * SSE-created agents … applies to new IDs only"). Not consulted for an ID
+   * already in `held` — that case instead carries the *held* object's own
+   * `_capabilities` forward when the incoming update lacks them (see
+   * `mergeChanged`'s existing-member branch). `stateManager`'s own object
+   * for an ID only preserves a prior truthy `_capabilities` that *it* had
+   * already stored; it has no way to know about capabilities a page added
+   * on top of its own copy via this option, so `mergeChanged` must carry
+   * those forward itself rather than relying on `getAgent` to have done so.
    */
   scopeCapabilities?: Capabilities | undefined;
 }
@@ -75,7 +78,7 @@ function withInheritedCapabilities(agent: Agent, scopeCapabilities?: Capabilitie
 /**
  * Apply one coalesced `agents-changed` flush to `held`. Returns `held`
  * itself when nothing changed, and otherwise a new array with every
- * untouched element carried over by reference (design §7, §10 A10).
+ * untouched element carried over by reference (design §7).
  *
  * `change.unknown` is not consulted here: an "unknown" entry is, by
  * definition, for an ID `stateManager` has no full `Agent` object for yet
@@ -108,7 +111,20 @@ export function mergeChanged(
     const existing = byId.get(id);
     if (existing) {
       if (existing === agent) continue;
-      byId.set(id, agent);
+      // `stateManager`'s own object for this ID only preserves a prior
+      // truthy `_capabilities` that *it* had already stored (state.ts's
+      // own merge). It has no way to know about capabilities this page
+      // added on top via `withInheritedCapabilities` below, for an ID
+      // created while already held by a *different* page/view with no
+      // scope caps of its own — so without this, an incoming update with
+      // no `_capabilities` of its own would silently drop them, hiding
+      // action buttons the user could use a moment ago. Only the one
+      // changed object is copied; everything else keeps its reference.
+      const next =
+        !agent._capabilities && existing._capabilities
+          ? ({ ...agent, _capabilities: existing._capabilities } as Agent)
+          : agent;
+      byId.set(id, next);
       changed = true;
       continue;
     }
@@ -149,4 +165,29 @@ export function dropTombstoned(agents: readonly Agent[], deletedIds: ReadonlySet
   }
   if (!anyTombstoned) return agents as Agent[];
   return agents.filter((a) => !deletedIds.has(a.id));
+}
+
+/**
+ * Same reasoning as `dropTombstoned`, applied to a `[id, phase]` pairs list
+ * instead of full `Agent` objects — the shape a paged response's
+ * `stats.agents` carries, seeded into `AgentMemberIndex`. Without this, a
+ * REST page response racing an SSE `deleted` would re-seed the member
+ * index with an ID the client already knows is gone, inflating the paged
+ * total/running counts and Stop-all visibility, with no later event ever
+ * naming that ID again to correct it.
+ */
+export function dropTombstonedPairs(
+  pairs: ReadonlyArray<readonly [string, string]>,
+  deletedIds: ReadonlySet<string>
+): Array<[string, string]> {
+  if (deletedIds.size === 0) return pairs as Array<[string, string]>;
+  let anyTombstoned = false;
+  for (const [id] of pairs) {
+    if (deletedIds.has(id)) {
+      anyTombstoned = true;
+      break;
+    }
+  }
+  if (!anyTombstoned) return pairs as Array<[string, string]>;
+  return pairs.filter(([id]) => !deletedIds.has(id)) as Array<[string, string]>;
 }
