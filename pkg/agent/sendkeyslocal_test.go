@@ -87,15 +87,7 @@ func newSendKeysLocalMock(agents []api.AgentInfo, captured *[]execRecord) *runti
 			return "", nil
 		},
 		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
-			buf := make([]byte, 0, 256)
-			tmp := make([]byte, 256)
-			for {
-				n, err := stdin.Read(tmp)
-				buf = append(buf, tmp[:n]...)
-				if err != nil {
-					break
-				}
-			}
+			buf, _ := io.ReadAll(stdin)
 			record(cmd, string(buf))
 			return "", nil
 		},
