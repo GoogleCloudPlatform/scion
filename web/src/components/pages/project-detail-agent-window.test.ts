@@ -212,6 +212,7 @@ interface Internals {
   agentWindow: {
     next(): Promise<void>;
     prev(): Promise<void>;
+    refresh(): Promise<void>;
     state: 'small' | 'paged';
     items: Agent[];
     pageIndex: number;
@@ -793,6 +794,97 @@ describe('project-detail — agent list window', () => {
       expect(requests.length).toBe(before);
     });
 
+    it("a paged refetch's stats do not resurrect an agent already removed by an SSE delete", async () => {
+      const projectId = 'p-paged-stats-tombstone';
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      const el = await mountForcedPaged(projectId, agents, requests);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentStats.total).toBe(5);
+
+      // The hub tells this client one member is gone.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: agents[0].id },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+      expect(internals(el).agentStats.total).toBe(4);
+
+      // A view-state change (sort direction flip) triggers a fresh
+      // `loadAgentsForView` request, which always asks for `stats=1`. The
+      // fixture's fetch handler still returns `stats.agents` built from the
+      // full, static fixture list — it has no knowledge of the delete,
+      // exactly like a REST response that was already in flight, or served
+      // from a stale read replica, when the delete happened.
+      internals(el).toggleSort('updated');
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      // The already-removed agent must not be re-counted.
+      expect(internals(el).agentStats.total).toBe(4);
+    });
+
+    it('a paged refetch via a view-state change drops an agent already removed by an SSE delete', async () => {
+      // Same race as the stats-only test above, through `loadAgentsForView`'s
+      // own paged branch (the response's `agents` field, not just `stats`).
+      const projectId = 'p-paged-fit-tombstone';
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      const el = await mountForcedPaged(projectId, agents, requests);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(true);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: agents[0].id },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // A view-state change (sort direction flip) issues a fresh
+      // `loadAgentsForView` request, landing in the paged branch again
+      // (`fit` is forced to 0). The fixture still lists the already-deleted
+      // agent.
+      internals(el).toggleSort('updated');
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(false);
+    });
+
+    it("the window's own page fetcher drops an agent already removed by an SSE delete", async () => {
+      // Same race as the two tests above, but through the window's own
+      // per-page fetcher (`fetchAgentsPage`, used by `next`/`prev`/
+      // `refresh`) rather than `loadAgentsForView`'s own request.
+      const projectId = 'p-paged-fetcher-tombstone';
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      const el = await mountForcedPaged(projectId, agents, requests);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(true);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: agents[0].id },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      // The chip-click refresh re-fetches page 0 through `fetchAgentsPage`;
+      // the fixture still lists the already-deleted agent.
+      await internals(el).agentWindow.refresh();
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.items.some((a) => a.id === agents[0].id)).toBe(false);
+    });
+
     it('an off-page change that newly passes the active phase filter raises the chip', async () => {
       const projectId = 'p-paged-newly-passes';
       const agents = Array.from({ length: 30 }, (_, i) =>
@@ -956,8 +1048,8 @@ describe('project-detail — agent list window', () => {
       expect(afterAgents.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(internals(el).agentWindow.items.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(requests.length).toBe(1);
-      // mergeChanged (design §7, W2/A10): the array identity changed (a-4
-      // changed), but every untouched agent is carried over by reference.
+      // mergeChanged (design §7): the array identity changed (a-4 changed),
+      // but every untouched agent is carried over by reference.
       expect(afterAgents).not.toBe(beforeAgents);
       expect(afterAgents.find((a) => a.id === 'a-3')).toBe(untouched);
 
@@ -983,6 +1075,67 @@ describe('project-detail — agent list window', () => {
 
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-new')).toBe(true);
       expect(requests.length).toBe(1); // still no request
+    });
+
+    it('an SSE-created agent keeps its inherited capabilities across its next status delta', async () => {
+      const projectId = 'p-small-caps';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: 2 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
+        )
+      );
+
+      const el = await createComponent(projectId);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.created`,
+        data: {
+          agentId: 'a-caps',
+          id: 'a-caps',
+          name: 'a-caps',
+          projectId,
+          template: 't',
+          phase: 'running',
+          created: '2026-02-01T00:00:00Z',
+          updated: '2026-02-01T00:00:00Z',
+          messageMode: 'project',
+          // No `_capabilities` of its own, as a real SSE create carries.
+        },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const afterCreate = (el as unknown as { agents: Agent[] }).agents.find(
+        (a) => a.id === 'a-caps'
+      );
+      expect(afterCreate?._capabilities).toBeTruthy();
+
+      // Its next delta carries no `_capabilities` either, same as any real
+      // status update.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.status`,
+        data: { agentId: 'a-caps', phase: 'stopped' },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      const afterStatus = (el as unknown as { agents: Agent[] }).agents.find(
+        (a) => a.id === 'a-caps'
+      );
+      expect(afterStatus?.phase).toBe('stopped');
+      expect(afterStatus?._capabilities).toBe(afterCreate?._capabilities);
     });
 
     it('a REST response landing after an SSE delete does not resurrect the deleted agent', async () => {
@@ -1027,6 +1180,39 @@ describe('project-detail — agent list window', () => {
 
       expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(false);
+    });
+
+    it('a legacy-mode reload drops an agent already removed by an SSE delete', async () => {
+      // Same race, through `loadLegacyAgentsImpl` instead of the sorted-mode
+      // load above: grid view (the default) is not P1-eligible, so every
+      // load here goes through the legacy path.
+      const projectId = 'p-legacy-tombstone';
+      const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
+        )
+      );
+
+      const el = await createComponent(projectId);
+      expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(true);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: 'a-1' },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
     });
   });
 

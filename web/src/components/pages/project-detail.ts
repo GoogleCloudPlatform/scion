@@ -51,7 +51,7 @@ import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
 import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
-import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
+import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
 import { sortAgents } from '../../shared/agent-sort.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
@@ -1351,10 +1351,11 @@ export class ScionPageProjectDetail extends LitElement {
    * Live updates for the small/held state (design §7, §11): one
    * `agents-changed` flush merged through `mergeChanged`, replacing the old
    * `onAgentsUpdated` per-event full rebuild over `stateManager.getAgents()`.
-   * A no-op while the window is paged — `this.agents` is intentionally
-   * empty then, and the list view's live updates go through
-   * `agentWindow.applyChanges` instead (design §6.2), called by
-   * `boundOnAgentsChanged` before this.
+   * Never called while the window is paged — `boundOnAgentsChanged` gates
+   * the call to this method on `agentWindow.state !== 'paged'`, since
+   * `this.agents` is intentionally empty then and the list view's live
+   * updates go through `agentWindow.applyChanges` instead (design §6.2),
+   * called unconditionally before that gate.
    */
   private mergeAgentsChanged(detail: AgentsChangedDetail): void {
     // Lazily derive scope capabilities from existing agents if not yet set
@@ -1659,12 +1660,28 @@ export class ScionPageProjectDetail extends LitElement {
           agents: freshAgents,
           nextCursor: data.nextCursor,
           totalCount: data.totalCount,
-          stats: data.stats,
+          stats: this.freshStats(data.stats),
         },
         label
       );
       this.listViewUsesWindow = true;
     }
+  }
+
+  /**
+   * `stats` with any already-tombstoned ID dropped from `stats.agents`
+   * (design §6.2): a paged response's member-index seed can race an SSE
+   * `deleted` the same way the page's own agent rows can (`dropTombstoned`
+   * above) — without this, a deleted agent's count would re-enter the
+   * member index via `stats.agents` and nothing would ever remove it
+   * again, inflating the paged total/running counts and Stop-all
+   * visibility. Returns `stats` itself when there is nothing to drop.
+   */
+  private freshStats(stats: SortedAgentsResponse['stats']): SortedAgentsResponse['stats'] {
+    if (!stats?.agents) return stats;
+    const agents = dropTombstonedPairs(stats.agents, stateManager.getDeletedAgentIds());
+    if (agents === stats.agents) return stats;
+    return { ...stats, agents };
   }
 
   /** Today's unsorted request (design §4.3's "legacy mode"), used when the view state is not P1-eligible, or sorted mode was refused for this label. */
@@ -1801,7 +1818,7 @@ export class ScionPageProjectDetail extends LitElement {
       agents: dropTombstoned(data.agents, stateManager.getDeletedAgentIds()),
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
-      stats: data.stats,
+      stats: this.freshStats(data.stats),
     };
   }
 
