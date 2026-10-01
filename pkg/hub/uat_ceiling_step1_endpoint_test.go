@@ -90,14 +90,10 @@ func TestUATCeilingStep1_AliasSelectorMintTimeParity(t *testing.T) {
 }
 
 // TestUATCeilingStep1_ExactScopeDenialIsCeilingGated pins (c): a ceiling
-// that does not include the resolved permission is denied at step 1, and the
-// control assertion (the permission the ceiling DOES hold passes) makes this
-// test fail if the Ceiling().Allows call in enforceUATConstraints is removed
-// (both assertions would then pass regardless of the ceiling, since nothing
-// gates on it — caught by the deny assertion no longer firing) or inverted
-// (the deny/control results would flip). This was verified by temporarily
-// removing, then inverting, that call and confirming this test fails both
-// ways, then reverting.
+// that does not include the resolved permission is denied at step 1, with a
+// control assertion that the permission the ceiling DOES hold still passes.
+// Removing the Ceiling().Allows check in enforceUATConstraints fails the
+// deny assertion. Inverting it fails both assertions.
 func TestUATCeilingStep1_ExactScopeDenialIsCeilingGated(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -188,9 +184,12 @@ func TestCreateTokenWithParams_DeniedSelectorLeavesNoTokenRow(t *testing.T) {
 
 	_, _, mintErr := srv.uatService.CreateToken(rs4MintContext(memberID), memberID, "denied-mint",
 		project.ID, []string{"agent:delete"}, nil)
-	require.Error(t, mintErr, "a plain member must not be able to mint agent:delete")
+	var sv *UATScopeViolationError
+	require.ErrorAs(t, mintErr, &sv, "a plain member must not be able to mint agent:delete")
+	assert.Equal(t, "agent:delete", sv.Selector)
+	assert.NotErrorIs(t, mintErr, ErrUATProjectForbidden)
 
 	after, err := s.ListUserAccessTokens(ctx, memberID)
 	require.NoError(t, err)
-	assert.Empty(t, after, "a denied selector must leave no token row — CanMintSelector's denial must be reached before WithTx, never rolled back after an insert")
+	assert.Empty(t, after, "a denied selector must leave no token row")
 }

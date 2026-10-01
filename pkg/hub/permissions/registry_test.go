@@ -86,7 +86,7 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 		"nonsense",
 		"agent:frobnicate",
 		"hub:read",          // exactly the resource:action reconstruction a fallback would accept
-		"broker:create",     // no UATScope on broker.create today; not yet a selector (D.0a/D.1 add it)
+		"broker:create",     // no UATScope on broker.create today; not yet a selector
 		"hub.settings:read", // no such literal UATScope exists
 	} {
 		if _, ok := ResolveSelector(selector); ok {
@@ -96,7 +96,7 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 }
 
 // TestResolveSelector_SharedResourceActionCannotCollapse is the direct
-// regression for the A.1 acceptance criterion "two hub permissions sharing
+// regression for the acceptance criterion "two hub permissions sharing
 // resource/action cannot collapse into one selector." hub.settings.read and
 // hub.config.read are real Registry entries that already share
 // {Resource: hub, Action: read} today. A resource:action reconstruction
