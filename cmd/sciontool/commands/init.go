@@ -360,7 +360,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
-	procreap.StartReaper()
+	startReaper()
 
 	// Extract the child command (everything after --)
 	childArgs := extractChildCommand(args)
@@ -1718,7 +1718,7 @@ var lookupUserByID = defaultLookupUserByID
 // rewrite is unit-tested without ever touching real system files.
 var runDirectSetUID = directSetUID
 
-// startReaper is supervisor.StartReaper's call site as a package var.
+// startReaper is procreap.StartReaper's call site as a package var.
 // StartReaper installs a process-wide SIGCHLD handler that Wait4(-1, ...)s
 // any reapable child — including one a later exec.Command in the *same*
 // test binary is still waiting on itself, which races os/exec's own
@@ -1727,7 +1727,7 @@ var runDirectSetUID = directSetUID
 // test driving RunInit directly does not, and starting it there corrupts
 // every other test in the same binary that shells out — stubbed to a
 // no-op by TestMain for exactly that reason.
-var startReaper = supervisor.StartReaper
+var startReaper = procreap.StartReaper
 
 // runSetupHostUser is setupHostUser's own call site as a package var. A
 // test driving RunInit end to end with RequirePrivilegeDrop: true cannot
@@ -2163,7 +2163,7 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	groupSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		groupPath)
-	if out, err := groupSed.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(groupSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
@@ -2172,7 +2172,7 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 	passwdSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
 		passwdPath)
-	if out, err := passwdSed.CombinedOutput(); err != nil {
+	if out, err := procreap.CombinedOutputManaged(passwdSed); err != nil {
 		return fmt.Errorf("sed %s: %w (output: %s)", passwdPath, err, string(out))
 	}
 

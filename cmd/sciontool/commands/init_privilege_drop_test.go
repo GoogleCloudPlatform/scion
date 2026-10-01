@@ -174,6 +174,35 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 	}
 }
 
+// TestRunInit_CallsStartReaperSeamExactlyOnce pins RunInit to calling the
+// startReaper package var — not procreap.StartReaper directly — so TestMain's
+// own startReaper = func() {} stub actually reaches the call RunInit makes.
+// Without this seam, every RunInit call in this test binary would install a
+// real, process-wide SIGCHLD handler that reaps any zombie child no
+// in-flight exec.Cmd has claimed — including one a *different* test's own
+// exec.Cmd.Wait is still waiting on, which races it and fails with ECHILD.
+// Reusing TestRunInit_PrivilegeDropFailure_ReturnsSentinel's own
+// RequirePrivilegeDrop: true setup drives the shortest real path to that
+// call: startReaper runs as RunInit's very first statement, before the
+// privilege-drop gate itself returns the sentinel exit code.
+func TestRunInit_CallsStartReaperSeamExactlyOnce(t *testing.T) {
+	scrubHubEnv(t)
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_HOST_GID", "")
+	t.Setenv("HOME", t.TempDir())
+
+	var calls int
+	withStartReaper(t, func() { calls++ })
+
+	got := RunInit([]string{"true"}, InitRunOptions{DisableTermSignalForwarding: true, RequirePrivilegeDrop: true})
+	if got != exitCodePrivilegeDropRequired {
+		t.Fatalf("RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", got, exitCodePrivilegeDropRequired)
+	}
+	if calls != 1 {
+		t.Errorf("startReaper seam called %d time(s), want exactly 1", calls)
+	}
+}
+
 // TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure drives the real
 // RunInit through a *different* pre-launch failure path than the
 // privilege-drop gate, to prove reportInitFailure was actually wired at
@@ -1052,6 +1081,14 @@ func withRunFetchSecretOverrides(t *testing.T, f func(client *hub.Client, keys [
 	orig := runFetchSecretOverrides
 	runFetchSecretOverrides = f
 	t.Cleanup(func() { runFetchSecretOverrides = orig })
+}
+
+// withStartReaper temporarily overrides the startReaper package var.
+func withStartReaper(t *testing.T, f func()) {
+	t.Helper()
+	orig := startReaper
+	startReaper = f
+	t.Cleanup(func() { startReaper = orig })
 }
 
 // writeServicesYAMLWithInvalidEntry is writeServicesYAML plus one entry

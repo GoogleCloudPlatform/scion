@@ -1753,7 +1753,7 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 	// fail to create <agentHome>/.gitconfig.
 	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
 
-	err := gitCloneWorkspace(0, 0, badAgentHome)
+	err := gitCloneWorkspace(0, 0, badAgentHome, false)
 	if err == nil {
 		t.Fatal("expected gitCloneWorkspace to fail at the credential-helper config step")
 	}
@@ -1776,7 +1776,7 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 
 	// Retry with a valid agentHome: must succeed and populate the workspace.
 	goodAgentHome := t.TempDir()
-	if err := gitCloneWorkspace(0, 0, goodAgentHome); err != nil {
+	if err := gitCloneWorkspace(0, 0, goodAgentHome, false); err != nil {
 		t.Fatalf("retry after cleanup failed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {

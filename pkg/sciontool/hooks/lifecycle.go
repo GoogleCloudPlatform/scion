@@ -385,8 +385,22 @@ func (m *LifecycleManager) executeScriptEnforced(path, eventName string) error {
 	if err != nil {
 		return err
 	}
+	return runEnforcedCmd(cmd)
+}
 
-	if err := cmd.Run(); err != nil {
+// runEnforcedCmd runs an *exec.Cmd buildEnforcedCmd built, split out from
+// executeScriptEnforced purely so a test can drive the exact same run step
+// against a cmd it built directly via buildEnforcedCmd (asRoot passed
+// explicitly), without needing prepareEnforcedExec's real on-disk
+// root-ownership check — the same reason buildEnforcedCmd itself is split
+// from executeScriptEnforced.
+//
+// Enforced hook scripts run inside sciontool init's PID-1 process while its
+// zombie reaper is active, the same as executeScript's unenforced path
+// above: RunManaged registers this child's PID so the reaper leaves it for
+// this Wait call to reap instead of racing it.
+func runEnforcedCmd(cmd *exec.Cmd) error {
+	if err := procreap.RunManaged(cmd); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
 	}
 	return nil

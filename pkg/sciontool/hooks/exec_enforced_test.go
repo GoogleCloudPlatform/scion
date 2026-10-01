@@ -7,16 +7,19 @@ package hooks
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
@@ -1213,4 +1216,93 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+var startHooksProcreapReaperOnce sync.Once
+
+// TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD is the
+// regression test for the property that executeScriptEnforced's root-branch
+// exec must go through procreap's managed exec API, not a raw cmd.Run(),
+// because sciontool init's real PID-1 reaper (procreap.StartReaper) is
+// active for the whole lifetime of every enforced hook script it runs in
+// production. A raw cmd.Run() call here is exactly the shape of bug
+// TestManagedService_StartSurvivesReaperRace (pkg/sciontool/services) and
+// TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
+// (cmd/sciontool/commands) guard against elsewhere: the reaper's generic
+// wait4(-1, ...) can steal a hook script's exit status from cmd.Wait()
+// before Run() gets to it, surfacing as an ECHILD-shaped "wait: no child
+// processes" error.
+//
+// This drives buildEnforcedCmd with asRoot passed explicitly (the same
+// unprivileged-safe construction TestBuildEnforcedCmd_AsRoot* uses above),
+// then runEnforcedCmd — the exact tail executeScriptEnforced itself calls —
+// rather than executeScriptEnforced end to end, because the dropped branch's
+// real setgroups(2) call requires CAP_SETGID (see
+// TestExecuteScriptEnforced_WorkloadOwnedRunsDropped); the root branch under
+// test here needs no privilege at all.
+//
+// A real, live procreap reaper must run for this to be a faithful
+// reproduction — a fake or absent reaper can't race anything (same
+// requirement TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
+// documents).
+//
+// Positive control: this test is not vacuously green. Reverting
+// runEnforcedCmd's call back to a raw cmd.Run() makes this test fail under
+// `go test -race -count=5 -run
+// TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD
+// ./pkg/sciontool/hooks/`; with procreap.RunManaged in place it passes
+// reliably.
+func TestExecuteScriptEnforced_AsRootRunsUnderActiveReaperWithoutECHILD(t *testing.T) {
+	startHooksProcreapReaperOnce.Do(procreap.StartReaper)
+
+	const iterations = 50
+	// Pre-create every fixture AND open every script file serially:
+	// t.TempDir, t.Fatal and t.Cleanup (all used by mustWriteExecutableScript
+	// and openScriptForTest) are not safe to call from multiple goroutines,
+	// so none of the concurrent work below may call either helper.
+	markers := make([]string, iterations)
+	scripts := make([]string, iterations)
+	files := make([]*os.File, iterations)
+	for i := range markers {
+		dir := t.TempDir()
+		markers[i] = filepath.Join(dir, "marker")
+		scripts[i] = filepath.Join(dir, fmt.Sprintf("post-start-%d", i))
+		mustWriteExecutableScript(t, scripts[i], "#!/bin/sh\necho ran > "+markers[i]+"\n")
+		files[i], _ = openScriptForTest(t, scripts[i])
+	}
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true}
+
+	var wg sync.WaitGroup
+	errs := make([]error, iterations)
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			cmd, err := m.buildEnforcedCmd(files[i], scripts[i], EventPostStart, true)
+			if err != nil {
+				errs[i] = fmt.Errorf("buildEnforcedCmd: %w", err)
+				return
+			}
+			if err := runEnforcedCmd(cmd); err != nil {
+				errs[i] = fmt.Errorf("runEnforcedCmd: %w", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("iteration %d: %v", i, err)
+			continue
+		}
+		got, readErr := os.ReadFile(markers[i])
+		if readErr != nil {
+			t.Errorf("iteration %d: read marker: %v", i, readErr)
+			continue
+		}
+		if string(got) != "ran\n" {
+			t.Errorf("iteration %d: marker = %q, want %q", i, got, "ran\n")
+		}
+	}
 }

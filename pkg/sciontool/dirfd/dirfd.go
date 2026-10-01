@@ -214,10 +214,10 @@ func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid in
 	for _, name := range strings.Split(rel, string(filepath.Separator)) {
 		child, operr := unix.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		created := false
-		switch {
-		case operr == nil:
+		switch operr {
+		case nil:
 			// A real, pre-existing directory: leave its ownership alone.
-		case operr == syscall.ENOENT:
+		case syscall.ENOENT:
 			if merr := unix.Mkdirat(curFd, name, uint32(mode)); merr != nil && merr != syscall.EEXIST {
 				return true, fmt.Errorf("dirfd: mkdir %s: %w", name, merr)
 			}
@@ -226,9 +226,9 @@ func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid in
 				return true, fmt.Errorf("dirfd: open %s after create: %w", name, operr)
 			}
 			created = true
-		case operr == syscall.ELOOP:
+		case syscall.ELOOP:
 			return true, fmt.Errorf("dirfd: refusing %s: existing entry is a symlink", name)
-		case operr == syscall.ENOTDIR:
+		case syscall.ENOTDIR:
 			return true, fmt.Errorf("dirfd: refusing %s: existing entry is not a directory", name)
 		default:
 			return true, fmt.Errorf("dirfd: open %s: %w", name, operr)
