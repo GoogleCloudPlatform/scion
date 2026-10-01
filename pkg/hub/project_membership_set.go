@@ -895,12 +895,24 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			if rd := currentDefs1[plan1.BuiltInChange.Old.RoleDefinitionID]; rd != nil {
 				oldName = rd.Name
 			}
+			// N5 (review r1): carry roleKind and principalType here too — the
+			// §13.6 contract is that every audit row carries roleKind for
+			// uniform filtering, and a built-in swap is always
+			// roleKind:"builtin" on both sides by construction
+			// (planRoleSet only populates BuiltInChange from built-in role
+			// names).
 			if aErr := svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
-				MutationType:  "project_member_role_change",
-				TargetType:    "project_membership",
-				TargetID:      req.ProjectID,
-				BeforeSummary: marshalAuditJSON(map[string]string{"principalId": req.PrincipalID, "role": oldName}),
-				AfterSummary:  marshalAuditJSON(map[string]string{"principalId": req.PrincipalID, "role": plan1.BuiltInChange.New.Name}),
+				MutationType: "project_member_role_change",
+				TargetType:   "project_membership",
+				TargetID:     req.ProjectID,
+				BeforeSummary: marshalAuditJSON(map[string]string{
+					"principalType": req.PrincipalType, "principalId": req.PrincipalID,
+					"role": oldName, "roleKind": projectRoleKind(oldName),
+				}),
+				AfterSummary: marshalAuditJSON(map[string]string{
+					"principalType": req.PrincipalType, "principalId": req.PrincipalID,
+					"role": plan1.BuiltInChange.New.Name, "roleKind": projectRoleKind(plan1.BuiltInChange.New.Name),
+				}),
 			}); aErr != nil {
 				return aErr
 			}
@@ -913,9 +925,8 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			authVia := ""
 			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil {
 				roleName = rd.Name
-				if store.IsBuiltInProjectMembershipRole(rd.Name) {
-					roleKind = "builtin"
-				} else {
+				roleKind = projectRoleKind(rd.Name)
+				if roleKind != "builtin" {
 					authVia = customAuthTx[PermRoleBindingDelete].Via
 				}
 			}
@@ -940,10 +951,7 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			if cb != nil && cb.ID == builtInNewBindingID {
 				continue
 			}
-			roleKind := "custom"
-			if store.IsBuiltInProjectMembershipRole(d.Name) {
-				roleKind = "builtin"
-			}
+			roleKind := projectRoleKind(d.Name)
 			summary := map[string]string{
 				"principalType": req.PrincipalType, "principalId": req.PrincipalID,
 				"role": d.Name, "roleKind": roleKind,

@@ -41,8 +41,10 @@ type projectMemberInfo struct {
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
 	// RoleKind is "builtin" or "custom". Additive field (ptone/scion#2529 P1,
 	// design.md §3.1); every existing consumer of projectMemberInfo ignores
-	// unknown JSON fields.
-	RoleKind string `json:"roleKind,omitempty"`
+	// unknown JSON fields. No `omitempty` (review r1 L5): design.md §3.1 says
+	// it appears "on every endpoint", and every construction site sets it via
+	// projectRoleKind, so it is never the empty string in practice.
+	RoleKind string `json:"roleKind"`
 }
 
 // projectMemberGroup is one principal's project membership: its built-in
@@ -190,15 +192,11 @@ func (s *Server) listProjectMembers(w http.ResponseWriter, r *http.Request, proj
 			rdCache[b.RoleDefinitionID] = roleName
 		}
 
-		roleKind := "custom"
-		if store.IsBuiltInProjectMembershipRole(roleName) {
-			roleKind = "builtin"
-		}
 		info := projectMemberInfo{
 			RoleBinding: *b,
 			RoleName:    roleName,
 			Source:      "direct",
-			RoleKind:    roleKind,
+			RoleKind:    projectRoleKind(roleName),
 		}
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
@@ -333,15 +331,11 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 	}
 
 	// Return enriched response.
-	roleKind := "custom"
-	if store.IsBuiltInProjectMembershipRole(roleName) {
-		roleKind = "builtin"
-	}
 	info := projectMemberInfo{
 		RoleBinding: *result.Binding,
 		RoleName:    roleName,
 		Source:      "direct",
-		RoleKind:    roleKind,
+		RoleKind:    projectRoleKind(roleName),
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
@@ -419,6 +413,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		RoleBinding: *result.Binding,
 		RoleName:    roleName,
 		Source:      "direct",
+		RoleKind:    projectRoleKind(roleName),
 	}
 	info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, result.Binding.PrincipalType, result.Binding.PrincipalID)
 	info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, result.Binding.CreatedBy)
@@ -650,9 +645,16 @@ func validatePrincipalType(w http.ResponseWriter, principalType string) bool {
 func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
 	ctx := r.Context()
 
-	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
-		return
-	}
+	// L3 (review r1): the credential-kind gate runs before resource
+	// authorization, mirroring checkMembershipCredential's own position as
+	// the FIRST check in SetMemberRoles — "you need an interactive user
+	// session to mutate membership at all" is independent of, and prior to,
+	// what permissions that credential happens to map to. Without this, an
+	// agent token (which no permission in the registry maps project.manage
+	// to, so it can never pass the authorize() call below anyway) would
+	// still surface as a generic resource-authorization denial rather than
+	// the credential_insufficient code design.md §12 P1 / acceptance 7 ask
+	// for uniformly across UAT and agent credentials.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -660,7 +662,11 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok {
-		Forbidden(w)
+		writeError(w, http.StatusForbidden, ErrCodeMembershipCredentialInsufficient, "membership mutations require an authenticated user identity", nil)
+		return
+	}
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
 		return
 	}
 
@@ -734,9 +740,8 @@ func (s *Server) putProjectMemberPrincipal(w http.ResponseWriter, r *http.Reques
 func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Request, projectID, principalType, principalID string) {
 	ctx := r.Context()
 
-	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
-		return
-	}
+	// L3 (review r1): see putProjectMemberPrincipal — credential-kind gate
+	// before resource authorization.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
@@ -744,7 +749,11 @@ func (s *Server) deleteProjectMemberPrincipal(w http.ResponseWriter, r *http.Req
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok {
-		Forbidden(w)
+		writeError(w, http.StatusForbidden, ErrCodeMembershipCredentialInsufficient, "membership mutations require an authenticated user identity", nil)
+		return
+	}
+
+	if !s.authorize(w, r, Resource{Type: "project", ID: projectID}, ActionManage) {
 		return
 	}
 
@@ -804,8 +813,8 @@ func (s *Server) buildProjectMemberGroup(ctx context.Context, principalType, pri
 		roleName, roleKind := "", "custom"
 		if rd, err := s.store.GetRoleDefinition(ctx, b.RoleDefinitionID); err == nil && rd != nil {
 			roleName = rd.Name
-			if store.IsBuiltInProjectMembershipRole(rd.Name) {
-				roleKind = "builtin"
+			roleKind = projectRoleKind(rd.Name)
+			if roleKind == "builtin" {
 				group.BuiltInRoleName = rd.Name
 			}
 		}

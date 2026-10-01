@@ -347,6 +347,13 @@ func TestSetMemberRoles_PutChangesBuiltInKeepsCustom(t *testing.T) {
 	for _, r := range rows {
 		if r.MutationType == "project_member_role_change" {
 			changeRows++
+			// N5 (review r1): the role_change row carries roleKind (and
+			// principalType) on both sides, matching every other mutation
+			// type's contract, even though a built-in swap is always
+			// roleKind:"builtin" by construction.
+			assert.Contains(t, r.BeforeSummary, `"roleKind":"builtin"`)
+			assert.Contains(t, r.AfterSummary, `"roleKind":"builtin"`)
+			assert.Contains(t, r.BeforeSummary, `"principalType":"user"`)
 		}
 	}
 	assert.Equal(t, 1, changeRows)
@@ -831,6 +838,38 @@ func TestSetMemberRoles_CredentialGate_RejectsUAT(t *testing.T) {
 	rec := doRequestWithUAT(t, f.srv, uatKey, http.MethodPut, mmrPrincipalPath(f.projectID, "user", f.member.ID), body)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient)
+}
+
+// TestSetMemberRoles_CredentialGate_RejectsAgentToken is L3 (review r1):
+// design.md §12 P1 / acceptance 7 list "UAT or agent token -> 403
+// credential_insufficient" for this endpoint, but only the UAT half was
+// tested. A real agent JWT authenticates to an AgentIdentity, which is not a
+// UserIdentity; the handler now checks that before calling s.authorize (no
+// permission in the registry maps project.manage to any agent scope, so an
+// agent could never pass that check anyway) and returns the same
+// credential_insufficient code a UAT gets, not a generic authorization
+// denial.
+func TestSetMemberRoles_CredentialGate_RejectsAgentToken(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: agentID, Name: "mmr-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+	agentToken, err := f.srv.GenerateAgentToken(agentID, f.projectID, []string{f.owner.ID}, AgentRoleFull, nil)
+	require.NoError(t, err)
+
+	bodyBytes, err := json.Marshal(map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPut, mmrPrincipalPath(f.projectID, "user", f.member.ID), bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token must be refused with the same code as a UAT")
 }
 
 // ---------------------------------------------------------------------------

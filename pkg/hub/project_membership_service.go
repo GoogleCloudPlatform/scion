@@ -673,6 +673,23 @@ func isProtectedRole(role string) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Role kind
+// ---------------------------------------------------------------------------
+
+// projectRoleKind returns "builtin" or "custom" for a project-scoped role
+// name (design.md §3.1's additive roleKind field). N1 (review r1): this was
+// previously inlined at four call sites (list/add/buildProjectMemberGroup in
+// handlers_project_members.go, plus the audit code in
+// project_membership_set.go); extracted here so there is exactly one
+// definition of "builtin" vs "custom" for display and audit purposes.
+func projectRoleKind(roleName string) string {
+	if store.IsBuiltInProjectMembershipRole(roleName) {
+		return "builtin"
+	}
+	return "custom"
+}
+
+// ---------------------------------------------------------------------------
 // Principal eligibility
 // ---------------------------------------------------------------------------
 
@@ -682,6 +699,21 @@ func isProtectedRole(role string) bool {
 //   - project-admin: direct user or group (D3 approved)
 //   - project-member: user, agent, or group
 func principalEligibleForRole(principalType, roleName string) bool {
+	// L4 (review r1): the custom-role branch is reached only for a role name
+	// explicitly known NOT to be built-in — not as the switch's default. A
+	// name that reaches the switch below without matching any case (e.g. an
+	// unanticipated built-in role added to the registry but not here) fails
+	// closed instead of silently falling through to the permissive
+	// user/group rule meant for custom roles.
+	if !store.IsBuiltInProjectMembershipRole(roleName) {
+		// Custom project-scoped roles (ptone/scion#2529 D1, ruling "block"):
+		// user and group only. A custom binding on an agent is a delegation
+		// grant and stays hub-gated via /admin/role-bindings. This is the
+		// one eligibility switch for custom roles; no other call site may
+		// special-case principal type for custom-role eligibility.
+		return principalType == store.RoleBindingPrincipalUser ||
+			principalType == store.RoleBindingPrincipalGroup
+	}
 	switch roleName {
 	case store.ProjectRoleOwner:
 		return principalType == store.RoleBindingPrincipalUser
@@ -694,13 +726,10 @@ func principalEligibleForRole(principalType, roleName string) bool {
 			principalType == store.RoleBindingPrincipalAgent ||
 			principalType == store.RoleBindingPrincipalGroup
 	default:
-		// Custom project-scoped roles (ptone/scion#2529 D1, ruling "block"):
-		// user and group only. A custom binding on an agent is a delegation
-		// grant and stays hub-gated via /admin/role-bindings. This is the
-		// one eligibility switch for custom roles; no other call site may
-		// special-case principal type for custom-role eligibility.
-		return principalType == store.RoleBindingPrincipalUser ||
-			principalType == store.RoleBindingPrincipalGroup
+		// Fail closed: IsBuiltInProjectMembershipRole said this name is
+		// built-in, but it matches none of the cases above. Should not
+		// happen; if it ever does, refuse rather than guess.
+		return false
 	}
 }
 
