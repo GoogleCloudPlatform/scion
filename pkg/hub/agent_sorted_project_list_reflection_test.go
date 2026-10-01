@@ -100,12 +100,18 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // through the real store (valid UUIDs, a real MessageMode enum value, etc.)
 // rather than an arbitrary string.
 //
-// Three fields are deliberately left at their zero value, each for a
+// Four fields are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:
-//   - Project, RuntimeBrokerName, HarnessAuth: "Enriched fields (populated
-//     by Hub when returning data, not persisted)" per store.Agent's own
-//     field comment -- no store write path can ever make these non-zero
-//     after a read-back, and agentResource never reads them either.
+//   - Project, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
+//     fields (populated by Hub when returning data, not persisted)" per
+//     store.Agent's own field comment (pkg/store/models.go) -- no store
+//     write path can ever make these non-zero after a read-back, and
+//     agentResource never reads them either. (r2 review N-2: HarnessConfig
+//     was missing from this list and from the skip map below, even though
+//     it sits in the exact same "enriched, not persisted" block as the
+//     other three -- the reflection fill set it, but it reads back zero,
+//     same as its neighbors. assertNonSkippedFieldsNonZero below proves this
+//     skip list is exhaustive rather than trusting the comment.)
 //   - DeletedAt: GetAgentsByIDs (deliberately exercised here, per r1 review
 //     B2's wording) hard-codes agent.DeletedAtIsNil() -- a soft-deleted
 //     fixture could never be read back through it at all. The dropped-row
@@ -125,20 +131,31 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // followed by one UpdateAgent call (which covers the handful of fields
 // CreateAgent itself does not set, e.g. ExitCode/ExitReason/
 // ReincarnationState/ReincarnationUpdatedAt).
+// reflectFillStoreAgentSkipFields is the single source of truth for which
+// store.Agent fields cannot round-trip through the real store and so are
+// deliberately left at their zero value by reflectFillStoreAgent (see its
+// doc comment for why each one is here). Sharing this map with
+// assertNonSkippedFieldsNonZero (rather than each keeping its own copy)
+// means the skip list cannot drift out of sync with what the fill/verify
+// pair actually checks -- the r2 review N-2 gap (HarnessConfig missing from
+// an independently-stated list) cannot recur silently, because
+// assertNonSkippedFieldsNonZero fails closed on every field not in this map.
+var reflectFillStoreAgentSkipFields = map[string]bool{
+	"Project": true, "RuntimeBrokerName": true, "HarnessConfig": true, "HarnessAuth": true,
+	"DeletedAt": true,
+	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
+	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
+	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
+	"LaunchStep": true, "LaunchError": true,
+}
+
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 	t.Helper()
 	a := &store.Agent{}
 	v := reflect.ValueOf(a).Elem()
 	typ := v.Type()
 
-	skip := map[string]bool{
-		"Project": true, "RuntimeBrokerName": true, "HarnessAuth": true,
-		"DeletedAt": true,
-		"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
-		"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
-		"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
-		"LaunchStep": true, "LaunchError": true,
-	}
+	skip := reflectFillStoreAgentSkipFields
 	special := map[string]func(reflect.Value){
 		"ID":        func(f reflect.Value) { f.SetString(uuid.New().String()) },
 		"ProjectID": func(f reflect.Value) { f.SetString(projectID) },
@@ -224,6 +241,33 @@ func fillGenericNonZero(t *testing.T, f reflect.Value, name string, seq int) {
 	}
 }
 
+// assertNonSkippedFieldsNonZero asserts every exported field of a NOT in
+// reflectFillStoreAgentSkipFields is non-zero (r2 review N-2: "the test
+// compares memberResource against agentResource(re-read row), so any field
+// that does not round-trip is invisible to it ... assert that every
+// non-skipped field of the re-read store.Agent is non-zero. That makes the
+// fixture prove its own coverage."). Without this, a field silently falling
+// out of round-trip (like HarnessConfig did, undetected until this review)
+// would just quietly stop being exercised by the S6 gate rather than
+// failing loudly.
+func assertNonSkippedFieldsNonZero(t *testing.T, a *store.Agent) {
+	t.Helper()
+	v := reflect.ValueOf(a).Elem()
+	typ := v.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if reflectFillStoreAgentSkipFields[name] {
+			continue
+		}
+		f := v.Field(i)
+		if f.IsZero() {
+			t.Errorf("store.Agent.%s read back as the zero value after the reflection-filled round trip; "+
+				"either reflectFillStoreAgent needs to fill it, or it belongs in reflectFillStoreAgentSkipFields "+
+				"with a documented reason (it is currently neither)", name)
+		}
+	}
+}
+
 // TestListProjectAgentsSorted_MemberProjectionEquality is the non-waivable
 // S6 gate (r1 review B2): a reflection-filled store.Agent, written through
 // the real store and read back through the real ListAgentMembers and
@@ -253,6 +297,12 @@ func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, fullRows, full.ID)
 	rereadFull := fullRows[full.ID]
+
+	// r2 review N-2: prove the fixture's own coverage rather than trusting
+	// the skip-list comment -- every field NOT in reflectFillStoreAgentSkipFields
+	// must actually have round-tripped non-zero, or this test's deep-equal
+	// below would be silently blind to it.
+	assertNonSkippedFieldsNonZero(t, rereadFull)
 
 	require.True(t, reflect.DeepEqual(memberResource(member), agentResource(rereadFull)),
 		"memberResource(ListAgentMembers row) must deep-equal agentResource(GetAgentsByIDs row) for a fully reflection-filled agent;\nmember resource: %#v\nfull resource:   %#v",

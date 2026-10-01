@@ -18,10 +18,11 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -35,30 +36,182 @@ import (
 // This file closes the remaining r1 review findings: B3 (limit clamp), B4
 // (includeDeleted), B6 c/d/e/f (S6 test-plan gaps), B7 (S3/A3 test-plan
 // gaps), N2 (S10 R<=fit), N6 (legacy byte-identity with sort-only params).
+// The original B3 test (TestListProjectAgentsSorted_LimitClampedTo500) is
+// superseded below by the r2 review's B-1 finding and its resolution,
+// erratum E2 (lists-graph-errata.md): the 500 clamp alone does not keep
+// every paged request inside the A15 decision ceiling at every candidate
+// count n, which needed the P_eff = min(limit, floor((4000-n)/7)) page-size
+// bound (effectivePagedPageSize, agent_sorted_project_list.go).
 
-// --- B3: sorted mode must clamp limit to 500 -------------------------------
+// --- B3/B-1: sorted mode must clamp limit to 500, and the paged page size
+// must additionally stay inside A15 at every candidate count n -------------
 
-// TestListProjectAgentsSorted_LimitClampedTo500 reproduces the r1 review's
-// exact finding: 700 agents with limit=700 used to return 700 items and
-// cost 5,605 decisions (over the A15 bound). Clamping limit to 500 (design
-// 4.1: "limit 1..500, Unchanged") caps both.
-func TestListProjectAgentsSorted_LimitClampedTo500(t *testing.T) {
+// TestListProjectAgentsSorted_LimitClampedTo500 is superseded by erratum E2
+// (lists-graph-errata.md, 2026-10-01): the original version of this test
+// asserted limit=700/n=700 costs 5+700+7*500=4,205 decisions, which r2
+// review finding B-1 showed is itself over the A15 ceiling (4,005) -- the
+// 500 clamp alone does not keep every paged request inside A15 at every n.
+// TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes below
+// replaces it with the erratum's P_eff = min(limit, floor((4000-n)/7))
+// formula, asserting the exact page size and decision count at n in
+// {500, 501, 700, 1200, 2000} and limit=500 -- all <= 4,005 decisions,
+// never 4,205.
+
+// TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes is
+// erratum E2's primary S6 test: at limit=500, the paged branch's actual page
+// size is P_eff = min(limit, floor((4000-n)/7)), not limit itself, so the
+// per-request decision cost 5+n+7*P_eff never exceeds the A15 ceiling
+// (sortedProjectDecisionCeiling, 4,005) at any of the design's own n values.
+func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing.T) {
+	const limit = 500
+	sizes := []int{500, 501, 700, 1200, 2000}
+	for _, n := range sizes {
+		n := n
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			f := sortedListSetup(t)
+			f.createAgentsBulk(t, n, "e2sz", string(state.PhaseStopped), nil) // nil ownerFor: every agent owned by f.owner, so R=n
+
+			wantPEff := effectivePagedPageSize(limit, n)
+			require.LessOrEqual(t, wantPEff, limit)
+			require.LessOrEqual(t, 5+n+7*wantPEff, sortedProjectDecisionCeiling,
+				"the erratum's whole point: P_eff must keep the paged request inside A15")
+
+			emitter := &recordingDecisionAuditEmitter{}
+			f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
+			// No fit: always paged, regardless of n (complete requires hasFit).
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&limit=%d", limit)), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			resp := mustDecodeListAgentsResponse(t, rec.Body)
+
+			assert.Len(t, resp.Agents, wantPEff, "the page must hold exactly P_eff items, not min(limit, n)")
+			assert.Equal(t, n, resp.TotalCount, "totalCount is the full readable candidate count, independent of page size")
+			if wantPEff < n {
+				assert.NotEmpty(t, resp.NextCursor, "fewer items than n were returned, so there must be a next page")
+			} else {
+				assert.Empty(t, resp.NextCursor, "P_eff consumed every candidate in one page")
+			}
+
+			want := 5 + n + 7*wantPEff
+			assert.Len(t, emitter.records, want, "decision cost must reflect P_eff, not the requested/clamped limit")
+		})
+	}
+}
+
+// TestListProjectAgentsSorted_PagedWalk_E2_AllReadableReturnedOnce is
+// erratum E2's walk test: a limit=500 walk over n=2,000 must still return
+// every readable agent exactly once, in order, even though P_eff (285 at
+// n=2,000) is well under the requested limit -- both at R=n (every page
+// item readable) and at R=400 (a strict readable subset, design 5.3's R<n
+// case), per the erratum's own test list ("with R=n, and with R=400").
+func TestListProjectAgentsSorted_PagedWalk_E2_AllReadableReturnedOnce(t *testing.T) {
+	t.Run("R=n", func(t *testing.T) {
+		f := sortedListSetup(t)
+		const n = 2000
+		f.createAgentsBulk(t, n, "e2walk-full", string(state.PhaseStopped), nil)
+
+		want := referenceOrderIDs(t, f.store, f.project.ID, "updated", "desc", n+1)
+		require.Len(t, want, n)
+
+		got := walkAllPagesIDs(t, f, "desc", 500)
+		assert.Equal(t, want, got, "a limit=500 walk at n=2,000 (R=n) must still concatenate to the full reference order despite P_eff<limit")
+	})
+
+	t.Run("R=400", func(t *testing.T) {
+		f := sortedListSetup(t)
+		caller := &store.User{
+			ID: tid("sl-e2walk-caller"), Email: "sl-e2walk@test.com", DisplayName: "Caller",
+			Role: store.UserRoleMember, Status: "active",
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), caller))
+		ensureHubMembership(context.Background(), f.store, caller.ID)
+		grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-e2walk-list-only")
+
+		const n, r = 2000, 400
+		agents := f.createAgentsBulk(t, n, "e2walk-partial", string(state.PhaseStopped), func(i int) string {
+			if i < r {
+				return caller.ID // readable to caller via the owner relationship grant
+			}
+			return f.owner.ID // unreadable to caller: no agent.read permission, no ownership
+		})
+		readable := make(map[string]bool, r)
+		for i := 0; i < r; i++ {
+			readable[agents[i].ID] = true
+		}
+
+		full := referenceOrderIDs(t, f.store, f.project.ID, "updated", "desc", n+1)
+		require.Len(t, full, n)
+		var want []string
+		for _, id := range full {
+			if readable[id] {
+				want = append(want, id)
+			}
+		}
+		require.Len(t, want, r)
+
+		got := walkAllPagesIDsAs(t, f, caller, "desc", 500)
+		assert.Equal(t, want, got, "a limit=500 walk at n=2,000, R=400 must return every readable agent exactly once, in reference order")
+	})
+}
+
+// TestListProjectAgentsSorted_PagedRaced_E2_StaysUnderRacedCeiling is
+// erratum E2's raced variant: at n=501, limit=500 (so P_eff=499, per
+// effectivePagedPageSize), racing every single page item still costs at
+// most 4,504 decisions (5+n+8*P_eff: every raced item costs 8, not 7,
+// because step 5a re-decides all 8 actions including read, not just the 7
+// remaining ones) -- inside the design's stated raced exception to A15
+// (4,505), even though the unraced variant above is already at 4,005.
+func TestListProjectAgentsSorted_PagedRaced_E2_StaysUnderRacedCeiling(t *testing.T) {
 	f := sortedListSetup(t)
-	const n = 700
-	f.createAgentsBulk(t, n, "clamp", string(state.PhaseStopped), nil)
+	const n = 501
+	const limit = 500
+	f.createAgentsBulk(t, n, "e2raced", string(state.PhaseStopped), nil)
+
+	pEff := effectivePagedPageSize(limit, n)
+	require.Less(t, pEff, n, "a race on every page item is only interesting if the page doesn't already cover every candidate")
+
+	raced := &racingAllMembersStore{Store: f.store}
+	f.srv.store = raced
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&limit=%d", n)), nil)
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&limit=%d", limit)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
-	assert.Len(t, resp.Agents, 500, "limit must be clamped to 500 even when the request asks for more")
-	assert.Equal(t, n, resp.TotalCount)
-	assert.NotEmpty(t, resp.NextCursor)
+	require.Len(t, resp.Agents, pEff, "every page item must still be kept: the race only changes Labels, which no filter in this request cares about")
 
-	want := 5 + n + 7*500
-	assert.Len(t, emitter.records, want, "decision cost must reflect the clamped page size (500), not the requested limit (700)")
+	want := 5 + n + 8*pEff
+	assert.Len(t, emitter.records, want, "every page item raced costs 8 (full re-decision), not 7")
+	assert.LessOrEqual(t, want, 4504, "the design's stated raced exception to A15")
+}
+
+// racingAllMembersStore mutates every candidate's Labels (via the real
+// store, bypassing the read path) the first time ListAgentMembers is
+// called, simulating every page item racing between the member read and the
+// full-row read (design 5.3 step 5a) -- the n-items generalization of
+// mutatingAfterMembersStore, which only races one row.
+type racingAllMembersStore struct {
+	store.Store
+	once sync.Once
+}
+
+func (r *racingAllMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
+	members, err := r.Store.ListAgentMembers(ctx, filter, sort, dir, max)
+	if err != nil {
+		return nil, err
+	}
+	r.once.Do(func() {
+		for _, m := range members {
+			a, gerr := r.Store.GetAgent(ctx, m.ID)
+			if gerr != nil {
+				continue
+			}
+			a.Labels = map[string]string{"raced": "true"}
+			_ = r.Store.UpdateAgent(ctx, a)
+		}
+	})
+	return members, nil
 }
 
 // --- B4: includeDeleted=true must behave like legacy mode ------------------
@@ -329,6 +482,87 @@ func TestListProjectAgentsSorted_NilVsEmptyLabels_EndToEndZeroRedecisions(t *tes
 	assert.Len(t, emitter.records, 13, "nil-to-empty Labels must cost zero re-decisions: 5+8*1, not 5+9*1")
 }
 
+// fieldMutatingAfterMembersStore generalizes labelsNilToEmptyAfterMembersStore
+// (and mutatingAfterMembersStore) to any single-field mutation applied after
+// the first ListAgentMembers call: r2 review N-4 found the original
+// end-to-end test exercised only Labels nil->empty, when
+// normalizeResourceForCompare normalizes both Labels and Ancestry, in both
+// directions.
+type fieldMutatingAfterMembersStore struct {
+	store.Store
+	once    sync.Once
+	agentID string
+	mutate  func(a *store.Agent)
+}
+
+func (f *fieldMutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
+	members, err := f.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
+	if err != nil {
+		return nil, err
+	}
+	f.once.Do(func() {
+		a, gerr := f.Store.GetAgent(ctx, f.agentID)
+		if gerr != nil {
+			return
+		}
+		f.mutate(a)
+		_ = f.Store.UpdateAgent(ctx, a)
+	})
+	return members, nil
+}
+
+// TestListProjectAgentsSorted_NilVsEmpty_TableDriven_EndToEndZeroRedecisions
+// is r2 review N-4: the nil/empty normalization end-to-end proof, extended
+// to both fields normalizeResourceForCompare touches (Labels, Ancestry) and
+// both directions (nil->empty and empty->nil), not just Labels nil->empty.
+// Every case must cost exactly 5+8*1=13 decisions, never 5+9*1=14 -- a
+// re-decision would mean the normalization missed this field or direction.
+func TestListProjectAgentsSorted_NilVsEmpty_TableDriven_EndToEndZeroRedecisions(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial func(a *store.Agent)
+		mutate  func(a *store.Agent)
+	}{
+		{"Labels_nil_to_empty", func(a *store.Agent) { a.Labels = nil }, func(a *store.Agent) { a.Labels = map[string]string{} }},
+		{"Labels_empty_to_nil", func(a *store.Agent) { a.Labels = map[string]string{} }, func(a *store.Agent) { a.Labels = nil }},
+		{"Ancestry_nil_to_empty", func(a *store.Agent) { a.Ancestry = nil }, func(a *store.Agent) { a.Ancestry = []string{} }},
+		{"Ancestry_empty_to_nil", func(a *store.Agent) { a.Ancestry = []string{} }, func(a *store.Agent) { a.Ancestry = nil }},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			f := sortedListSetup(t)
+			ctx := context.Background()
+
+			a := &store.Agent{
+				ID: tid("sl-nilempty-" + tc.name), Slug: "nilempty-" + tc.name, Name: "nilempty-" + tc.name,
+				ProjectID: f.project.ID, Phase: string(state.PhaseStopped),
+				CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
+			}
+			require.NoError(t, f.store.CreateAgent(ctx, a))
+			// Pin the exact "before" shape via an explicit UpdateAgent round
+			// trip, rather than trusting CreateAgent's own default
+			// normalization of a nil/empty field -- this is what the first
+			// (pre-race) ListAgentMembers call will see.
+			tc.initial(a)
+			require.NoError(t, f.store.UpdateAgent(ctx, a))
+
+			raced := &fieldMutatingAfterMembersStore{Store: f.store, agentID: a.ID, mutate: tc.mutate}
+			f.srv.store = raced
+
+			emitter := &recordingDecisionAuditEmitter{}
+			f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			resp := mustDecodeListAgentsResponse(t, rec.Body)
+			require.Len(t, resp.Agents, 1, "the item must be kept: %s must not look like a project/filter mismatch", tc.name)
+
+			assert.Len(t, emitter.records, 13, "%s must cost zero re-decisions: 5+8*1=13, never 5+9*1=14", tc.name)
+		})
+	}
+}
+
 // --- B7: S3/A3 test-plan gaps ----------------------------------------------
 
 // TestListProjectAgentsSorted_CursorLabelReplayRejected is B7: a cursor
@@ -470,27 +704,98 @@ func TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit(t *t
 	assert.Len(t, resp.Agents, fit)
 }
 
-// --- N6: legacy mode ignores fit/stats/dir, byte-identical apart from serverTime ---
+// --- N6/E1: legacy mode ignores fit/stats/dir, byte-identical apart from serverTime ---
 
-// TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical is N6 (EM
+// serverTimeJSONRe matches the "serverTime":"..." field in a
+// ListAgentsResponse's JSON encoding, so rawBodyWithoutServerTime can blank
+// it out for an exact byte comparison of everything else (r2 review N-3:
+// "compare ... raw bytes after stripping serverTime").
+var serverTimeJSONRe = regexp.MustCompile(`"serverTime":"[^"]*"`)
+
+// rawBodyWithoutServerTime returns rec's raw response body with the
+// serverTime value blanked out, for an exact byte-for-byte comparison
+// against another response (r2 review N-3).
+func rawBodyWithoutServerTime(rec *httptest.ResponseRecorder) []byte {
+	return serverTimeJSONRe.ReplaceAll(rec.Body.Bytes(), []byte(`"serverTime":""`))
+}
+
+// TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical is N6/E1 (EM
 // ruling, architect-confirmed r8 erratum): without "sort", fit/stats/dir are
 // silently ignored and the response is byte-identical to the same request
-// without them, apart from serverTime.
+// without them, apart from serverTime. Extended per r2 review N-3, which
+// found the original version under-scoped against errata E1's own test
+// description: only the project endpoint, only valid values, no cursor in
+// play, and a decoded-map compare rather than raw bytes. This version adds
+// invalid values (dir=sideways, fit=0, and others), a cursor already in
+// play (so the emitted nextCursor/binding is part of what must match), raw
+// byte comparison, and the global endpoint (whose legacy path P1b leaves
+// unchanged, so cheap to add).
 func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) {
 	f := sortedListSetup(t)
 	f.createAgent(t, "n6-a", string(state.PhaseRunning), nil)
 	f.createAgent(t, "n6-b", string(state.PhaseStopped), nil)
 
-	plain := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(""), nil)
-	require.Equal(t, http.StatusOK, plain.Code, plain.Body.String())
+	// Valid values (the original test's case), plus the invalid shapes the
+	// reviewer's probe used (dir=sideways, fit=0) plus two more unparsable
+	// ones -- all of these would be 400s in sorted mode (design 4.1), and
+	// must instead be silently ignored here, exactly like the valid case.
+	extras := []string{
+		"fit=500&stats=1&dir=asc",
+		"dir=sideways",
+		"fit=0",
+		"fit=abc&stats=yes",
+	}
 
-	withExtras := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("fit=500&stats=1&dir=asc"), nil)
-	require.Equal(t, http.StatusOK, withExtras.Code, withExtras.Body.String())
+	t.Run("project_endpoint_no_cursor", func(t *testing.T) {
+		base := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(""), nil)
+		require.Equal(t, http.StatusOK, base.Code, base.Body.String())
+		baseBody := rawBodyWithoutServerTime(base)
 
-	var plainBody, extrasBody map[string]interface{}
-	require.NoError(t, json.Unmarshal(plain.Body.Bytes(), &plainBody))
-	require.NoError(t, json.Unmarshal(withExtras.Body.Bytes(), &extrasBody))
-	delete(plainBody, "serverTime")
-	delete(extrasBody, "serverTime")
-	assert.Equal(t, plainBody, extrasBody, "fit/stats/dir without sort must be silently ignored: byte-identical apart from serverTime")
+		for _, extra := range extras {
+			t.Run(extra, func(t *testing.T) {
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(extra), nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, string(baseBody), string(rawBodyWithoutServerTime(rec)),
+					"project endpoint: fit/stats/dir (%s) without sort must be silently ignored, byte-identical apart from serverTime", extra)
+			})
+		}
+	})
+
+	t.Run("project_endpoint_cursor_present", func(t *testing.T) {
+		// limit=1 forces a nextCursor with 2 agents in the project.
+		page1 := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("limit=1"), nil)
+		require.Equal(t, http.StatusOK, page1.Code, page1.Body.String())
+		resp1 := mustDecodeListAgentsResponse(t, page1.Body)
+		require.NotEmpty(t, resp1.NextCursor, "need a cursor in play for this sub-case")
+		cursorQS := "cursor=" + url.QueryEscape(resp1.NextCursor)
+
+		base := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("limit=1&"+cursorQS), nil)
+		require.Equal(t, http.StatusOK, base.Code, base.Body.String())
+		baseBody := rawBodyWithoutServerTime(base)
+
+		for _, extra := range extras {
+			t.Run(extra, func(t *testing.T) {
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("limit=1&"+cursorQS+"&"+extra), nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, string(baseBody), string(rawBodyWithoutServerTime(rec)),
+					"project endpoint with a cursor already in play: fit/stats/dir (%s) must still be ignored -- including the emitted nextCursor/binding, which is part of this byte comparison", extra)
+			})
+		}
+	})
+
+	t.Run("global_endpoint", func(t *testing.T) {
+		globalBase := "/api/v1/agents?projectId=" + f.project.ID
+		base := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, globalBase, nil)
+		require.Equal(t, http.StatusOK, base.Code, base.Body.String())
+		baseBody := rawBodyWithoutServerTime(base)
+
+		for _, extra := range extras {
+			t.Run(extra, func(t *testing.T) {
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, globalBase+"&"+extra, nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, string(baseBody), string(rawBodyWithoutServerTime(rec)),
+					"global endpoint: fit/stats/dir (%s) must be ignored too -- P1b does not touch this endpoint's legacy path", extra)
+			})
+		}
+	})
 }

@@ -264,8 +264,10 @@ type countingAgentStore struct {
 	countAgentsCalls  int
 	membersCalls      int
 	getByIDsCalls     int
-	fakeCandidateSize int // if > 0, CountAgents and ListAgentMembers report this size
-	maxSeen           int // last "max" ListAgentMembers was called with
+	listAgentsCalls   int
+	listAgentsIDs     [][]string // filter.IDs seen by each ListAgents call, in call order
+	fakeCandidateSize int        // if > 0, CountAgents and ListAgentMembers report this size
+	maxSeen           int        // last "max" ListAgentMembers was called with
 }
 
 func (c *countingAgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
@@ -304,13 +306,27 @@ func (c *countingAgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (
 	return c.Store.GetAgentsByIDs(ctx, ids)
 }
 
+// ListAgents is overridden so tests can observe loadFullRowsForPage's actual
+// full-row read: how many times it runs per request, and exactly which IDs
+// it asks for (r2 review N-1 -- the old getByIDsCalls assertion in
+// TestListProjectAgentsSorted_CandidateCeiling was vacuous after the B4 fix
+// moved the full-row read from GetAgentsByIDs to ListAgents, so it passed
+// regardless of what the handler actually did).
+func (c *countingAgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	c.mu.Lock()
+	c.listAgentsCalls++
+	c.listAgentsIDs = append(c.listAgentsIDs, append([]string(nil), filter.IDs...))
+	c.mu.Unlock()
+	return c.Store.ListAgents(ctx, filter, opts)
+}
+
 // TestListProjectAgentsSorted_CandidateCeiling is S9 (hard gate): a candidate
 // pool above authorizedListMaxCandidates gets the 422 refusal, with exactly
 // one decision (the agent.list gate) and zero read-pass/capability
 // decisions; ListAgentMembers is not called with results scanned into the
 // read pass. The candidate pool is faked (via countingAgentStore) here,
 // specifically to assert the call counts (countAgentsCalls/membersCalls/
-// getByIDsCalls) a real 2001-row pool can't observe as directly;
+// listAgentsCalls) a real 2001-row pool can't observe as directly;
 // TestListProjectAgentsSorted_CandidateCeiling_RealRows (designsizes_test.go)
 // covers the same gate with a real, materialized 2001-row pool.
 func TestListProjectAgentsSorted_CandidateCeiling(t *testing.T) {
@@ -337,7 +353,7 @@ func TestListProjectAgentsSorted_CandidateCeiling(t *testing.T) {
 	assert.Len(t, emitter.records, 1, "exactly the agent.list gate decision, zero read-pass/capability decisions")
 	assert.Equal(t, 1, counting.countAgentsCalls)
 	assert.Equal(t, 0, counting.membersCalls, "ListAgentMembers must not be called once CountAgents already exceeds the ceiling")
-	assert.Equal(t, 0, counting.getByIDsCalls)
+	assert.Equal(t, 0, counting.listAgentsCalls, "the full-row read (loadFullRowsForPage -> ListAgents) must not run once the ceiling is breached; there is no page to read rows for")
 }
 
 // TestListProjectAgentsSorted_CandidateCeiling_Race is the S9 race
@@ -388,6 +404,60 @@ func (r *raceMembersStore) ListAgentMembers(ctx context.Context, filter store.Ag
 		out[i] = store.AgentMember{ID: fmt.Sprintf("race-%d", i), ProjectID: filter.ProjectID}
 	}
 	return out, nil
+}
+
+// TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage
+// is r2 review N-1: a real, successful request must trigger exactly one
+// full-row read (loadFullRowsForPage -> ListAgents) per request, and the IDs
+// that read asks for must be exactly the page's IDs -- not the whole
+// candidate set, and not called once per item. This replaces the N-1
+// finding's vacuous getByIDsCalls==0 assertion with one that actually
+// guards the "no full-row read outside the page" property.
+func TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage(t *testing.T) {
+	t.Run("paged", func(t *testing.T) {
+		f := sortedListSetup(t)
+		const n = 8
+		const limit = 3
+		for i := 0; i < n; i++ {
+			f.createAgent(t, fmt.Sprintf("frr-paged-%d", i), string(state.PhaseStopped), nil)
+		}
+		counting := &countingAgentStore{Store: f.store}
+		f.srv.store = counting
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d&limit=%d", limit, limit)), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		resp := mustDecodeListAgentsResponse(t, rec.Body)
+		require.Len(t, resp.Agents, limit)
+
+		require.Equal(t, 1, counting.listAgentsCalls, "exactly one full-row read per request")
+		require.Len(t, counting.listAgentsIDs, 1)
+		gotIDs := counting.listAgentsIDs[0]
+		assert.Len(t, gotIDs, limit, "the full-row read must ask for exactly the page's IDs, not the whole n-candidate set")
+		wantIDs := make([]string, len(resp.Agents))
+		for i, a := range resp.Agents {
+			wantIDs[i] = a.ID
+		}
+		assert.ElementsMatch(t, wantIDs, gotIDs, "the full-row read's IDs must be exactly the page, not a superset or subset")
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		f := sortedListSetup(t)
+		const n = 5
+		for i := 0; i < n; i++ {
+			f.createAgent(t, fmt.Sprintf("frr-complete-%d", i), string(state.PhaseStopped), nil)
+		}
+		counting := &countingAgentStore{Store: f.store}
+		f.srv.store = counting
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d&limit=%d", n, n)), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		resp := mustDecodeListAgentsResponse(t, rec.Body)
+		require.Len(t, resp.Agents, n)
+
+		require.Equal(t, 1, counting.listAgentsCalls, "exactly one full-row read per request, even when the response is complete")
+		require.Len(t, counting.listAgentsIDs, 1)
+		assert.Len(t, counting.listAgentsIDs[0], n)
+	})
 }
 
 // TestListProjectAgentsSorted_UnderCeiling_ReturnsExactTotals asserts the

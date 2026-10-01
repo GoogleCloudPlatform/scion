@@ -31,8 +31,42 @@ import (
 // the store's own clamp (entadapter/agent_store.go's maxAgentListLimit);
 // sorted mode slices in Go, so it must clamp for itself or an unbounded
 // limit lets a caller multiply the per-page decision cost (7 actions per
-// page item) past the A15 bound with no race at all (r1 review B3).
+// page item) without bound (r1 review B3). This clamp alone does not keep
+// every paged request inside the A15 bound at every candidate count n --
+// that additionally requires the n-aware effectivePagedPageSize clamp below
+// (erratum E2, r2 review B-1): at limit=500, n above 500 still needs a
+// narrower page than 500 to stay at or under A15's 4,005-decision ceiling.
 const maxSortedLimit = 500
+
+// sortedProjectDecisionCeiling is the A15 security gate for a sorted-mode
+// project agents request (design lists-graph.md A15): no single request may
+// cost more than this many authorization decisions (the race exception adds
+// up to 500 more, per erratum E2). effectivePagedPageSize enforces this for
+// the paged branch.
+const sortedProjectDecisionCeiling = 4005
+
+// effectivePagedPageSize is erratum E2 (lists-graph-errata.md, 2026-10-01,
+// ruled by the design author in response to r2 review finding B-1): the
+// sorted project endpoint's paged branch costs 5 + n + 7*pageSize
+// decisions, which breaches the A15 ceiling (sortedProjectDecisionCeiling)
+// at legal (limit, n) pairs with no race involved -- e.g. limit=500 at
+// n=2,000 costs 5,505 unraced. P_eff = min(limit, floor((4000-n)/7)) keeps
+// every paged request within 4,005 unraced (4,504 raced) for every n up to
+// the 2,000 candidate ceiling, where n is the step-1 binding count
+// (len(members), already capped at authorizedListMaxCandidates by the time
+// this is called), not the step-0 COUNT. At n<=500, P_eff==limit (up to
+// 500, unchanged from before this erratum); at n=2,000, P_eff<=285.
+// P_eff is NOT part of the cursor binding (design: "P_eff must not enter
+// the cursor binding"), so a later page computing a different P_eff (n
+// having changed) does not invalidate the cursor -- only the position
+// within the walk is bound, never the page size.
+func effectivePagedPageSize(limit, n int) int {
+	maxP := (sortedProjectDecisionCeiling - 5 - n) / 7
+	if maxP < limit {
+		return maxP
+	}
+	return limit
+}
 
 // P1b (ptone/scion#2383) implements sorted mode on the project agents
 // endpoint only: sort=updated (both directions), fit/complete, stats=1, the
@@ -384,7 +418,16 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		if cur != nil {
 			start = positionAfterCursor(p.sort, p.dir, r, *cur)
 		}
-		end := start + p.limit
+		// Erratum E2 (2026-10-01, lists-graph-errata.md): the paged branch's
+		// page size is bounded by n (this request's step-1 binding count,
+		// i.e. len(members) above -- not the step-0 COUNT, which can be
+		// lower if the pool grew in between), not just the request's limit,
+		// so the per-request decision cost 5+n+7*pageSize never exceeds the
+		// A15 ceiling. pEff deliberately does not enter the cursor binding
+		// (binding, above, is built before pEff exists): n can differ from
+		// one page to the next without invalidating a cursor.
+		pEff := effectivePagedPageSize(p.limit, n)
+		end := start + pEff
 		if end > len(r) {
 			end = len(r)
 		}
