@@ -260,7 +260,7 @@ Agents are assigned one of four named roles, each mapping to a fixed set of JWT 
 | `none` | *None* | No access to the Hub API (runs with no authorization claims). |
 | `readonly` | `project:read` | Can view and query project state, but cannot report status, register port forwards, or manage other agents. |
 | `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, send notifications, and manage its own notification subscriptions. |
-| `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
+| `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:sa_assign`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, assigning GCP service accounts to agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
 
 #### Creation-Time Role Ceilings
 The effective role granted to an agent at creation depends on the caller:

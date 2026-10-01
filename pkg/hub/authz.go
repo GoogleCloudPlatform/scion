@@ -1133,13 +1133,13 @@ func formatBoundaryScope(scopeType, scopeID string) string {
 // authority into kernel-evaluable bindings so the agent's project-scoped
 // permissions flow through the standard evaluation pipeline.
 func (a *AuthzService) buildAgentSyntheticBindings(agent AgentIdentity) ([]CandidateBinding, map[string]*RolePermissions) {
-	scopes := agent.Scopes()
+	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {
 		return nil, nil
 	}
 
 	// Map scopes to permission IDs.
-	permIDs := agentScopesToPermissionIDs(scopes, agentScopeSchema(agent))
+	permIDs := agentScopesToPermissionIDs(scopes)
 	if len(permIDs) == 0 {
 		return nil, nil
 	}
@@ -1171,76 +1171,85 @@ func (a *AuthzService) buildAgentSyntheticBindings(agent AgentIdentity) ([]Candi
 	return candidates, roleDefs
 }
 
-// legacyAgentScopeGrants names, for an agent scope that a permission moved
-// off of onto its own dedicated agent scope, the permission(s) the old
-// combined scope keeps granting for a token minted under an earlier
-// AgentTokenClaims.ScopeSchema. This exists so an agent JWT minted with the
-// combined scope before the split keeps authorizing what it authorized when
-// it was minted, without the registry itself claiming the old scope still
-// covers the permission: permissions.Registry's AgentScopes names only the
-// scope a newly minted token receives for that permission (ptone/scion#2339).
-//
-// Applied only when agentScopeSchema reports schema 0, i.e. an actual
-// pre-split hub-signed JWT (see CurrentAgentScopeSchema and
-// agentScopeSchema) — a current-schema token that holds ScopeAgentCreate
-// without the dedicated assign scope was minted (or filtered) under the
-// split rule on purpose, and must not regain the permission here. An
-// identity with no schema of its own (never minted by this hub's signer)
-// resolves to CurrentAgentScopeSchema via agentScopeSchema, so it never hits
-// this branch either.
-var legacyAgentScopeGrants = map[AgentTokenScope][]string{
-	ScopeAgentCreate: {"gcp_service_account.assign"},
+// isLegacyPreSplitAgentJWT reports whether identity is a genuine pre-split
+// hub-signed agent JWT: one that ValidateAgentToken actually verified and
+// found carried no scope_schema claim on the wire (AgentTokenClaims.
+// legacyScopeSchema; see CurrentAgentScopeSchema's doc comment for why that
+// flag, not a zero ScopeSchema value, is the signal). Direct construction of
+// an AgentTokenClaims literal never sets legacyScopeSchema, so every
+// in-process identity built that way — a stored-record wrapper, a
+// scheduled-dispatch creator identity, a synthetic secret-resolution
+// identity, and so on — reports false here regardless of which scopes it
+// carries. A non-hub-JWT AgentIdentity (federated, or any future kind) also
+// reports false: this compatibility exists only to grandfather a token this
+// hub's own signer actually minted before the split, and an identity that
+// never went through that signer was never granted anything under the
+// pre-split combined scope to begin with.
+func isLegacyPreSplitAgentJWT(identity AgentIdentity) bool {
+	wrapped, ok := identity.(*agentIdentityWrapper)
+	return ok && wrapped.AgentTokenClaims != nil && wrapped.legacyScopeSchema
 }
 
-// agentScopeSchema reports the AgentTokenClaims.ScopeSchema recorded on
-// agent's JWT. It returns CurrentAgentScopeSchema — "apply no
-// legacyAgentScopeGrants entry" — for any identity that carries no such
-// claims (a synthetic, federated, or otherwise non-hub-JWT-backed
-// AgentIdentity). legacyAgentScopeGrants exists only to grandfather a token
-// this hub's own signer minted before scope-schema versioning existed; an
-// identity that never went through that signer was never granted anything
-// under the pre-split combined scope in the first place, so it must not
-// receive the compatibility grant either. Schema 0 is reserved for an actual
-// pre-schema hub JWT, never used as a not-applicable/unknown default.
-func agentScopeSchema(identity AgentIdentity) int {
-	if wrapped, ok := identity.(*agentIdentityWrapper); ok && wrapped.AgentTokenClaims != nil {
-		return wrapped.ScopeSchema
+// effectiveAgentScopes is the single place the ptone/scion#2339
+// compatibility rule applies, so every scope-level consumer agrees on what a
+// legacy token means. For a genuine pre-split hub JWT
+// (isLegacyPreSplitAgentJWT) that holds ScopeAgentCreate but not
+// ScopeAgentSAAssign, it appends ScopeAgentSAAssign — the same single
+// combined scope granted both permissions when the token was minted, so the
+// token keeps authorizing what it authorized then. Every other identity's
+// scopes pass through unchanged, including a current-schema token that
+// deliberately holds ScopeAgentCreate without ScopeAgentSAAssign (a future
+// per-scope-ceiling-filtered mint must not be widened back here).
+//
+// Every scope-level consumer — the synthetic project-scoped grant
+// (buildAgentSyntheticBindings), the credential-scope restriction
+// (agentScopeRestriction), and agent-to-agent delegation admission
+// (canAgentDelegateToAgent) — must call this instead of agent.Scopes()
+// directly, so a permission one of them grants can never be taken back by
+// another reading a different, stale scope list.
+func effectiveAgentScopes(agent AgentIdentity) []AgentTokenScope {
+	scopes := agent.Scopes()
+	if !isLegacyPreSplitAgentJWT(agent) {
+		return scopes
 	}
-	return CurrentAgentScopeSchema
+	hasCreate, hasAssign := false, false
+	for _, s := range scopes {
+		switch s {
+		case ScopeAgentCreate:
+			hasCreate = true
+		case ScopeAgentSAAssign:
+			hasAssign = true
+		}
+	}
+	if !hasCreate || hasAssign {
+		return scopes
+	}
+	extended := make([]AgentTokenScope, len(scopes), len(scopes)+1)
+	copy(extended, scopes)
+	return append(extended, ScopeAgentSAAssign)
 }
 
 // agentScopesToPermissionIDs maps agent JWT token scopes to canonical
-// permission IDs by looking up each scope in the permissions registry, plus
-// — for a scopeSchema-0 token only — any permission a scope grants under
-// legacyAgentScopeGrants.
-func agentScopesToPermissionIDs(scopes []AgentTokenScope, scopeSchema int) []string {
+// permission IDs by looking up each scope in the permissions registry. It is
+// a pure registry lookup with no compatibility logic of its own — callers
+// evaluating an agent's actual authority must pass effectiveAgentScopes(agent)
+// rather than agent.Scopes() so the ptone/scion#2339 compatibility rule is
+// applied exactly once, upstream of this function.
+func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 	scopeSet := make(map[string]bool, len(scopes))
 	for _, s := range scopes {
 		scopeSet[string(s)] = true
 	}
 	seen := make(map[string]bool)
 	var ids []string
-	addID := func(id string) {
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
 	for _, p := range permissions.Registry {
 		for _, s := range p.AgentScopes {
 			if scopeSet[s] {
-				addID(p.ID)
+				if !seen[p.ID] {
+					seen[p.ID] = true
+					ids = append(ids, p.ID)
+				}
 				break
-			}
-		}
-	}
-	if scopeSchema == 0 {
-		for scope, legacyIDs := range legacyAgentScopeGrants {
-			if !scopeSet[string(scope)] {
-				continue
-			}
-			for _, id := range legacyIDs {
-				addID(id)
 			}
 		}
 	}
@@ -1266,15 +1275,15 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 }
 
 // agentScopeRestriction builds a kernel Restriction from agent JWT token
-// scopes. Only permissions the agent's scopes grant are allowed — computed
-// via agentScopesToPermissionIDs, the same function step 5b's synthetic
-// binding uses, so a permission agentScopesToPermissionIDs grants (including
-// a scopeSchema-0 token's legacyAgentScopeGrants compatibility grant,
-// ptone/scion#2339) can never be immediately taken back by this restriction
-// evaluating a separate, undated copy of the same scope-to-permission
-// mapping.
+// scopes. Only permissions the agent's effective scopes grant are allowed —
+// computed via effectiveAgentScopes + agentScopesToPermissionIDs, the same
+// pipeline step 5b's synthetic binding uses, so a permission one of them
+// grants (including a legacy pre-split token's effectiveAgentScopes
+// compatibility grant, ptone/scion#2339) can never be immediately taken back
+// by this restriction evaluating a separate, stale copy of the same
+// scope-to-permission mapping.
 func agentScopeRestriction(agent AgentIdentity) Restriction {
-	scopes := agent.Scopes()
+	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {
 		// No scopes: deny everything (fail closed).
 		return Restriction{
@@ -1283,7 +1292,7 @@ func agentScopeRestriction(agent AgentIdentity) Restriction {
 		}
 	}
 	allowed := make(map[string]struct{})
-	for _, id := range agentScopesToPermissionIDs(scopes, agentScopeSchema(agent)) {
+	for _, id := range agentScopesToPermissionIDs(scopes) {
 		allowed[id] = struct{}{}
 	}
 	return Restriction{

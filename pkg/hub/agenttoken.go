@@ -57,11 +57,10 @@ const (
 	// ScopeAgentSAAssign allows the agent to assign a GCP service account to
 	// an agent within the same project. Split from ScopeAgentCreate
 	// (ptone/scion#2339) so the two permissions are granted and checked
-	// independently: agentScopesToPermissionIDs (authz.go) maps this scope to
-	// gcp_service_account.assign, and also maps ScopeAgentCreate to the same
-	// permission for a JWT minted with the combined scope before the split,
-	// so an already-issued token keeps authorizing what it did when it was
-	// minted until it next refreshes onto the split scopes.
+	// independently. A JWT minted with the combined ScopeAgentCreate before
+	// the split keeps authorizing gcp_service_account.assign until it next
+	// refreshes onto the split scopes — see effectiveAgentScopes (authz.go)
+	// and CurrentAgentScopeSchema.
 	ScopeAgentSAAssign AgentTokenScope = "project:agent:sa_assign"
 	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same project.
 	ScopeAgentLifecycle AgentTokenScope = "project:agent:lifecycle"
@@ -94,24 +93,31 @@ const (
 )
 
 // CurrentAgentScopeSchema is stamped onto every agent JWT this hub mints or
-// refreshes, so a token's scope list can be told apart from one minted under
-// an earlier, coarser scope vocabulary without inspecting the scopes
-// themselves. It increments only when a permission moves off a shared scope
-// onto its own (ptone/scion#2339 is schema 1: gcp_service_account.assign
-// gets project:agent:sa_assign instead of sharing project:agent:create).
+// refreshes (AgentTokenClaims.ScopeSchema), so a verified token's wire form
+// records which scope vocabulary it was minted under. It increments only
+// when a permission moves off a shared scope onto its own (ptone/scion#2339
+// is schema 1: gcp_service_account.assign gets project:agent:sa_assign
+// instead of sharing project:agent:create).
 //
-// AgentTokenClaims.ScopeSchema is 0 (its Go zero value, also absent from the
-// wire form via omitempty) on any token minted before this field existed.
-// agentScopesToPermissionIDs treats schema 0 as "apply every scope grant
-// this hub has ever combined into another scope," so a token minted before
-// a split keeps authorizing what it authorized when it was minted. Schema
-// 0 must never be treated as "unrestricted" or "current" — it names a
-// specific, ambiguous-by-omission history, not a missing restriction.
+// ScopeSchema itself is metadata only — nothing branches on its value
+// directly. The decision of whether a token predates a given split lives in
+// AgentTokenClaims.legacyScopeSchema (authz.go's effectiveAgentScopes), an
+// unexported field ValidateAgentToken sets, and only ValidateAgentToken
+// sets, when a verified token's wire form carries no scope_schema claim
+// (ScopeSchema reads as its Go zero value, 0, because GenerateAgentToken —
+// the only agent-JWT minter — has always stamped a nonzero value since this
+// field existed, so a verified 0 can only mean "minted before the field
+// existed"). Every in-process AgentTokenClaims built directly as a Go
+// literal — every stored-record identity, scheduled-dispatch creator
+// identity, and synthetic secret-resolution identity among them — leaves
+// legacyScopeSchema at its own zero value (false) and so is NEVER read as
+// legacy, regardless of what its Scopes list contains: only a value that
+// came out of ValidateAgentToken can be legacy.
 //
-// The zero-schema compatibility grants in agentScopesToPermissionIDs may be
-// deleted once no unexpired token can still carry schema 0: DefaultAgentTokenDuration
-// after CurrentAgentScopeSchema was introduced, since every agent refreshes
-// (or is re-minted) within one token lifetime.
+// legacyScopeSchema's effect may be deleted once no unexpired token can
+// still predate CurrentAgentScopeSchema: the configured agent token
+// lifetime (AgentTokenConfig.TokenDuration) after this change deploys,
+// since every agent refreshes (or is re-minted) within one token lifetime.
 const CurrentAgentScopeSchema = 1
 
 // AgentTokenClaims represents the custom claims in an agent JWT.
@@ -121,8 +127,18 @@ type AgentTokenClaims struct {
 	Scopes    []AgentTokenScope `json:"scopes,omitempty"`
 	Ancestry  []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
 	// ScopeSchema records which scope vocabulary Scopes was minted under.
-	// See CurrentAgentScopeSchema.
+	// See CurrentAgentScopeSchema. Metadata only; see legacyScopeSchema for
+	// the field that actually gates compatibility behavior.
 	ScopeSchema int `json:"scope_schema,omitempty"`
+	// legacyScopeSchema is set only by ValidateAgentToken, and only when the
+	// verified token's wire form carries no scope_schema claim. It is
+	// deliberately unexported (so it is never part of the wire format and
+	// can never be set by unmarshaling untrusted input) and deliberately
+	// never set by any direct construction of this struct — see
+	// CurrentAgentScopeSchema's doc comment for why that is the safe
+	// default. Read via authz.go's effectiveAgentScopes /
+	// isLegacyPreSplitAgentJWT, never directly.
+	legacyScopeSchema bool
 }
 
 // AgentTokenConfig holds configuration for agent token generation.
@@ -310,6 +326,17 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 
 	if err := claims.Validate(expected); err != nil {
 		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+
+	// A verified token whose wire form carried no scope_schema claim (reads
+	// as the Go zero value, 0) predates CurrentAgentScopeSchema entirely:
+	// GenerateAgentToken has always stamped a nonzero schema since the field
+	// existed, and this method only returns claims that passed HS256
+	// verification against this hub's own signing key, so no other signer's
+	// output reaches this line. This is the one place legacyScopeSchema is
+	// ever set — see CurrentAgentScopeSchema's doc comment.
+	if claims.ScopeSchema == 0 {
+		claims.legacyScopeSchema = true
 	}
 
 	return &claims, nil

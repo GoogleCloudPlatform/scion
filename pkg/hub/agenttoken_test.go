@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,13 +48,11 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 }
 
 // TestAgentTokenService_ScopeSchemaStampedOnEveryToken pins ptone/scion#2339's
-// compatibility discriminator: every token this service mints or re-mints
-// (a refresh is just another call to GenerateAgentToken with the agent's
-// current role scopes) carries the current scope schema, so
-// agentScopesToPermissionIDs can tell a freshly (re)issued token apart from
-// one minted before AgentTokenClaims.ScopeSchema existed. It also pins that
-// AgentRoleFull's scope bundle carries both the agent-create and the
-// service-account-assign agent scopes, so a role=full agent keeps both
+// compatibility metadata: every token this service mints or re-mints (a
+// refresh is just another call to GenerateAgentToken with the agent's
+// current role scopes) carries the current scope schema on the wire. It also
+// pins that AgentRoleFull's scope bundle carries both the agent-create and
+// the service-account-assign agent scopes, so a role=full agent keeps both
 // permissions once its token is next minted or refreshed.
 func TestAgentTokenService_ScopeSchemaStampedOnEveryToken(t *testing.T) {
 	service, err := NewAgentTokenService(AgentTokenConfig{
@@ -71,6 +70,53 @@ func TestAgentTokenService_ScopeSchemaStampedOnEveryToken(t *testing.T) {
 		"a freshly (re)generated token must carry the current scope schema")
 	assert.Contains(t, claims.Scopes, ScopeAgentCreate)
 	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign)
+}
+
+// TestAgentTokenService_ValidateAgentToken_LegacyRoundTrip pins the
+// wire-level discriminator: ValidateAgentToken reads a verified token that
+// carries no scope_schema claim as a legacy pre-split token, and a verified
+// token stamped with the current schema as not legacy. GenerateAgentToken is
+// the only production minter and always stamps the current schema, so the
+// "no claim" case is constructed directly here, using the service's own
+// signer instead of GenerateAgentToken, to simulate a genuine token signed
+// before AgentTokenClaims.ScopeSchema existed.
+func TestAgentTokenService_ValidateAgentToken_LegacyRoundTrip(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	now := time.Now()
+	legacyClaims := AgentTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    AgentTokenIssuer,
+			Subject:   "legacy-agent",
+			Audience:  jwt.Audience{AgentTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+		ProjectID: "proj-legacy",
+		Scopes:    []AgentTokenScope{ScopeAgentCreate},
+		// ScopeSchema is deliberately left unset (its zero value, omitted
+		// from the wire via omitempty), simulating a token signed before
+		// this field existed.
+	}
+	legacyToken, err := jwt.Signed(service.signer).Claims(legacyClaims).Serialize()
+	require.NoError(t, err)
+
+	legacyParsed, err := service.ValidateAgentToken(legacyToken)
+	require.NoError(t, err)
+	assert.True(t, isLegacyPreSplitAgentJWT(&agentIdentityWrapper{legacyParsed}),
+		"a verified token with no scope_schema claim must read as a legacy pre-split token")
+
+	currentToken, err := service.GenerateAgentToken("current-agent", "proj-current", []AgentTokenScope{ScopeAgentCreate}, nil)
+	require.NoError(t, err)
+	currentParsed, err := service.ValidateAgentToken(currentToken)
+	require.NoError(t, err)
+	assert.False(t, isLegacyPreSplitAgentJWT(&agentIdentityWrapper{currentParsed}),
+		"a freshly minted token must never read as a legacy pre-split token")
 }
 
 func TestAgentTokenService_DefaultScopes(t *testing.T) {

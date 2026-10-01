@@ -337,13 +337,21 @@ func (a *AuthzService) canDelegateAgent(ctx context.Context, actor Identity, gra
 
 // canAgentDelegateToAgent checks that an agent creating a sub-agent holds
 // at least the scopes being delegated.
+//
+// Compares against effectiveAgentScopes(agentActor), not agentActor.Scopes()
+// directly, so a genuine pre-split hub JWT (ptone/scion#2339) is judged by
+// what it actually authorizes today, the same answer buildAgentSyntheticBindings
+// and agentScopeRestriction give it — otherwise a schema-0 Full-role token,
+// which still carries the pre-split 10-scope list, would fail to delegate
+// Full (ScopesForRole(Full) now lists 11 scopes) until the token's next
+// refresh, a real loss of authority the compatibility rule exists to avoid.
 func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant GrantDescriptor) Decision {
 	// Resolve the requested role to scopes.
 	requestedRole := AgentRole(grant.AgentRole)
 	requestedScopes := ScopesForRole(requestedRole)
 	requestedScopes = append(requestedScopes, grant.AgentScopes...)
 
-	actorScopes := agentActor.Scopes()
+	actorScopes := effectiveAgentScopes(agentActor)
 	actorScopeSet := make(map[AgentTokenScope]bool, len(actorScopes))
 	for _, s := range actorScopes {
 		actorScopeSet[s] = true
