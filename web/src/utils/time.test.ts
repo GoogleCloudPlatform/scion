@@ -56,6 +56,40 @@ describe('isValidTimeZone', () => {
     expect(() => isValidTimeZone('💥')).not.toThrow();
     expect(isValidTimeZone('💥')).toBe(false);
   });
+
+  // tz-refactor task 12 review round 1, R1-3: isValidTimeZone must agree
+  // with the server's validator (Go's time.LoadLocation), which Intl alone
+  // is looser than in these ways.
+  it('rejects names that differ from Intl only by case', () => {
+    expect(isValidTimeZone('asia/tokyo')).toBe(false);
+    expect(isValidTimeZone('utc')).toBe(false);
+    expect(isValidTimeZone('Utc')).toBe(false);
+  });
+
+  it('rejects numeric offset IDs', () => {
+    expect(isValidTimeZone('+05:30')).toBe(false);
+    expect(isValidTimeZone('-07:00')).toBe(false);
+  });
+
+  it('still accepts genuine aliases that resolve to a different (not just differently-cased) name', () => {
+    // Asia/Kathmandu -> Asia/Katmandu, Asia/Calcutta -> Asia/Calcutta,
+    // Europe/Kyiv -> Europe/Kiev: real IANA names the server's
+    // time.LoadLocation also accepts, so the client must not be stricter.
+    expect(isValidTimeZone('Asia/Kathmandu')).toBe(true);
+    expect(isValidTimeZone('Asia/Katmandu')).toBe(true);
+    expect(isValidTimeZone('Asia/Calcutta')).toBe(true);
+    expect(isValidTimeZone('Europe/Kyiv')).toBe(true);
+    expect(isValidTimeZone('Europe/Kiev')).toBe(true);
+  });
+
+  it('rejects tzdata names that are not a portable IANA zone, matching the server denylist', () => {
+    // Intl.DateTimeFormat already throws for all four, so no explicit
+    // denylist is needed on the client side — this just locks that in.
+    expect(isValidTimeZone('Local')).toBe(false);
+    expect(isValidTimeZone('localtime')).toBe(false);
+    expect(isValidTimeZone('posixrules')).toBe(false);
+    expect(isValidTimeZone('Factory')).toBe(false);
+  });
 });
 
 describe('listTimeZones', () => {
@@ -81,9 +115,10 @@ describe('listTimeZones', () => {
   });
 
   it('every returned name is itself valid per isValidTimeZone', () => {
+    // Cross-consistency between the two helpers: every name listTimeZones()
+    // returns (400+ of them) must itself pass isValidTimeZone, including
+    // under R1-3's stricter case/offset rules.
     const zones = listTimeZones();
-    // Bound the check: the full list is large (400+), and the point of this
-    // test is cross-consistency between the two helpers, not performance.
     for (const zone of zones) {
       expect(isValidTimeZone(zone)).toBe(true);
     }

@@ -57,21 +57,43 @@ export function browserTimeZone(): string {
 }
 
 /**
- * Reports whether `zone` is a time zone name `Intl` accepts (e.g. an IANA
- * name such as "Asia/Tokyo", or "UTC").
+ * Reports whether `zone` is a time zone name the server-side resolver
+ * (Go's `time.LoadLocation`, used for `agent_defaults.default_timezone` and
+ * the per-user display-timezone preference) would also accept.
  *
  * This is the one place in the web app allowed to probe `Intl.DateTimeFormat`
  * for this purpose; every zone-name check elsewhere should call this
  * function instead of constructing its own `Intl.DateTimeFormat`.
+ *
+ * `Intl.DateTimeFormat` alone is looser than `time.LoadLocation` in two ways
+ * this function corrects, so the two validators agree (tz-refactor task 12
+ * review round 1, R1-3):
+ * - **Case.** `Intl` matches zone names case-insensitively (`asia/tokyo`,
+ *   `utc` both resolve), `time.LoadLocation` does not. Rejected by checking
+ *   whether `resolvedOptions().timeZone` matches `zone` case-insensitively
+ *   but not exactly — which still *accepts* a genuine alias such as
+ *   "Asia/Kathmandu" (resolves to "Asia/Katmandu": a different string, not a
+ *   same-string case variant).
+ * - **Offsets.** `Intl` accepts numeric offset IDs like "+05:30" (and
+ *   resolves them to themselves, so the case check above would not catch
+ *   them); `time.LoadLocation` rejects them. Rejected explicitly.
+ *
+ * It also rejects tzdata's own non-portable names ("Local", "localtime",
+ * "posixrules", "Factory") the same way the server's denylist does, but
+ * needs no explicit list for them: `Intl.DateTimeFormat` already throws for
+ * all four.
  */
 export function isValidTimeZone(zone: string): boolean {
   if (!zone) return false;
+  if (zone.startsWith('+') || zone.startsWith('-')) return false;
+  let resolved: string;
   try {
-    new Intl.DateTimeFormat('en', { timeZone: zone });
-    return true;
+    resolved = new Intl.DateTimeFormat('en', { timeZone: zone }).resolvedOptions().timeZone;
   } catch {
     return false;
   }
+  if (resolved !== zone && resolved.toLowerCase() === zone.toLowerCase()) return false;
+  return true;
 }
 
 /**
