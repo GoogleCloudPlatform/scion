@@ -296,52 +296,16 @@ type localAncestryProvenanceIdentity interface {
 	localAncestryProvenance() ancestryProvenance
 }
 
-// isNilIdentity reports whether identity is nil at the interface level, or is
-// a non-nil Identity interface value holding a nil pointer of one of the
-// concrete identity types this package classifies. The distinction matters
-// because a typed-nil interface — for example an Identity holding
-// (*ScopedUserIdentity)(nil) — is never == nil, yet a type assertion or type
-// switch against it still succeeds with a nil concrete value; calling a
-// method or reading a field on that value then dereferences a nil pointer.
-// Every classifier in this package (principalContextForIdentity,
+// isNilIdentity (scheduled_initiator.go) reports whether identity is nil at
+// the interface level, or is a non-nil Identity interface value holding a
+// nil concrete pointer — for example an Identity holding
+// (*ScopedUserIdentity)(nil), which is never == nil even though a type
+// assertion or type switch against it succeeds with a nil concrete value and
+// a method call or field read on that value then dereferences a nil
+// pointer. Every classifier in this package (principalContextForIdentity,
 // credentialContextForIdentity, AncestryIsHubAttested) and decide's entry
-// check must treat that case identically to a nil interface, before doing
+// check treats that case identically to a nil interface, before doing
 // anything else with identity.
-//
-// The concrete set enumerated here is the same closed set tracked by
-// identityInventoryExpectation (identity_classification_test.go); a new
-// production Identity type needs a case here as well as a row there.
-func isNilIdentity(identity Identity) bool {
-	if identity == nil {
-		return true
-	}
-	switch v := identity.(type) {
-	case *AuthenticatedUser:
-		return v == nil
-	case *ScopedUserIdentity:
-		return v == nil
-	case *DevUser:
-		return v == nil
-	case *agentIdentityWrapper:
-		return v == nil
-	case *storedAgentIdentity:
-		return v == nil
-	case *peerAgentIdentity:
-		return v == nil
-	case *explainAgentIdentity:
-		return v == nil
-	case *brokerIdentityImpl:
-		return v == nil
-	case *FederatedUserIdentity:
-		return v == nil
-	case *FederatedAgentIdentity:
-		return v == nil
-	case *FederatedServiceIdentity:
-		return v == nil
-	default:
-		return false
-	}
-}
 
 // AncestryIsHubAttested returns true when the identity's ancestry chain has
 // recognized local provenance: signed by this hub (agent JWT) or persisted
