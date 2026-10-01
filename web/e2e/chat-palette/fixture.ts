@@ -90,11 +90,12 @@ document.documentElement.setAttribute('data-theme', 'light');
 const params = new URLSearchParams(location.search);
 window.history.replaceState({}, '', params.get('route') || '/chat');
 
-// Server-injected feature flags, exactly as main.ts would set them from the
-// Go template. Defaults on for this fixture; a test that needs the "flag
-// off" (v1) case navigates to fixture.html?v2=0 instead — isV2 is captured
-// once at construction, so it must be set before the page element is
-// created.
+// Pinned feature flags, written before boot as an E2E init script would
+// (boot's applyServerFeatureFlags() in server-feature-flags.ts writes the
+// same bag via setFeatureFlag). Defaults on for this fixture; a test that
+// needs the "flag off" (v1) case navigates to fixture.html?v2=0 instead —
+// isV2 is captured once at construction, so it must be set before the page
+// element is created.
 window.__SCION_FEATURES__ = {
   'web.native_chat_v2': params.get('v2') !== '0',
 };
