@@ -685,6 +685,56 @@ func TestAsyncCreate_KeepaliveAbortDuringStart_CancelsAndCleansUp(t *testing.T) 
 	}
 }
 
+// TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart
+// covers a keepalive answer ending the launch while the claim itself is
+// still blocked retrying against an unreachable Hub (the keepalive starts
+// before the claim, design §3.8.5's F-18 fix, so its answers can end the
+// launch before the claim ever gets through): Manager.Start must never run,
+// and the claim's own retry loop must not keep it blocked until ctx'
+// expires and reports a separate failed{hub_unreachable}.
+func TestAsyncCreate_KeepaliveAbortWhileClaimUnreachable_CleansUpWithoutStart(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	keepalives := 0
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return nil, errors.New("simulated unreachable")
+		}
+		mu.Lock()
+		keepalives++
+		n := keepalives
+		mu.Unlock()
+		if n == 1 {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-keepalive-abort-unreachable-claim", "asyncLaunch": true,
+		"launchId":             "L-keepalive-abort-unreachable-claim",
+		"launchTimeoutSeconds": 300, "launchKeepaliveSeconds": 1,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 5*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected a keepalive abort to trigger CleanupLaunch while the claim was still unreachable")
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the keepalive ends the launch before the claim gets through, got %d calls", n)
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a keepalive-triggered abort must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
 // --- B-3: a claim blocked by an unreachable Hub retries until ctx' expires,
 // then sends failed{hub_unreachable}. ---
 
@@ -730,6 +780,42 @@ func TestAsyncCreate_ClaimUnreachableUntilDeadline_SendsHubUnreachable(t *testin
 	mu.Unlock()
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must never be called when the claim never got through, got %d calls", n)
+	}
+}
+
+// TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal covers a local
+// stop/delete (launchRegistry.CancelLocal) waking a claim that is still
+// blocked on an unreachable Hub: the Hub already knows, or will
+// independently learn, that this launch is over, so this must not be
+// reported as failed{hub_unreachable} the way a real ctx' deadline is.
+func TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return nil, errors.New("simulated unreachable")
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-cancel-local", "asyncLaunch": true, "launchId": "L-cancel-local",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, time.Second, func() bool { return len(rtb.getLaunchReports()) >= 1 }) {
+		t.Fatal("expected at least one claim attempt")
+	}
+	srv.launchRegistry.CancelLocal(launchKey{Slug: "agent-cancel-local"})
+
+	time.Sleep(200 * time.Millisecond) // let runLaunch observe the cancellation
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("a locally cancelled claim must send no terminal, got %+v", r.Report)
+		}
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called after a locally cancelled claim, got %d calls", n)
 	}
 }
 
