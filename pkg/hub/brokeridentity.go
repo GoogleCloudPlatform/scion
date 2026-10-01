@@ -67,10 +67,10 @@ type brokerIdentityContextKey struct{}
 // present. The type assertions below report ok=true for a stored value whose
 // concrete type implements BrokerIdentity even when that concrete pointer is
 // nil (a typed nil), because a type assertion checks the dynamic type, not
-// nilness. BrokerIdentity embeds Identity (brokeridentity.go), so isNilIdentity
-// applies directly: each branch treats that case the same as nothing being
-// stored, so callers comparing the result with == nil see a real nil
-// interface instead of a non-nil interface wrapping a nil pointer.
+// nilness. BrokerIdentity embeds Identity, so isNilIdentity applies directly:
+// each branch treats that case the same as nothing being stored, so callers
+// comparing the result with == nil see a real nil interface instead of a
+// non-nil interface wrapping a nil pointer.
 func GetBrokerIdentityFromContext(ctx context.Context) BrokerIdentity {
 	if identity, ok := ctx.Value(brokerIdentityContextKey{}).(BrokerIdentity); ok && !isNilIdentity(identity) {
 		return identity

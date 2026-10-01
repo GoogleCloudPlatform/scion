@@ -51,14 +51,7 @@ func requireNoNilDereference(t *testing.T, msg string, fn func()) {
 // must normalize to a true nil interface, for the dedicated broker-identity
 // key and for the generic identity key.
 func TestGetBrokerIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
-	// typedNil is a non-nil BrokerIdentity interface value holding a nil
-	// *brokerIdentityImpl pointer — not a nil interface. staticcheck (SA4023)
-	// flags a direct typedNil != nil comparison right after this assignment as
-	// "always true", since it can see the concrete type is non-nil; that is
-	// exactly the typed-nil property under test here, so there is no separate
-	// self-check assertion for it (see also contextWithBrokerIdentity and
-	// contextWithIdentity below, which both take it as a BrokerIdentity
-	// parameter — the same typed-nil shape the production code receives).
+	// typedNil is a non-nil interface value holding a nil *brokerIdentityImpl.
 	var typedNil BrokerIdentity = (*brokerIdentityImpl)(nil)
 
 	t.Run("brokerIdentityContextKey", func(t *testing.T) {
@@ -82,13 +75,17 @@ func TestGetBrokerIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 	})
 }
 
-// TestBrokerOnBehalfOfAuthorizes_TypedNilBrokerDenied covers the ctx broker
-// identity branch: a context carrying a typed-nil BrokerIdentity under the
-// broker-identity key must deny before reaching the ctx broker's ID() call
-// later in the function. A valid OBO marker is installed so that, absent the
-// guard, evaluation would proceed past the Type() call (which does not
-// dereference the receiver and so would not itself fail) into the
-// obo.BrokerID != broker.ID() comparison, which does.
+// TestBrokerOnBehalfOfAuthorizes_TypedNilBrokerDenied pins the ctx broker
+// identity path end to end, getter plus guard together: a context carrying a
+// typed-nil BrokerIdentity under the broker-identity key must deny before
+// reaching the ctx broker's ID() call later in the function. The guard at
+// that call site reads its value through GetBrokerIdentityFromContext, which
+// normalizes a typed nil first, so the guard alone is not reachable by a
+// typed nil through this path; it stays as defense in depth, and this test
+// exercises the getter and the guard as a pair. A valid OBO marker is
+// installed so that, absent both, evaluation would proceed past the Type()
+// call (which does not dereference the receiver and so would not itself
+// fail) into the obo.BrokerID != broker.ID() comparison, which does.
 func TestBrokerOnBehalfOfAuthorizes_TypedNilBrokerDenied(t *testing.T) {
 	ctx := contextWithBrokerIdentity(context.Background(), (*brokerIdentityImpl)(nil))
 	ctx = contextWithBrokerOnBehalfOf(ctx, BrokerOnBehalfOf{
