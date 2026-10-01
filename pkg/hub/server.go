@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -1047,6 +1048,20 @@ type Server struct {
 	// protection. Set once in New and read without the lock; nil-safe.
 	mentionPairLimiter *mentionPairLimiter
 
+	// Independent token-bucket limiters for the agent-keys operation
+	// (task 2.2, .design/agent-keys-contract.md "Concrete defaults"):
+	// keysPrincipalLimiter is keyed per authenticated principal+project,
+	// keysTargetLimiter is keyed per target agent. Both must allow a
+	// request; they are separate from chatSendLimiter's aggregate DM
+	// allowance (keys must not charge or evade it) and are shared by the
+	// /keys routes and the temporary raw bridge (task 2.3) alike. Set once
+	// in New and read without the lock; nil-safe. In-memory and per-Hub
+	// instance, not a distributed quota service (contract §5): N Hub
+	// replicas behind a load balancer allow N times the configured rate in
+	// aggregate, and a Hub restart resets both buckets to full.
+	keysPrincipalLimiter *keysRateLimiter
+	keysTargetLimiter    *keysRateLimiter
+
 	// In-memory idempotency cache for chat message sends (#1055).
 	// Keyed by senderID:idempotencyKey with a 5-minute TTL.
 	chatIdempotency *ChatIdempotencyCache
@@ -1381,6 +1396,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Per-pair agent mention loop/storm protection.
 	srv.mentionPairLimiter = newMentionPairLimiter()
+
+	// Agent-keys admission rate limiters (task 2.2, contract "Concrete
+	// defaults"): 5 req/s burst 10 per principal+project, 10 req/s burst 20
+	// per target.
+	srv.keysPrincipalLimiter = newKeysRateLimiter(agentkeys.PrincipalProjectRateLimit, agentkeys.PrincipalProjectBurst)
+	srv.keysTargetLimiter = newKeysRateLimiter(agentkeys.TargetRateLimit, agentkeys.TargetBurst)
 
 	ctx := context.Background()
 
