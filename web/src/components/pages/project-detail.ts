@@ -1537,18 +1537,22 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * A single place to react to a failed `view-change` request while paged
-   * (round 5 review N1''''): the stored cursors were minted under the
-   * previous phase/dir/label and would 400 if replayed under the new,
-   * now-current params (design §4.4), regardless of *how* the request
-   * failed — a network error, a non-OK response on the sorted (fit) path,
-   * or a fallback legacy request that itself fails after a 422. Called from
-   * every one of those failure branches in `loadAgentsForViewImpl` and
-   * `loadLegacyAgentsImpl`. A no-op for any trigger other than
-   * `view-change` (a label-commit reverts `committedLabel` instead, which
-   * keeps the old cursors correctly bound) or when the window isn't paged.
+   * A single place to react to any failed agents-load request, regardless
+   * of *how* it failed (a network error or a non-OK response) or which of
+   * the two request paths (sorted/fit or legacy) hit it. A label commit
+   * reverts `committedLabel` to its pre-commit value, so a rejected label
+   * is not kept re-sent on the next request. A view-change clears the
+   * paged window's navigation, since the stored cursors were minted under
+   * the previous phase/dir/label and would 400 if replayed under the new,
+   * now-current params (design §4.4) — this also covers a fallback legacy
+   * request that itself fails after a 422. Called from every failure exit
+   * of `loadAgentsForViewImpl` and `loadLegacyAgentsImpl`. A page-load or
+   * lifecycle-refresh trigger has nothing to revert or invalidate here.
    */
-  private onViewChangeFailed(trigger: AgentsViewTrigger): void {
+  private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
+    if (trigger === 'label-commit') {
+      this.committedLabel = this.labelBeforeCommit;
+    }
     if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
       this.agentWindow.invalidateCursors();
     }
@@ -1595,7 +1599,7 @@ export class ScionPageProjectDetail extends LitElement {
     } catch (err) {
       if (this.isAbortError(err)) return; // superseded by a later trigger.
       console.warn('Failed to load agents:', err);
-      this.onViewChangeFailed(trigger); // round 5 review N1'''': a network error, not just a non-OK response.
+      this.onAgentsLoadFailed(trigger);
       return;
     }
     if (this.isStaleAgentsLoad(gen)) return;
@@ -1610,15 +1614,12 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     if (!response.ok) {
-      if (trigger === 'label-commit') {
-        this.committedLabel = this.labelBeforeCommit; // N3: don't keep re-sending a rejected label.
-      }
       if (trigger === 'page-load') {
         this.agents = [];
         this.agentScopeCapabilities = undefined;
         this.listViewUsesWindow = false;
       }
-      this.onViewChangeFailed(trigger);
+      this.onAgentsLoadFailed(trigger);
       // Other triggers keep the previous data (design §6.3 N2).
       return;
     }
@@ -1695,21 +1696,18 @@ export class ScionPageProjectDetail extends LitElement {
         this.listViewUsesWindow = false;
       }
       console.warn('Failed to load agents:', err);
-      this.onViewChangeFailed(trigger); // round 5 review N1'''': the 422-then-legacy-failure path.
+      this.onAgentsLoadFailed(trigger);
       return;
     }
     if (this.isStaleAgentsLoad(gen)) return;
 
     if (!response.ok) {
-      if (trigger === 'label-commit') {
-        this.committedLabel = this.labelBeforeCommit; // N3
-      }
       if (trigger === 'page-load') {
         this.agents = [];
         this.agentScopeCapabilities = undefined;
         this.listViewUsesWindow = false;
       }
-      this.onViewChangeFailed(trigger);
+      this.onAgentsLoadFailed(trigger);
       // Other triggers keep the previous data, with today's client label
       // filter applied to it (design §6.3 N2).
       return;

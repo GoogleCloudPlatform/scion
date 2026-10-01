@@ -881,15 +881,21 @@ describe('AgentListWindow — round 5 review fixes', () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
     const page0Again = [agent('e', { phase: 'stopped' }), agent('f', { phase: 'stopped' })];
+    const page1Again = [agent('g', { phase: 'stopped' }), agent('h', { phase: 'stopped' })];
     const fetchPage = vi.fn(async (params: { cursor?: string }) => {
       if (!params.cursor) {
         // The second cursor-free call simulates the server now answering
         // under the new (post-view-change) params.
         return fetchPage.mock.calls.length <= 1
           ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-          : pagedResult(page0Again, { nextCursor: undefined, totalCount: 2 });
+          : pagedResult(page0Again, { nextCursor: 'c1-new', totalCount: 4 });
       }
-      return pagedResult(page1, { totalCount: 4 });
+      if (params.cursor === 'c1') return pagedResult(page1, { totalCount: 4 });
+      // The fresh cursor minted by the page-0-again response: distinct from
+      // 'c1' (page 1's original, now-stale cursor), so a call with it
+      // proves `next()` is using the newly-minted one, not the old one.
+      if (params.cursor === 'c1-new') return pagedResult(page1Again, { totalCount: 4 });
+      throw new Error(`unexpected cursor: ${params.cursor}`);
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -923,8 +929,65 @@ describe('AgentListWindow — round 5 review fixes', () => {
 
     // A successful page-0 fetch mints a fresh cursor stack, so navigation
     // is restored without waiting for a brand-new setPaged.
-    expect(win.hasNext).toBe(false); // page0Again has no nextCursor
+    expect(win.hasNext).toBe(true); // page0Again has a (fresh) nextCursor
     expect(win.hasPrev).toBe(false); // page 0
     expect(win.updatesAvailable).toBe(false);
+
+    // Prove it's actually the *fresh* cursor, minted under the new params,
+    // not the stale one from before the invalidation.
+    await win.next();
+    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c1-new', limit: 2, wantStats: false });
+    expect(win.items.map((a) => a.id)).toEqual(['g', 'h']);
+  });
+});
+
+describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch', () => {
+  function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
+    return {
+      agents,
+      totalCount: agents.length,
+      stats: {
+        total: agents.length,
+        running: agents.filter((a) => a.phase === 'running').length,
+        agents: agents.map((a) => [a.id, a.phase]),
+      },
+      ...opts,
+    };
+  }
+
+  it('a page-0 fetch already in flight when the stack is invalidated must not re-validate it with a cursor minted under the old params', async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    let resolvePending!: (r: PagedPageResult) => void;
+    const pending = new Promise<PagedPageResult>((resolve) => {
+      resolvePending = resolve;
+    });
+    const fetchPage = vi.fn((params: { cursor?: string }) => {
+      if (!params.cursor) return pending; // the in-flight page-0 fetch below
+      return Promise.resolve(pagedResult(page1, { nextCursor: 'c1', totalCount: 4 }));
+    });
+    const { win } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(pagedResult(page0, { nextCursor: 'c1', totalCount: 4 }), '');
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+
+    // Start a page-0 fetch under the current (old) params; leave it pending.
+    const prevDone = win.prev();
+
+    // Meanwhile, a view-change elsewhere fails and invalidates the stack
+    // (the same call the host makes on a failed request while paged).
+    win.invalidateCursors();
+    expect(win.hasNext).toBe(false);
+
+    // The in-flight page-0 fetch — requested before the invalidation, and
+    // so carrying a cursor bound to the stale, pre-invalidation params —
+    // now lands.
+    resolvePending(pagedResult(page0, { nextCursor: 'c1-stale', totalCount: 4 }));
+    await prevDone;
+
+    // Its result must not re-validate the stack: a late response from a
+    // fetch started under now-obsolete params is exactly what the
+    // generation bump in invalidateCursors() is for.
+    expect(win.hasNext).toBe(false);
   });
 });

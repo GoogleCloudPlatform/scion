@@ -397,8 +397,7 @@ export class AgentListWindow extends EventTarget {
       if (index === 0) {
         // Page 0's request is always cursor-free, so it cannot mismatch; a
         // successful fetch mints `cursors[1]` fresh under the current
-        // params, which makes the whole stack valid again (round 5 review
-        // N2'''').
+        // params, which makes the whole stack valid again.
         this._cursorsValid = true;
       }
       this._updatesAvailable = false;
@@ -421,16 +420,26 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Clears paged navigation after a failed view-change request (round 4
-   * review N1'''): the stored cursors were minted under the previous
-   * phase/label/dir (design §4.4's cursor-binding contract) and would 400
-   * if replayed under the new, now-current params. `hasNext`/`hasPrev`
-   * report `false` until the next successful `setPaged()` mints a fresh
-   * cursor stack. A no-op in the small state, which has no cursors.
+   * Clears paged navigation after a failed view-change request: the stored
+   * cursors were minted under the previous phase/label/dir (design §4.4's
+   * cursor-binding contract) and would 400 if replayed under the new,
+   * now-current params. `hasNext`/`hasPrev` report `false` until the next
+   * successful `setPaged()` mints a fresh cursor stack. A no-op in the
+   * small state, which has no cursors.
+   *
+   * Also bumps `generation` and drops the loading flag, the same way
+   * `setPaged`/`setSmall` do: a window fetch can still be in flight when
+   * the triggering view-change fails, and if that fetch is a page-0
+   * request it would otherwise land afterward and re-validate the stack
+   * using a cursor minted under the params that were just invalidated. The
+   * generation bump makes that late response a no-op, so only a page-0
+   * fetch issued *after* this call can mark the stack valid again.
    */
   invalidateCursors(): void {
     if (this._state !== 'paged') return;
     this._cursorsValid = false;
+    this.generation++;
+    this._loading = false;
     this.notifyChange();
   }
 

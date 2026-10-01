@@ -1728,6 +1728,149 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
       expect(internals(el).agentWindow.error).toBeNull();
     });
+
+    it('a view-change that 422s, whose legacy fallback rejects with a NETWORK error, also invalidates cursors', async () => {
+      const projectId = 'p-legacy-network-error';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      let fail422NextSorted = false;
+      let failNextLegacy = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+            if (u.searchParams.get('sort')) {
+              u.searchParams.set('fit', '0'); // always paged when sorted
+              if (fail422NextSorted && !u.searchParams.has('cursor')) {
+                fail422NextSorted = false;
+                requests.push({ url: rawUrl });
+                return Promise.resolve(
+                  jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
+                );
+              }
+            } else if (failNextLegacy) {
+              failNextLegacy = false;
+              requests.push({ url: rawUrl });
+              return Promise.reject(new TypeError('Failed to fetch'));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      // Same as the 500 case above, but the legacy fallback's fetch itself
+      // rejects rather than resolving with a non-OK response — this
+      // exercises the legacy path's catch branch specifically, which a
+      // non-OK response never reaches.
+      fail422NextSorted = true;
+      failNextLegacy = true;
+      internals(el).setPhaseFilter('stopped');
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(false);
+      expect(internals(el).agentWindow.hasPrev).toBe(false);
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
+      expect(internals(el).agentWindow.error).toBeNull();
+    });
+  });
+
+  describe('a paged label commit that fails reverts the committed label on every failure path, not just a non-OK response', () => {
+    it('a label commit whose sorted request rejects with a NETWORK error reverts committedLabel, so Next does not send the new label against an old cursor', async () => {
+      const projectId = 'p-label-commit-network-error';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
+      );
+      const requests: AgentsRequest[] = [];
+      let failNextSorted = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (failNextSorted && !u.searchParams.has('cursor')) {
+              failNextSorted = false;
+              requests.push({ url: rawUrl });
+              return Promise.reject(new TypeError('Failed to fetch'));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).committedLabel).toBe('');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      // Commit a label; its request rejects with a network error. Without
+      // reverting committedLabel here (the gap this test closes), the next
+      // change would resend the new label bound to the cursor minted under
+      // the OLD (pre-commit) label and get a 400 (design §4.4).
+      failNextSorted = true;
+      const input = labelInput(el)!;
+      input.value = 'env=dev';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
+      expect(internals(el).agentWindow.state).toBe('paged'); // previous data kept
+      // A label-commit failure doesn't invalidate navigation the way a
+      // view-change failure does: the stored cursors are still correctly
+      // bound to the label that's back in effect (the empty one), so they
+      // remain usable.
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      // Exactly one legitimate request, bound to the reverted (empty)
+      // label, with no 400: this is what reverting committedLabel on a
+      // network error (not just a non-OK response) prevents from
+      // mismatching.
+      expect(requests.length).toBe(requestsBeforeNext + 1);
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.pageIndex).toBe(1);
+    });
   });
 
   describe("fit-path label 400 restores the previous committedLabel (round 1 review N3, round 2 N3')", () => {
