@@ -6067,6 +6067,29 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 	if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
 		t.Errorf("hubAgentDefaults().DefaultTimezone = %q after clearing, want \"\"", got)
 	}
+
+	// Re-dispatch: the handler test above already covers hubAgentDefaults()
+	// going back to "" after a clear, but that alone doesn't show dispatch
+	// itself stops injecting TZ (tz-refactor task 12 review round 2, R2-6).
+	agent2 := &store.Agent{
+		ID:              tid("tz-agent-filemode-cleared"),
+		Name:            "tz-agent-filemode-cleared",
+		Slug:            "tz-agent-filemode-cleared",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-filemode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test file-mode hub default tz after clear",
+			Profile:       "no-tz",
+		},
+	}
+	if err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
+		t.Fatalf("DispatchAgentCreate (after clear) failed: %v", err)
+	}
+	if _, ok := mockClient.lastCreateReq.ResolvedEnv["TZ"]; ok {
+		t.Errorf("TZ present in ResolvedEnv after clearing default_timezone, want absent: %q",
+			mockClient.lastCreateReq.ResolvedEnv["TZ"])
+	}
 }
 
 // TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ verifies that
