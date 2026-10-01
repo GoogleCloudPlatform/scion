@@ -64,7 +64,8 @@ func KeyFor(sort string, id string, created, updated, lastActivity time.Time) Ro
 }
 
 // Less reports whether a sorts strictly before b in the section-4.2 total
-// order for (sort, dir):
+// order for dir. The sort key is already folded into Row.K by KeyFor, so
+// only the direction is needed here:
 //
 //	updated: (K dir, created DESC, id DESC)
 //	created: (created dir, id DESC)      -- K == Created, so this falls out
@@ -74,7 +75,7 @@ func KeyFor(sort string, id string, created, updated, lastActivity time.Time) Ro
 // Ties are always broken by created DESC then id DESC, regardless of dir —
 // this is what makes both directions show ties in the same created-desc
 // order, matching today's client (design 4.2).
-func Less(sort, dir string, a, b Row) bool {
+func Less(dir string, a, b Row) bool {
 	if !a.K.Equal(b.K) {
 		if dir == Asc {
 			return a.K.Before(b.K)
@@ -89,20 +90,21 @@ func Less(sort, dir string, a, b Row) bool {
 
 // Compare returns -1 if a sorts before b, 1 if after, 0 if the tuples are
 // identical (which, since ID is a unique key, only happens for a == b).
-func Compare(sort, dir string, a, b Row) int {
-	if Less(sort, dir, a, b) {
+func Compare(dir string, a, b Row) int {
+	if Less(dir, a, b) {
 		return -1
 	}
-	if Less(sort, dir, b, a) {
+	if Less(dir, b, a) {
 		return 1
 	}
 	return 0
 }
 
-// SortRows sorts rows in place into the section-4.2 total order for (sort,
-// dir). It is used by the project endpoint, which reads its candidate set
-// unordered (bounded by the candidate ceiling) and positions it in Go rather
-// than in SQL (design lists-graph.md 5.3).
-func SortRows(sortKey, dir string, rows []Row) {
-	stdsort.Slice(rows, func(i, j int) bool { return Less(sortKey, dir, rows[i], rows[j]) })
+// SortRows sorts rows in place into the section-4.2 total order for dir
+// (rows must come from KeyFor with a single sort key). It is used by the
+// project endpoint, which reads its candidate set unordered (bounded by the
+// candidate ceiling) and positions it in Go rather than in SQL (design
+// lists-graph.md 5.3).
+func SortRows(dir string, rows []Row) {
+	stdsort.Slice(rows, func(i, j int) bool { return Less(dir, rows[i], rows[j]) })
 }

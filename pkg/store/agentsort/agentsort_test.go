@@ -68,10 +68,10 @@ func TestLess_TiesAlwaysCreatedDescIDDesc(t *testing.T) {
 	for _, dir := range []string{Asc, Desc} {
 		// B has the later created time, so under "created DESC" B sorts
 		// before A, regardless of dir.
-		if !Less(dir, dir, b, a) {
+		if !Less(dir, b, a) {
 			t.Errorf("dir=%s: want b before a (created desc tiebreak)", dir)
 		}
-		if Less(dir, dir, a, b) {
+		if Less(dir, a, b) {
 			t.Errorf("dir=%s: want NOT a before b", dir)
 		}
 	}
@@ -83,10 +83,10 @@ func TestLess_IDDescTiebreakWhenCreatedAlsoTies(t *testing.T) {
 	a := Row{K: sameK, Created: sameCreated, ID: "aaa"}
 	b := Row{K: sameK, Created: sameCreated, ID: "bbb"}
 	// id desc: "bbb" > "aaa" so b sorts before a.
-	if !Less(Desc, Desc, b, a) {
+	if !Less(Desc, b, a) {
 		t.Fatalf("want b before a on id-desc tiebreak")
 	}
-	if Less(Desc, Desc, a, b) {
+	if Less(Desc, a, b) {
 		t.Fatalf("want NOT a before b")
 	}
 }
@@ -97,10 +97,10 @@ func TestLess_PrimaryKeyRespectsDir(t *testing.T) {
 	earlier := Row{K: mustParse(t, "2026-01-01T00:00:00Z"), Created: mustParse(t, "2026-01-01T00:00:00Z"), ID: "a"}
 	later := Row{K: mustParse(t, "2026-01-02T00:00:00Z"), Created: mustParse(t, "2026-01-02T00:00:00Z"), ID: "b"}
 
-	if !Less(Updated, Desc, later, earlier) {
+	if !Less(Desc, later, earlier) {
 		t.Errorf("desc: want later before earlier")
 	}
-	if !Less(Updated, Asc, earlier, later) {
+	if !Less(Asc, earlier, later) {
 		t.Errorf("asc: want earlier before later")
 	}
 }
@@ -122,12 +122,12 @@ func TestSortRows_TrailingZeroFractionsAtBoundary(t *testing.T) {
 		{K: t2, Created: t2, ID: "b"},
 		{K: t1, Created: t1, ID: "a"},
 	}
-	SortRows(Updated, Desc, rows)
+	SortRows(Desc, rows)
 	if rows[0].ID != "b" || rows[1].ID != "a" {
 		t.Fatalf("desc order = %v, want [b, a] (true time, not string order)", rows)
 	}
 
-	SortRows(Updated, Asc, rows)
+	SortRows(Asc, rows)
 	if rows[0].ID != "a" || rows[1].ID != "b" {
 		t.Fatalf("asc order = %v, want [a, b]", rows)
 	}
@@ -146,14 +146,14 @@ func TestSortRows_NonUTC(t *testing.T) {
 		{K: later, Created: later, ID: "later"},
 		{K: sameInstant, Created: sameInstant, ID: "same"},
 	}
-	SortRows(Updated, Desc, rows)
+	SortRows(Desc, rows)
 	if rows[0].ID != "later" || rows[1].ID != "same" {
 		t.Fatalf("order = %v, want [later, same]", rows)
 	}
 
 	// And the "same instant" row must tie (not error) against a UTC row
 	// with the identical instant.
-	if Compare(Updated, Desc, Row{K: utc, Created: utc, ID: "x"}, Row{K: sameInstant, Created: sameInstant, ID: "x"}) != 0 {
+	if Compare(Desc, Row{K: utc, Created: utc, ID: "x"}, Row{K: sameInstant, Created: sameInstant, ID: "x"}) != 0 {
 		t.Fatalf("expected equal instants (different zones) to compare equal")
 	}
 }
@@ -161,13 +161,13 @@ func TestSortRows_NonUTC(t *testing.T) {
 func TestCompare_Basic(t *testing.T) {
 	a := Row{K: mustParse(t, "2026-01-01T00:00:00Z"), Created: mustParse(t, "2026-01-01T00:00:00Z"), ID: "a"}
 	b := Row{K: mustParse(t, "2026-01-02T00:00:00Z"), Created: mustParse(t, "2026-01-02T00:00:00Z"), ID: "b"}
-	if Compare(Updated, Desc, b, a) != -1 {
+	if Compare(Desc, b, a) != -1 {
 		t.Errorf("want b before a (desc) => -1")
 	}
-	if Compare(Updated, Desc, a, b) != 1 {
+	if Compare(Desc, a, b) != 1 {
 		t.Errorf("want a after b (desc) => 1")
 	}
-	if Compare(Updated, Desc, a, a) != 0 {
+	if Compare(Desc, a, a) != 0 {
 		t.Errorf("want equal => 0")
 	}
 }

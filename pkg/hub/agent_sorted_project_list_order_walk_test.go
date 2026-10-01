@@ -278,7 +278,7 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 		full := fullRows[id]
 		rows = append(rows, agentsort.KeyFor(agentsort.Updated, full.ID, full.Created, full.Updated, full.LastActivityEvent))
 	}
-	agentsort.SortRows(agentsort.Updated, agentsort.Desc, rows)
+	agentsort.SortRows(agentsort.Desc, rows)
 	want := make([]string, len(rows))
 	for i, row := range rows {
 		want[i] = row.ID

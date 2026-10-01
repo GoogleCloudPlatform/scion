@@ -284,7 +284,7 @@ func positionAfterCursor(sortKey, dir string, members []store.AgentMember, cur s
 		row := memberKeyOf(sortKey, m)
 		// The first row that is NOT before-or-equal to cur in the walk
 		// order, i.e. the first row that sorts strictly after cur.
-		if agentsort.Less(sortKey, dir, curRow, row) {
+		if agentsort.Less(dir, curRow, row) {
 			return i
 		}
 	}

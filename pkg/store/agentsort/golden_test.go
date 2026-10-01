@@ -82,7 +82,7 @@ func orderIDs(sortKey, dir string, t *testing.T, fx goldenFixture) []string {
 	for i, ir := range irows {
 		rows[i] = ir.row
 	}
-	SortRows(sortKey, dir, rows)
+	SortRows(dir, rows)
 	ids := make([]string, len(rows))
 	for i, row := range rows {
 		ids[i] = row.ID
