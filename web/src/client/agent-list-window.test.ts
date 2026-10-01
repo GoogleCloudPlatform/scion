@@ -836,3 +836,95 @@ describe('AgentListWindow — round 4 review fixes', () => {
     expect(win.hasNext).toBe(false); // unaffected — governed by display.length, not cursors
   });
 });
+
+describe('AgentListWindow — round 5 review fixes', () => {
+  function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
+    return {
+      agents,
+      totalCount: agents.length,
+      stats: {
+        total: agents.length,
+        running: agents.filter((a) => a.phase === 'running').length,
+        agents: agents.map((a) => [a.id, a.phase]),
+      },
+      ...opts,
+    };
+  }
+
+  it('nit 1: invalidateCursors() also clears hasPrev on a page other than 0, and prev() makes 0 fetches', async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
+      !params.cursor
+        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+        : pagedResult(page1, { totalCount: 4 })
+    );
+    const { win } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+    expect(win.hasPrev).toBe(true); // on page 1, Prev is normally available
+
+    win.invalidateCursors();
+    expect(win.hasPrev).toBe(false); // the stored page-0 cursor slot (undefined) is fine, but
+    // this is deliberately conservative: nothing distinguishes "this
+    // particular cursor is safe" from "the stack might be stale" once
+    // invalidated, so Prev is refused too, not just Next.
+
+    const callsBefore = fetchPage.mock.calls.length;
+    await win.prev();
+    expect(fetchPage.mock.calls.length).toBe(callsBefore); // 0 fetches
+    expect(win.pageIndex).toBe(1); // unchanged
+  });
+
+  it("N2'''': refresh() while invalidated refetches page 0 instead of the current (stale-cursor) page, and restores navigation (probe R5-2)", async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    const page0Again = [agent('e', { phase: 'stopped' }), agent('f', { phase: 'stopped' })];
+    const fetchPage = vi.fn(async (params: { cursor?: string }) => {
+      if (!params.cursor) {
+        // The second cursor-free call simulates the server now answering
+        // under the new (post-view-change) params.
+        return fetchPage.mock.calls.length <= 1
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+          : pagedResult(page0Again, { nextCursor: undefined, totalCount: 2 });
+      }
+      return pagedResult(page1, { totalCount: 4 });
+    });
+    const { win } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+
+    // A view-change trigger fails while on page 1 (e.g. a phase change that
+    // 500s): the window invalidates, exactly like the N1''' scenario above.
+    win.invalidateCursors();
+    expect(win.hasPrev).toBe(false);
+    expect(win.hasNext).toBe(false);
+
+    // The resync chip (an SSE signal) can still fire independently of
+    // navigation.
+    win.markResync();
+    expect(win.updatesAvailable).toBe(true);
+
+    // Clicking the chip calls refresh(). Because the stack is invalidated,
+    // this must NOT replay page 1's stale cursor — it refetches page 0
+    // instead (whose cursor is always `undefined`, so it cannot mismatch).
+    const callsBefore = fetchPage.mock.calls.length;
+    await win.refresh();
+    expect(fetchPage).toHaveBeenNthCalledWith(callsBefore + 1, {
+      cursor: undefined,
+      limit: 2,
+      wantStats: true,
+    });
+    expect(win.pageIndex).toBe(0);
+    expect(win.items.map((a) => a.id)).toEqual(['e', 'f']);
+    expect(win.error).toBeNull();
+
+    // A successful page-0 fetch mints a fresh cursor stack, so navigation
+    // is restored without waiting for a brand-new setPaged.
+    expect(win.hasNext).toBe(false); // page0Again has no nextCursor
+    expect(win.hasPrev).toBe(false); // page 0
+    expect(win.updatesAvailable).toBe(false);
+  });
+});

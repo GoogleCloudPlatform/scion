@@ -1590,12 +1590,143 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(internals(el).agentWindow.error).toBeNull(); // in particular, no 400
       expect(internals(el).agentWindow.pageIndex).toBe(0);
 
-      // Retrying the same change (now succeeding) restores navigation via setPaged.
+      // A subsequent successful view-change restores navigation via setPaged
+      // (round 5 review nit 2: this is a *different* phase, not a retry of
+      // 'stopped' — any successful view-change restores it, not just a
+      // retry of the one that failed).
       internals(el).setPhaseFilter('running');
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
       expect(internals(el).agentWindow.error).toBeNull();
       expect(internals(el).agentWindow.hasNext).toBe(true);
+    });
+
+    it("N1'''': a phase change that fails with a NETWORK error also invalidates cursors (round 5 review, probe R5-1)", async () => {
+      const projectId = 'p-n1-quad-prime-net';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      let failNextSorted = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (failNextSorted && !u.searchParams.has('cursor')) {
+              failNextSorted = false;
+              requests.push({ url: rawUrl });
+              return Promise.reject(new TypeError('Failed to fetch'));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      failNextSorted = true;
+      internals(el).setPhaseFilter('stopped');
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // The rejected fetch (not a non-OK response) must still invalidate:
+      // the old gap (round 5 review N1'''') was that only the `!response.ok`
+      // branch called `invalidateCursors()`, so a thrown network error fell
+      // through the catch and left the stale cursor armed.
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.hasNext).toBe(false);
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
+      expect(internals(el).agentWindow.error).toBeNull();
+    });
+
+    it("N1'''': a view-change that 422s, whose legacy fallback also fails, invalidates cursors (round 5 review, probe gap: 422-then-legacy-failure)", async () => {
+      const projectId = 'p-n1-quad-prime-legacy';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      let fail422NextSorted = false;
+      let failNextLegacy = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+            if (u.searchParams.get('sort')) {
+              u.searchParams.set('fit', '0'); // always paged when sorted
+              if (fail422NextSorted && !u.searchParams.has('cursor')) {
+                fail422NextSorted = false;
+                requests.push({ url: rawUrl });
+                return Promise.resolve(
+                  jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
+                );
+              }
+            } else if (failNextLegacy) {
+              failNextLegacy = false;
+              requests.push({ url: rawUrl });
+              return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+
+      // A phase change (trigger 'view-change') whose sorted request 422s;
+      // the legacy fallback it triggers then itself fails (500) — the
+      // window must still be left with invalidated navigation, not a stale
+      // cursor armed under the old (pre-change) params.
+      fail422NextSorted = true;
+      failNextLegacy = true;
+      internals(el).setPhaseFilter('stopped');
+      await new Promise((r) => setTimeout(r, 30));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.state).toBe('paged'); // the legacy failure doesn't change window state
+      expect(internals(el).agentWindow.hasNext).toBe(false);
+      expect(internals(el).agentWindow.hasPrev).toBe(false);
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext();
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
+      expect(internals(el).agentWindow.error).toBeNull();
     });
   });
 

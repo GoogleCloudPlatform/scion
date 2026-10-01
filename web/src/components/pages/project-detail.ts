@@ -1537,6 +1537,24 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
+   * A single place to react to a failed `view-change` request while paged
+   * (round 5 review N1''''): the stored cursors were minted under the
+   * previous phase/dir/label and would 400 if replayed under the new,
+   * now-current params (design §4.4), regardless of *how* the request
+   * failed — a network error, a non-OK response on the sorted (fit) path,
+   * or a fallback legacy request that itself fails after a 422. Called from
+   * every one of those failure branches in `loadAgentsForViewImpl` and
+   * `loadLegacyAgentsImpl`. A no-op for any trigger other than
+   * `view-change` (a label-commit reverts `committedLabel` instead, which
+   * keeps the old cursors correctly bound) or when the window isn't paged.
+   */
+  private onViewChangeFailed(trigger: AgentsViewTrigger): void {
+    if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
+      this.agentWindow.invalidateCursors();
+    }
+  }
+
+  /**
    * The project page's single request-choosing function (design §4.3,
    * §11 P1c). Called exactly once per trigger by `loadData` and
    * `fetchAndMergeAgents`, and by `syncAgentsForViewState` for a view-state
@@ -1577,6 +1595,7 @@ export class ScionPageProjectDetail extends LitElement {
     } catch (err) {
       if (this.isAbortError(err)) return; // superseded by a later trigger.
       console.warn('Failed to load agents:', err);
+      this.onViewChangeFailed(trigger); // round 5 review N1'''': a network error, not just a non-OK response.
       return;
     }
     if (this.isStaleAgentsLoad(gen)) return;
@@ -1599,12 +1618,7 @@ export class ScionPageProjectDetail extends LitElement {
         this.agentScopeCapabilities = undefined;
         this.listViewUsesWindow = false;
       }
-      if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
-        // The stored cursors were minted under the previous phase/dir/label
-        // and would 400 if replayed under the new params (round 4 review
-        // N1'''); disable Prev/Next until the next successful request.
-        this.agentWindow.invalidateCursors();
-      }
+      this.onViewChangeFailed(trigger);
       // Other triggers keep the previous data (design §6.3 N2).
       return;
     }
@@ -1681,6 +1695,7 @@ export class ScionPageProjectDetail extends LitElement {
         this.listViewUsesWindow = false;
       }
       console.warn('Failed to load agents:', err);
+      this.onViewChangeFailed(trigger); // round 5 review N1'''': the 422-then-legacy-failure path.
       return;
     }
     if (this.isStaleAgentsLoad(gen)) return;
@@ -1694,6 +1709,7 @@ export class ScionPageProjectDetail extends LitElement {
         this.agentScopeCapabilities = undefined;
         this.listViewUsesWindow = false;
       }
+      this.onViewChangeFailed(trigger);
       // Other triggers keep the previous data, with today's client label
       // filter applied to it (design §6.3 N2).
       return;

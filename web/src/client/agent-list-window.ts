@@ -357,10 +357,17 @@ export class AgentListWindow extends EventTarget {
     await this.fetchPageAt(this._pageIndex - 1);
   }
 
-  /** Re-fetch the current page (the paged-state chip click, design §6.2). A no-op in the small state. */
+  /**
+   * Re-fetch the current page (the paged-state chip click, design §6.2). A
+   * no-op in the small state. If the cursor stack was invalidated (round 5
+   * review N2''''), the current page's cursor is still stale, so this
+   * refetches page 0 instead — its cursor is always `undefined`, so it
+   * cannot mismatch, and it gives the user a way off a stranded page rather
+   * than leaving them on an un-refreshable one until they change a filter.
+   */
   async refresh(): Promise<void> {
     if (this._state !== 'paged') return;
-    await this.fetchPageAt(this._pageIndex);
+    await this.fetchPageAt(this._cursorsValid ? this._pageIndex : 0);
   }
 
   private async fetchPageAt(index: number): Promise<void> {
@@ -387,6 +394,13 @@ export class AgentListWindow extends EventTarget {
       this.pageOffsets[index + 1] =
         (this.pageOffsets[index] ?? index * this.viewState.pageSize) + result.agents.length;
       this._hasNext = !!result.nextCursor;
+      if (index === 0) {
+        // Page 0's request is always cursor-free, so it cannot mismatch; a
+        // successful fetch mints `cursors[1]` fresh under the current
+        // params, which makes the whole stack valid again (round 5 review
+        // N2'''').
+        this._cursorsValid = true;
+      }
       this._updatesAvailable = false;
       this.seedStats(result.stats);
     } catch (err) {
