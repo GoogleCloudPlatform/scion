@@ -123,55 +123,15 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
  * delta's own top level, leaving `detail` itself untouched. A no-op (returns
  * `delta` unchanged) when `delta.detail` is absent.
  *
- * Shared by `mergeAgentDelta` (applying a delta to a real base) and by
- * `bufferAgentDelta`/`recordSeedEpochDelta` (accumulating deltas for an ID
- * that has no base yet, §7/§8). Promoting *before* accumulating matters:
- * `detail` is always replaced wholesale by whichever delta sets it last
- * (never merged field-by-field — see `mergeAgentDelta`'s own doc comment),
- * but the top-level scalars survive a later delta that omits them, because
- * the top-level accumulation only overwrites a key a later delta actually
- * sets. Promoting each raw delta first, before folding it into the
- * accumulator, reproduces that same per-field survival for `message` et al.
- * in the buffered/recorded path — promoting only once, after accumulation,
- * on the final merged delta would let a later delta's full-object
- * replacement of `detail` silently erase an earlier delta's already-promoted
- * field, which immediate sequential application (apply each delta to a real
- * base as it arrives) never does. Re-running this on an already-promoted
- * delta is idempotent: it only overwrites a top-level field when the current
- * `detail` provides a value for it, never clears one.
+ * Called once per delta application, inside `mergeAgentDelta` (§7). A
+ * buffered delta (for an ID unknown to `state.agents`) or a seed-epoch
+ * delta is stored raw and replayed through `mergeAgentDelta` one at a time,
+ * in arrival order, once a base becomes available — `handleAgentEvent`'s
+ * created branch and `seedAgents` — so this never needs to run ahead of an
+ * accumulator; see `mergeAgentDelta`'s own doc comment for why deltas are
+ * replayed one at a time instead of flattened into one accumulated delta
+ * first.
  */
-/**
- * Process one raw delta against the activity a base (real or pseudo)
- * already holds: suppress a working/empty activity transition when that
- * base's activity is sticky, then promote detail fields
- * (`promoteDetailFields`). Returns a new delta; never touches `base`.
- *
- * Shared by `mergeAgentDelta` (a real `Agent` base) and by
- * `bufferAgentDelta`/`recordSeedEpochDelta` (the accumulator built so far,
- * as a pseudo-base — there is no real `Agent` yet for an unknown ID).
- * Sticky-activity preservation is one of the documented merge semantics
- * (§7) applied "immediately" to every delta; a buffered/recorded delta that
- * sets a sticky activity must protect a later one in the same buffer from
- * resetting it to working/empty, the same way it would if the agent had
- * already existed when both arrived.
- */
-function applyDeltaStep(
-  baseActivity: string | undefined,
-  rawDelta: Partial<Agent>
-): Partial<Agent> {
-  const delta: Partial<Agent> = { ...rawDelta };
-  const incomingActivity = delta.activity as string | undefined;
-  if (
-    incomingActivity !== undefined &&
-    (incomingActivity === 'working' || incomingActivity === '') &&
-    baseActivity &&
-    STICKY_ACTIVITIES.has(baseActivity)
-  ) {
-    delete delta.activity;
-  }
-  return promoteDetailFields(delta);
-}
-
 function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail;
   if (!detail) return delta;
@@ -293,9 +253,15 @@ export class StateManager extends EventTarget {
    * When a clone fails quickly, the hub may publish the "status" SSE event
    * (with phase=error) before the "created" event. Without buffering, the
    * status delta would be dropped and the UI would never reflect the error.
-   * Buffered deltas are applied when the "created" event arrives.
+   *
+   * Each ID's deltas are kept raw, in arrival order, and replayed one at a
+   * time through `mergeAgentDelta` when the "created" event arrives — not
+   * flattened into a single accumulated delta first: only replaying one at
+   * a time, each against the base the previous step produced, correctly
+   * carries a sticky activity set by one buffered delta through a later one
+   * that tries to reset it to working/empty.
    */
-  private pendingAgentDeltas = new Map<string, Partial<Agent>>();
+  private pendingAgentDeltas = new Map<string, Partial<Agent>[]>();
 
   /** Timers that drop a `pendingAgentDeltas` entry 30s after it was last touched (§7). */
   private pendingAgentDeltaTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -351,8 +317,13 @@ export class StateManager extends EventTarget {
     reject: (err: Error) => void;
   }> = [];
 
-  /** Open seed epochs, keyed by the token handed to the caller (§7, §8). */
-  private seedEpochs = new Map<SeedEpochToken, { deltas: Map<string, Partial<Agent>> }>();
+  /**
+   * Open seed epochs, keyed by the token handed to the caller (§7, §8).
+   * Each epoch's per-ID deltas are kept raw, in arrival order, and replayed
+   * one at a time through `mergeAgentDelta` at seed time — see
+   * `recordSeedEpochDelta`'s doc comment.
+   */
+  private seedEpochs = new Map<SeedEpochToken, { deltas: Map<string, Partial<Agent>[]> }>();
 
   /**
    * "State holds the complete dashboard-scope membership" (§6.3, R2-B3, R3-B4).
@@ -788,19 +759,26 @@ export class StateManager extends EventTarget {
     }
     const base = existing || ({} as Agent);
 
-    // For "created" events, apply any buffered deltas that arrived early.
-    // The buffered delta is applied AFTER the created snapshot so that
-    // status updates (like phase=error) take precedence.
-    let rawDelta = data as Partial<Agent>;
+    // For "created" events, apply any buffered deltas that arrived early —
+    // one at a time, each against the base the previous step produced, not
+    // flattened into a single delta first. A buffered delta is still
+    // applied AFTER the created snapshot so that status
+    // updates (like phase=error) take precedence, exactly as before;
+    // replaying as separate sequential steps means a sticky activity set by
+    // the created event or an earlier buffered delta correctly protects
+    // against a later one trying to reset it to working/empty, the same way
+    // it would for an agent that already existed when both arrived.
+    let updated = this.mergeAgentDelta(base, data as Partial<Agent>, agentId);
+    let pending: Partial<Agent>[] | undefined;
     if (eventType === 'created') {
-      const pending = this.pendingAgentDeltas.get(agentId);
-      if (pending) {
-        rawDelta = { ...rawDelta, ...pending };
-      }
+      pending = this.pendingAgentDeltas.get(agentId);
       this.clearPendingAgentDelta(agentId);
+      if (pending) {
+        for (const raw of pending) {
+          updated = this.mergeAgentDelta(updated, raw, agentId);
+        }
+      }
     }
-
-    const { updated, finalizedDelta } = this.mergeAgentDelta(base, rawDelta, agentId);
 
     // §7: a merge that changes nothing (by value; `detail`/`exposedPorts`
     // compared field-by-field) is a no-op — no mutation, no dirty entry, no
@@ -809,7 +787,16 @@ export class StateManager extends EventTarget {
     const changed = !existing || !agentsShallowEqual(existing, updated);
     if (changed) {
       this.state.agents.set(agentId, updated);
-      this.recordSeedEpochDelta(agentId, finalizedDelta);
+      if (pending) {
+        // The epoch already holds `pending`'s own entries, recorded in
+        // arrival order by `bufferAgentDelta`'s sibling call as each one was
+        // buffered. Prepend this event's own raw delta so a later seed-time
+        // replay sees the same order live application just used: created,
+        // then each buffered delta.
+        this.recordSeedEpochDeltaFirst(agentId, data as Partial<Agent>);
+      } else {
+        this.recordSeedEpochDelta(agentId, data as Partial<Agent>);
+      }
       this.dirty.upserted.add(agentId);
       this.dirty.unknown.delete(agentId);
       // A `created` for an ID whose `deleted` arrived earlier in the same
@@ -834,17 +821,34 @@ export class StateManager extends EventTarget {
    * Merge a delta into a base `Agent`: sticky-activity preservation, detail
    * field promotion, and capability preservation when the delta omits them
    * (§7). Shared by `handleAgentEvent`'s created/known-agent path and by
-   * `seedAgents`' seed-epoch reapplication, so the two cannot drift out of
-   * sync. Returns both the merged `Agent` and the finalized delta (post
-   * sticky/detail processing) so callers can record the same thing that
-   * was actually applied — e.g. into a seed epoch.
+   * `seedAgents`'s seed-epoch replay, so the two cannot drift out of sync.
+   *
+   * Every delta — live or replayed later against a REST snapshot — goes
+   * through this one at a time, in arrival order, against whatever base the
+   * previous step produced. That is the actual definition of "immediate
+   * sequential application" `pendingAgentDeltas`/seed-epoch deltas are
+   * checked against; an earlier design instead flattened several raw
+   * deltas into one accumulated delta before any real base existed, which
+   * could not tell a sticky activity that a later delta's `working`/`''`
+   * should suppress apart from one an *even later* delta had already
+   * legitimately replaced.
    */
-  private mergeAgentDelta(
-    base: Agent,
-    rawDelta: Partial<Agent>,
-    agentId: string
-  ): { updated: Agent; finalizedDelta: Partial<Agent> } {
-    const delta = applyDeltaStep(base.activity, rawDelta);
+  private mergeAgentDelta(base: Agent, rawDelta: Partial<Agent>, agentId: string): Agent {
+    let delta: Partial<Agent> = { ...rawDelta };
+
+    // Preserve sticky activities: if the incoming activity is working/empty
+    // but the existing activity is sticky, keep the existing value.
+    const incomingActivity = delta.activity as string | undefined;
+    if (
+      incomingActivity !== undefined &&
+      (incomingActivity === 'working' || incomingActivity === '') &&
+      base.activity &&
+      STICKY_ACTIVITIES.has(base.activity)
+    ) {
+      delete delta.activity;
+    }
+    // Promote detail fields from SSE detail to top-level agent
+    delta = promoteDetailFields(delta);
     // Ensure id is always set
     const updated = { ...base, ...delta, id: agentId } as Agent;
     // Preserve _capabilities from existing state when the delta doesn't
@@ -852,19 +856,19 @@ export class StateManager extends EventTarget {
     if (!delta._capabilities && base._capabilities) {
       updated._capabilities = base._capabilities;
     }
-    return { updated, finalizedDelta: delta };
+    return updated;
   }
 
   /**
    * Buffer a delta for an agent not yet known to state, refreshing its 30s
-   * TTL (§7). Each delta goes through `applyDeltaStep` before being folded
-   * in, using the accumulator built so far as the pseudo-base — see that
-   * helper's doc comment for why.
+   * TTL (§7). Deltas are kept raw, in arrival order, and replayed one at a
+   * time through `mergeAgentDelta` once "created" supplies a base — see
+   * `handleAgentEvent`'s created branch and `mergeAgentDelta`'s doc comment.
    */
   private bufferAgentDelta(agentId: string, delta: Partial<Agent>): void {
-    const prev = this.pendingAgentDeltas.get(agentId);
-    const processed = applyDeltaStep(prev?.activity as string | undefined, delta);
-    this.pendingAgentDeltas.set(agentId, prev ? { ...prev, ...processed } : processed);
+    const list = this.pendingAgentDeltas.get(agentId) ?? [];
+    list.push(delta);
+    this.pendingAgentDeltas.set(agentId, list);
 
     const prevTimer = this.pendingAgentDeltaTimers.get(agentId);
     if (prevTimer !== undefined) {
@@ -898,26 +902,44 @@ export class StateManager extends EventTarget {
   }
 
   /**
-   * Record a delta into every open seed epoch (§7, §8), merged last-wins
-   * per field with anything already recorded for this ID in that epoch.
+   * Record a delta into every open seed epoch (§7, §8): appended raw, in
+   * arrival order, to that ID's list. `seedAgents` replays the whole list
+   * one at a time through `mergeAgentDelta` once the REST snapshot provides
+   * a base — the same relationship `pendingAgentDeltas` has to a `created`
+   * event's base (see `mergeAgentDelta`'s doc comment).
    *
-   * Called from two places: the known-agent/created merge path, with the
-   * *finalized* delta (post sticky-activity/detail processing, as
-   * `mergeAgentDelta` returns it); and the unknown-ID buffering branch,
-   * with the *raw*, unprocessed delta — there is no base to merge against
-   * yet for that one, so `seedAgents` runs it through `mergeAgentDelta`
-   * itself once the REST snapshot provides a base.
-   *
-   * Each delta goes through `applyDeltaStep` before being folded in, using
-   * the accumulator built so far (per epoch) as the pseudo-base — see that
-   * helper's doc comment for why.
+   * Called from two places: the known-agent/created merge path (this
+   * event's own raw delta — `handleAgentEvent` uses
+   * `recordSeedEpochDeltaFirst` instead when a `created` event also drains
+   * a non-empty `pendingAgentDeltas` entry for the same ID), and the
+   * unknown-ID buffering branch, with the same raw delta
+   * `bufferAgentDelta` buffers.
    */
   private recordSeedEpochDelta(agentId: string, delta: Partial<Agent>): void {
     if (this.seedEpochs.size === 0) return;
     for (const epoch of this.seedEpochs.values()) {
-      const prev = epoch.deltas.get(agentId);
-      const processed = applyDeltaStep(prev?.activity as string | undefined, delta);
-      epoch.deltas.set(agentId, prev ? { ...prev, ...processed } : processed);
+      const list = epoch.deltas.get(agentId) ?? [];
+      list.push(delta);
+      epoch.deltas.set(agentId, list);
+    }
+  }
+
+  /**
+   * Like `recordSeedEpochDelta`, but inserts at the *front* of each epoch's
+   * list instead of appending. Used only by `handleAgentEvent`'s created
+   * branch when draining a non-empty `pendingAgentDeltas` entry: that
+   * entry's own deltas are already recorded (in arrival order, via
+   * `recordSeedEpochDelta`'s unknown-ID call site) by the time `created`
+   * arrives, so the created event's own raw delta must go *before* them to
+   * match the order live application just used — created, then each
+   * buffered delta.
+   */
+  private recordSeedEpochDeltaFirst(agentId: string, delta: Partial<Agent>): void {
+    if (this.seedEpochs.size === 0) return;
+    for (const epoch of this.seedEpochs.values()) {
+      const list = epoch.deltas.get(agentId) ?? [];
+      list.unshift(delta);
+      epoch.deltas.set(agentId, list);
     }
   }
 
@@ -1045,22 +1067,26 @@ export class StateManager extends EventTarget {
    *
    * `token`, from `beginSeedEpoch`, re-applies the deltas recorded for each
    * ID while the epoch was open, so a delta that landed after this REST
-   * snapshot was taken is not clobbered by it (§7, §8). A recorded delta is
-   * applied through the same `mergeAgentDelta` helper `handleAgentEvent`
-   * uses — sticky activity, detail promotion, capability preservation —
-   * treating this REST snapshot as the base. That covers a delta recorded
-   * while the ID was already known (a straight re-merge, idempotent since
-   * detail promotion just recomputes the same fields and sticky-activity
-   * re-checks the same invariant) **and** a delta recorded while the ID was
-   * still unknown to `state.agents`: that delta never had a base to merge
-   * against before, and this snapshot is the first one it gets, the same
-   * relationship a `created` event has to its own
-   * buffered `pendingAgentDeltas` entry. Once applied, the ID's
-   * `pendingAgentDeltas` entry (if any) is cleared, so a `created` event
-   * that still arrives later does not re-apply the same delta a second
-   * time. A token invalidated by a scope change (or never opened, or
-   * already ended) makes this call a complete no-op: the snapshot may
-   * belong to a scope state no longer holds.
+   * snapshot was taken is not clobbered by it (§7, §8). Each ID's recorded
+   * deltas are a raw, ordered list; they are replayed one at a time through
+   * the same `mergeAgentDelta` helper `handleAgentEvent` uses — sticky
+   * activity, detail promotion, capability preservation — starting from
+   * this REST snapshot as the base, each step against whatever the previous
+   * one produced: replaying one at a time, not a single flattened delta, is
+   * what lets a sticky activity recorded mid-epoch correctly survive being
+   * seeded against a stale, non-sticky REST row, and still correctly yield
+   * to a real later transition away from sticky.
+   * That covers deltas recorded while the ID was already known (a straight
+   * re-merge of each, idempotent since detail promotion just recomputes the
+   * same fields) **and** deltas recorded while the ID was still unknown to
+   * `state.agents`: those never had a base to merge against before, and
+   * this snapshot is the first one they get, the same relationship a
+   * `created` event has to its own buffered `pendingAgentDeltas` entry.
+   * Once applied, the ID's `pendingAgentDeltas` entry (if any) is cleared,
+   * so a `created` event that still arrives later does not re-apply the
+   * same deltas a second time. A token invalidated by a scope change (or
+   * never opened, or already ended) makes this call a complete no-op: the
+   * snapshot may belong to a scope state no longer holds.
    *
    * A token is single-use: this call ends the epoch itself once every
    * agent is seeded, so a caller's own `endSeedEpoch` afterward (per the
@@ -1094,9 +1120,11 @@ export class StateManager extends EventTarget {
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {
-        toStore = this.mergeAgentDelta(toStore, recorded, agent.id).updated;
+        for (const raw of recorded) {
+          toStore = this.mergeAgentDelta(toStore, raw, agent.id);
+        }
         // Consumed: a later "created" for this ID must not re-apply the
-        // same buffered delta a second time.
+        // same buffered deltas a second time.
         this.clearPendingAgentDelta(agent.id);
       }
       this.state.agents.set(agent.id, toStore);

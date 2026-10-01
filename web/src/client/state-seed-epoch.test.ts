@@ -56,6 +56,40 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** Every sticky activity, one non-sticky value, and "no activity field at all" (`undefined`). */
+const ACTIVITIES: ReadonlyArray<string | undefined> = [
+  'working',
+  'thinking',
+  'waiting_for_input',
+  'completed',
+  undefined,
+];
+
+/** Emit one status delta: `undefined` means a delta that carries no `activity` field at all. */
+function emitActivity(sm: StateManager, id: string, activity: string | undefined): void {
+  emit(sm, `agent.${id}.status`, activity === undefined ? { phase: 'running' } : { activity });
+}
+
+/**
+ * Independent oracle: seed `base` directly (no epoch, no buffering — the
+ * agent already exists), then apply each of `deltas` immediately, one at a
+ * time, through the public SSE path. This is "immediate sequential
+ * application" by definition: every delta goes through the known-agent
+ * merge path against a real base, in order.
+ */
+function sequentialActivity(
+  base: Agent,
+  deltas: ReadonlyArray<string | undefined>
+): string | undefined {
+  const sm = new StateManager();
+  sm.setScope({ type: 'dashboard' });
+  sm.seedAgents([base]);
+  for (const activity of deltas) {
+    emitActivity(sm, base.id, activity);
+  }
+  return sm.getAgent(base.id)?.activity as string | undefined;
+}
+
 describe('W3 seed epoch', () => {
   it('an SSE delta during a drain survives the seed', () => {
     const sm = new StateManager();
@@ -316,5 +350,57 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.detail).toEqual({ currentTurns: 7 });
     expect(sm.getAgent('a1')?.message).toBe('m1');
     expect(sm.getAgent('a1')?.currentTurns).toBe(7);
+  });
+
+  it('a seed-epoch replay does not let a stale sticky REST row overwrite newer live SSE state', () => {
+    // The REST snapshot this epoch guards was fetched before the user
+    // replied: by the time it comes back, live SSE has already carried the
+    // agent from waiting_for_input (sticky) through thinking (not sticky,
+    // not working/empty) to working. Replaying the epoch's recorded deltas
+    // one at a time against the stale REST base must reproduce that same
+    // live transition, not regress to the REST row's sticky activity.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.seedAgents([{ id: 'a1', name: 'A1', activity: 'waiting_for_input' } as Agent]);
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { activity: 'thinking' });
+    emit(sm, 'agent.a1.status', { activity: 'working' });
+    expect(sm.getAgent('a1')?.activity).toBe('working'); // live state, before the seed lands
+
+    sm.seedAgents([{ id: 'a1', name: 'A1', activity: 'waiting_for_input' } as Agent], { token });
+
+    expect(sm.getAgent('a1')?.activity).toBe('working');
+  });
+
+  it('epoch path: every 3-delta sequence for an unknown ID, over every base activity, equals immediate sequential application', () => {
+    let checked = 0;
+    for (const base of ACTIVITIES) {
+      for (const x of ACTIVITIES) {
+        for (const y of ACTIVITIES) {
+          for (const z of ACTIVITIES) {
+            const deltas = [x, y, z];
+            const baseAgent = {
+              id: 'u',
+              name: 'U',
+              ...(base !== undefined ? { activity: base } : {}),
+            } as Agent;
+
+            const sm = new StateManager();
+            sm.setScope({ type: 'dashboard' });
+            const token = sm.beginSeedEpoch();
+            for (const activity of deltas) {
+              emitActivity(sm, 'u', activity);
+            }
+            sm.seedAgents([baseAgent], { token });
+
+            const want = sequentialActivity(baseAgent, deltas);
+            expect(sm.getAgent('u')?.activity, `base=${base} seq=${deltas.join(',')}`).toBe(want);
+            checked++;
+          }
+        }
+      }
+    }
+    expect(checked).toBe(ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran, nothing skipped
   });
 });

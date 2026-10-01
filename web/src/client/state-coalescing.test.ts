@@ -192,15 +192,15 @@ function applyKnown(base: Agent, rawDelta: Partial<Agent>, id: string): Agent {
  * semantics (sticky activity, detail promotion, capability preservation,
  * buffering of early deltas, tombstones) with NO equality-skip and NO
  * coalescing. `applyOne` lets a run be checked against production at many
- * points during a single pass (round 6 review N1), not only once at the end.
+ * points during a single pass, not only once at the end.
  *
- * Round 6 review N2: a buffered ID's deltas are kept raw, in arrival order,
- * and replayed one at a time through `applyKnown` once `created` supplies a
- * base — not accumulated via a promote-then-spread shortcut. That shortcut
- * is production's own optimization (and this file's own
- * `promoteDetailFieldsRef`/accumulation copy of it would no longer be an
- * independent oracle for it); replaying one at a time is the actual
- * definition of sequential application being checked.
+ * A buffered ID's deltas are kept raw, in arrival order, and replayed one at
+ * a time through `applyKnown` once `created` supplies a base — the
+ * definition of sequential application: apply each delta, in order, to
+ * whatever base the previous step produced. This model is written
+ * independently of `state.ts` (it does not import or call anything from
+ * it), so a bug that is only in `state.ts`'s own logic — including one in
+ * how it replays buffered/epoch deltas — still shows up as a mismatch here.
  */
 class ReferenceModel {
   readonly agents = new Map<string, Agent>();
@@ -304,6 +304,43 @@ function applyEvent(sm: StateManager, ev: FuzzEvent): void {
   }
 }
 
+/** Every sticky activity, one non-sticky value, and "no activity field at all" (`undefined`). */
+const STICKY_PROBE_ACTIVITIES: ReadonlyArray<string | undefined> = [
+  'working',
+  'thinking',
+  'waiting_for_input',
+  'completed',
+  undefined,
+];
+
+/** Emit one status delta: `undefined` means a delta that carries no `activity` field at all. */
+function emitActivity(sm: StateManager, id: string, activity: string | undefined): void {
+  emit(sm, `agent.${id}.status`, activity === undefined ? { phase: 'running' } : { activity });
+}
+
+/**
+ * Independent oracle: `created` first (with `createdActivity`, if any), then
+ * apply each of `deltas` immediately, one at a time, through the public SSE
+ * path — i.e. the agent already exists for every one of them. This is
+ * "immediate sequential application" by definition.
+ */
+function sequentialCreatedActivity(
+  createdActivity: string | undefined,
+  deltas: ReadonlyArray<string | undefined>
+): string | undefined {
+  const sm = new StateManager();
+  sm.setScope({ type: 'dashboard' });
+  emit(
+    sm,
+    'agent.u.created',
+    createdActivity === undefined ? { name: 'U' } : { name: 'U', activity: createdActivity }
+  );
+  for (const activity of deltas) {
+    emitActivity(sm, 'u', activity);
+  }
+  return sm.getAgent('u')?.activity as string | undefined;
+}
+
 describe('W2 coalescing fuzz (10k random events)', () => {
   it('final state equals immediate application, with no per-event notify', () => {
     const events = genEvents(10_000, 0xc0ffee);
@@ -333,7 +370,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     }
   });
 
-  it('final state equals immediate application at every periodic checkpoint, not just at the end (round 6 review N1)', () => {
+  it('final state equals immediate application at every periodic checkpoint, not just at the end', () => {
     // The test above compares only once, after all 10,000 events. With a
     // fixed 24-ID pool and ~400 events per ID, a transient divergence for
     // one ID (e.g. a dropped promoted `message` field, the
@@ -865,6 +902,40 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     expect(buffered.getAgent('a1')?.detail).toEqual({ currentTurns: 7 });
     expect(buffered.getAgent('a1')?.message).toBe('m1');
     expect(buffered.getAgent('a1')?.currentTurns).toBe(7);
+  });
+
+  it('created path: every 3-delta sequence buffered before "created", over every created activity, equals immediate sequential application', () => {
+    let checked = 0;
+    for (const createdActivity of STICKY_PROBE_ACTIVITIES) {
+      for (const x of STICKY_PROBE_ACTIVITIES) {
+        for (const y of STICKY_PROBE_ACTIVITIES) {
+          for (const z of STICKY_PROBE_ACTIVITIES) {
+            const deltas = [x, y, z];
+
+            const sm = new StateManager();
+            sm.setScope({ type: 'dashboard' });
+            for (const activity of deltas) {
+              emitActivity(sm, 'u', activity);
+            }
+            emit(
+              sm,
+              'agent.u.created',
+              createdActivity === undefined
+                ? { name: 'U' }
+                : { name: 'U', activity: createdActivity }
+            );
+
+            const want = sequentialCreatedActivity(createdActivity, deltas);
+            expect(
+              sm.getAgent('u')?.activity,
+              `created-activity=${createdActivity} seq=${deltas.join(',')}`
+            ).toBe(want);
+            checked++;
+          }
+        }
+      }
+    }
+    expect(checked).toBe(STICKY_PROBE_ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran
   });
 });
 

@@ -310,3 +310,92 @@ New head, addendum and full disposition:
 - **nit2**: trimmed `bufferAgentDelta`'s and `recordSeedEpochDelta`'s doc
   comments to one line each pointing at `promoteDetailFields`/
   `applyDeltaStep`; the reasoning lives once, on the shared helpers.
+
+**Correction (round 7):** the `applyDeltaStep` pseudo-base design above was
+an incomplete fix. It only matches sequential application when the real
+base (the REST row a seed-epoch replays against, or `{}` for a fresh
+`created`) is *not* itself sticky — see the round-7 entry below. The
+`applyDeltaStep` helper described above no longer exists; it was replaced,
+not patched.
+
+## Round 7 review (REQUEST CHANGES; B1, N1, nit1, nit2 all closed)
+
+Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-7.md`;
+probe: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-7-probe.test.ts`.
+New head, addendum and full disposition:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+
+- **B1 (required):** the round-6 `applyDeltaStep` pseudo-base accumulator
+  only remembers the *last* surviving activity, so the final
+  `mergeAgentDelta(base, acc)` checks stickiness against the real base
+  without knowing whether an intermediate activity in the accumulated
+  sequence had already (correctly) replaced that base's sticky value before
+  a later `working`/`''` arrived. Concretely: a REST row with
+  `activity: 'waiting_for_input'` (sticky), with `thinking` then `working`
+  recorded during the epoch, replayed to `waiting_for_input` instead of
+  `working` — exactly the stale-REST-over-newer-SSE regression §7/§8 say
+  seed epochs exist to prevent. Root-caused and reproduced end-to-end
+  through the public API by round 7's reviewer (30 mismatches found by an
+  exhaustive probe over `{working, thinking, waiting_for_input, completed,
+  none}` × 3 deltas × every base activity, down from 174 before round 6 but
+  not zero). Took the reviewer's option (a): `pendingAgentDeltas` and each
+  seed epoch's `deltas` now store **raw deltas as an ordered list per ID**
+  instead of one accumulated delta, and replay them **one at a time through
+  `mergeAgentDelta`** once a base is available — `handleAgentEvent`'s
+  created branch (created delta first, then each buffered delta) and
+  `seedAgents` (REST row first, then each recorded delta). This is the same
+  algorithm the W2 `ReferenceModel`/`applyKnown` (round 6) and the review's
+  probe already used as the independent oracle, now adopted in production
+  too, so there is no longer a separate "pseudo-base" case to reason about
+  — `mergeAgentDelta` always has a real, evolving `Agent` base. Verified
+  with the reviewer's own (uncommitted) probe: 30 mismatches → 0, and the
+  live sticky-REST-base repro now yields `working`.
+- **N1 (non-blocking, closed):** the epoch half of the sticky fix had no
+  dedicated test (only the W2 buffer-path fuzz exercised sticky activity at
+  all). Added, in `state-seed-epoch.test.ts`: the known-agent
+  live-`working`-vs-stale-sticky-REST repro as a committed test, plus an
+  exhaustive 5^4 (625-case) enumeration of 3-delta sequences over every base
+  activity for the epoch path. A matching exhaustive enumeration for the
+  created+buffered path was added to `state-coalescing.test.ts` instead (not
+  `state-seed-epoch.test.ts`): it exercises `pendingAgentDeltas`/`created`
+  only, no seed-epoch API, which is that file's own documented scope. Both
+  new exhaustive tests fail against `7c6140b0` (round 6) and pass after this
+  round's fix; both also build their own independent "sequential
+  application" oracle (seed/create the base directly, then apply each delta
+  immediately, one at a time, through the public SSE path) rather than
+  reusing any production or `ReferenceModel` code.
+- **nit1 (non-blocking, closed):** `applyDeltaStep`'s doc comment had been
+  inserted between `promoteDetailFields`'s own doc comment and
+  `promoteDetailFields` itself, leaving two stacked JSDoc blocks attached to
+  the wrong function and a stale "shared by buffer/epoch" claim. Resolved
+  by removing `applyDeltaStep` entirely (its two call sites besides
+  `mergeAgentDelta` are gone under B1's redesign — `mergeAgentDelta` is
+  once again its only caller, exactly as before round 6), restoring
+  `promoteDetailFields`'s original doc comment above itself, and updating it
+  to describe the current (replay-based) design instead of the retired
+  accumulator one.
+- **nit2 (non-blocking, closed):** dropped the "(round 6 review N1)" /
+  "round 6 review N2" tags from `state-coalescing.test.ts`'s comments and
+  the new test's name — this file had that pattern removed twice before
+  (commits `8302a4b`, `5b62879`) for the same reason: a round-N tag means
+  nothing once this lands upstream. Also removed the "(round-7 review ...)"
+  tags this round's own `state.ts` comments had accumulated, which would
+  have repeated the same mistake in the one file (`state.ts`) round 3
+  explicitly swept clean of them.
+
+### Commands and results
+
+- `npm run typecheck`: pass. `npx eslint src/client/state.ts`: clean.
+  `npx prettier --check` on `state.ts` and both changed test files: pass.
+- `npx vitest run --no-file-parallelism state-coalescing.test.ts
+  state-seed-epoch.test.ts state-completeness-flag.test.ts`: 3 files, 64
+  tests, all passing (61 from round 6 + 3 new: the sticky-REST-base repro,
+  and the two exhaustive enumerations).
+- Reviewer's probe (fetched fresh, not committed): 0 mismatches (down from
+  30 at `7c6140b0`), live sticky-REST-base repro yields `working`.
+- Regression check: swapped in the `7c6140b0` `state.ts` and reran the 3 new
+  tests — all 3 failed with the predicted divergence; restored the fix and
+  all 3 (plus the full 64) passed again, byte-identical to the committed
+  `state.ts`.
+- Full suite: see the gs report addendum for the exact count at this round's
+  head SHA.
