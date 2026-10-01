@@ -414,21 +414,48 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
 }
 
 /**
- * Maps every node in `roots` to a "placement unit" id. When `showUsers` is
- * on, every root sharing a `rootUserOf` is one unit, keyed by `userKey` —
- * matching `layoutForestWithUsers`'s own grouping, so a unit's fresh layout
- * always has exactly one user node and every root that belongs with it.
- * Otherwise (or for a root with no recorded user) every root is its own
- * unit, keyed `root:<id>`. `computeStableLayout` uses this both ways: on the
- * current agents, to know which whole block to reposition together; on the
- * old agents (always with `showUsers: false`, since the old side only needs
- * "which old tree", not grouping by user) to look up where a unit used to be.
+ * Maps every node in `roots` to the agent id of the root of its tree, keyed
+ * `root:<id>`. `computeStableLayout` uses this on the *old* agents to tell
+ * which old tree a given (possibly since-removed) agent belonged to —
+ * everything descended from one old root gets the same key regardless of
+ * what the removal does to the tree's shape, which is what lets pieces
+ * promoted from the same old tree be laid out and placed together instead of
+ * competing as independent units (see the re-rooting branch).
  */
-function unitIdsOf(roots: LineageNode[], showUsers: boolean): Map<string, string> {
+function oldTreeKeysOf(roots: LineageNode[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const root of roots) {
+    const unit = `root:${root.agent.id}`;
+    const walk = (node: LineageNode): void => {
+      map.set(node.agent.id, unit);
+      for (const child of node.children) walk(child);
+    };
+    walk(root);
+  }
+  return map;
+}
+
+/**
+ * Maps every node in `roots` (a *current* forest) to its placement unit:
+ * every root's own unit — `userKey(rootUserOf(root))` when `showUsers` and
+ * the root has one, else `oldTreeOf.get(root.id)` (so roots with no user,
+ * or when users aren't shown, pack with whatever else came from the same old
+ * tree) — propagated down to every descendant via the tree, not computed
+ * independently per agent. That propagation matters: a non-root descendant
+ * must always share its actual current root's unit, never its own
+ * `rootUserOf`, or a node whose ancestry happens to name a different "user"
+ * than the tree it's actually (still) attached to gets split into its own
+ * spurious one-node group.
+ */
+function currentUnitsOf(
+  roots: LineageNode[],
+  showUsers: boolean,
+  oldTreeOf: ReadonlyMap<string, string>
+): Map<string, string> {
   const map = new Map<string, string>();
   for (const root of roots) {
     const uid = showUsers ? rootUserOf(root.agent) : undefined;
-    const unit = uid ? userKey(uid) : `root:${root.agent.id}`;
+    const unit = uid ? userKey(uid) : oldTreeOf.get(root.agent.id)!;
     const walk = (node: LineageNode): void => {
       map.set(node.agent.id, unit);
       for (const child of node.children) walk(child);
@@ -584,14 +611,17 @@ function packShiftEdge(
  *   dropped; one that keeps some is recentred over them (its old midpoint can
  *   drift once a sibling root is gone).
  * - Re-rooting (`orphanedIds` non-empty): some old tree(s) must reflow. Every
- *   "placement unit" (`unitIdsOf`: a user's whole group when `showUsers`, else
- *   a single root tree) untouched by the removal is frozen at its exact
- *   previous pixels, same as the clean case. Each *affected* unit is laid out
- *   on its own — `buildLineageForest` + `pruneCollapsed` + `layoutForest[WithUsers]`
- *   on just its surviving members, the same pipeline `freshLayout` below uses
- *   for everything, so collapse state and user grouping can't drift — then
- *   placed in its old footprint if that doesn't overlap any already-placed
- *   unit, otherwise appended just past the rightmost one so far.
+ *   "placement unit" — a user's whole group when `showUsers` (keyed by
+ *   `userKey`), else everything descended from one *old* root tree (keyed by
+ *   `oldTreeKeysOf`, so pieces promoted from the same old tree are placed
+ *   together instead of competing for the same spot) — untouched by the
+ *   removal is frozen at its exact previous pixels, same as the clean case.
+ *   Each *affected* unit is laid out on its own — `buildLineageForest` +
+ *   `pruneCollapsed` + `layoutForest[WithUsers]` on just its surviving
+ *   members, the same pipeline `freshLayout` below uses for everything, so
+ *   collapse state and user grouping can't drift — then placed in its old
+ *   footprint if that doesn't overlap any already-placed unit, otherwise
+ *   appended just past the rightmost one so far.
  */
 export function computeStableLayout(
   agents: Agent[],
@@ -663,45 +693,60 @@ export function computeStableLayout(
   }
 
   // --- Re-rooting removal ----------------------------------------------------
-  // A "unit" is a user's whole group when showUsers (so a removal never
-  // splits one user's roots across two recomputed pieces, which was the
-  // source of duplicate user keys and dropped user→root edges), else a
-  // single root tree. A unit is "affected" if a removed agent belonged to it
-  // (by old root for a tree, by rootUserOf for a user group — a user group's
-  // *set* of members never changes shape from promotion, only from an
-  // actual removal). Every other unit is frozen at its exact previous pixels.
-  const oldGroupOf = unitIdsOf(buildLineageForest(previous.agents), false);
-  const oldById = new Map(previous.agents.map((a) => [a.id, a]));
+  // A "unit" is a user's whole group when showUsers, else everything that
+  // descended from one *old* root tree — grouping by the old tree (not the
+  // new root an agent ends up under) is what keeps multiple pieces promoted
+  // from the same tree together as one placement decision instead of
+  // competing for the same old footprint and shoving each other off-screen.
+  const oldTreeOf = oldTreeKeysOf(buildLineageForest(previous.agents));
+  const unitOf = currentUnitsOf(buildLineageForest(agents), showUsers, oldTreeOf);
 
-  const affectedGroups = new Set<string>();
+  // A unit is affected if any of its *current* members descended from an old
+  // tree the removal touched — propagated via old-tree membership, not an
+  // agent's own removal status, so a survivor that shares a current unit
+  // (the same user group) with an affected one is always pulled in even if
+  // its own old tree wasn't touched (this is what keeps a user's untouched
+  // roots from being dropped, #2481 review round 2 C1's "mid" case, and what
+  // correctly recomputes an orphan's new group even when the removed parent
+  // had no ancestry of its own to name that group, round 3's R2).
+  const touchedOldTrees = new Set<string>();
   for (const id of removal.removedIds) {
-    const group = oldGroupOf.get(id);
-    if (group !== undefined) affectedGroups.add(group);
+    const tree = oldTreeOf.get(id);
+    if (tree !== undefined) touchedOldTrees.add(tree);
   }
-  const affectedUserIds = new Set<string>();
+  const affectedUnits = new Set<string>();
+  for (const a of agents) {
+    if (touchedOldTrees.has(oldTreeOf.get(a.id)!)) affectedUnits.add(unitOf.get(a.id)!);
+  }
+  // A removed old root's own user group can end up with no surviving member
+  // at all (its whole subtree is gone, nothing promoted) — the loop above
+  // never marks that case, since it only propagates from current survivors,
+  // but the group's stale user card still needs to be dropped. Scoped to
+  // `id` being an old root itself (`oldTreeOf.get(id) === "root:" + id`, not
+  // just any removed descendant) so a removed non-root doesn't pull in an
+  // unrelated group that merely shares its own ancestry-derived rootUserOf.
   if (showUsers) {
+    const oldById = new Map(previous.agents.map((a) => [a.id, a]));
     for (const id of removal.removedIds) {
-      const uid = rootUserOf(oldById.get(id)!);
-      if (uid) affectedUserIds.add(uid);
+      if (oldTreeOf.get(id) === `root:${id}`) {
+        const uid = rootUserOf(oldById.get(id)!);
+        if (uid) affectedUnits.add(userKey(uid));
+      }
     }
   }
-  const unitOf = unitIdsOf(buildLineageForest(agents), showUsers);
-  const isAffectedUnit = (unit: string): boolean => {
-    const uid = userIdFromKey(unit);
-    if (uid !== null) return affectedUserIds.has(uid);
-    const group = oldGroupOf.get(unit.slice('root:'.length));
-    return group !== undefined && affectedGroups.has(group);
-  };
-  const isSurvivorAffected = (agentId: string): boolean => isAffectedUnit(unitOf.get(agentId)!);
+  const isSurvivorAffected = (agentId: string): boolean => affectedUnits.has(unitOf.get(agentId)!);
 
   const placedNodes: PositionedNode[] = previous.layout.nodes.filter(
     (n) => !removal.removedIds.has(n.agent.id) && !isSurvivorAffected(n.agent.id)
   );
   const placedUsers: PositionedUser[] = previous.layout.users.filter(
-    (u) => !affectedUserIds.has(u.id)
+    (u) => !affectedUnits.has(userKey(u.id))
   );
   const placedEdges: PositionedEdge[] = previous.layout.edges.filter(
-    (e) => !removal.removedIds.has(e.childId) && !isSurvivorAffected(e.childId)
+    (e) =>
+      !removal.removedIds.has(e.parentId) &&
+      !removal.removedIds.has(e.childId) &&
+      !isSurvivorAffected(e.childId)
   );
 
   // Already-placed rectangles, for real interval-overlap testing — not just
@@ -717,15 +762,15 @@ export function computeStableLayout(
   let frontier = occupied.reduce((max, o) => Math.max(max, o.max), -Infinity);
   const gap = orientation === 'horizontal' ? H_GAP_Y : GAP_X;
 
-  const affectedUnits = new Set<string>();
-  for (const a of agents) {
-    const unit = unitOf.get(a.id)!;
-    if (isAffectedUnit(unit)) affectedUnits.add(unit);
-  }
-
+  // Every entry in affectedUnits came from some current agent's own unit, so
+  // this is already exactly the set of units that need recomputing.
   for (const unit of [...affectedUnits].sort(compareIds)) {
     const unitAgents = agents.filter((a) => unitOf.get(a.id) === unit);
-    if (unitAgents.length === 0) continue; // every agent that was in this unit is gone
+    // A unit can be "affected" with no current members at all: a removed old
+    // root whose entire subtree is gone, nothing promoted (see the
+    // user-group fallback above). Nothing to lay out or place — it just
+    // disappears, which placedUsers' own affected-unit filter already did.
+    if (unitAgents.length === 0) continue;
 
     const unitForest = buildLineageForest(unitAgents);
     pruneCollapsed(unitForest, collapsedIds); // keep collapse state in sync with the normal pipeline
@@ -737,9 +782,7 @@ export function computeStableLayout(
     const oldPositions =
       uid !== null
         ? previous.layout.nodes.filter((n) => rootUserOf(n.agent) === uid)
-        : previous.layout.nodes.filter(
-            (n) => oldGroupOf.get(n.agent.id) === oldGroupOf.get(unitAgents[0].id)
-          );
+        : previous.layout.nodes.filter((n) => oldTreeOf.get(n.agent.id) === unit);
     const oldUser = uid !== null ? previous.layout.users.find((u) => u.id === uid) : undefined;
     const oldSpan = packSpan(orientation, oldUser ? [...oldPositions, oldUser] : oldPositions);
 

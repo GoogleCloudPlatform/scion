@@ -37,6 +37,7 @@ import {
   H_GAP_Y,
   PAD,
   type ForestLayout,
+  type LineageNode,
 } from './lineage.js';
 import type { Agent } from './types.js';
 
@@ -1041,6 +1042,104 @@ describe('computeStableLayout (#2481)', () => {
       assertNoOverlap(stable);
       assertStructurallyValid(after, noCollapse, true, 'vertical', stable);
     });
+
+    it('packs both children of a deleted multi-child root together in its old footprint, without growing the canvas (#2490 review round 3, R1)', () => {
+      // r has two children c1, c2; s and t are untouched, independent trees
+      // to the right. Deleting r must not send c2 past s and t — both
+      // children belong to the same old tree and must be placed together.
+      const before = [
+        agent('r', 'r', ['user-1']),
+        agent('c1', 'c1', ['user-1', 'r']),
+        agent('c2', 'c2', ['user-1', 'r']),
+        agent('s', 's', ['user-2']),
+        agent('t', 't', ['user-3']),
+      ];
+      const beforeLayout = layoutForest(buildLineageForest(before));
+      const beforePos = posById(beforeLayout);
+      const after = before.filter((a) => a.id !== 'r');
+      const stable = computeStableLayout(
+        after,
+        noCollapse,
+        false,
+        'vertical',
+        '',
+        prev(before, beforeLayout)
+      );
+
+      assertNoOverlap(stable);
+      assertStructurallyValid(after, noCollapse, false, 'vertical', stable);
+      const pos = posById(stable);
+      // c1/c2 are promoted to roots, so they move up one row (depth 0 instead
+      // of 1) — only their horizontal (packAxis) position must be unchanged.
+      expect(pos.c1.px).toBe(beforePos.c1.px);
+      expect(pos.c2.px).toBe(beforePos.c2.px);
+      expect(pos.s).toEqual(beforePos.s);
+      expect(pos.t).toEqual(beforePos.t);
+      expect(stable.width).toBe(beforeLayout.width);
+    });
+
+    it('packs children of a deleted multi-child root with empty ancestry together, with users shown (#2490 review round 3, R1)', () => {
+      // r has no ancestry (the hub's no-identity convention); its children
+      // inherit ancestry [r], making rootUserOf(c1) === rootUserOf(c2) ===
+      // 'r' — both land in the same "user:r" unit once r is deleted, so they
+      // pack together the same way the no-users case above does.
+      const before = [
+        agent('r', 'r', []),
+        agent('c1', 'c1', ['r']),
+        agent('c2', 'c2', ['r']),
+        agent('s', 's', ['user-2']),
+      ];
+      const beforeLayout = layoutForestWithUsers(buildLineageForest(before));
+      const beforePos = posById(beforeLayout);
+      const after = before.filter((a) => a.id !== 'r');
+      const stable = computeStableLayout(
+        after,
+        noCollapse,
+        true,
+        'vertical',
+        '',
+        prev(before, beforeLayout, { showUsers: true })
+      );
+
+      assertNoOverlap(stable);
+      assertStructurallyValid(after, noCollapse, true, 'vertical', stable);
+      expect(posById(stable).s).toEqual(beforePos.s);
+      expect(stable.users.map((u) => u.id)).toContain('r');
+    });
+
+    it('recomputes the orphan-side user group when the deleted parent has empty ancestry, with no dangling edges (#2490 review round 3, R2)', () => {
+      // p has no ancestry; c (its child) inherits [p], so rootUserOf(c) ===
+      // 'p' even though p itself was never grouped under any user (p was a
+      // plain, ungrouped root). Deleting p must still produce a "p" user
+      // card for the promoted c/g, not a dangling p->c edge.
+      const before = [
+        agent('p', 'p', []),
+        agent('c', 'c', ['p']),
+        agent('g', 'g', ['p', 'c']),
+        agent('x', 'x', ['u1']),
+      ];
+      const beforeLayout = layoutForestWithUsers(buildLineageForest(before));
+      const after = before.filter((a) => a.id !== 'p');
+      const stable = computeStableLayout(
+        after,
+        noCollapse,
+        true,
+        'vertical',
+        '',
+        prev(before, beforeLayout, { showUsers: true })
+      );
+
+      assertStructurallyValid(after, noCollapse, true, 'vertical', stable);
+      assertNoOverlap(stable);
+      // No dangling edge to the deleted 'p'.
+      expect(stable.edges.some((e) => e.parentId === 'p' || e.childId === 'p')).toBe(false);
+      expect(stable.nodes.some((n) => n.agent.id === 'p')).toBe(false);
+      // The orphaned c/g get a user card (c's rootUserOf is 'p').
+      expect(stable.users.map((u) => u.id)).toContain('p');
+      expect(stable.edges.some((e) => e.parentId === userKey('p') && e.childId === 'c')).toBe(true);
+      // x (unrelated, under a real user) is untouched.
+      expect(stable.users.map((u) => u.id)).toContain('u1');
+    });
   });
 
   it('rebuilds re-rooting-branch edges with the correct endpoints (#2490 review round 1, C2)', () => {
@@ -1120,7 +1219,7 @@ describe('computeStableLayout (#2481)', () => {
     expect(posById(stable)).toEqual(posById(fresh));
   });
 
-  describe('structural invariants over randomized removals (#2490 review round 2, R4)', () => {
+  describe('structural invariants over randomized removals (#2490 review round 2, R4; round 3, R3)', () => {
     // Minimal seeded LCG: deterministic (reproducible on failure) without
     // relying on Math.random or a test dependency.
     function makeRng(seed: number): () => number {
@@ -1131,10 +1230,25 @@ describe('computeStableLayout (#2481)', () => {
       };
     }
 
-    /** A random forest: `size` agents, each either a root (a fresh random
-     * user) or a child of an earlier agent — inheriting that *parent's* root
-     * user, same as real ancestry chains always do, so a child never reports
-     * a different `rootUserOf` than the tree it's actually attached to. */
+    /** Seeded Fisher–Yates: unlike `array.sort(() => rng() - 0.5)`, this
+     * doesn't depend on the engine's sort algorithm for reproducibility. */
+    function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
+      const out = [...arr];
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+      }
+      return out;
+    }
+
+    /**
+     * A random forest: `size` agents, each either a root or a child of an
+     * earlier agent. A child's ancestry is the parent's full chain plus the
+     * parent's own id (real ancestry semantics), not just `[uid, parentId]`,
+     * so multi-level chains are exercised. Roots get empty ancestry about
+     * 30% of the time (the hub's no-identity convention — #2481 review
+     * round 3, R2) and a real user id otherwise.
+     */
     function randomForest(rng: () => number, size: number, userCount: number): Agent[] {
       const users = Array.from({ length: userCount }, (_, i) => `u${i}`);
       const agents: Agent[] = [];
@@ -1142,7 +1256,9 @@ describe('computeStableLayout (#2481)', () => {
         const id = `a${i}`;
         const parent = i > 0 && rng() < 0.65 ? agents[Math.floor(rng() * agents.length)] : null;
         if (parent) {
-          agents.push(agent(id, id, [rootUserOf(parent)!, parent.id]));
+          agents.push(agent(id, id, [...(parent.ancestry ?? []), parent.id]));
+        } else if (rng() < 0.3) {
+          agents.push(agent(id, id, [])); // no-ancestry root
         } else {
           agents.push(agent(id, id, [users[Math.floor(rng() * users.length)]]));
         }
@@ -1150,40 +1266,111 @@ describe('computeStableLayout (#2481)', () => {
       return agents;
     }
 
-    it('no overlaps and valid structure over many random 1-2 agent removals', () => {
+    /** About 20% of agents, for exercising collapse state in the re-rooting
+     * branch alongside everything else. */
+    function randomCollapsed(rng: () => number, agents: Agent[]): Set<string> {
+      const collapsed = new Set<string>();
+      for (const a of agents) {
+        if (rng() < 0.2) collapsed.add(a.id);
+      }
+      return collapsed;
+    }
+
+    /**
+     * Every surviving agent whose old root tree, and old user group when
+     * `showUsers`, had no removed member must keep its exact previous pixel
+     * — the core acceptance criterion (#2481), checked independently of
+     * `computeStableLayout`'s own notion of "affected" so a bug in that
+     * notion (round 3's R1, R2) can't hide from this assertion the way it
+     * hid from a no-overlap-only check.
+     */
+    function assertUnaffectedUnchanged(
+      before: Agent[],
+      beforeLayout: ForestLayout,
+      removedIds: ReadonlySet<string>,
+      showUsers: boolean,
+      stable: ForestLayout
+    ): void {
+      const oldTreeOf = new Map<string, string>();
+      const walk = (node: LineageNode, rootId: string): void => {
+        oldTreeOf.set(node.agent.id, rootId);
+        for (const c of node.children) walk(c, rootId);
+      };
+      for (const root of buildLineageForest(before)) walk(root, root.agent.id);
+      const oldById = new Map(before.map((a) => [a.id, a]));
+
+      const touchedTrees = new Set<string>();
+      const touchedUsers = new Set<string>();
+      for (const id of removedIds) {
+        const root = oldTreeOf.get(id);
+        if (root !== undefined) touchedTrees.add(root);
+        if (showUsers) {
+          const uid = rootUserOf(oldById.get(id)!);
+          if (uid) touchedUsers.add(uid);
+        }
+      }
+
+      const beforePos = new Map(
+        beforeLayout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }])
+      );
+      const stablePos = new Map(stable.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+      for (const a of before) {
+        if (removedIds.has(a.id)) continue;
+        const uid = showUsers ? rootUserOf(a) : undefined;
+        const unaffected =
+          !touchedTrees.has(oldTreeOf.get(a.id)!) && !(uid !== undefined && touchedUsers.has(uid));
+        if (unaffected) {
+          expect(stablePos.get(a.id), `unaffected agent ${a.id} moved`).toEqual(
+            beforePos.get(a.id)
+          );
+        }
+      }
+    }
+
+    it('no overlaps, valid structure and unaffected-tree stability over many random removals', () => {
+      // 2000 trials run in ~1s in isolation, but the default 5s test timeout
+      // can be too tight under full-suite CPU contention (confirmed on a
+      // busy sandbox); the explicit timeout below is for that environment,
+      // not because this test is normally slow. See the third `it()` arg.
       const rng = makeRng(0xc0ffee);
       let trials = 0;
       for (const showUsers of [false, true]) {
         for (const orientation of ['vertical', 'horizontal'] as const) {
-          for (let i = 0; i < 100; i++) {
+          for (let i = 0; i < 500; i++) {
             const before = randomForest(rng, 4 + Math.floor(rng() * 8), 3);
+            const collapsed = randomCollapsed(rng, before);
+
             let beforeLayout = showUsers
-              ? layoutForestWithUsers(buildLineageForest(before))
-              : layoutForest(buildLineageForest(before));
+              ? layoutForestWithUsers(pruneCollapsed(buildLineageForest(before), collapsed))
+              : layoutForest(pruneCollapsed(buildLineageForest(before), collapsed));
             if (orientation === 'horizontal') beforeLayout = transposeLayout(beforeLayout);
 
-            const removeCount = Math.min(rng() < 0.5 ? 1 : 2, before.length - 1);
-            const shuffled = [...before].sort(() => rng() - 0.5);
-            const removedIds = new Set(shuffled.slice(0, removeCount).map((a) => a.id));
+            const removeCount = Math.min(1 + Math.floor(rng() * 3), before.length - 1);
+            const removedIds = new Set(
+              shuffle(before, rng)
+                .slice(0, removeCount)
+                .map((a) => a.id)
+            );
             const after = before.filter((a) => !removedIds.has(a.id));
 
             const stable = computeStableLayout(
               after,
-              noCollapse,
+              collapsed,
               showUsers,
               orientation,
               '',
-              prev(before, beforeLayout, { showUsers, orientation })
+              prev(before, beforeLayout, { showUsers, orientation, collapsedIds: collapsed })
             );
 
             assertNoOverlap(stable);
-            assertStructurallyValid(after, noCollapse, showUsers, orientation, stable);
+            assertStructurallyValid(after, collapsed, showUsers, orientation, stable);
+            assertUnaffectedUnchanged(before, beforeLayout, removedIds, showUsers, stable);
             trials++;
           }
         }
       }
-      expect(trials).toBe(400);
-    });
+      expect(trials).toBe(2000);
+    }, 20000);
   });
 
   describe('filterKey distinguishes a filter change from a delete (#2481)', () => {
