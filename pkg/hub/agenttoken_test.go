@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -117,6 +118,52 @@ func TestAgentTokenService_ValidateAgentToken_LegacyRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, isLegacyPreSplitAgentJWT(&agentIdentityWrapper{currentParsed}),
 		"a freshly minted token must never read as a legacy pre-split token")
+}
+
+// TestAgentTokenService_ValidateAgentToken_UnknownScopeSchemaIsNotLegacy pins
+// the non-widening direction for a scope_schema value this package does not
+// recognize: only a MISSING claim (ScopeSchema's Go zero value after a
+// verified parse) reads as legacy. A PRESENT but unknown value — a schema
+// from a future split (CurrentAgentScopeSchema+1) or a malformed one (-1) —
+// must not, since treating an unrecognized marker as legacy would resolve
+// the ambiguity in the direction that regrants project:agent:sa_assign,
+// which is exactly the widening the compatibility rule forbids.
+func TestAgentTokenService_ValidateAgentToken_UnknownScopeSchemaIsNotLegacy(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	for _, schema := range []int{CurrentAgentScopeSchema + 1, -1} {
+		t.Run(fmt.Sprintf("scope_schema=%d", schema), func(t *testing.T) {
+			now := time.Now()
+			claims := AgentTokenClaims{
+				Claims: jwt.Claims{
+					Issuer:    AgentTokenIssuer,
+					Subject:   "unknown-schema-agent",
+					Audience:  jwt.Audience{AgentTokenAudience},
+					IssuedAt:  jwt.NewNumericDate(now),
+					Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
+					NotBefore: jwt.NewNumericDate(now),
+				},
+				ProjectID:   "proj-unknown-schema",
+				Scopes:      []AgentTokenScope{ScopeAgentCreate},
+				ScopeSchema: schema,
+			}
+			token, err := jwt.Signed(service.signer).Claims(claims).Serialize()
+			require.NoError(t, err)
+
+			parsed, err := service.ValidateAgentToken(token)
+			require.NoError(t, err)
+
+			identity := &agentIdentityWrapper{parsed}
+			assert.False(t, isLegacyPreSplitAgentJWT(identity),
+				"a present, unrecognized scope_schema value must not read as legacy")
+			assert.Equal(t, []AgentTokenScope{ScopeAgentCreate}, effectiveAgentScopes(identity),
+				"an unrecognized scope_schema must not regain project:agent:sa_assign")
+		})
+	}
 }
 
 func TestAgentTokenService_DefaultScopes(t *testing.T) {

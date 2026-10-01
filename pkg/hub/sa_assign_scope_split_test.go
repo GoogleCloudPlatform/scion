@@ -31,20 +31,29 @@ import (
 // project:agent:create. These tests name the rule the split establishes, not
 // a historical gap.
 
-// preSplitScopesForRole returns the literal scope list ScopesForRole(role)
-// produced before this split (ScopesForRole(role) with ScopeAgentSAAssign
-// removed). Only AgentRoleFull differs from its current bundle; every other
-// role never carried ScopeAgentCreate and is identical before and after.
+// preSplitScopesForRole returns the literal scope list each AgentRole
+// carried before this split — a fixed snapshot, not derived from the
+// current ScopesForRole, so a later addition to a role's bundle cannot
+// silently change what "legacy" means here. Only AgentRoleFull's pre-split
+// list (10 scopes) differs from its current one (11); every other role
+// never carried ScopeAgentCreate, so its pre-split list is the same as its
+// current one.
 func preSplitScopesForRole(role AgentRole) []AgentTokenScope {
-	current := ScopesForRole(role)
-	pre := make([]AgentTokenScope, 0, len(current))
-	for _, s := range current {
-		if s == ScopeAgentSAAssign {
-			continue
+	if role == AgentRoleFull {
+		return []AgentTokenScope{
+			ScopeProjectRead,
+			ScopeAgentStatusUpdate,
+			ScopeAgentTokenRefresh,
+			ScopeAgentNotify,
+			ScopeAgentPortForward,
+			ScopeAgentCreate,
+			ScopeAgentLifecycle,
+			ScopeProjectSecretRead,
+			ScopeProjectTemplateWrite,
+			ScopeAgentSetMessageMode,
 		}
-		pre = append(pre, s)
 	}
-	return pre
+	return ScopesForRole(role)
 }
 
 // TestAgentScopesToPermissionIDs_CreateAndAssignAreDisjoint is the
@@ -88,10 +97,11 @@ func containsID(ids []string, id string) bool {
 }
 
 // TestEffectiveAgentScopes_LegacyPreSplitTokenGainsAssignScope pins
-// effectiveAgentScopes directly: only a genuine legacy pre-split hub JWT
-// (legacyScopeSchema set — never a direct struct literal's zero value) that
-// holds ScopeAgentCreate without ScopeAgentSAAssign gets the scope appended.
-// Every other combination passes through unchanged.
+// effectiveAgentScopes directly: only an identity with legacyScopeSchema set
+// (constructed directly here to simulate what ValidateAgentToken produces
+// for a verified, pre-split hub JWT) that holds ScopeAgentCreate without
+// ScopeAgentSAAssign gets the scope appended. Every other combination passes
+// through unchanged.
 func TestEffectiveAgentScopes_LegacyPreSplitTokenGainsAssignScope(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -173,8 +183,8 @@ func TestEffectiveAgentScopes_NonHubJWTIdentityNeverLegacy(t *testing.T) {
 // exact permission set it authorizes — both reading its current
 // ScopesForRole bundle directly, and reading its pre-split bundle through
 // effectiveAgentScopes as a legacy token — and asserts the two are always
-// identical, so a stray extra grant (a future legacy-compatibility entry, or
-// a Registry change that accidentally widens a role) is caught immediately.
+// identical, so a stray extra grant (a change to effectiveAgentScopes, or a
+// Registry change that accidentally widens a role) is caught immediately.
 // It also pins that no reading, for any role, ever includes
 // gcp_service_account.use: the compatibility rule must never cross into a
 // different per-SA-scoped permission family (ptone/scion#2129).
@@ -205,7 +215,14 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 		},
 	}
 
-	for role, want := range golden {
+	// Iterate the explicit set of roles ValidAgentRole accepts, not
+	// range(golden): ranging the map would silently skip a role missing its
+	// own golden row instead of failing for it.
+	for _, role := range []AgentRole{AgentRoleNone, AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+		require.True(t, ValidAgentRole(role), "test bug: %s is not a valid AgentRole", role)
+		want, ok := golden[role]
+		require.True(t, ok, "role %s has no golden permission set in this table", role)
+
 		t.Run(string(role)+"/current", func(t *testing.T) {
 			got := agentScopesToPermissionIDs(ScopesForRole(role))
 			assert.ElementsMatch(t, want, got)
@@ -223,6 +240,10 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			assert.NotContains(t, got, "gcp_service_account.use")
 		})
 	}
+
+	assert.Len(t, golden, 4, "golden must have exactly one row per role ValidAgentRole accepts")
+	assert.False(t, ValidAgentRole(AgentRole("unknown-role-for-test")),
+		"test bug: the sentinel used to confirm ValidAgentRole rejects unknown roles must not itself be valid")
 }
 
 // TestCanAgentDelegateToAgent_LegacyFullCanDelegateFull pins the rule that
@@ -277,6 +298,8 @@ func TestCanAgentDelegateToAgent_CurrentCreateOnlyCannotDelegateFull(t *testing.
 	decision := authz.CanDelegate(context.Background(), actor, grant)
 	assert.False(t, decision.Allowed,
 		"a current-schema token without project:agent:sa_assign must not be able to delegate full")
+	assert.Contains(t, decision.Reason, string(ScopeAgentSAAssign),
+		"the denial must name the missing scope, not an unrelated one")
 }
 
 // TestCanAgentDelegateToAgent_LegacyParentCanDelegateExplicitAssignScope

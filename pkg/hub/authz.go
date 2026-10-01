@@ -1276,12 +1276,9 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 
 // agentScopeRestriction builds a kernel Restriction from agent JWT token
 // scopes. Only permissions the agent's effective scopes grant are allowed —
-// computed via effectiveAgentScopes + agentScopesToPermissionIDs, the same
-// pipeline step 5b's synthetic binding uses, so a permission one of them
-// grants (including a legacy pre-split token's effectiveAgentScopes
-// compatibility grant, ptone/scion#2339) can never be immediately taken back
-// by this restriction evaluating a separate, stale copy of the same
-// scope-to-permission mapping.
+// computed via effectiveAgentScopes + agentScopesToPermissionIDs, the exact
+// pipeline step 5b's synthetic binding uses, so the two always agree on what
+// a legacy pre-split token (ptone/scion#2339) authorizes.
 func agentScopeRestriction(agent AgentIdentity) Restriction {
 	scopes := effectiveAgentScopes(agent)
 	if len(scopes) == 0 {

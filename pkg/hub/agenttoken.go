@@ -99,20 +99,21 @@ const (
 // is schema 1: gcp_service_account.assign gets project:agent:sa_assign
 // instead of sharing project:agent:create).
 //
-// ScopeSchema itself is metadata only — nothing branches on its value
-// directly. The decision of whether a token predates a given split lives in
-// AgentTokenClaims.legacyScopeSchema (authz.go's effectiveAgentScopes), an
-// unexported field ValidateAgentToken sets, and only ValidateAgentToken
-// sets, when a verified token's wire form carries no scope_schema claim
-// (ScopeSchema reads as its Go zero value, 0, because GenerateAgentToken —
-// the only agent-JWT minter — has always stamped a nonzero value since this
-// field existed, so a verified 0 can only mean "minted before the field
-// existed"). Every in-process AgentTokenClaims built directly as a Go
-// literal — every stored-record identity, scheduled-dispatch creator
-// identity, and synthetic secret-resolution identity among them — leaves
-// legacyScopeSchema at its own zero value (false) and so is NEVER read as
-// legacy, regardless of what its Scopes list contains: only a value that
-// came out of ValidateAgentToken can be legacy.
+// Authorization code never reads ScopeSchema; ValidateAgentToken alone reads
+// it, once, to set AgentTokenClaims.legacyScopeSchema, the unexported field
+// authz.go's effectiveAgentScopes actually keys on. ValidateAgentToken sets
+// legacyScopeSchema only when a verified token's wire form carries no
+// scope_schema claim (ScopeSchema reads as its Go zero value, 0, because
+// GenerateAgentToken — the only agent-JWT minter — has always stamped a
+// nonzero value since this field existed, so a verified 0 can only mean
+// "minted before the field existed"; any other value, including one from a
+// schema this package does not yet know about, is left as not legacy). Every
+// in-process AgentTokenClaims built directly as a Go literal — every
+// stored-record identity, scheduled-dispatch creator identity, and synthetic
+// secret-resolution identity among them — leaves legacyScopeSchema at its
+// own zero value (false) and so is NEVER read as legacy, regardless of what
+// its Scopes list contains: only a value that came out of ValidateAgentToken
+// can be legacy.
 //
 // legacyScopeSchema's effect may be deleted once no unexpired token can
 // still predate CurrentAgentScopeSchema: the configured agent token
