@@ -281,7 +281,7 @@ func openSQLiteForBench(dbPath string) (*ent.Client, error) {
 	return entc.OpenSQLite(sqliteDSN, entc.PoolConfig{MaxOpenConns: 1})
 }
 
-func run(dbPath string, agentCount int, secret, projectSlug, projectName string, randSeed int64, outPath string) error {
+func run(dbPath string, agentCount int, secret, projectSlug, projectName string, randSeed int64, outPath string) (err error) {
 	ctx := context.Background()
 	rng := rand.New(rand.NewSource(randSeed))
 
@@ -290,6 +290,14 @@ func run(dbPath string, agentCount int, secret, projectSlug, projectName string,
 		return fmt.Errorf("open sqlite: %w", err)
 	}
 	s := entadapter.NewCompositeStore(client)
+	// Close on every return path, not just the success path: Migrate,
+	// hub.New, or any later step below can fail and return early, and an
+	// un-closed store would otherwise leak the sqlite file handle.
+	defer func() {
+		if cerr := s.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close store: %w", cerr)
+		}
+	}()
 	if err := s.Migrate(ctx); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
@@ -369,10 +377,6 @@ func run(dbPath string, agentCount int, secret, projectSlug, projectName string,
 		if i%7 == 0 {
 			priorAgentIDs = append(priorAgentIDs, agent.ID)
 		}
-	}
-
-	if err := s.Close(); err != nil {
-		return fmt.Errorf("close store: %w", err)
 	}
 
 	tokenSvc, err := hub.NewUserTokenService(hub.UserTokenConfig{
