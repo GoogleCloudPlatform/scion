@@ -477,6 +477,17 @@ func (e *countingAuditEmitter) EmitDecisionAudit(context.Context, *store.Decisio
 	e.calls++
 }
 
+// recordingAuditEmitter records every DecisionAuditRecord passed to it,
+// without touching a store, so a test can assert on record fields (not just
+// the call count) for Decide's fail-closed entry paths.
+type recordingAuditEmitter struct {
+	records []*store.DecisionAuditRecord
+}
+
+func (e *recordingAuditEmitter) EmitDecisionAudit(_ context.Context, record *store.DecisionAuditRecord) {
+	e.records = append(e.records, record)
+}
+
 // TestDecide_UnrecognizedDerivedPrincipalKindDenied: Decide denies a nil
 // identity with "missing principal", and denies an identity of an
 // unrecognized concrete type, an agent-shaped identity that hasn't opted into
@@ -1099,4 +1110,106 @@ func TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks(t *t
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "unrecognized principal kind", decision.Reason)
 	})
+}
+
+// =============================================================================
+// Typed-nil identity fail-closed classification
+// =============================================================================
+
+// TestIdentityClassification_TypedNilTreatedAsMissing covers, for every
+// concrete type in identityInventoryExpectation, an Identity interface value
+// that is not == nil but holds a nil pointer of that type (e.g. an Identity
+// holding (*ScopedUserIdentity)(nil)). A type assertion or type switch
+// against such a value still succeeds with a nil concrete result, so a
+// classifier that reads a field or calls a method on it before checking for
+// this case panics instead of classifying (see isNilIdentity). Every case
+// here must: not panic in principalContextForIdentity,
+// credentialContextForIdentity, AncestryIsHubAttested or Decide; classify as
+// the empty principal context; return false from AncestryIsHubAttested; and
+// deny in Decide with reason "missing principal", the same path a nil
+// interface takes, emitting exactly one audit record with an empty derived
+// PrincipalID.
+//
+// credentialContextForIdentity returns CredentialContext{Kind:
+// CredentialKindUAT} (zero Ceiling) for a typed-nil *ScopedUserIdentity
+// rather than the empty context (ptone/scion#2143; see authz.go). Decide
+// still denies it with "missing principal", since the Principal check runs
+// first.
+func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
+	for name := range identityInventoryExpectation {
+		t.Run(name, func(t *testing.T) {
+			var identity Identity
+			switch name {
+			case "AuthenticatedUser":
+				identity = (*AuthenticatedUser)(nil)
+			case "ScopedUserIdentity":
+				identity = (*ScopedUserIdentity)(nil)
+			case "DevUser":
+				identity = (*DevUser)(nil)
+			case "agentIdentityWrapper":
+				identity = (*agentIdentityWrapper)(nil)
+			case "storedAgentIdentity":
+				identity = (*storedAgentIdentity)(nil)
+			case "peerAgentIdentity":
+				identity = (*peerAgentIdentity)(nil)
+			case "explainAgentIdentity":
+				identity = (*explainAgentIdentity)(nil)
+			case "brokerIdentityImpl":
+				identity = (*brokerIdentityImpl)(nil)
+			case "FederatedUserIdentity":
+				identity = (*FederatedUserIdentity)(nil)
+			case "FederatedAgentIdentity":
+				identity = (*FederatedAgentIdentity)(nil)
+			case "FederatedServiceIdentity":
+				identity = (*FederatedServiceIdentity)(nil)
+			default:
+				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
+			}
+			// identity != nil (a plain Go interface comparison, not
+			// require.NotNil/assert.NotNil) is the correct check here:
+			// testify's NotNil uses reflection to unwrap pointer kinds and
+			// reports a typed-nil pointer as nil, which is exactly the
+			// distinction this table is built to exercise. A plain interface
+			// comparison is true for every case constructed above, since
+			// each carries a concrete type word even though the pointer
+			// value is nil.
+			require.True(t, identity != nil, "the interface value under test must be typed-nil, not a nil interface")
+
+			require.NotPanics(t, func() {
+				principal := principalContextForIdentity(identity)
+				assert.Equal(t, PrincipalContext{}, principal, "typed-nil identity must classify as the empty principal context")
+			}, "principalContextForIdentity must not panic on a typed-nil %s", name)
+
+			wantCredential := CredentialContext{}
+			if name == "ScopedUserIdentity" {
+				// Typed-nil *ScopedUserIdentity keeps a UAT credential with
+				// a zero ceiling; see above.
+				wantCredential = CredentialContext{Kind: CredentialKindUAT}
+			}
+			require.NotPanics(t, func() {
+				credential := credentialContextForIdentity(identity)
+				assert.Equal(t, wantCredential, credential, "typed-nil identity must classify into the expected credential context")
+			}, "credentialContextForIdentity must not panic on a typed-nil %s", name)
+
+			require.NotPanics(t, func() {
+				assert.False(t, AncestryIsHubAttested(identity), "typed-nil identity must not be hub-attested")
+			}, "AncestryIsHubAttested must not panic on a typed-nil %s", name)
+
+			emitter := &recordingAuditEmitter{}
+			authz := &AuthzService{decisionAuditEmitter: emitter}
+			var decision Decision
+			require.NotPanics(t, func() {
+				decision = authz.Decide(context.Background(), AuthzRequest{
+					Principal: PrincipalContext{Identity: identity},
+					Resource:  Resource{Type: "agent", ID: tid("typed-nil-target-" + name)},
+					Action:    ActionRead,
+				})
+			}, "Decide must not panic on a typed-nil %s", name)
+
+			assert.False(t, decision.Allowed)
+			assert.Equal(t, "missing principal", decision.Reason, "a typed-nil identity must take the same path as a nil interface")
+			require.Len(t, emitter.records, 1, "exactly one audit record must be emitted")
+			assert.Equal(t, "", emitter.records[0].PrincipalID, "the audit record's derived principal ID must be empty")
+		})
+	}
 }

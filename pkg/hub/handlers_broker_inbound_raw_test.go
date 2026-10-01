@@ -282,9 +282,20 @@ func TestHandleBrokerInbound_RawRejectedBeforeTopicParsing(t *testing.T) {
 // rejected before any log line is emitted, this pins the invariant that no
 // code path between decode and rejection writes the raw body to any log.
 func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
+	// captureSlog must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment. That binding does not follow a
+	// later slog.SetDefault swap, so capturing afterward could leave logs
+	// written through a subsystem logger unobserved by buf.
+	buf := captureSlog(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
-	buf := captureSlog(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// a capture installed before it must already have observed something.
+	// This is the part that a capture-after-construct ordering bug (the
+	// regression this test guards against) would silently defeat.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	const secret = "BROKER-INBOUND-RAW-SECRET-7Q3ZK9"
 
@@ -334,6 +345,11 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 	srv.mux.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
+	requireLogCaptureLive(t, buf, "API client error")
+
 	assert.NotContains(t, rec.Body.String(), secret, "raw content must not appear in the error response")
 	assert.NotContains(t, buf.String(), secret, "raw content must not appear in captured logs")
 }
@@ -343,8 +359,20 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 // user: prefix" validation — a raw message with a malformed sender still
 // gets the raw-specific 422, not the generic 400 prefix error.
 func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing.T) {
+	// captureSlog must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment. That binding does not follow a
+	// later slog.SetDefault swap, so capturing afterward could leave logs
+	// written through a subsystem logger unobserved by buf.
+	buf := captureSlog(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
+
+	// Positive control: New() unconditionally logs during construction, so
+	// a capture installed before it must already have observed something.
+	// This is the part that a capture-after-construct ordering bug (the
+	// regression this test guards against) would silently defeat.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	project := &store.Project{
 		ID:      tid("proj-routed-raw"),
@@ -357,7 +385,6 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 
 	dispatcher := &recordingDispatcher{}
 	srv.SetDispatcher(dispatcher)
-	buf := captureSlog(t)
 
 	// Assert unchanged message/conversation counts (before/after) instead
 	// of looping over persisted rows checking body text — a stronger proof
@@ -401,6 +428,11 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 	assert.Len(t, msgsAfter.Items, len(msgCountBefore.Items), "rejected routed raw message must not persist any row")
 	assert.Equal(t, convCountBefore, countStoreConversations(t, s, ctx),
 		"rejected routed raw message must not create a conversation")
+
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
+	requireLogCaptureLive(t, buf, "API client error")
 
 	// Rejected-case log/error-body secret capture for the routed inbound
 	// route.

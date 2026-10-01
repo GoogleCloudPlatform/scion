@@ -255,7 +255,10 @@ func IsScopedUserIdentity(identity Identity) bool {
 // being demoted. For contexts that need an explicit role-binding check, use
 // AuthzService.IsSystemAdmin instead.
 func IsUnscopedLocalPlatformAdmin(user UserIdentity) bool {
-	if user == nil || user.Role() != "admin" || IsScopedUserIdentity(user) {
+	// isNilIdentity treats a typed-nil UserIdentity (for example
+	// (*AuthenticatedUser)(nil)) as missing, denying here rather than
+	// reaching user.Role() below.
+	if isNilIdentity(user) || user.Role() != "admin" || IsScopedUserIdentity(user) {
 		return false
 	}
 	_, federated := user.(FederatedIdentity)
@@ -293,6 +296,17 @@ type localAncestryProvenanceIdentity interface {
 	localAncestryProvenance() ancestryProvenance
 }
 
+// isNilIdentity (scheduled_initiator.go) reports whether identity is nil at
+// the interface level, or is a non-nil Identity interface value holding a
+// nil concrete pointer — for example an Identity holding
+// (*ScopedUserIdentity)(nil), which is never == nil even though a type
+// assertion or type switch against it succeeds with a nil concrete value and
+// a method call or field read on that value then dereferences a nil
+// pointer. Every classifier in this package (principalContextForIdentity,
+// credentialContextForIdentity, AncestryIsHubAttested) and decide's entry
+// check treats that case identically to a nil interface, before doing
+// anything else with identity.
+
 // AncestryIsHubAttested returns true when the identity's ancestry chain has
 // recognized local provenance: signed by this hub (agent JWT) or persisted
 // by this hub (store-derived wrappers), or is itself the root of the chain
@@ -309,9 +323,11 @@ type localAncestryProvenanceIdentity interface {
 // cannot accidentally pass an unrelated type. Nil, unknown, and unrecognized
 // identity types all return false (fail closed): an identity is attested
 // only if it implements localAncestryProvenanceIdentity, which — unlike
-// Type() — cannot be satisfied by an arbitrary or future type string.
+// Type() — cannot be satisfied by an arbitrary or future type string. A
+// typed-nil concrete identity is treated the same as a nil interface: see
+// isNilIdentity.
 func AncestryIsHubAttested(identity Identity) bool {
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return false
 	}
 	// All FederatedIdentity types (FederatedAgentIdentity,
@@ -425,6 +441,12 @@ type credentialContextKey struct{}
 func GetIdentityFromContext(ctx context.Context) Identity {
 	// First check for identity set by unified auth middleware
 	if identity, ok := ctx.Value(identityContextKey{}).(Identity); ok {
+		// A typed-nil identity (for example an Identity holding
+		// (*ScopedUserIdentity)(nil)) is treated as missing, the same as a
+		// nil interface; see isNilIdentity.
+		if isNilIdentity(identity) {
+			return nil
+		}
 		return identity
 	}
 	// Fall back to checking individual context keys for backwards compatibility
@@ -440,7 +462,10 @@ func GetIdentityFromContext(ctx context.Context) Identity {
 // GetUserIdentityFromContext returns the user identity if present.
 func GetUserIdentityFromContext(ctx context.Context) UserIdentity {
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) is treated as missing here too, before the type
+	// assertion below hands a nil concrete value to the caller.
+	if isNilIdentity(identity) {
 		return nil
 	}
 	if user, ok := identity.(UserIdentity); ok {
@@ -452,7 +477,10 @@ func GetUserIdentityFromContext(ctx context.Context) UserIdentity {
 // GetAgentIdentityFromContext returns the agent identity if present.
 func GetAgentIdentityFromContext(ctx context.Context) AgentIdentity {
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) is treated as missing here too, before the type
+	// assertion below hands a nil concrete value to the caller.
+	if isNilIdentity(identity) {
 		return nil
 	}
 	if agent, ok := identity.(AgentIdentity); ok {
@@ -594,7 +622,9 @@ func contextWithAuthType(ctx context.Context, authType string) context.Context {
 // credential established on ctx. See contextWithAuthType.
 func requestAuthAttrs(ctx context.Context) []slog.Attr {
 	var attrs []slog.Attr
-	if identity := GetIdentityFromContext(ctx); identity != nil {
+	// isNilIdentity, not a plain interface comparison: a typed-nil identity
+	// (see isNilIdentity) must not reach identity.ID() below.
+	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
 		attrs = append(attrs, slog.String(logging.AttrUserID, identity.ID()))
 		if pc := principalContextForIdentity(identity); pc.Kind != "" {
 			attrs = append(attrs, slog.String("principal_kind", string(pc.Kind)))
