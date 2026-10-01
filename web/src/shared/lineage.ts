@@ -664,41 +664,85 @@ export function computeStableLayout(
   const removal = detectPureRemoval(previous.agents, agents);
   if (!removal) return freshLayout();
 
-  // --- Clean removal: every removed id was a leaf ---------------------------
   if (removal.orphanedIds.size === 0) {
-    const nodes = previous.layout.nodes.filter((n) => !removal.removedIds.has(n.agent.id));
-    const nodeById = new Map(nodes.map((n) => [n.agent.id, n]));
-    const liveEdges = previous.layout.edges.filter(
-      (e) => !removal.removedIds.has(e.parentId) && !removal.removedIds.has(e.childId)
-    );
-
-    // Recenter each surviving user over its remaining root children: the old
-    // midpoint can drift off the group once a sibling root is gone. Linear in
-    // each root's packAxis position, so this matches what re-deriving from a
-    // fresh layoutForestWithUsers call (then transposing) would give.
-    const users = previous.layout.users.flatMap((u) => {
-      const rootIds = liveEdges.filter((e) => e.parentId === userKey(u.id)).map((e) => e.childId);
-      if (rootIds.length === 0) return []; // every root under this user is gone
-      const roots = rootIds.map((id) => nodeById.get(id)!); // every id is a live edge's childId, always a surviving node
-      const span = packSpan(orientation, roots)!; // roots is non-empty
-      const center = (span.min + span.max - (orientation === 'horizontal' ? NODE_H : NODE_W)) / 2;
-      return [orientation === 'horizontal' ? { ...u, py: center } : { ...u, px: center }];
-    });
-    const userById = new Map(users.map((u) => [u.id, u]));
-
-    const edges = liveEdges.map((e) => {
-      const uid = userIdFromKey(e.parentId);
-      if (uid === null) return e;
-      const user = userById.get(uid);
-      const child = nodeById.get(e.childId);
-      if (!user || !child) return e;
-      return { ...e, ...edgeEndpoints(orientation, user, child) };
-    });
-
-    return { nodes, edges, users, ...layoutExtent(nodes, users) };
+    return stableCleanRemoval(previous.layout, removal.removedIds, orientation);
   }
+  return stableReRootingRemoval(agents, collapsedIds, showUsers, orientation, previous, removal);
+}
 
-  // --- Re-rooting removal ----------------------------------------------------
+/**
+ * The clean-removal path: every removed id was a leaf, so the remaining tree
+ * needs no re-rooting and `previousLayout` is still valid as-is — the
+ * removed nodes/edges are dropped in place and nothing else is recomputed, so
+ * nothing else can move. A user left with no roots is dropped; one that
+ * keeps some is recentred over them (its old midpoint can drift once a
+ * sibling root is gone).
+ */
+function stableCleanRemoval(
+  previousLayout: ForestLayout,
+  removedIds: ReadonlySet<string>,
+  orientation: Orientation
+): ForestLayout {
+  const nodes = previousLayout.nodes.filter((n) => !removedIds.has(n.agent.id));
+  const nodeById = new Map(nodes.map((n) => [n.agent.id, n]));
+  const liveEdges = previousLayout.edges.filter(
+    (e) => !removedIds.has(e.parentId) && !removedIds.has(e.childId)
+  );
+
+  // Recenter each surviving user over its remaining root children: the old
+  // midpoint can drift off the group once a sibling root is gone. Linear in
+  // each root's packAxis position, so this matches what re-deriving from a
+  // fresh layoutForestWithUsers call (then transposing) would give.
+  const users = previousLayout.users.flatMap((u) => {
+    const rootIds = liveEdges.filter((e) => e.parentId === userKey(u.id)).map((e) => e.childId);
+    if (rootIds.length === 0) return []; // every root under this user is gone
+    const roots = rootIds.map((id) => nodeById.get(id)!); // every id is a live edge's childId, always a surviving node
+    const span = packSpan(orientation, roots)!; // roots is non-empty
+    const center = (span.min + span.max - (orientation === 'horizontal' ? NODE_H : NODE_W)) / 2;
+    return [orientation === 'horizontal' ? { ...u, py: center } : { ...u, px: center }];
+  });
+  const userById = new Map(users.map((u) => [u.id, u]));
+
+  const edges = liveEdges.map((e) => {
+    const uid = userIdFromKey(e.parentId);
+    if (uid === null) return e;
+    const user = userById.get(uid);
+    const child = nodeById.get(e.childId);
+    if (!user || !child) return e;
+    return { ...e, ...edgeEndpoints(orientation, user, child) };
+  });
+
+  return { nodes, edges, users, ...layoutExtent(nodes, users) };
+}
+
+/**
+ * The re-rooting path: some old tree(s) must reflow because a removed agent
+ * had surviving children. A "unit" is a user's whole group when `showUsers`
+ * (keyed by `userKey`), else everything descended from one *old* root tree
+ * (keyed by `oldTreeKeysOf`, so pieces promoted from the same old tree are
+ * placed together instead of competing for the same spot). Every unit
+ * untouched by the removal is frozen at its exact previous pixels, same as
+ * the clean case. Each *affected* unit is laid out on its own —
+ * `buildLineageForest` + `pruneCollapsed` + `layoutForest[WithUsers]` on just
+ * its surviving members, the same pipeline used for a full fresh layout, so
+ * collapse state and user grouping can't drift — then anchored at its old
+ * footprint. If it no longer fits there (it widened), it stays anchored
+ * anyway, and everything from that footprint's old right edge onward —
+ * frozen content, and any later affected unit — shifts right by exactly the
+ * overflow: a uniform, order-preserving translation, the same thing a fresh
+ * layout does when inserting one more slot, not a reshuffle or a relocation
+ * to the far end. A unit with no old footprint at all (every member was
+ * hidden by collapse before) is the one case with nothing to anchor to, and
+ * is appended past whatever has been placed so far.
+ */
+function stableReRootingRemoval(
+  agents: Agent[],
+  collapsedIds: ReadonlySet<string>,
+  showUsers: boolean,
+  orientation: Orientation,
+  previous: { agents: readonly Agent[]; layout: ForestLayout },
+  removal: PureRemoval
+): ForestLayout {
   // A "unit" is a user's whole group when showUsers, else everything that
   // descended from one *old* root tree — grouping by the old tree (not the
   // new root an agent ends up under) is what keeps multiple pieces promoted
