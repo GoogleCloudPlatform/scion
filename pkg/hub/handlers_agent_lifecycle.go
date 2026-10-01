@@ -94,17 +94,36 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 
-		// Observability only: the harness's SessionStart hook reports exactly
-		// this phase/activity/message combination (see ReportState's one call
-		// site for EventSessionStart in pkg/sciontool/hooks/handlers/hub.go),
-		// distinct from sciontool's own post-launch "Agent started" report.
-		// Logging since_create_ms here, every time, rather than tracking a
-		// persisted "first report" flag — testers take the earliest such line
-		// per agent as the dispatch-to-harness-ready number.
-		if status.Phase == string(state.PhaseRunning) && status.Activity == string(state.ActivityWorking) &&
-			status.Message == "Session started" && !agent.Created.IsZero() {
-			s.agentLifecycleLog.Info("harness ready: SessionStart status received",
-				"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+		// Observability only: start-time attribution from agent.Created to the
+		// first "running"/"working" status report, logged at whichever of two
+		// known sources actually reaches here first (live int2 data showed
+		// the harness-level one below never fires for no-auth/drop-to-shell
+		// agents, since there is no harness session to emit SessionStart —
+		// see ptone/scion#2519 r1 discussion):
+		//
+		//  - "Agent started": sciontool init's own report, right after the
+		//    supervised child process starts (same request that carries
+		//    Metadata["startup_ms"] above). Fires for every agent, including
+		//    no-auth/drop-to-shell ones. This is the dispatch-to-init-ready
+		//    number.
+		//  - "Session started": the harness's SessionStart hook (see
+		//    ReportState's one call site for EventSessionStart in
+		//    pkg/sciontool/hooks/handlers/hub.go). Only fires once a real
+		//    harness session starts, i.e. when credentials are configured.
+		//    This is the dispatch-to-harness-ready number.
+		//
+		// Logging every time a matching report arrives, rather than tracking
+		// a persisted "first report" flag — testers take the earliest line
+		// per agent and source as the number.
+		if status.Phase == string(state.PhaseRunning) && status.Activity == string(state.ActivityWorking) && !agent.Created.IsZero() {
+			switch status.Message {
+			case "Agent started":
+				s.agentLifecycleLog.Info("dispatch ready: Agent started status received",
+					"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+			case "Session started":
+				s.agentLifecycleLog.Info("harness ready: SessionStart status received",
+					"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+			}
 		}
 
 		oldPhase := agent.Phase

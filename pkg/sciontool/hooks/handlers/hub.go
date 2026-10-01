@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,6 +48,11 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// callStart times the hub call this event triggers (if any), for
+	// start-time attribution of hook-driven status updates. Observability
+	// only: outcome and elapsed_ms, never the request body.
+	callStart := time.Now()
 
 	var err error
 	switch event.Name {
@@ -215,11 +221,21 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
+	elapsedMs := time.Since(callStart).Milliseconds()
 	if err != nil {
 		log.Error("Hub status update failed: %v", err)
 		// Don't return error - we don't want Hub failures to break the hook chain
+		slog.Warn("hub status update failed", "event", event.Name, "elapsed_ms", elapsedMs)
 	} else {
 		log.Debug("Hub status update sent successfully")
+		// SessionStart is the one event currently used for start-time
+		// attribution (see pkg/hub's since_create_ms), so it logs at Info;
+		// every other event logs the same shape at Debug.
+		if event.Name == hooks.EventSessionStart {
+			slog.Info("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+		} else {
+			slog.Debug("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+		}
 	}
 
 	return nil

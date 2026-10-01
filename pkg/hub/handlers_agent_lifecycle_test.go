@@ -20,10 +20,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,4 +162,65 @@ func TestUpdateAgentStatus_ReincarnationInFlight_PostedMessageDiscarded(t *testi
 	assert.Equal(t, "migrating to generation 2", final.Message,
 		"Guard 0b must block the status POST's Message from landing while a reincarnation is in flight")
 	assert.Equal(t, "starting", final.Phase, "Phase must also stay blocked")
+}
+
+// TestUpdateAgentStatus_DispatchReadyLogsOnAgentStartedReport is a regression
+// test for the real path that actually sets activity=working, confirmed live
+// on hybval int2 (agent 4ef7f4c9, ptone/scion#2519 r1): a no-auth /
+// drop-to-shell agent never runs a harness session, so the SessionStart hook
+// never fires and "Session started" never reaches this handler. The only
+// phase=running/activity=working report such an agent ever sends is
+// sciontool init's own "Agent started" status, carrying Metadata
+// ["startup_ms"] (see cmd/sciontool/commands/init.go). This pins the real
+// wire shape of that report and asserts both the pre-existing startup_ms log
+// and the new dispatch-ready since_create_ms log fire for it, while the
+// harness-ready (SessionStart) line does not.
+func TestUpdateAgentStatus_DispatchReadyLogsOnAgentStartedReport(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("project-dr"), Name: "Dispatch Ready Project", Slug: "dispatch-ready-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:        tid("agent-dr"),
+		Slug:      "agent-dr-slug",
+		Name:      "Agent Dispatch Ready",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseStarting),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Real wire shape of sciontool init's initial running report, confirmed
+	// against the live hybval int2 journal.
+	status := store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+		Message:  "Agent started",
+		Metadata: map[string]string{"startup_ms": "358"},
+	}
+	body, err := json.Marshal(status)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	logged := logBuf.String()
+	assert.Contains(t, logged, "agent reported startup timing", "startup_ms line must still fire")
+	assert.Contains(t, logged, "startup_ms=358")
+	assert.Contains(t, logged, "dispatch ready: Agent started status received",
+		"the dispatch-ready since_create_ms line must fire on the Agent started report")
+	assert.Contains(t, logged, "since_create_ms=")
+	assert.NotContains(t, logged, "harness ready",
+		"the harness-ready (SessionStart) line must not fire for an Agent started report")
 }
