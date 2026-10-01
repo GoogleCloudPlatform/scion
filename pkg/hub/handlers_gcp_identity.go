@@ -1015,14 +1015,6 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// agentGCPMintFacts is the live service account row behind an agent's
-// assigned GCP identity, once every SA-row fact a live mint depends on has
-// been rechecked against the store for one mint request.
-type agentGCPMintFacts struct {
-	gcpID *store.GCPIdentityConfig
-	sa    *store.GCPServiceAccount
-}
-
 // resolveAgentGCPAssignment rechecks the agent-side half of a token-mint
 // request: the agent record is current (not soft-deleted) and its applied
 // GCP identity is still in assign mode. It intentionally does not touch the
@@ -1053,27 +1045,27 @@ func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCP
 // lookup error, so the caller renders the one denial it already had for "no
 // GCP identity assigned" -- a refusal here discloses nothing beyond what that
 // existing denial already discloses.
-func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) (*agentGCPMintFacts, bool) {
+func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil || sa == nil {
-		return nil, false
+		return false
 	}
 	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified || sa.Email != gcpID.ServiceAccountEmail {
-		return nil, false
+		return false
 	}
 	if !sa.ReachableFromProject(agentProjectID) {
-		return nil, false
+		return false
 	}
 	if sa.Scope == store.ScopeHub {
 		s.mu.RLock()
 		mode := s.saAssignCheckMode
 		s.mu.RUnlock()
 		if mode != SAAssignCheckEnforce {
-			return nil, false
+			return false
 		}
 	}
 
-	return &agentGCPMintFacts{gcpID: gcpID, sa: sa}, true
+	return true
 }
 
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.
@@ -1127,7 +1119,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 
 	// Recheck the service account row's verification, reachability and mode
 	// facts from the store on every mint request.
-	if _, ok := s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID); !ok {
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
@@ -1216,7 +1208,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 
 	// Recheck the service account row's verification, reachability and mode
 	// facts from the store on every mint request.
-	if _, ok := s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID); !ok {
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
