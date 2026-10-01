@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -381,6 +382,42 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// nonPortableTimezoneNames are tzdata entries time.LoadLocation accepts
+// (Go's embedded zoneinfo ships the actual files) but that do not name a
+// portable, specific IANA zone, so they are meaningless for an agent
+// container's TZ and are rejected for the same reason "Local" is: "Local"
+// is the host process's ambient zone, "localtime" and "posixrules" are
+// tzdata's own implementation files (not geographic zones), and "Factory"
+// is tzdata's explicit "deliberately uninformative" placeholder. Kept as the
+// same denylist the per-user display-timezone preference (design §3 A (d))
+// uses, so the two validators agree.
+var nonPortableTimezoneNames = map[string]bool{
+	"Local":      true,
+	"localtime":  true,
+	"posixrules": true,
+	"Factory":    true,
+}
+
+// validateDefaultTimezone checks an agent_defaults.default_timezone
+// candidate against the rule design.md §3 A (d) also uses for the per-user
+// display-timezone preference: it must be a real IANA time zone name per
+// time.LoadLocation, and nonPortableTimezoneNames is rejected even though
+// LoadLocation accepts those names. An empty string means UTC and is always
+// valid; callers that only validate a non-empty value still get the right
+// answer since LoadLocation("") would itself error.
+func validateDefaultTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if nonPortableTimezoneNames[tz] {
+		return fmt.Errorf("%q is not an IANA time zone name", tz)
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return err
+	}
+	return nil
+}
+
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	var req ServerConfigUpdateRequest
@@ -452,6 +489,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			DefaultGCPIdentityMode:             mode,
 			DefaultGCPIdentityServiceAccountID: saID,
 		}) {
+			return
+		}
+	}
+
+	// Validate the hub default timezone (IANA name check) before writing.
+	// Same rule, same 422, as the DB-mode handler (admin_settings_db.go) —
+	// without this, an invalid name is written to settings.yaml silently and
+	// never rejected in file mode.
+	if req.DefaultTimezone != nil {
+		tz, _ := raw["default_timezone"].(string)
+		if err := validateDefaultTimezone(tz); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
 			return
 		}
 	}

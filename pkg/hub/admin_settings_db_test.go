@@ -3365,6 +3365,34 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 	}
 }
 
+// TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected covers
+// tz-refactor task 12 review round 1's R1-3/tz-em addendum: time.LoadLocation
+// accepts "Local", "localtime", "posixrules" and "Factory" (Go's embedded
+// tzdata ships those files), but none of them name a portable IANA zone —
+// "Local" is the host's ambient zone, the other three are tzdata's own
+// implementation files — so the hub default must reject them explicitly,
+// the same denylist the per-user display-timezone preference uses (design
+// §3 A (d)).
+func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
+	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory"} {
+		t.Run(tz, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			body := `{"default_timezone": "` + tz + `"}`
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for default_timezone %q, got %d: %s", tz, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tz) {
+				t.Errorf("error message should mention %q: %s", tz, rr.Body.String())
+			}
+		})
+	}
+}
+
 // ---- default_user_role (design §5.A) ----
 
 // readAccessRow returns the persisted access section doc from the fake store.

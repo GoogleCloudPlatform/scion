@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -5971,6 +5973,99 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 	env := mockClient.lastCreateReq.ResolvedEnv
 	if got := env["TZ"]; got != "America/New_York" {
 		t.Errorf("TZ = %q, want America/New_York (hub default should apply)", got)
+	}
+}
+
+// TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode is the end-to-end
+// regression test for tz-refactor task 12 review round 1 finding R1-1: a
+// default_timezone saved through a file-mode admin PUT never reached agent
+// create, because BuildLayer1SnapshotFromFile did not populate
+// Layer1Snapshot.DefaultTimezone from GlobalConfig. Unlike
+// TestHTTPAgentDispatcher_TZInjection_HubDefault above (which hands the
+// dispatcher an arbitrary closure as the hub-agent-defaults provider), this
+// wires the dispatcher to the real (*Server).hubAgentDefaults method — the
+// same accessor server.go's NewServer wiring uses
+// (dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)) — and drives
+// it through an actual file-mode PUT, so it proves the fix end to end rather
+// than just the dispatcher's own injection logic in isolation.
+func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("tz-broker-filemode"),
+		Name:     "tz-host-filemode",
+		Slug:     "tz-host-filemode",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("create broker: %v", err)
+	}
+
+	// A bare &Server{} (no OperationalSettings/postgres) takes the file-mode
+	// path in handleAdminServerConfig. HOME is pointed at one temp dir for
+	// the whole test, set up directly (not via fileModePutServerConfig,
+	// which repoints HOME at a fresh temp dir on every call) so the clear-it
+	// PUT below lands in the same settings.yaml as the set-it PUT above it.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	putServerConfig := func(srv *Server, body string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+		return rr
+	}
+
+	srv := &Server{}
+	rr := putServerConfig(srv, `{"server":{"hub":{"port":9810}},"default_timezone":"Asia/Tokyo"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode PUT default_timezone: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "Asia/Tokyo" {
+		t.Fatalf("hubAgentDefaults().DefaultTimezone = %q after file-mode PUT, want Asia/Tokyo", got)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
+	// The real accessor, not a test closure — this is what makes the test
+	// prove the GlobalConfig/BuildLayer1SnapshotFromFile fix, not just the
+	// dispatcher's pre-existing injection logic.
+	dispatcher.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
+
+	agent := &store.Agent{
+		ID:              tid("tz-agent-filemode"),
+		Name:            "tz-agent-filemode",
+		Slug:            "tz-agent-filemode",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-filemode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test file-mode hub default tz",
+			Profile:       "no-tz",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got := env["TZ"]; got != "Asia/Tokyo" {
+		t.Errorf("TZ = %q, want Asia/Tokyo (file-mode hub default should reach dispatch)", got)
+	}
+
+	// Clearing it (PUT "") must clear hubAgentDefaults() too, not just leave
+	// the old value cached.
+	rr = putServerConfig(srv, `{"server":{"hub":{"port":9810}},"default_timezone":""}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode PUT to clear default_timezone: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
+		t.Errorf("hubAgentDefaults().DefaultTimezone = %q after clearing, want \"\"", got)
 	}
 }
 
