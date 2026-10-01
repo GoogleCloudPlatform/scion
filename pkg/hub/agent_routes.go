@@ -222,9 +222,8 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
 	// AgentRouteActionKeys has no ops entry, like message above: the keys
 	// action is routed and authorized by its own early-branch choke point
-	// (authorizeAgentKeys in handleAgentAction), not by the generic authz
-	// block this table's ops mapping feeds. The keys action has no catalog
-	// operation.
+	// (authorizeAgentKeys in handleAgentAction). The keys action has no
+	// catalog operation.
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
 
 	// --- /api/v1/projects/{projectId}/agents ---
