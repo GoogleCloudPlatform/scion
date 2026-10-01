@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -65,18 +66,22 @@ func TestMessage(t *testing.T) {
 		t.Fatalf("Message failed: %v", err)
 	}
 
-	if len(capturedCmd) != 6 {
-		t.Fatalf("Expected 6 commands, got %d: %v", len(capturedCmd), capturedCmd)
+	if len(capturedCmd) != 10 {
+		t.Fatalf("Expected 10 commands, got %d: %v", len(capturedCmd), capturedCmd)
 	}
 
-	bufName := bufNameFromLoadCmd(t, capturedCmd[1])
+	bufName := bufNameFromLoadCmd(t, capturedCmd[2])
+	submitBuf := submitBufferName(bufName)
 	expectedCmds := []string{
+		"tmux copy-mode -q -t scion:0",
 		"tmux send-keys -t scion:0 C-c",
 		"tmux load-buffer -b " + bufName + " -",
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
-		"tmux send-keys -t scion:0 Enter",
-		"tmux send-keys -t scion:0 Enter",
-		"tmux send-keys -t scion:0 Enter",
+	}
+	// One submit for the message, then the two confirmations. -d consumes
+	// the buffer, so each pairs a set with its paste.
+	for range 3 {
+		expectedCmds = append(expectedCmds, submitCmdStrings(submitBuf)...)
 	}
 
 	for i, cmd := range capturedCmd {
@@ -84,6 +89,21 @@ func TestMessage(t *testing.T) {
 			t.Errorf("Expected cmd %d to be '%s', got '%s'", i, expectedCmds[i], cmd)
 		}
 	}
+}
+
+// submitCmdStrings returns the joined argv of one pasted-CR submit.
+func submitCmdStrings(submitBuf string) []string {
+	return []string{
+		"tmux set-buffer -b " + submitBuf + " -- \r",
+		"tmux paste-buffer -t scion:0 -d -b " + submitBuf,
+	}
+}
+
+// isSubmitPaste reports whether cmd pastes a submit (CR) buffer.
+func isSubmitPaste(cmd []string) bool {
+	return len(cmd) > 1 && cmd[1] == "paste-buffer" && slices.ContainsFunc(cmd, func(a string) bool {
+		return strings.HasPrefix(a, submitBufferPrefix+"-")
+	})
 }
 
 // parseBufNameFromLoadCmd extracts the buffer name from a captured
@@ -140,9 +160,9 @@ func TestBroadcast(t *testing.T) {
 	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
 		mu.Lock()
 		capturedCalls = append(capturedCalls, fmt.Sprintf("%s: %s", id, strings.Join(cmd, " ")))
-		// Signal done for each bare Enter keypress (two trailing Enters per agent delivery).
-		// Bare Enter: ["tmux", "send-keys", "-t", "scion:0", "Enter"] → len 5.
-		if len(cmd) == 5 && cmd[0] == "tmux" && cmd[1] == "send-keys" && cmd[4] == "Enter" {
+		// Signal done for each submit paste (one for the message, two for the
+		// trailing confirmations, per agent delivery).
+		if isSubmitPaste(cmd) {
 			done <- struct{}{}
 		}
 		mu.Unlock()
@@ -170,7 +190,7 @@ func TestBroadcast(t *testing.T) {
 		t.Fatalf("Message 2 failed: %v", err)
 	}
 
-	// Wait for both buffered deliveries to complete (3 Enters per agent × 2 agents).
+	// Wait for both buffered deliveries to complete (3 submits per agent × 2 agents).
 	for i := 0; i < 6; i++ {
 		select {
 		case <-done:
@@ -182,8 +202,8 @@ func TestBroadcast(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(capturedCalls) != 10 {
-		t.Fatalf("Expected 10 calls, got %d: %v", len(capturedCalls), capturedCalls)
+	if len(capturedCalls) != 16 {
+		t.Fatalf("Expected 16 calls, got %d: %v", len(capturedCalls), capturedCalls)
 	}
 
 	// Since buffer delivery is async, agents may flush in either order.
@@ -191,8 +211,8 @@ func TestBroadcast(t *testing.T) {
 	agent1Calls := filterByPrefix(capturedCalls, "agent-1:")
 	agent2Calls := filterByPrefix(capturedCalls, "agent-2:")
 
-	if len(agent1Calls) != 5 || len(agent2Calls) != 5 {
-		t.Fatalf("Expected 5 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
+	if len(agent1Calls) != 8 || len(agent2Calls) != 8 {
+		t.Fatalf("Expected 8 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
 	}
 
 	// Buffer names are not required to differ across agents: each agent has
@@ -206,9 +226,11 @@ func TestBroadcast(t *testing.T) {
 	expectedAgent1 := []string{
 		"agent-1: tmux load-buffer -b " + buf1 + " -",
 		"agent-1: tmux paste-buffer -t scion:0 -p -d -b " + buf1,
-		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-1: tmux send-keys -t scion:0 Enter",
-		"agent-1: tmux send-keys -t scion:0 Enter",
+	}
+	for range 3 {
+		for _, c := range submitCmdStrings(submitBufferName(buf1)) {
+			expectedAgent1 = append(expectedAgent1, "agent-1: "+c)
+		}
 	}
 	for i, want := range expectedAgent1 {
 		if agent1Calls[i] != want {
@@ -219,9 +241,11 @@ func TestBroadcast(t *testing.T) {
 	expectedAgent2 := []string{
 		"agent-2: tmux load-buffer -b " + buf2 + " -",
 		"agent-2: tmux paste-buffer -t scion:0 -p -d -b " + buf2,
-		"agent-2: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux send-keys -t scion:0 Enter",
-		"agent-2: tmux send-keys -t scion:0 Enter",
+	}
+	for range 3 {
+		for _, c := range submitCmdStrings(submitBufferName(buf2)) {
+			expectedAgent2 = append(expectedAgent2, "agent-2: "+c)
+		}
 	}
 	for i, want := range expectedAgent2 {
 		if agent2Calls[i] != want {
@@ -232,8 +256,8 @@ func TestBroadcast(t *testing.T) {
 
 // TestDeliverImmediate_PartialDeliveryAfterPaste covers #1866: once
 // "tmux paste-buffer" has succeeded, the message text is already sitting in
-// the agent's terminal input. A later failure (the closing Enter, or one of
-// the confirmation Enters) must be reported as a PartialDeliveryError so the
+// the agent's terminal input. A later failure (the closing submit, or one of
+// the confirmation submits) must be reported as a PartialDeliveryError so the
 // message buffer's bounded retry does not re-run the whole delivery — doing
 // so would re-paste the text and the agent would see it twice.
 func TestDeliverImmediate_PartialDeliveryAfterPaste(t *testing.T) {
@@ -244,21 +268,31 @@ func TestDeliverImmediate_PartialDeliveryAfterPaste(t *testing.T) {
 			}, nil
 		},
 	}
-	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
-		if len(cmd) >= 2 && cmd[1] == "send-keys" && cmd[len(cmd)-1] == "Enter" {
-			return "", fmt.Errorf("exec failed")
-		}
-		return "", nil
-	}
+	for _, tc := range []struct {
+		name string
+		fail func(cmd []string) bool
+	}{
+		{"submit set-buffer fails", func(cmd []string) bool { return len(cmd) > 1 && cmd[1] == "set-buffer" }},
+		{"submit paste fails", isSubmitPaste},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+				if tc.fail(cmd) {
+					return "", fmt.Errorf("exec failed")
+				}
+				return "", nil
+			}
 
-	mgr := &AgentManager{Runtime: mockRT}
-	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	var partial *PartialDeliveryError
-	if !errors.As(err, &partial) {
-		t.Fatalf("expected a PartialDeliveryError once paste-buffer succeeded, got %T: %v", err, err)
+			mgr := &AgentManager{Runtime: mockRT}
+			err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			var partial *PartialDeliveryError
+			if !errors.As(err, &partial) {
+				t.Fatalf("expected a PartialDeliveryError once paste-buffer succeeded, got %T: %v", err, err)
+			}
+		})
 	}
 }
 
@@ -312,10 +346,10 @@ func TestDeliverImmediate_ContextCanceledDuringEnterWait(t *testing.T) {
 	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
 		if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
 			// Cancel right after the message text has been pasted, before the
-			// post-delivery confirmation Enters begin waiting.
+			// post-delivery confirmation submits begin waiting.
 			cancel()
 		}
-		if len(cmd) >= 2 && cmd[1] == "send-keys" && cmd[len(cmd)-1] == "Enter" {
+		if isSubmitPaste(cmd) {
 			enterCalls++
 		}
 		return "", nil
@@ -579,6 +613,7 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 	var mu sync.Mutex
 	var loadBufNames []string
 	var pasteBufNames []string
+	submitBufNames := map[string]bool{}
 	var parseErrs []error
 
 	start := make(chan struct{})
@@ -606,7 +641,11 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 			for i, arg := range cmd {
 				if arg == "-b" && i+1 < len(cmd) {
 					mu.Lock()
-					pasteBufNames = append(pasteBufNames, cmd[i+1])
+					if isSubmitPaste(cmd) {
+						submitBufNames[cmd[i+1]] = true
+					} else {
+						pasteBufNames = append(pasteBufNames, cmd[i+1])
+					}
 					mu.Unlock()
 				}
 			}
@@ -662,6 +701,61 @@ func TestDeliverImmediate_ConcurrentDeliveriesUseDistinctBufferNames(t *testing.
 		if !wantSet[b] {
 			t.Errorf("paste-buffer referenced a buffer name %q that was never loaded", b)
 		}
+	}
+	// The CR submit buffers must be per-delivery too: with a shared name one
+	// delivery's set-buffer could be consumed (-d) by the other's paste.
+	wantSubmit := map[string]bool{
+		submitBufferName(loadBufNames[0]): true,
+		submitBufferName(loadBufNames[1]): true,
+	}
+	if len(submitBufNames) != 2 {
+		t.Fatalf("expected 2 distinct submit buffer names, got %v", submitBufNames)
+	}
+	for b := range submitBufNames {
+		if !wantSubmit[b] {
+			t.Errorf("submit paste referenced buffer %q not derived from a loaded message buffer", b)
+		}
+	}
+}
+
+// TestDeliverImmediate_SubmitPasteFailureDeletesSubmitBuffer: a failed CR
+// paste leaves its named buffer behind (-d only fires on success), so it is
+// deleted best-effort, and the failure still counts as partial delivery.
+func TestDeliverImmediate_SubmitPasteFailureDeletesSubmitBuffer(t *testing.T) {
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "agent-1", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+	}
+	var loadedBufName string
+	var deleteCalls []string
+	mockRT.ExecWithStdinFunc = func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+		loadedBufName = bufNameFromLoadCmd(t, strings.Join(cmd, " "))
+		return "", nil
+	}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		switch {
+		case isSubmitPaste(cmd):
+			return "", fmt.Errorf("paste failed")
+		case len(cmd) >= 2 && cmd[1] == "delete-buffer":
+			deleteCalls = append(deleteCalls, strings.Join(cmd, " "))
+			return "", fmt.Errorf("delete-buffer also failed")
+		default:
+			return "", nil
+		}
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected a PartialDeliveryError, got %T: %v", err, err)
+	}
+	want := []string{"tmux delete-buffer -b " + submitBufferName(loadedBufName)}
+	if !slices.Equal(deleteCalls, want) {
+		t.Fatalf("delete-buffer calls = %v, want %v", deleteCalls, want)
 	}
 }
 
@@ -738,4 +832,182 @@ func filterByPrefix(calls []string, prefix string) []string {
 		}
 	}
 	return result
+}
+
+// TestDeliveryReachesTheHarnessInCopyMode pins how each delivery path survives
+// a pane left in copy-mode by a scroll. Real keys are dispatched through the
+// mode's key table, so those paths cancel the mode first; the message path
+// submits by paste, which bypasses the key table and therefore must NOT cancel
+// - that is what keeps a reading operator's scroll position.
+func TestDeliveryReachesTheHarnessInCopyMode(t *testing.T) {
+	const exitCopyMode = "tmux copy-mode -q -t scion:0"
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		// deliver invokes one delivery path.
+		deliver func(mgr *AgentManager) error
+		// wantExit is whether that path must cancel copy-mode.
+		wantExit bool
+		// firstInput is the first command of that path that reaches the pane.
+		firstInput string
+	}{
+		{
+			name:       "message submits by paste and leaves the mode alone",
+			deliver:    func(mgr *AgentManager) error { return mgr.deliverImmediate(ctx, "test-agent", "", "hello", false) },
+			wantExit:   false,
+			firstInput: "tmux paste-buffer",
+		},
+		{
+			name:       "interrupt sends real keys so it must cancel first",
+			deliver:    func(mgr *AgentManager) error { return mgr.deliverImmediate(ctx, "test-agent", "", "hello", true) },
+			wantExit:   true,
+			firstInput: "tmux send-keys -t scion:0 C-c",
+		},
+		{
+			name:       "empty message is a bare Enter key so it must cancel first",
+			deliver:    func(mgr *AgentManager) error { return mgr.deliverImmediate(ctx, "test-agent", "", "", false) },
+			wantExit:   true,
+			firstInput: "tmux send-keys -t scion:0 Enter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedCmds []string
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{
+						{
+							ContainerID:     "agent-1",
+							Name:            "test-agent",
+							ContainerStatus: "Up 2 minutes",
+							Labels:          map[string]string{"scion.name": "test-agent"},
+						},
+					}, nil
+				},
+				ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+					capturedCmds = append(capturedCmds, strings.Join(cmd, " "))
+					return "", nil
+				},
+			}
+
+			mgr := &AgentManager{Runtime: mockRT}
+			if err := tt.deliver(mgr); err != nil {
+				t.Fatalf("delivery failed: %v", err)
+			}
+			if len(capturedCmds) == 0 {
+				t.Fatal("no commands were sent")
+			}
+
+			exitIdx := slices.Index(capturedCmds, exitCopyMode)
+			if tt.wantExit && exitIdx != 0 {
+				t.Errorf("expected cmd 0 to be %q, got %v", exitCopyMode, capturedCmds)
+			}
+			if !tt.wantExit && exitIdx >= 0 {
+				t.Errorf("path must not cancel copy-mode, but did at %d: %v", exitIdx, capturedCmds)
+			}
+
+			inputIdx := slices.IndexFunc(capturedCmds, func(c string) bool { return strings.HasPrefix(c, tt.firstInput) })
+			if inputIdx < 0 {
+				t.Fatalf("expected %q among the sent commands, got %v", tt.firstInput, capturedCmds)
+			}
+			if tt.wantExit && inputIdx < exitIdx {
+				t.Errorf("%q was sent before copy-mode was left: %v", tt.firstInput, capturedCmds)
+			}
+		})
+	}
+}
+
+// TestMessageSubmitsWithoutSendKeys guards the property the paste submit exists
+// for: nothing on the plain-message path may go through the mode's key table.
+func TestMessageSubmitsWithoutSendKeys(t *testing.T) {
+	var capturedCmds [][]string
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{
+					ContainerID:     "agent-1",
+					Name:            "test-agent",
+					ContainerStatus: "Up 2 minutes",
+					Labels:          map[string]string{"scion.name": "test-agent"},
+				},
+			}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmds = append(capturedCmds, cmd)
+			return "", nil
+		},
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	if err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false); err != nil {
+		t.Fatalf("delivery failed: %v", err)
+	}
+
+	for _, cmd := range capturedCmds {
+		if len(cmd) > 1 && cmd[1] == "send-keys" {
+			t.Errorf("plain message path used send-keys, which copy-mode swallows: %v", cmd)
+		}
+		if len(cmd) > 1 && cmd[1] == "paste-buffer" && isSubmitPaste(cmd) && slices.Contains(cmd, "-p") {
+			t.Errorf("submit paste must not be bracketed (-p), or the CR arrives as pasted text: %v", cmd)
+		}
+	}
+	if !slices.ContainsFunc(capturedCmds, isSubmitPaste) {
+		t.Error("no submit paste was sent; the message would never be submitted")
+	}
+}
+
+// TestDeliveryToleratesOldTmux pins the fallback for tmux before 3.1, where
+// copy-mode -q does not exist: the delivery must still go through rather than
+// aborting on a command that is only best-effort.
+func TestDeliveryToleratesOldTmux(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tt := range []struct {
+		name    string
+		deliver func(mgr *AgentManager) error
+		want    string
+	}{
+		{
+			name:    "interrupt",
+			deliver: func(m *AgentManager) error { return m.deliverImmediate(ctx, "test-agent", "", "hello", true) },
+			want:    "tmux send-keys -t scion:0 C-c",
+		},
+		{
+			name:    "empty message",
+			deliver: func(m *AgentManager) error { return m.deliverImmediate(ctx, "test-agent", "", "", false) },
+			want:    "tmux send-keys -t scion:0 Enter",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured []string
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{{
+						ContainerID:     "agent-1",
+						Name:            "test-agent",
+						ContainerStatus: "Up 2 minutes",
+						Labels:          map[string]string{"scion.name": "test-agent"},
+					}}, nil
+				},
+				ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+					joined := strings.Join(cmd, " ")
+					captured = append(captured, joined)
+					if strings.Contains(joined, "copy-mode") {
+						return "", errors.New("unknown flag: -q")
+					}
+					return "", nil
+				},
+			}
+
+			mgr := &AgentManager{Runtime: mockRT}
+			if err := tt.deliver(mgr); err != nil {
+				t.Fatalf("delivery aborted on an old-tmux copy-mode failure: %v", err)
+			}
+			if !slices.Contains(captured, tt.want) {
+				t.Errorf("expected %q to still be sent, got %v", tt.want, captured)
+			}
+		})
+	}
 }
