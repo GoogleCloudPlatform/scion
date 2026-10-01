@@ -933,8 +933,8 @@ authDone:
 	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
 	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
 	// operator-derived resolution (request HubEndpoint, hub connection
-	// endpoint, broker config HubEndpoint, or project settings; never
-	// ResolvedEnv/Config.Env, which a creator can set — see
+	// endpoint, or broker config HubEndpoint; never ResolvedEnv/Config.Env,
+	// which a creator can set — see
 	// api.StartOptions.TrustedHubEndpoint's own doc comment), a field set
 	// separately from opts.Env so a creator-controlled env value can never
 	// reach it even when every operator tier is empty; if empty, no hub host

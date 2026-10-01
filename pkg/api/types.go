@@ -998,9 +998,9 @@ type StartOptions struct {
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
 	// TrustedHubEndpoint is the broker's own operator-derived resolution of
 	// the hub endpoint — set only in BrokerMode, only from the request
-	// HubEndpoint, the hub connection endpoint, this broker's configured
-	// HubEndpoint, or project settings (never from ResolvedEnv/Config.Env,
-	// which a project or template creator controls). It is empty when none
+	// HubEndpoint, the hub connection endpoint, or this broker's configured
+	// HubEndpoint (never from ResolvedEnv/Config.Env, which a project or
+	// template creator controls). It is empty when none
 	// of those operator tiers produced a value, even if Env's own
 	// SCION_HUB_ENDPOINT is non-empty. Runtime.Run's substrate egress
 	// allowlist is the one consumer that must read this field instead of
