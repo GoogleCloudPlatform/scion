@@ -110,10 +110,12 @@ func TestCapabilities_AgentMatchesDecide(t *testing.T) {
 				assertCapabilitiesMatchDecide(t, authz, user, res, authz.ComputeCapabilities(ctx, user, res), actions)
 				assertCapabilitiesMatchDecide(t, authz, user, res, batch[i], actions)
 			}
-			// Attach and port access follow the relationship to the agent,
-			// not the project role.
+			// Attach follows the relationship to the agent, not the project
+			// role. Owners and admins carry agent.port_access through their
+			// role; members reach ports only on their own agents.
 			assert.False(t, capabilityAllows(batch[0], ActionAttach), "attach on another member's agent")
-			assert.False(t, capabilityAllows(batch[0], ActionPortAccess), "port access on another member's agent")
+			assert.Equal(t, tc.role != store.GroupMemberRoleMember, capabilityAllows(batch[0], ActionPortAccess),
+				"port access on another member's agent")
 			assert.True(t, capabilityAllows(batch[1], ActionAttach), "attach on own agent")
 
 			scope := Resource{Type: "agent", ParentType: "project", ParentID: project.ID}
