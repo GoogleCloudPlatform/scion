@@ -2675,6 +2675,11 @@ var ErrRawDispatchRefused = errors.New("agent dispatch: raw message delivery ref
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	// A nil agent has no broker to deliver to; reject it before the raw
+	// backstop log below dereferences agent.ID.
+	if agent == nil {
+		return requireRuntimeBrokerAssigned(agent)
+	}
 	if structuredMsg != nil && structuredMsg.Raw {
 		slog.Error("agent dispatch: raw message delivery refused at the backstop",
 			"agent_id", agent.ID, "defect", "raw_reached_dispatch_layer")

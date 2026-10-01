@@ -100,7 +100,8 @@ func (s *Server) tryAgentKeysMessageBridge(w http.ResponseWriter, r *http.Reques
 	limited := http.MaxBytesReader(w, r.Body, agentKeysBridgePreAuthMaxBodyBytes)
 	body, err := io.ReadAll(limited)
 	if err != nil {
-		if errors.As(err, new(*http.MaxBytesError)) {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
 			// Generic, non-keys 413: raw-vs-not is not yet known at this
 			// point, so this is not an agentkeys.Outcome at all (contract
 			// §6.1/§6.4). No operation ID: no operation is recognized to

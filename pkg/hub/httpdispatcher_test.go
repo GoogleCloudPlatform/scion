@@ -435,6 +435,23 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw(t *testing.T) {
 	}
 }
 
+// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw verifies a nil
+// agent is rejected with errNoRuntimeBrokerAssigned (not a panic in the raw
+// backstop log) and that no broker call is made.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
+	memStore := createTestStore(t)
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{Raw: true})
+	if !errors.Is(err, errNoRuntimeBrokerAssigned) {
+		t.Fatalf("DispatchAgentMessage error = %v, want errNoRuntimeBrokerAssigned", err)
+	}
+	if mockClient.messageCalled {
+		t.Error("expected MessageAgent to never be called for a nil agent")
+	}
+}
+
 // TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers is the
 // backstop's negative control: Plain (and ordinary, non-raw) messages are
 // completely unaffected, proving the Raw check above is not accidentally
