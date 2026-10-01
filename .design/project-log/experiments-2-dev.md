@@ -1,6 +1,6 @@
 # Experiments Phase 2 — convention and documentation (ptone/scion#2217)
 
-Branch: `scion/experiments-2`, based on `scion/experiments-1b` (ptone/scion#2436), which is rebased onto upstream `main` after Phase 1a-i and 1a-ii merged upstream as GoogleCloudPlatform/scion#2121 and GoogleCloudPlatform/scion#2152.
+Branch: `scion/experiments-2`, based on `scion/experiments-1b` (ptone/scion#2436, upstream GoogleCloudPlatform/scion#2191), which is rebased onto upstream `main` after Phase 1a-i and 1a-ii merged upstream as GoogleCloudPlatform/scion#2121 and GoogleCloudPlatform/scion#2152.
 
 ## Scope
 
@@ -26,5 +26,5 @@ This repository records release notes as dated weekly digests under `docs-site/s
 ## Verification
 
 - `docs-site`: `npm ci`, then `npm run build` (requires Node >= 22; the sandbox's default Node was 20, so a local Node 22 toolchain and the `d2` CLI were used to run the real build rather than skip it). Build succeeds, generates `/reference/experiments/`, and the `starlight-links-validator` link check reports all internal links valid.
-- `web`: `npm ci`; `npm run typecheck` clean; `npx prettier --check src/utils/feature-flags.ts e2e/chat-palette/fixture.ts` clean; `npx eslint src/utils/feature-flags.ts` clean; `e2e/chat-palette/fixture.ts` cannot be type-linted (a pre-existing, repo-wide tsconfig gap excludes e2e/test files); `npx vitest run src/utils/feature-flags.test.ts` — 32/32 passing (no test changes needed; existing precedence tests already cover the corrected comments' behavior).
+- `web`: `npm ci`; `npm run typecheck` clean; `npx prettier --check src/utils/feature-flags.ts e2e/chat-palette/fixture.ts` clean; `npx eslint src/utils/feature-flags.ts` clean; `e2e/chat-palette/fixture.ts` cannot be type-linted (a pre-existing, repo-wide tsconfig gap excludes e2e/test files); `npx vitest run src/utils/feature-flags.test.ts` — 34/34 passing (no test changes needed; existing precedence tests already cover the corrected comments' behavior; the count includes two guard tests added upstream in `scion/experiments-1b`, not by this PR).
 - Repo-wide grep confirms no remaining doc claims that a Go template sets `window.__SCION_FEATURES__`, and `ROLLOUT.md` no longer says the flag is off by default.
