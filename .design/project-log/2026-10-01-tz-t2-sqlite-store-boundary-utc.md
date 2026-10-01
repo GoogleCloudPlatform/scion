@@ -85,11 +85,23 @@ What's left after both carve-outs, and what this change implements:
 - `golangci-lint run --new-from-rev=upstream/main --concurrency=1
   ./pkg/ent/entc/...` — 0 issues.
 - `gofmt -l` on changed files — clean.
-- `go test -p 2 -count=1 ./pkg/hub/... ` under `TZ=Asia/Kathmandu`
-  (createTestStore-backed tests, the ~275-test baseline from
-  dev-common.md): see report to tz-em for the full breakdown (which of
-  those now pass vs. which still hit the agent-store/schedule-store
-  thresholds owned by #2470/#2476).
+- `go test -p 2 -count=1 -timeout 60m ./pkg/hub/...` (the ~275-test
+  `createTestStore`-backed baseline from dev-common.md): **fully green
+  under both `TZ=Asia/Kathmandu` (1040.6s) and `TZ=Asia/Tokyo` (1029.0s)**,
+  zero failures — not a partial fix. `pkg/hub/auth`, `authzop`,
+  `githubapp`, `imagecheck`, `permissions` all pass too under both zones;
+  `brokersettings` has no test files. No remaining failure traces to an
+  agent-store site owned by PR ptone/scion#2470: `_timezone=UTC`
+  canonicalises every SQLite bind regardless of whether the predicate
+  site calls `.UTC()` explicitly (design §2.1.2), so the agent-store/
+  schedule-store thresholds are already correct on SQLite even before
+  #2470/#2476 land. Those two PRs still matter for **Postgres**, where
+  there's no DSN-level equivalent — correctness there depends on their
+  explicit bind-site `.UTC()` plus this PR's hook (which only normalises
+  what's echoed back, since Postgres `timestamptz` is already
+  instant-correct regardless of the bound value's `Location`). A
+  default-TZ full `pkg/hub` run was skipped per tz-em (fork CI covers
+  default TZ).
 
 ## Fixed: two test harnesses bypassed the store boundary entirely
 
