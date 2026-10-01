@@ -5765,12 +5765,11 @@ describe('scion-chat-thread /stop slash command', () => {
   });
 
   /**
-   * Round-2 review Optional: in a V2 chat-page DM, `projectId` is only
-   * `inheritedProjectId()` — the previously viewed project, not one the DM
-   * belongs to (see `resolvePathLinkProjectId`). `/stop <slug>` must resolve
-   * against the DM peer agent's own project instead, the same fallback
-   * `resolvePathLinkProjectId` already uses for path links. Fails on the
-   * reviewed head, which always used `this.projectId`.
+   * In a chat-page DM, `projectId` is only `inheritedProjectId()` — the
+   * previously viewed project, not one the DM belongs to (see
+   * `resolvePathLinkProjectId`). `/stop <slug>` must resolve against the DM
+   * peer agent's own project instead, the same fallback
+   * `resolvePathLinkProjectId` already uses for path links.
    */
   it('in a DM, targets the peer agent project, not the inherited thread projectId', async () => {
     fakeStateManager.setAgent('coder', 'proj-peer');
