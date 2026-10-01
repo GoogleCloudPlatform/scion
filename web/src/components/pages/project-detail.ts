@@ -47,13 +47,19 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
+import { AgentListWindow } from '../../client/agent-list-window.js';
+import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
+import { sortAgents } from '../../shared/agent-sort.js';
+import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/agent-message-viewer.js';
+import '../shared/agent-pager.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import {
@@ -70,8 +76,20 @@ import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 
-type AgentSortField = 'name' | 'status' | 'created' | 'updated';
-type SortDir = 'asc' | 'desc';
+/** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11 P1c). */
+type AgentsViewTrigger = 'page-load' | 'label-commit' | 'lifecycle-refresh' | 'view-change';
+
+/** The project endpoint's sorted-mode response shape (design §4.6). */
+interface SortedAgentsResponse {
+  agents: Agent[];
+  nextCursor?: string;
+  totalCount: number;
+  complete?: boolean;
+  sort?: string;
+  dir?: string;
+  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  _capabilities?: Capabilities;
+}
 
 // User-level (not per-project) sticky preference for the agents section height.
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
@@ -205,6 +223,92 @@ export class ScionPageProjectDetail extends LitElement {
 
   @state()
   private sortDir: SortDir = 'desc';
+
+  /**
+   * The label filter as of the last commit (`sl-change`/`sl-clear`), as
+   * opposed to `labelFilter`, which also tracks every keystroke for local
+   * preview (design §6.3). Used to decide P1 eligibility and request
+   * parameters, and to key the per-label 422 refusal memory below.
+   */
+  private committedLabel = '';
+
+  /**
+   * The committed label for which the server last refused sorted mode
+   * (422 `sorted_view_unavailable`, design §4.3). `null` until a refusal
+   * happens. A later commit of a *different* label retries sorted mode once.
+   */
+  private sortedRefusedForLabel: string | null = null;
+
+  /**
+   * Page size for the list view's window (design Q4; persisted by
+   * `<scion-agent-pager>` itself via `storageKey`).
+   */
+  @state()
+  private pagerPageSize = 25;
+
+  /**
+   * Whether the list view currently has valid window data (small or paged)
+   * for the current view state, and so should render from `agentWindow`
+   * with a pager instead of the legacy unsliced `displayAgents` (design
+   * §11 P1c). False right after a legacy load that was truncated
+   * (`nextCursor` present, > 500 candidates) — see `loadLegacyAgents`.
+   */
+  @state()
+  private listViewUsesWindow = false;
+
+  /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
+  @state()
+  private windowTick = 0;
+
+  /**
+   * The list view's window (design §4.3, §6.1). P1c implements only the
+   * small and paged states (design §11); held and capped land in P5 with
+   * `agent-drain.ts`.
+   */
+  private agentWindow = new AgentListWindow({
+    viewState: {
+      phaseFilter: this.phaseFilter,
+      label: this.labelFilter,
+      sortField: this.sortField,
+      sortDir: this.sortDir,
+      pageSize: this.pagerPageSize,
+    },
+    fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
+    getAgent: (id: string) => stateManager.getAgent(id),
+  });
+
+  private boundOnWindowChange = () => {
+    this.windowTick++;
+  };
+
+  private boundOnAgentsChanged = (e: Event) => {
+    // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
+    // `AgentsChangedDetail` itself is `detail.data`.
+    this.agentWindow.applyChanges((e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data);
+  };
+
+  private boundOnAgentsResync = () => {
+    this.agentWindow.markResync();
+  };
+
+  /** "Agents"/"Running" stats and Stop-all visibility: from `this.agents` normally, or the member index while paged (design §6.2, §11 P1c). */
+  private get agentStats(): { total: number; running: number } {
+    if (this.agentWindow.state === 'paged') {
+      return this.agentWindow.stats;
+    }
+    return {
+      total: this.agents.length,
+      running: this.agents.filter((a) => isAgentRunning(a)).length,
+    };
+  }
+
+  /** P1-eligible view state (design §11 P1c): list view, `updated` sort, and a label that is empty or contains `=`. */
+  private isP1Eligible(): boolean {
+    if (this.viewMode !== 'list') return false;
+    if (this.sortField !== 'updated') return false;
+    const label = this.committedLabel.trim();
+    return label === '' || label.includes('=');
+  }
 
   /**
    * Whether a git pull is in progress
@@ -979,6 +1083,19 @@ export class ScionPageProjectDetail extends LitElement {
       }
     }
 
+    // Sync the window's view state with the persisted values read above,
+    // before the initial load (design §6.3).
+    this.agentWindow.setViewState(
+      {
+        phaseFilter: this.phaseFilter,
+        label: this.labelFilter,
+        sortField: this.sortField,
+        sortDir: this.sortDir,
+        pageSize: this.pagerPageSize,
+      },
+      { refetchIfPaged: false }
+    );
+
     void this.loadData();
     void this.loadHubProjectCapabilities();
 
@@ -990,6 +1107,9 @@ export class ScionPageProjectDetail extends LitElement {
     // Listen for real-time updates
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
@@ -999,6 +1119,9 @@ export class ScionPageProjectDetail extends LitElement {
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
     );
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.filesSectionObserver?.disconnect();
     this.filesSectionObserver = null;
     this.observedFilesPlaceholder = null;
@@ -1158,6 +1281,11 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private onAgentsUpdated(): void {
+    // The small state's `this.agents` rebuild is skipped while the window is
+    // paged: `this.agents` is intentionally empty then, and live updates for
+    // the list view instead go through `agentWindow.applyChanges` (design
+    // §11 P1c, §6.2).
+    if (this.agentWindow.state === 'paged') return;
     const updatedAgents = stateManager.getAgents();
     // Merge SSE agent deltas into local agent list
     const agentMap = new Map(this.agents.map((a) => [a.id, a]));
@@ -1212,10 +1340,12 @@ export class ScionPageProjectDetail extends LitElement {
     this.error = null;
 
     try {
-      // Load project and agents in parallel
-      const [projectResponse, agentsResponse] = await Promise.all([
+      // Load the project and the agents window's one first request in
+      // parallel (design §11 P1c: `loadData` and `fetchAndMergeAgents` both
+      // funnel into `loadAgentsForView`).
+      const [projectResponse] = await Promise.all([
         apiFetch(`/api/v1/projects/${this.projectId}`),
-        apiFetch(`/api/v1/projects/${this.projectId}/agents`),
+        this.loadAgentsForView('page-load'),
       ]);
 
       if (!projectResponse.ok) {
@@ -1230,30 +1360,6 @@ export class ScionPageProjectDetail extends LitElement {
       this.project = (await projectResponse.json()) as Project;
       dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
 
-      if (agentsResponse.ok) {
-        const agentsData = (await agentsResponse.json()) as
-          | { agents?: Agent[]; _capabilities?: Capabilities }
-          | Agent[];
-        if (Array.isArray(agentsData)) {
-          this.agents = agentsData;
-          this.agentScopeCapabilities = undefined;
-        } else {
-          this.agents = agentsData.agents || [];
-          this.agentScopeCapabilities = agentsData._capabilities;
-        }
-        // Derive scope capabilities from per-agent capabilities when the
-        // response doesn't include a top-level _capabilities field.
-        if (!this.agentScopeCapabilities) {
-          this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
-        }
-      } else {
-        // Fallback: if project-scoped agents endpoint fails, try filtering from all agents
-        this.agents = [];
-        this.agentScopeCapabilities = undefined;
-      }
-
-      // Seed stateManager so SSE delta merging has full baseline data
-      stateManager.seedAgents(this.agents);
       if (this.project) {
         stateManager.seedProjects([this.project]);
       }
@@ -1333,38 +1439,201 @@ export class ScionPageProjectDetail extends LitElement {
     return n.toLocaleString();
   }
 
-  private backgroundRefresh(): void {
-    this.fetchAndMergeAgents().catch((err) => {
+  private backgroundRefresh(trigger: AgentsViewTrigger = 'lifecycle-refresh'): void {
+    this.fetchAndMergeAgents(trigger).catch((err) => {
       console.warn('Background refresh failed:', err);
     });
   }
 
-  private async fetchAndMergeAgents(): Promise<void> {
+  /** Label commit and lifecycle/stop-all refresh both land here, same as `loadData` (design §11 P1c). */
+  private async fetchAndMergeAgents(
+    trigger: AgentsViewTrigger = 'lifecycle-refresh'
+  ): Promise<void> {
+    await this.loadAgentsForView(trigger);
+  }
+
+  /**
+   * The project page's single request-choosing function (design §4.3,
+   * §11 P1c). Called exactly once per trigger by `loadData` and
+   * `fetchAndMergeAgents`.
+   */
+  private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
+    const label = this.committedLabel.trim();
+    if (!this.isP1Eligible() || this.sortedRefusedForLabel === label) {
+      await this.loadLegacyAgents(trigger);
+      return;
+    }
+
     const params = new URLSearchParams();
-    if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
-      params.append('label', this.labelFilter.trim());
+    params.set('sort', 'updated');
+    params.set('dir', this.sortDir);
+    params.set('limit', String(this.pagerPageSize));
+    params.set('fit', '500');
+    params.set('stats', '1');
+    if (label) params.set('label', label);
+    if (this.phaseFilter) params.set('phase', this.phaseFilter);
+
+    let response: Response;
+    try {
+      response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${params.toString()}`);
+    } catch (err) {
+      console.warn('Failed to load agents:', err);
+      return;
+    }
+
+    if (response.status === 422) {
+      // Candidate ceiling (design §4.3, §5.3 step 0): remember the refusal
+      // for this committed label and fall back to a drain (today's legacy
+      // load, until agent-drain.ts lands in P5).
+      this.sortedRefusedForLabel = label;
+      await this.loadLegacyAgents(trigger);
+      return;
+    }
+
+    if (!response.ok) {
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      // Other triggers keep the previous data (design §6.3 N2).
+      return;
+    }
+
+    const data = (await response.json()) as SortedAgentsResponse;
+    if (data._capabilities) {
+      this.agentScopeCapabilities = data._capabilities;
+    }
+
+    if (data.complete) {
+      this.agents = data.agents;
+      if (!this.agentScopeCapabilities) {
+        this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
+      }
+      stateManager.seedAgents(this.agents);
+      this.agentWindow.setSmall(this.agents);
+      this.listViewUsesWindow = true;
+    } else {
+      // Paged: `this.agents` stays empty, and grid/tree/stats/Stop-all read
+      // the member index through `agentStats` instead (design §11 P1c).
+      this.agents = [];
+      stateManager.seedAgents(data.agents, { partial: true });
+      this.agentWindow.setPaged({
+        agents: data.agents,
+        nextCursor: data.nextCursor,
+        totalCount: data.totalCount,
+        stats: data.stats,
+      });
+      this.listViewUsesWindow = true;
+    }
+  }
+
+  /** Today's unsorted request (design §4.3's "legacy mode"), used when the view state is not P1-eligible, or sorted mode was refused for this label. */
+  private async loadLegacyAgents(trigger: AgentsViewTrigger): Promise<void> {
+    const params = new URLSearchParams();
+    const label = this.committedLabel.trim();
+    if (label && label.includes('=')) {
+      params.append('label', label);
     }
     const qs = params.toString();
     const url = qs
       ? `/api/v1/projects/${this.projectId}/agents?${qs}`
       : `/api/v1/projects/${this.projectId}/agents`;
-    const response = await apiFetch(url);
-    if (!response.ok) return;
+
+    let response: Response;
+    try {
+      response = await apiFetch(url);
+    } catch (err) {
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      console.warn('Failed to load agents:', err);
+      return;
+    }
+
+    if (!response.ok) {
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      // Other triggers keep the previous data, with today's client label
+      // filter applied to it (design §6.3 N2).
+      return;
+    }
 
     const data = (await response.json()) as
-      | { agents?: Agent[]; _capabilities?: Capabilities }
+      | { agents?: Agent[]; _capabilities?: Capabilities; nextCursor?: string }
       | Agent[];
+
+    let nextCursor: string | undefined;
     if (Array.isArray(data)) {
       this.agents = data;
       this.agentScopeCapabilities = undefined;
     } else {
       this.agents = data.agents || [];
       this.agentScopeCapabilities = data._capabilities;
+      nextCursor = data.nextCursor;
     }
     if (!this.agentScopeCapabilities) {
       this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
     }
+
     stateManager.seedAgents(this.agents);
+
+    if (nextCursor) {
+      // Truncated (> 500 candidates): the window has no valid data for the
+      // list view until a sorted-eligible view state issues its own fit
+      // request (design §11 P1c interim costs).
+      this.listViewUsesWindow = false;
+    } else {
+      // Complete: adopt as the small H with no further request, even if the
+      // list view isn't the one currently showing (design §4.3).
+      this.listViewUsesWindow = true;
+      this.agentWindow.setSmall(this.agents);
+    }
+  }
+
+  /** The window's own page-navigation (and, while paged, sort/phase/page-size-change) fetches (design §6.1). */
+  private async fetchAgentsPage(params: PagedPageParams): Promise<PagedPageResult> {
+    const label = this.committedLabel.trim();
+    const qs = new URLSearchParams();
+    qs.set('sort', 'updated');
+    qs.set('dir', this.sortDir);
+    qs.set('limit', String(params.limit));
+    if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.wantStats) qs.set('stats', '1');
+    if (label) qs.set('label', label);
+    if (this.phaseFilter) qs.set('phase', this.phaseFilter);
+
+    const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${qs.toString()}`);
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, 'Failed to load agents'));
+    }
+    const data = (await response.json()) as SortedAgentsResponse;
+    return {
+      agents: data.agents,
+      nextCursor: data.nextCursor,
+      totalCount: data.totalCount,
+      stats: data.stats,
+    };
+  }
+
+  /**
+   * Called after a view/sort change (design §11 P1c interim costs): issues
+   * the one request needed to make the new view state renderable, or none
+   * if the window (or the legacy `this.agents`) already has what it needs.
+   */
+  private async syncAgentsForViewState(): Promise<void> {
+    if (this.isP1Eligible()) {
+      if (!this.listViewUsesWindow && this.sortedRefusedForLabel !== this.committedLabel.trim()) {
+        await this.loadAgentsForView('view-change');
+      }
+    } else if (this.agentWindow.state === 'paged' && this.agents.length === 0) {
+      await this.loadLegacyAgents('view-change');
+    }
   }
 
   private async autoDiscoverGitHubApp(): Promise<void> {
@@ -1564,6 +1833,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+    void this.syncAgentsForViewState();
   }
 
   private toggleAgentsExpanded(): void {
@@ -1586,34 +1856,7 @@ export class ScionPageProjectDetail extends LitElement {
         return filterKey in a.labels;
       });
     }
-    const sorted = [...list];
-    sorted.sort((a, b) => {
-      let cmp = 0;
-      switch (this.sortField) {
-        case 'name':
-          cmp = (a.name || '').localeCompare(b.name || '');
-          break;
-        case 'status':
-          cmp = getAgentDisplayStatus(a).localeCompare(getAgentDisplayStatus(b));
-          break;
-        case 'created':
-          cmp = (a.created || a.createdAt || '').localeCompare(b.created || b.createdAt || '');
-          break;
-        case 'updated':
-          cmp = (
-            a.lastActivityEvent && !a.lastActivityEvent.startsWith('0001')
-              ? a.lastActivityEvent
-              : a.updated || a.updatedAt || ''
-          ).localeCompare(
-            b.lastActivityEvent && !b.lastActivityEvent.startsWith('0001')
-              ? b.lastActivityEvent
-              : b.updated || b.updatedAt || ''
-          );
-          break;
-      }
-      return this.sortDir === 'asc' ? cmp : -cmp;
-    });
-    return sorted;
+    return sortAgents(list, this.sortField, this.sortDir);
   }
 
   private setPhaseFilter(phase: AgentPhase | ''): void {
@@ -1624,6 +1867,7 @@ export class ScionPageProjectDetail extends LitElement {
     } else {
       localStorage.removeItem(`scion-filter-project-agents-phase-${this.projectId}`);
     }
+    this.agentWindow.setViewState({ phaseFilter: phase });
   }
 
   private toggleSort(field: AgentSortField): void {
@@ -1637,6 +1881,8 @@ export class ScionPageProjectDetail extends LitElement {
       `scion-sort-project-agents-${this.projectId}`,
       JSON.stringify({ field: this.sortField, dir: this.sortDir })
     );
+    this.agentWindow.setViewState({ sortField: this.sortField, sortDir: this.sortDir });
+    void this.syncAgentsForViewState();
   }
 
   private sortIndicator(field: AgentSortField): string {
@@ -1702,11 +1948,18 @@ export class ScionPageProjectDetail extends LitElement {
           .value=${this.labelFilter}
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
+            // Live preview only — no request per keystroke (design §4.3, §6.4 row 8).
+            this.agentWindow.setViewState({ label: this.labelFilter }, { refetchIfPaged: false });
           }}
-          @sl-change=${() => void this.backgroundRefresh()}
+          @sl-change=${() => {
+            this.committedLabel = this.labelFilter;
+            this.backgroundRefresh('label-commit');
+          }}
           @sl-clear=${() => {
             this.labelFilter = '';
-            void this.backgroundRefresh();
+            this.committedLabel = '';
+            this.agentWindow.setViewState({ label: '' }, { refetchIfPaged: false });
+            this.backgroundRefresh('label-commit');
           }}
           style="max-width: 220px;"
         >
@@ -1747,7 +2000,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private hasRunningAgents(): boolean {
-    return this.agents.some((a) => isAgentRunning(a));
+    return this.agentStats.running > 0;
   }
 
   private async handleStopAll(): Promise<void> {
@@ -2111,11 +2364,11 @@ export class ScionPageProjectDetail extends LitElement {
       <div class="stats-row">
         <div class="stat">
           <span class="stat-label">Agents</span>
-          <span class="stat-value">${this.agents.length}</span>
+          <span class="stat-value">${this.agentStats.total}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Running</span>
-          <span class="stat-value">${this.agents.filter((a) => isAgentRunning(a)).length}</span>
+          <span class="stat-value">${this.agentStats.running}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
@@ -2243,7 +2496,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${this.agents.length > 0 && this.viewMode !== 'graph'
+          ${this.agentStats.total > 0 && this.viewMode !== 'graph'
             ? html`
                 <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
                   <sl-icon-button
@@ -2259,19 +2512,21 @@ export class ScionPageProjectDetail extends LitElement {
         </div>
       </div>
 
-      ${this.agents.length === 0
+      ${this.agentStats.total === 0
         ? this.renderEmptyAgents()
         : html`
             ${this.renderFilterBar()}
-            ${this.displayAgents.length === 0
-              ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
-              : this.viewMode === 'graph'
-                ? html`<scion-agent-tree-view
-                    .agents=${this.displayAgents}
-                  ></scion-agent-tree-view>`
-                : this.viewMode === 'grid'
-                  ? this.renderAgentGrid()
-                  : this.renderAgentTable()}
+            ${this.viewMode === 'list' && this.listViewUsesWindow
+              ? this.renderAgentWindowList()
+              : this.displayAgents.length === 0
+                ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
+                : this.viewMode === 'graph'
+                  ? html`<scion-agent-tree-view
+                      .agents=${this.displayAgents}
+                    ></scion-agent-tree-view>`
+                  : this.viewMode === 'grid'
+                    ? this.renderAgentGrid()
+                    : this.renderAgentTable()}
           `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
       ${this.shouldShowFilesSection()
@@ -2518,41 +2773,97 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderAgentTable() {
+    return this.renderAgentTableFor(this.displayAgents);
+  }
+
+  private renderAgentTableHead() {
+    return html`
+      <thead>
+        <tr>
+          <th
+            class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('name')}
+          >
+            Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
+          </th>
+          <th class="hide-mobile">Template</th>
+          <th class="hide-mobile">Broker</th>
+          <th
+            class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('status')}
+          >
+            Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
+          </th>
+          <th
+            class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('updated')}
+          >
+            Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
+          </th>
+          <th class="hide-mobile">Task</th>
+          <th style="text-align: right">Actions</th>
+        </tr>
+      </thead>
+    `;
+  }
+
+  private renderAgentTableFor(agents: Agent[]) {
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         <table>
-          <thead>
-            <tr>
-              <th
-                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('name')}
-              >
-                Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
-              </th>
-              <th class="hide-mobile">Template</th>
-              <th class="hide-mobile">Broker</th>
-              <th
-                class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('status')}
-              >
-                Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
-              </th>
-              <th
-                class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('updated')}
-              >
-                Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
-              </th>
-              <th class="hide-mobile">Task</th>
-              <th style="text-align: right">Actions</th>
-            </tr>
-          </thead>
+          ${this.renderAgentTableHead()}
           <tbody>
-            ${this.displayAgents.map((agent) => this.renderAgentRow(agent))}
+            ${agents.map((agent) => this.renderAgentRow(agent))}
           </tbody>
         </table>
       </div>
     `;
+  }
+
+  /**
+   * The list view's windowed rendering (design §4.3, §6.1, §11 P1c): the
+   * server page (paged) or a local slice of today's `displayAgents` (small),
+   * plus the pager. Used whenever `listViewUsesWindow` is true, in both the
+   * small and paged states.
+   */
+  private renderAgentWindowList() {
+    const items = this.agentWindow.items;
+    return html`
+      <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
+        ${items.length === 0
+          ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
+          : html`
+              <table>
+                ${this.renderAgentTableHead()}
+                <tbody>
+                  ${items.map((agent) => this.renderAgentRow(agent))}
+                </tbody>
+              </table>
+            `}
+        <scion-agent-pager
+          storageKey="scion-pagesize-project-agents"
+          .pageIndex=${this.agentWindow.pageIndex}
+          .rowsOnPage=${items.length}
+          .total=${this.agentWindow.total}
+          .pageSize=${this.pagerPageSize}
+          .hasNext=${this.agentWindow.hasNext}
+          .hasPrev=${this.agentWindow.hasPrev}
+          .loading=${this.agentWindow.loading}
+          .error=${this.agentWindow.error}
+          .showChip=${this.agentWindow.updatesAvailable}
+          @prev=${() => void this.agentWindow.prev()}
+          @next=${() => void this.agentWindow.next()}
+          @chip-click=${() => void this.agentWindow.refresh()}
+          @page-size-change=${(e: CustomEvent<{ pageSize: number }>) =>
+            this.onPagerSizeChange(e.detail.pageSize)}
+        ></scion-agent-pager>
+      </div>
+    `;
+  }
+
+  private onPagerSizeChange(size: number): void {
+    this.pagerPageSize = size;
+    this.agentWindow.setViewState({ pageSize: size });
   }
 
   private renderAgentRow(agent: Agent) {
