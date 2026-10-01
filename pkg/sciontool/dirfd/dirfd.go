@@ -24,6 +24,7 @@ Copyright 2026 The Scion Authors.
 package dirfd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -161,7 +162,7 @@ func RefuseSymlinkOrNonRegularAt(dirFd int, name string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		if err == syscall.ELOOP {
+		if errors.Is(err, syscall.ELOOP) {
 			return fmt.Errorf("refusing %s: existing entry is a symlink", name)
 		}
 		return fmt.Errorf("refusing %s: %w", name, err)

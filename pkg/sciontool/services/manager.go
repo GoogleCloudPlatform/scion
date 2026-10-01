@@ -301,7 +301,7 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 		return startErr
 	}
 	if len(openErrs) > 0 {
-		return fmt.Errorf("failed to open log files for %d service(s): %s", len(openErrs), strings.Join(openErrs, "; "))
+		return fmt.Errorf("failed to initialize %d service(s): %s", len(openErrs), strings.Join(openErrs, "; "))
 	}
 	return nil
 }
