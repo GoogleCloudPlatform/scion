@@ -170,7 +170,7 @@ func assertMembersMatchRowOrder(t *testing.T, sortKey, dir string, got []store.A
 	for i := 1; i < len(got); i++ {
 		prev := agentsort.KeyFor(sortKey, got[i-1].ID, got[i-1].Created, got[i-1].Updated, got[i-1].LastActivityEvent)
 		cur := agentsort.KeyFor(sortKey, got[i].ID, got[i].Created, got[i].Updated, got[i].LastActivityEvent)
-		if agentsort.Less(sortKey, dir, cur, prev) {
+		if agentsort.Less(dir, cur, prev) {
 			t.Fatalf("sort=%s dir=%s: row %d (%s) sorts before row %d (%s), but ListAgentMembers returned them in the opposite order",
 				sortKey, dir, i, got[i].ID, i-1, got[i-1].ID)
 		}

@@ -125,6 +125,10 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     chain entirely" -- only BeginLaunch/MarkLaunchAccepted/EndLaunch/
 //     ApplyLaunchReport/RunLaunchReaperTick write them. They are also json:"-"
 //     and never reach agentResource.
+//   - Launch: the computed, client-facing view of the Launch* columns. No
+//     store method persists or populates it; only the hub's enrichAgents
+//     (via ComputeAgentLaunch) sets it on a response copy, and agentResource
+//     never reads it.
 //
 // Every other exported field, including Slug (which a mutation of
 // agentResource to read ScopeUserID would depend on), is filled and
@@ -148,6 +152,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
 	"LaunchStep": true, "LaunchError": true,
+	"Launch": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
@@ -223,7 +228,7 @@ func fillGenericNonZero(t *testing.T, f reflect.Value, name string, seq int) {
 			return
 		}
 		t.Fatalf("fillGenericNonZero: unhandled struct type for field %s; extend this helper", name)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		elemType := f.Type().Elem()
 		switch {
 		case elemType.Kind() == reflect.Int:

@@ -213,12 +213,12 @@ func (r *racingAllMembersStore) ListAgentMembers(ctx context.Context, filter sto
 	}
 	r.once.Do(func() {
 		for _, m := range members {
-			a, gerr := r.Store.GetAgent(ctx, m.ID)
+			a, gerr := r.GetAgent(ctx, m.ID)
 			if gerr != nil {
 				continue
 			}
 			a.Labels = map[string]string{"raced": "true"}
-			_ = r.Store.UpdateAgent(ctx, a)
+			_ = r.UpdateAgent(ctx, a)
 		}
 	})
 	return members, nil

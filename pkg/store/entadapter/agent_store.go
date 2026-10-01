@@ -988,7 +988,7 @@ func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFil
 		idx[i] = i
 	}
 	sort.Slice(idx, func(i, j int) bool {
-		return agentsort.Less(sortKey, dir, rowsForSort[idx[i]], rowsForSort[idx[j]])
+		return agentsort.Less(dir, rowsForSort[idx[i]], rowsForSort[idx[j]])
 	})
 	ordered := make([]store.AgentMember, len(members))
 	for i, j := range idx {
