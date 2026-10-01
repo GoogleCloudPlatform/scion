@@ -1624,7 +1624,16 @@ export class ScionPageProjectDetail extends LitElement {
       return;
     }
 
-    const data = (await response.json()) as SortedAgentsResponse;
+    let data: SortedAgentsResponse;
+    try {
+      data = (await response.json()) as SortedAgentsResponse;
+    } catch (err) {
+      if (this.isStaleAgentsLoad(gen)) return; // stale: nothing to revert/invalidate.
+      if (this.isAbortError(err)) return;
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
     if (this.isStaleAgentsLoad(gen)) return;
     if (data._capabilities) {
       this.agentScopeCapabilities = data._capabilities;
@@ -1713,9 +1722,24 @@ export class ScionPageProjectDetail extends LitElement {
       return;
     }
 
-    const data = (await response.json()) as
+    type LegacyAgentsResponse =
       | { agents?: Agent[]; _capabilities?: Capabilities; nextCursor?: string }
       | Agent[];
+    let data: LegacyAgentsResponse;
+    try {
+      data = (await response.json()) as LegacyAgentsResponse;
+    } catch (err) {
+      if (this.isStaleAgentsLoad(gen)) return; // stale: nothing to revert/invalidate.
+      if (this.isAbortError(err)) return;
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
     if (this.isStaleAgentsLoad(gen)) return;
 
     let nextCursor: string | undefined;

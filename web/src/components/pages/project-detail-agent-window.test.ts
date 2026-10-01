@@ -1655,6 +1655,80 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.error).toBeNull();
     });
 
+    it('a phase change whose response is ok but json() rejects also invalidates cursors, with no unhandled rejection', async () => {
+      const projectId = 'p-n1-sorted-parse-error';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      let failNextSorted = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (failNextSorted && !u.searchParams.has('cursor')) {
+              failNextSorted = false;
+              requests.push({ url: rawUrl });
+              // ok: true, but the body is not valid JSON — response.json()
+              // rejects even though the request itself succeeded (the bug
+              // this test proves is fixed: that rejection used to be
+              // unhandled, since response.json() ran outside a try/catch).
+              return Promise.resolve(new Response('not json', { status: 200 }));
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+      const itemsBefore = internals(el).agentWindow.items;
+
+      failNextSorted = true;
+      internals(el).setPhaseFilter('stopped');
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // A parse failure on an otherwise-ok response must be treated exactly
+      // like the existing network-error failure exit for this path: the
+      // previous page is kept and the stale cursor is invalidated exactly
+      // once (not left armed, and not invalidated a second time by some
+      // other path).
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.items).toBe(itemsBefore);
+      expect(internals(el).agentWindow.hasNext).toBe(false);
+
+      const pg = el.shadowRoot!.querySelector('scion-agent-pager') as unknown as {
+        onNext(): void;
+      };
+      const requestsBeforeNext = requests.length;
+      pg.onNext(); // the pager's own guard refuses: hasNext is false
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      expect(requests.length).toBe(requestsBeforeNext); // no mismatched-cursor request
+      expect(internals(el).agentWindow.error).toBeNull();
+
+      // A subsequent successful view-change still restores navigation, so
+      // the invalidation above was not a permanent, leaked failure state.
+      internals(el).setPhaseFilter('running');
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.error).toBeNull();
+      expect(internals(el).agentWindow.hasNext).toBe(true);
+    });
+
     it('a view-change that 422s, whose legacy fallback also fails, invalidates cursors', async () => {
       const projectId = 'p-n1-quad-prime-legacy';
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -1865,6 +1939,72 @@ describe('project-detail — agent list window', () => {
       expect(requests.length).toBe(requestsBeforeNext + 1);
       expect(internals(el).agentWindow.error).toBeNull();
       expect(internals(el).agentWindow.pageIndex).toBe(1);
+    });
+
+    it('a label commit routed to the legacy path whose response is ok but json() rejects reverts committedLabel, with no unhandled rejection', async () => {
+      const projectId = 'p-legacy-parse-error-label-commit';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { labels: { env: 'dev' } }));
+      const requests: AgentsRequest[] = [];
+      let failNextLegacy = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (
+            failNextLegacy &&
+            u.pathname === `/api/v1/projects/${projectId}/agents` &&
+            !u.searchParams.get('sort')
+          ) {
+            failNextLegacy = false;
+            requests.push({ url: rawUrl });
+            // ok: true, but the body is not valid JSON — response.json()
+            // rejects even though the request itself succeeded (the bug
+            // this test proves is fixed: that rejection used to be
+            // unhandled, since response.json() ran outside a try/catch).
+            return Promise.resolve(new Response('not json', { status: 200 }));
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 <= 500)
+      expect(internals(el).committedLabel).toBe('');
+
+      // First, a successful commit on the sorted (P1-eligible) path, so the
+      // revert below has a non-trivial value to land back on rather than
+      // coincidentally landing on the initial empty label.
+      const input = labelInput(el)!;
+      input.value = 'env=dev';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(internals(el).committedLabel).toBe('env=dev');
+      const agentsAfterFirstCommit = internals(el).agents;
+
+      // A label with no "=" is not P1-eligible (design §11), so this commit
+      // is routed to the legacy path — the second of the two call sites
+      // this test suite covers.
+      failNextLegacy = true;
+      const requestsBeforeFailingCommit = requests.length;
+      input.value = 'badlabel';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      expect(requests.length).toBe(requestsBeforeFailingCommit + 1); // exactly one request for the failing commit
+      expect(internals(el).committedLabel).toBe('env=dev'); // reverted to the prior commit, not left at 'badlabel'
+      expect(internals(el).agents).toBe(agentsAfterFirstCommit); // previous rows kept
     });
   });
 
