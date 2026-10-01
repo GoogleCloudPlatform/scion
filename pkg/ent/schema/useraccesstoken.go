@@ -54,8 +54,8 @@ func (UserAccessToken) Fields() []ent.Field {
 			NotEmpty(),
 		// project_id is set iff boundary_kind is "project"; NULL for a hub
 		// boundary. A missing or blank project_id is never read as hub — see
-		// store.UserAccessToken.ValidateBoundary. Made Optional/Nillable so a
-		// hub-boundary token can persist a NULL value rather than an empty
+		// store.UserAccessToken.ValidateBoundary. Optional and Nillable so a
+		// hub-boundary token persists a NULL value rather than an empty
 		// string masquerading as "no project".
 		field.UUID("project_id", uuid.UUID{}).
 			Optional().
