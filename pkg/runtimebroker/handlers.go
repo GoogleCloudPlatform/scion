@@ -1049,6 +1049,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
 				return
 			}
+			// A required skill reference that could not be resolved (rate
+			// limited, timed out, or not found) within the create deadline is
+			// a 4xx the caller can act on, not a 500/502 (ptone/scion#2546).
+			var skillErr *agent.SkillResolutionError
+			if errors.As(err, &skillErr) {
+				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
+				SkillResolutionFailed(w, skillErr)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			RuntimeError(w, "Failed to provision agent: "+err.Error())
 			return
@@ -1104,9 +1113,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
 		// fault 3).
 		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
-		if notFoundErr {
+		// A required skill reference that could not be resolved (rate
+		// limited, timed out, or not found) within the create deadline is a
+		// 4xx the caller can act on, not a 500/502 (ptone/scion#2546).
+		var skillErr *agent.SkillResolutionError
+		isSkillErr := errors.As(err, &skillErr)
+		switch {
+		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
-		} else {
+		case isSkillErr:
+			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
@@ -1115,7 +1132,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
-		// Clean up provisioned agent files so they don't become orphans.
+		// Clean up provisioned agent files so they don't become orphans left
+		// behind in the "created" phase — this runs for every Start failure,
+		// including a skill resolution failure above (ptone/scion#2546): the
+		// agent directory ProvisionAgent created is removed here exactly as
+		// it is for any other mid-provision error.
 		if opts.ProjectPath != "" {
 			if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
@@ -1131,6 +1152,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			Conflict(w, err.Error())
 		case notFoundErr:
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+		case isSkillErr:
+			SkillResolutionFailed(w, skillErr)
 		default:
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 		}

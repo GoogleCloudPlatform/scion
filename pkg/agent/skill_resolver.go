@@ -67,6 +67,32 @@ type ResolveError struct {
 	Message string
 }
 
+// Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
+// Resolvers that can distinguish these failure modes (currently
+// GitHubSkillResolver) should set them so the create path can map a failure
+// to the right 4xx HTTP status without string-matching Message. An empty or
+// unrecognized code is treated as an uncategorized resolution failure.
+const (
+	SkillErrCodeNotFound    = "not_found"
+	SkillErrCodeRateLimited = "rate_limited"
+	SkillErrCodeTimeout     = "timeout"
+)
+
+// SkillResolutionError is returned by ProvisionAgent when a required skill
+// reference could not be resolved. It carries the ref URI and a stable Code
+// (see the SkillErrCode* constants) alongside the human-readable Message, so
+// the HTTP boundary (runtimebroker) can map it to a 4xx response — naming the
+// ref and the cause — instead of folding it into a generic 500/502.
+type SkillResolutionError struct {
+	URI     string
+	Code    string
+	Message string
+}
+
+func (e *SkillResolutionError) Error() string {
+	return fmt.Sprintf("required skill %q could not be resolved: %s", e.URI, e.Message)
+}
+
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
 type ResolvedSkill struct {
 	Name               string

@@ -19,8 +19,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -44,6 +46,18 @@ const (
 	githubBaseBackoff   = 1 * time.Second
 	githubMaxBackoff    = 30 * time.Second
 	githubBackoffFactor = 2.0
+
+	// githubRequestTimeout bounds a single HTTP attempt (one metadata call or
+	// one raw-file download), independent of both githubAPITimeout above and
+	// the caller's own ctx deadline. Before this, a stalled connection relied
+	// solely on githubAPITimeout (30s) to give up — the same order of
+	// magnitude as the ~30s agent-create deadline, so one hung request could
+	// consume the entire budget before doWithRetry's budget-fitting logic
+	// (below) ever got a chance to back off or fail fast. GitHub API and raw
+	// content requests normally complete in well under a second even from a
+	// loaded broker, so 5s is generous slack for a single attempt while still
+	// leaving room for several attempts inside a 30s create deadline.
+	githubRequestTimeout = 5 * time.Second
 )
 
 // GitHubSkillResolver resolves skills from GitHub repositories
@@ -204,8 +218,17 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 
 		resolved, err := r.resolveOne(ctx, ghRef, ref)
 		if err != nil {
+			// Classify the failure into a stable cause code when possible
+			// (set by doWithRetry/listContents/resolveCommitSHA below), so
+			// the create path can map a required-skill failure to the right
+			// 4xx status instead of a generic 500/502 (ptone/scion#2546).
+			code := "resolve_failed"
+			var rerr *githubResolveError
+			if errors.As(err, &rerr) {
+				code = rerr.code
+			}
 			result.Errors = append(result.Errors, ResolveError{
-				URI: ref.URI, Code: "resolve_failed", Message: err.Error(),
+				URI: ref.URI, Code: code, Message: err.Error(),
 			})
 			continue
 		}
@@ -256,7 +279,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 	contents, err := r.listContents(ctx, ghRef, commitSHA, token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list skill contents for %s: %w", ghRef.Raw, err)
 	}
 
 	if len(contents) == 0 {
@@ -278,7 +301,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 		content, err := r.downloadRawFile(ctx, ghRef, commitSHA, entry.Path, token)
 		if err != nil {
-			return nil, fmt.Errorf("failed to download %s: %w", entry.Path, err)
+			return nil, fmt.Errorf("failed to download %s for skill %s: %w", entry.Path, ghRef.Raw, err)
 		}
 
 		hash := fmt.Sprintf("sha256:%x", sha256.Sum256(content))
@@ -386,7 +409,10 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo)
+		return "", &githubResolveError{
+			code: SkillErrCodeNotFound,
+			msg:  fmt.Sprintf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo),
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", r.apiError(resp, "resolve commit")
@@ -422,8 +448,11 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("skill %q not found in repo %s/%s at ref %s (expected directory at %s)",
-			ghRef.SkillName, ghRef.Owner, ghRef.Repo, commitSHA[:12], ghRef.SkillPath)
+		return nil, &githubResolveError{
+			code: SkillErrCodeNotFound,
+			msg: fmt.Sprintf("skill %q not found in repo %s/%s at ref %s (expected directory at %s)",
+				ghRef.SkillName, ghRef.Owner, ghRef.Repo, commitSHA[:12], ghRef.SkillPath),
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, r.apiError(resp, "list contents")
@@ -452,6 +481,12 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &githubResolveError{
+			code: SkillErrCodeNotFound,
+			msg:  fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download failed with status %d for %s", resp.StatusCode, filePath)
 	}
@@ -485,10 +520,75 @@ func (r *GitHubSkillResolver) setAuthHeader(req *http.Request, token string) {
 	}
 }
 
+// githubResolveError is a classified GitHub resolution failure, carrying a
+// stable cause code (see the SkillErrCode* constants in skill_resolver.go) so
+// Resolve can set ResolveError.Code — and provision.go's SkillResolutionError
+// can in turn pick an HTTP status — without string-matching msg.
+type githubResolveError struct {
+	code string
+	msg  string
+}
+
+func (e *githubResolveError) Error() string { return e.msg }
+
+// classifyRetryCause maps the response that triggered a retry (or nil, for a
+// network-level failure such as a stalled connection) to a stable cause code.
+func classifyRetryCause(resp *http.Response) string {
+	if resp == nil {
+		return SkillErrCodeTimeout
+	}
+	if resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
+		return SkillErrCodeRateLimited
+	}
+	return SkillErrCodeTimeout
+}
+
+// cancelOnCloseBody ties a per-attempt context's cancel func to the lifetime
+// of the response body it guards: doOnce's bounded timeout must stay alive
+// while the body is being read, but must not leak once the caller is done
+// with it. Closing the body is the caller's existing signal for "done
+// reading" (every call site already defers resp.Body.Close()), so piggy-
+// backing cancellation on it needs no new caller-visible API.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+// doOnce performs a single HTTP attempt bounded by githubRequestTimeout. The
+// timeout is applied via the request context rather than relying solely on
+// r.httpClient's own Timeout, so it composes with (and is independent of) the
+// caller's ctx deadline: whichever is shorter wins.
+func (r *GitHubSkillResolver) doOnce(ctx context.Context, req *http.Request) (*http.Response, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, githubRequestTimeout)
+	cloned := req.Clone(attemptCtx)
+	resp, err := r.httpClient.Do(cloned)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
 // doWithRetry executes an HTTP request with retry and exponential backoff
 // for rate-limited (403 with X-RateLimit-Remaining: 0, 429) and transient
 // server errors (5xx). On retryable responses it respects the Retry-After
 // header when present.
+//
+// Each attempt is bounded by githubRequestTimeout (see doOnce), so a single
+// stalled request cannot by itself consume the whole create-deadline budget.
+// Before sleeping for a backoff, doWithRetry also checks whether the delay
+// still fits inside ctx's remaining deadline; if it doesn't, it fails
+// immediately with a classified, ref-naming error instead of sleeping into a
+// context cancellation that would otherwise surface only as an opaque
+// "context canceled" (ptone/scion#2546).
 func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
 	var lastResp *http.Response
 	var lastErr error
@@ -496,8 +596,36 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 	for attempt := 0; attempt <= githubMaxRetries; attempt++ {
 		if attempt > 0 {
 			delay := retryDelay(lastResp, attempt)
-			util.Debugf("github: retrying request (attempt %d/%d) after %v: %s %s",
-				attempt, githubMaxRetries, delay, req.Method, req.URL.Path)
+			status := -1
+			retryAfter := ""
+			if lastResp != nil {
+				status = lastResp.StatusCode
+				retryAfter = lastResp.Header.Get("Retry-After")
+			}
+
+			// Fail fast when the backoff (plus the time a further attempt
+			// would need) would run past ctx's deadline, rather than sleeping
+			// most or all of it away only to have the next request canceled.
+			if dl, ok := ctx.Deadline(); ok {
+				if remaining := time.Until(dl); delay+githubRequestTimeout >= remaining {
+					slog.Warn("github: skill resolution out of budget before backoff, failing fast",
+						"method", req.Method, "path", req.URL.Path,
+						"status", status, "retry_after", retryAfter,
+						"backoff", delay, "remaining_budget", remaining)
+					return nil, &githubResolveError{
+						code: classifyRetryCause(lastResp),
+						msg: fmt.Sprintf(
+							"GitHub API request to %s rate limited or unresponsive (status %d, retry-after %s): "+
+								"next backoff %s would exceed the %s left before the create deadline",
+							req.URL.Path, status, retryAfter, delay, remaining),
+					}
+				}
+			}
+
+			slog.Warn("github: retrying GitHub API request after backoff",
+				"method", req.Method, "path", req.URL.Path,
+				"status", status, "retry_after", retryAfter,
+				"backoff", delay, "attempt", attempt, "max_attempts", githubMaxRetries)
 
 			select {
 			case <-ctx.Done():
@@ -506,8 +634,7 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 		}
 
-		cloned := req.Clone(ctx)
-		resp, err := r.httpClient.Do(cloned)
+		resp, err := r.doOnce(ctx, req)
 		if err != nil {
 			lastErr = err
 			lastResp = nil
@@ -528,6 +655,9 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 		lastErr = nil
 	}
 
+	if lastErr != nil {
+		return nil, &githubResolveError{code: SkillErrCodeTimeout, msg: lastErr.Error()}
+	}
 	return nil, lastErr
 }
 
@@ -581,11 +711,20 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 	return backoff
 }
 
+// apiError builds the error for a terminal non-OK response: either the last
+// of githubMaxRetries retryable responses, or a non-retryable error status.
+// Rate-limit responses (429, or 403 with X-RateLimit-Remaining: 0) are
+// classified via githubResolveError so callers can map them to a 4xx without
+// string-matching.
 func (r *GitHubSkillResolver) apiError(resp *http.Response, action string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
-		return fmt.Errorf("GitHub API rate limit exceeded while %s (resets at %s); set GITHUB_TOKEN for higher limits",
-			action, resp.Header.Get("X-RateLimit-Reset"))
+	if resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
+		return &githubResolveError{
+			code: SkillErrCodeRateLimited,
+			msg: fmt.Sprintf("GitHub API rate limited while %s (retry-after=%s, resets at %s); set GITHUB_TOKEN for higher limits",
+				action, resp.Header.Get("Retry-After"), resp.Header.Get("X-RateLimit-Reset")),
+		}
 	}
 	return fmt.Errorf("GitHub API error (%d) while %s: %s", resp.StatusCode, action, string(body))
 }

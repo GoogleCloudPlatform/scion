@@ -640,6 +640,66 @@ func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
 	}
 }
 
+// TestCreateAgentFullStart_SkillResolutionRateLimited proves that a required
+// skill reference failing to resolve because of GitHub rate limiting
+// surfaces as a 429, naming the ref and the cause, instead of the generic
+// 500 the "other error" branch maps to (ptone/scion#2546).
+func TestCreateAgentFullStart_SkillResolutionRateLimited(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    agent.SkillErrCodeRateLimited,
+		Message: "GitHub API request to /repos/example-org/example-skills/commits/main rate limited",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "rate_limited") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_SkillResolutionNotFound is the ProvisionOnly
+// counterpart, covering the not-found cause mapped to 404.
+func TestCreateAgentProvisionOnly_SkillResolutionNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.provisionErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/missing-skill@main",
+		Code:    agent.SkillErrCodeNotFound,
+		Message: `skill "missing-skill" not found in repo example-org/example-skills at ref main`,
+	}
+
+	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/missing-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not_found") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
 func TestStopAgent(t *testing.T) {
 	srv := newTestServer(t)
 

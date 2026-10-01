@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 )
 
 // APIError represents a standardized error response.
@@ -49,6 +51,7 @@ const (
 	ErrCodeRuntimeUnavailable = "runtime_unavailable"
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
+	ErrCodeSkillResolution    = "skill_resolution_failed"
 )
 
 // writeError writes a JSON error response.
@@ -184,4 +187,34 @@ func TemplateError(w http.ResponseWriter, message string) {
 // Unprocessable writes a 422 Unprocessable Entity response.
 func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
+}
+
+// skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
+// status. Each cause gets the status whose standard semantics best fit it —
+// 429 for rate limiting, 408 for a budget/timeout failure, 404 for a skill
+// genuinely absent at the given ref — so clients and operators get more than
+// "something 4xx happened". An uncategorized cause falls back to 400: still a
+// 4xx (the create path should retry a different ref, not blindly retry the
+// same request), just without a more specific standard code to reach for.
+func skillResolutionHTTPStatus(code string) int {
+	switch code {
+	case agent.SkillErrCodeNotFound:
+		return http.StatusNotFound
+	case agent.SkillErrCodeRateLimited:
+		return http.StatusTooManyRequests
+	case agent.SkillErrCodeTimeout:
+		return http.StatusRequestTimeout
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+// SkillResolutionFailed writes a 4xx response for a required skill reference
+// that could not be resolved within the create deadline (rate limited, timed
+// out, or not found), naming the ref and the cause instead of folding the
+// failure into a generic 500/502 (ptone/scion#2546).
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
+		"Failed to provision agent: "+err.Error(),
+		map[string]interface{}{"skill": err.URI, "cause": err.Code})
 }

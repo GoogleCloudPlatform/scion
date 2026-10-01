@@ -15,10 +15,12 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -182,8 +184,8 @@ func TestGitHubSkillResolver_NotFound_Repo(t *testing.T) {
 	if len(result.Errors) != 1 {
 		t.Fatalf("expected 1 error, got %d", len(result.Errors))
 	}
-	if result.Errors[0].Code != "resolve_failed" {
-		t.Errorf("expected code resolve_failed, got %s", result.Errors[0].Code)
+	if result.Errors[0].Code != SkillErrCodeNotFound {
+		t.Errorf("expected code %s, got %s", SkillErrCodeNotFound, result.Errors[0].Code)
 	}
 	if !strings.Contains(result.Errors[0].Message, "not found") {
 		t.Errorf("expected error to contain 'not found', got %s", result.Errors[0].Message)
@@ -214,6 +216,9 @@ func TestGitHubSkillResolver_NotFound_SkillDir(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0].Message, "missing-skill") {
 		t.Errorf("expected error to mention skill name, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeNotFound {
+		t.Errorf("expected code %s, got %s", SkillErrCodeNotFound, result.Errors[0].Code)
 	}
 }
 
@@ -246,6 +251,9 @@ func TestGitHubSkillResolver_RateLimit(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0].Message, "GITHUB_TOKEN") {
 		t.Errorf("expected error to mention GITHUB_TOKEN, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, result.Errors[0].Code)
 	}
 	// Verify retries happened before the final rate-limit error
 	if attempts > 1 {
@@ -330,6 +338,246 @@ func TestGitHubSkillResolver_RetryOn5xx(t *testing.T) {
 	}
 	if attempts < 2 {
 		t.Errorf("expected at least 2 attempts, got %d", attempts)
+	}
+}
+
+// TestGitHubSkillResolver_StalledServer_FailsWithinBudget proves that a
+// connection that never responds no longer consumes the whole create-deadline
+// budget before failing (ptone/scion#2546): each attempt is bounded by
+// githubRequestTimeout independently of the per-request client timeout, and
+// doWithRetry fails fast once the next backoff would not fit the remaining
+// ctx budget, instead of sleeping into an opaque context cancellation.
+func TestGitHubSkillResolver_StalledServer_FailsWithinBudget(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		<-r.Context().Done() // never respond; only unblocks when the client gives up
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	const budget = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= budget {
+		t.Errorf("expected failure well before the %s budget elapsed, took %s", budget, elapsed)
+	}
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the skill ref, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeTimeout {
+		t.Errorf("expected code %s, got %s", SkillErrCodeTimeout, result.Errors[0].Code)
+	}
+	if atomic.LoadInt32(&attempts) < 1 {
+		t.Error("expected at least one attempt to reach the server")
+	}
+	t.Logf("stalled-server resolution failed after %s (budget %s), attempts=%d, message=%s",
+		elapsed, budget, atomic.LoadInt32(&attempts), result.Errors[0].Message)
+}
+
+// TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget
+// proves that a 429 carrying a Retry-After larger than the remaining ctx
+// budget fails immediately instead of sleeping through (and past) the
+// create deadline (ptone/scion#2546).
+func TestGitHubSkillResolver_RateLimit429_LargeRetryAfter_FailsWithinBudget(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Retry-After", "120") // far larger than the budget below
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	const budget = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= budget {
+		t.Errorf("expected failure well before the %s budget elapsed, took %s", budget, elapsed)
+	}
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the skill ref, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, result.Errors[0].Code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected exactly 1 attempt before failing fast on the oversized Retry-After, got %d", got)
+	}
+}
+
+// TestGitHubSkillResolver_RateLimit403_LargeRetryAfter_FailsWithinBudget is
+// the 403-rate-limit-exhaustion counterpart of the 429 test above.
+func TestGitHubSkillResolver_RateLimit403_LargeRetryAfter_FailsWithinBudget(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var attempts int32
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("Retry-After", "180") // far larger than the budget below
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	const budget = 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(result.Errors))
+	}
+	if elapsed >= budget {
+		t.Errorf("expected failure well before the %s budget elapsed, took %s", budget, elapsed)
+	}
+	if !strings.Contains(result.Errors[0].Message, "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected error to name the skill ref, got %s", result.Errors[0].Message)
+	}
+	if result.Errors[0].Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, result.Errors[0].Code)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected exactly 1 attempt before failing fast on the oversized Retry-After, got %d", got)
+	}
+}
+
+// TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget proves the
+// budget-fit check does not interfere with a retry that legitimately fits:
+// a single transient 5xx followed by success still succeeds inside a
+// realistic create-deadline-sized budget.
+func TestGitHubSkillResolver_TransientThenSuccess_FitsWithinBudget(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	attempts := 0
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	result, err := resolver.Resolve(ctx, []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+	if attempts < 2 {
+		t.Errorf("expected at least 2 attempts, got %d", attempts)
+	}
+}
+
+// TestGitHubSkillResolver_BackoffLogsStatusAndRetryAfterAtWarn proves that
+// the HTTP status and Retry-After are logged at WARN before a backoff, so a
+// production incident shows more than the previous debug-only "context
+// canceled" (ptone/scion#2546).
+func TestGitHubSkillResolver_BackoffLogsStatusAndRetryAfterAtWarn(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	attempts := 0
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("expected a WARN log line, got: %s", out)
+	}
+	if !strings.Contains(out, "status=429") {
+		t.Errorf("expected log to include the HTTP status, got: %s", out)
+	}
+	if !strings.Contains(out, "retry_after=0") {
+		t.Errorf("expected log to include Retry-After, got: %s", out)
 	}
 }
 
