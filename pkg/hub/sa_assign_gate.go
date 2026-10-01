@@ -54,7 +54,8 @@ const (
 	// SurfaceHubDefault is an SA assigned from the hub-level agent_defaults
 	// operational setting, one rung below SurfaceProjectDefault in the GCP
 	// identity fallback ladder (explicit request -> project default -> hub
-	// default -> block). Same authorization gate as SurfaceProjectDefault.
+	// default -> unset, the broker applies its runtime default). Same
+	// authorization gate as SurfaceProjectDefault.
 	SurfaceHubDefault = "hub-default"
 )
 

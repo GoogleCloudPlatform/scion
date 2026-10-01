@@ -1381,9 +1381,14 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Populate GCP identity in applied config.
-	// Default to "block" mode when no GCP identity is specified, so agents
-	// cannot access the underlying compute identity via the GCE metadata
-	// server unless explicitly opted into "passthrough" or "assign".
+	// When no GCP identity is specified anywhere in the ladder below, the
+	// applied config is left unset (see the final default: arm) rather than
+	// an explicit "block" record, so the broker applies its own
+	// runtime-aware default — "block" on every runtime except Kubernetes
+	// (unchanged; agents still cannot access the underlying compute identity
+	// via the GCE metadata server unless explicitly opted into "passthrough"
+	// or "assign"), "passthrough" on Kubernetes, which does not support
+	// "block" (ptone/scion#2328 phase 1).
 	if req.GCPIdentity != nil {
 		switch req.GCPIdentity.MetadataMode {
 		case store.GCPMetadataModeAssign:
@@ -1415,7 +1420,9 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	} else {
-		// No explicit GCP identity — check project default, then fall back to block.
+		// No explicit GCP identity — check project default, then fall back to
+		// the hub default, then to unset (the broker applies its runtime
+		// default) if the hub has none either.
 		projectSettings := projectSettingsFromAnnotations(project)
 		switch projectSettings.DefaultGCPIdentityMode {
 		case store.GCPMetadataModePassthrough:
@@ -1446,16 +1453,16 @@ func (s *Server) createAgentInProject(
 			}
 		default:
 			// No project default configured (empty string) — fall back to the
-			// hub-level operational default, then to "block" if the hub has
-			// none either. Mirrors the project-default case above one rung
-			// down the ladder: explicit request -> project default -> hub
-			// default -> block (see hub_agent_defaults.go).
+			// hub-level operational default, then to unset (the broker
+			// applies its runtime default) if the hub has none either.
+			// Mirrors the project-default case above one rung down the
+			// ladder: explicit request -> project default -> hub default ->
+			// unset (see hub_agent_defaults.go).
 			hubDefaults := s.hubAgentDefaults()
 			switch hubDefaults.DefaultGCPIdentityMode {
 			case store.GCPMetadataModePassthrough:
 				// Hub-default passthrough is confined to the embedded broker
-				// (see hubDefaultPassthroughAllowed for why); on any other
-				// broker the ladder bottoms out at block.
+				// (see hubDefaultPassthroughAllowed for why).
 				//
 				// The effective profile is computed here, before
 				// deriveAgentConfig would otherwise stamp AppliedConfig.Profile
@@ -1463,10 +1470,22 @@ func (s *Server) createAgentInProject(
 				// see the same profile the agent will actually dispatch under,
 				// not just what the request named (see
 				// effectiveRuntimeProfileName).
-				mode := store.GCPMetadataModeBlock
 				effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+				// Only write an explicit record when the grant is allowed.
+				// On denial, leave AppliedConfig.GCPIdentity unset instead of
+				// an explicit "block" (ptone/scion#2328): the operator never
+				// chose "block" here — they chose "passthrough" and it was
+				// denied — so this is treated exactly like "no hub default at
+				// all", letting the broker apply its own runtime-aware
+				// default (unchanged "block" on every runtime except
+				// Kubernetes; "passthrough" on Kubernetes, since Kubernetes
+				// does not support "block"). An explicit per-agent
+				// passthrough request that fails its own equivalent check
+				// still errors clearly elsewhere (translatePassthroughForSandbox
+				// / the passthrough authorization gate) — this arm only
+				// covers the hub-wide default, which has no caller to report
+				// an error to.
 				if allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID, agent.Name, effectiveProfile); allowed {
-					mode = store.GCPMetadataModePassthrough
 					// Pin the exact profile the gate checked so the broker
 					// cannot dispatch under a different one later: once
 					// AppliedConfig.Profile is set, deriveAgentConfig's
@@ -1488,19 +1507,19 @@ func (s *Server) createAgentInProject(
 					if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
 						agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
 					}
-				}
-				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-					MetadataMode: mode,
-					// RequireLocalRuntime asks the broker to re-check the
-					// resolved runtime itself once it knows it: the hub
-					// resolves runtimeBrokerID's profile from the broker's
-					// own registration data (resolveAgentRuntimeProfileType),
-					// which the broker's own dispatch-time settings can
-					// differ from. Only ever set on a hub-default grant —
-					// mode is only passthrough here when
-					// hubDefaultPassthroughAllowed returned true. Explicit
-					// and project-level passthrough are never flagged.
-					RequireLocalRuntime: mode == store.GCPMetadataModePassthrough,
+					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModePassthrough,
+						// RequireLocalRuntime asks the broker to re-check the
+						// resolved runtime itself once it knows it: the hub
+						// resolves runtimeBrokerID's profile from the broker's
+						// own registration data (resolveAgentRuntimeProfileType),
+						// which the broker's own dispatch-time settings can
+						// differ from. Only ever set on a hub-default grant —
+						// this whole block only runs when
+						// hubDefaultPassthroughAllowed returned true. Explicit
+						// and project-level passthrough are never flagged.
+						RequireLocalRuntime: true,
+					}
 				}
 			case store.GCPMetadataModeAssign:
 				if hubDefaults.DefaultGCPIdentityServiceAccountID != "" {
@@ -1515,12 +1534,27 @@ func (s *Server) createAgentInProject(
 						MetadataMode: store.GCPMetadataModeBlock,
 					}
 				}
-			default:
-				// No hub default either (or hub default is itself "block") —
-				// secure default.
+			case store.GCPMetadataModeBlock:
+				// Hub explicitly configured "block" as its own default — an
+				// explicit choice, kept as an explicit record (rejected on
+				// the Kubernetes runtime by the broker, ptone/scion#2328
+				// phase 1, same as an explicit per-agent or project-default
+				// "block").
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
+			default:
+				// No hub default configured at all (empty) — leave
+				// AppliedConfig.GCPIdentity unset rather than writing an
+				// explicit "block" record. This lets the broker apply its
+				// own runtime-aware default: "block" on every runtime except
+				// Kubernetes (unchanged), "passthrough" on Kubernetes, since
+				// Kubernetes does not support "block" (ptone/scion#2328
+				// phase 1). Distinguishing "nothing configured" from
+				// "explicitly block" here is what makes that possible — see
+				// the store.GCPMetadataModeBlock case above and the project
+				// rung's explicit-block case earlier in this function, both
+				// of which still write an explicit record.
 			}
 		}
 	}

@@ -23,10 +23,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Default-tier labels for the agent-creation GCP identity ladder
-// (explicit request -> project default -> hub default -> block). They name
-// the tier in log lines and in the user-facing error text, so an operator
-// can tell which setting to fix.
+// Default-tier labels for the agent-creation GCP identity ladder (explicit
+// request -> project default -> hub default -> unset, the broker applies its
+// runtime default). They name the tier in log lines and in the user-facing
+// error text, so an operator can tell which setting to fix.
 const (
 	defaultTierProject = "project"
 	defaultTierHub     = "hub"
@@ -143,12 +143,17 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 // Explicit passthrough requests go through authorizePassthroughIdentity
 // (broker owner or admin, plus actAs on the broker host SA). A hub-wide
 // default cannot run that gate meaningfully on behalf of the admin who set
-// it, and applying it unconditionally would expose the host identity of
-// every broker on the hub — including remote brokers registered by other
-// users — to every agent creator. The intended use is the single-node VM,
-// whose broker is the embedded (co-located) one, so the hub default is
-// confined to that broker. Anything else falls back to block, and the reason
-// is logged so an operator can see why the hub default did not take effect.
+// it, and granting it unconditionally would hand every broker's host
+// identity — including remote brokers registered by other users — to every
+// agent creator on the hub. The intended use is the single-node VM, whose
+// broker is the embedded (co-located) one, so the hub default is confined to
+// that broker. Anything else is denied, and the reason is logged so an
+// operator can see why the hub default did not take effect; the caller
+// leaves AppliedConfig.GCPIdentity unset on denial (ptone/scion#2328) rather
+// than writing an explicit "block", so the broker applies its own
+// runtime-aware default instead (unchanged "block" on most runtimes,
+// "passthrough" on Kubernetes, which does not accept an explicit "block"
+// here even if this gate wrote one).
 //
 // The broker check is isEmbeddedBroker, which compares against the embedded
 // broker ID the server records at startup (SetEmbeddedBrokerID). It
@@ -159,10 +164,10 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 //
 // Co-located registration runs after the Hub listener starts, so startup
 // marks the embedded broker as expected (ExpectEmbeddedBroker) and this gate
-// waits, bounded, for registration rather than permanently writing block
-// into an agent created in that window. When the result is still negative,
-// the log line names the cause: registration failed, still pending, no
-// embedded broker at all, or a different broker.
+// waits, bounded, for registration rather than denying an agent created in
+// that window. When the result is still negative, the log line names the
+// cause: registration failed, still pending, no embedded broker at all, or a
+// different broker.
 //
 // Being the embedded broker is necessary but no longer sufficient: the
 // embedded broker can itself run more than one runtime profile (for example
@@ -172,7 +177,7 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 // designed for. See that function's doc comment for the runtime rule.
 func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBrokerID, projectID, agentName, profileName string) (bool, string) {
 	if runtimeBrokerID == "" {
-		slog.Info("hub-default GCP passthrough not applied: no runtime broker resolved; using block",
+		slog.Info("hub-default GCP passthrough denied: no runtime broker resolved",
 			"surface", SurfaceHubDefault, "project_id", projectID)
 		return false, ""
 	}
@@ -182,19 +187,19 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 	}
 	switch {
 	case state.regErr != "":
-		slog.Warn("hub-default GCP passthrough not applied: co-located broker registration failed at startup, so the hub has no embedded broker; using block",
+		slog.Warn("hub-default GCP passthrough denied: co-located broker registration failed at startup, so the hub has no embedded broker",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID, "registration_error", state.regErr)
 	case state.pending:
-		slog.Warn("hub-default GCP passthrough not applied: co-located broker registration still pending; using block",
+		slog.Warn("hub-default GCP passthrough denied: co-located broker registration still pending",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID, "waited", embeddedBrokerWaitTimeout)
 	case state.id == "":
-		slog.Info("hub-default GCP passthrough not applied: hub has no embedded broker registered; using block",
+		slog.Info("hub-default GCP passthrough denied: hub has no embedded broker registered",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID)
 	default:
-		slog.Info("hub-default GCP passthrough not applied: broker is not the hub's embedded broker; using block",
+		slog.Info("hub-default GCP passthrough denied: broker is not the hub's embedded broker",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID, "embedded_broker", state.id)
 	}
@@ -236,20 +241,20 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 func (s *Server) hubDefaultRuntimeAllowed(ctx context.Context, runtimeBrokerID, profileName, agentName, projectID string) (bool, string) {
 	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
 	if err != nil || broker == nil {
-		slog.Info("hub-default GCP passthrough downgraded to block: runtime broker unavailable",
+		slog.Info("hub-default GCP passthrough denied: runtime broker unavailable",
 			"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "profile", profileName, "error", err)
 		return false, ""
 	}
 	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
 	if !ok {
-		slog.Info("hub-default GCP passthrough downgraded to block: runtime profile could not be resolved",
+		slog.Info("hub-default GCP passthrough denied: runtime profile could not be resolved",
 			"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "profile", profileName)
 		return false, ""
 	}
 	if !hubDefaultPassthroughRuntimeTypes[runtimeType] {
-		slog.Info("hub-default GCP passthrough downgraded to block: runtime is not a local-container runtime",
+		slog.Info("hub-default GCP passthrough denied: runtime is not a local-container runtime",
 			"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "profile", resolvedProfile, "runtime_type", runtimeType)
 		return false, ""

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
@@ -227,4 +228,47 @@ func TemplateError(w http.ResponseWriter, message string) {
 // Unprocessable writes a 422 Unprocessable Entity response.
 func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
+}
+
+// writeStartContextError writes the HTTP response for an error returned by
+// buildStartContext, honoring startContextError.Status (e.g. the 400 the
+// Kubernetes/"block" rejection sets, ptone/scion#2328) instead of collapsing
+// every failure into a generic 500. Returns the status code actually
+// written, so a caller that also tracks the dispatch attempt's status (e.g.
+// createAgent's markAttemptFailed) can record the same value instead of
+// hardcoding one.
+//
+// A Hub-connectivity failure (IsHubError) keeps its existing, more specific
+// handling — a retryable 503 hub_unreachable, or a 500 template_error for
+// any other hydration failure — ahead of the generic Status check; neither
+// of those was the 500-collapsing bug this helper fixes. err need not be a
+// *startContextError at all (any error buildStartContext could return,
+// including ones from other call sites in this package): a plain error
+// still gets the pre-existing generic 500 behavior.
+//
+// Any 4xx Status — not just exactly 400 — is treated as a client-caused
+// validation failure: buildStartContext only ever sets Status to a value it
+// means as a client error, so collapsing just one 4xx (400) into the generic
+// 500 path while honoring others would be an arbitrary distinction, not a
+// deliberate one.
+func writeStartContextError(w http.ResponseWriter, err error) int {
+	sce, ok := err.(*startContextError)
+	if !ok {
+		RuntimeError(w, err.Error())
+		return http.StatusInternalServerError
+	}
+	if sce.IsHubError {
+		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
+			HubUnreachableError(w, sce.OriginalErr.Error())
+			return http.StatusServiceUnavailable
+		}
+		TemplateError(w, err.Error())
+		return http.StatusInternalServerError
+	}
+	if sce.Status >= 400 && sce.Status < 500 {
+		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
+		return sce.Status
+	}
+	RuntimeError(w, err.Error())
+	return http.StatusInternalServerError
 }

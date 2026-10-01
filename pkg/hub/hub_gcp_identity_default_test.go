@@ -45,13 +45,43 @@ import (
 // covered by project_default_gate_test.go and handlers_agents_gcp_hubscope_test.go.
 // =============================================================================
 
-// TestHubDefaultGCPIdentity_NoDefaultsFallBackToBlock is the baseline: with
-// neither a project default nor a hub default configured, agent creation
-// still lands on "block" — the ladder's floor is unchanged by this feature.
-func TestHubDefaultGCPIdentity_NoDefaultsFallBackToBlock(t *testing.T) {
+// TestHubDefaultGCPIdentity_NoDefaultsLeavesGCPIdentityUnset is the baseline:
+// with neither a project default nor a hub default configured, agent
+// creation leaves AppliedConfig.GCPIdentity unset (nil) rather than writing
+// an explicit "block" record. This lets the broker apply its own
+// runtime-aware default — "block" on every runtime except Kubernetes,
+// unchanged, "passthrough" on Kubernetes, since Kubernetes does not support
+// "block" (ptone/scion#2328 phase 1). Before that phase, this same "nothing
+// configured" case always resolved to an explicit "block" record; see
+// TestCreateAgent_GCPIdentityBlock and friends for the (still explicit,
+// still rejected-on-Kubernetes-when-applicable) request/project/hub-default
+// "block" cases that are unaffected by this change.
+func TestHubDefaultGCPIdentity_NoDefaultsLeavesGCPIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 
-	identity := createdAgentIdentity(t, f, "no-defaults-agent")
+	identity := createdAgentIdentityOrNil(t, f, "no-defaults-agent")
+	assert.Nil(t, identity)
+}
+
+// TestHubDefaultGCPIdentity_HubDefaultExplicitlyBlockIsExplicit covers the
+// other half of the ptone/scion#2328 phase 1 split: a hub operator who
+// configures "block" as the hub-wide default (as opposed to configuring
+// nothing at all) has made an explicit choice, and it must still be written
+// as an explicit record — not treated the same as "no hub default
+// configured" (TestHubDefaultGCPIdentity_NoDefaultsLeavesGCPIdentityUnset).
+// Before this phase both cases fell into the same default arm and were
+// indistinguishable; that was fine because both resolved to "block" either
+// way. Now that "nothing configured" defers to the broker's own
+// runtime-aware default, an explicit hub-default "block" has to stay
+// explicit or it would silently become "passthrough" on a Kubernetes-bound
+// dispatch instead of being rejected.
+func TestHubDefaultGCPIdentity_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModeBlock,
+	})
+
+	identity := createdAgentIdentity(t, f, "hub-default-explicit-block-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
 }
 
@@ -159,12 +189,15 @@ func TestHubDefaultGCPIdentity_PassthroughAppliedOnStockEmbeddedBroker(t *testin
 		"the resolved profile must be pinned so dispatch cannot use a different one than the gate checked")
 }
 
-// TestHubDefaultGCPIdentity_PassthroughBlockedWhenBrokerDefaultProfileIsKubernetes
+// TestHubDefaultGCPIdentity_PassthroughDeniedWhenBrokerDefaultProfileIsKubernetesLeavesIdentityUnset
 // covers the other half of the stock broker's default-profile resolution: an
 // operator (or a hybrid-tier deployment) that points the broker's own
-// default profile at the kubernetes-type one must still get block, with no
-// profile named on the request.
-func TestHubDefaultGCPIdentity_PassthroughBlockedWhenBrokerDefaultProfileIsKubernetes(t *testing.T) {
+// default profile at the kubernetes-type one must still have the hub-default
+// grant denied, with no profile named on the request. Per ptone/scion#2328,
+// that denial leaves GCPIdentity unset rather than writing an explicit
+// "block", so the broker's own runtime-aware default (passthrough, for
+// Kubernetes) applies instead.
+func TestHubDefaultGCPIdentity_PassthroughDeniedWhenBrokerDefaultProfileIsKubernetesLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "remote")
@@ -174,9 +207,10 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedWhenBrokerDefaultProfileIsKuber
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-stock-k8s-default-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"the hub default must fall to block when the broker's own default profile is kubernetes-type")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-stock-k8s-default-agent")
+	assert.Nil(t, identity,
+		"the hub default must be denied, leaving GCPIdentity unset, when the broker's own default profile is "+
+			"kubernetes-type (ptone/scion#2328)")
 	assert.Len(t, logs.recordsContaining("runtime is not a local-container runtime"), 1)
 }
 
@@ -208,11 +242,13 @@ func TestHubDefaultGCPIdentity_PassthroughFollowsProjectActiveProfileOnStockBrok
 	assert.Equal(t, "local", agent.AppliedConfig.Profile)
 }
 
-// TestHubDefaultGCPIdentity_PassthroughBlockedByProjectActiveProfileOnStockBroker
+// TestHubDefaultGCPIdentity_PassthroughDeniedByProjectActiveProfileOnStockBrokerLeavesIdentityUnset
 // is the sibling of the test above: a project active profile of "remote"
-// (kubernetes) must block, even though the broker's own default profile
-// points at the local docker profile.
-func TestHubDefaultGCPIdentity_PassthroughBlockedByProjectActiveProfileOnStockBroker(t *testing.T) {
+// (kubernetes) must be what the gate evaluates and deny the grant, even
+// though the broker's own default profile points at the local docker
+// profile. Per ptone/scion#2328, that denial leaves GCPIdentity unset rather
+// than writing an explicit "block".
+func TestHubDefaultGCPIdentity_PassthroughDeniedByProjectActiveProfileOnStockBrokerLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local") // broker default points at docker
@@ -228,16 +264,18 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedByProjectActiveProfileOnStockBr
 	proj.Annotations[projectSettingActiveProfile] = "remote"
 	require.NoError(t, f.store.UpdateProject(ctx, proj))
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-project-remote-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"the project's active profile (remote/kubernetes) must be what the gate evaluates, not the broker's own default")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-project-remote-agent")
+	assert.Nil(t, identity,
+		"the project's active profile (remote/kubernetes) must be what the gate evaluates, not the broker's own "+
+			"default, and the denial must leave GCPIdentity unset (ptone/scion#2328)")
 }
 
 // TestHubDefaultGCPIdentity_PassthroughFollowsExplicitRequestProfileOnStockBroker
 // covers the top of the precedence order on the realistic multi-profile
 // broker: an explicit request profile wins over both the project's active
-// profile and the broker's own default. "remote" blocks; the sibling test
-// below sends "local" and gets passthrough.
+// profile and the broker's own default. "remote" denies the grant (leaving
+// GCPIdentity unset, ptone/scion#2328); the sibling test below sends "local"
+// and gets passthrough.
 func TestHubDefaultGCPIdentity_PassthroughFollowsExplicitRequestProfileOnStockBroker(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
@@ -247,9 +285,9 @@ func TestHubDefaultGCPIdentity_PassthroughFollowsExplicitRequestProfileOnStockBr
 	})
 
 	agent := createdAgentRecord(t, f, CreateAgentRequest{Name: "hub-passthrough-explicit-remote-agent", Profile: "remote"})
-	require.NotNil(t, agent.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, agent.AppliedConfig.GCPIdentity.MetadataMode,
-		"an explicit kubernetes-type request profile must block even though the broker default is docker")
+	assert.Nil(t, agent.AppliedConfig.GCPIdentity,
+		"an explicit kubernetes-type request profile must deny the hub-default grant, leaving GCPIdentity unset "+
+			"rather than an explicit block (ptone/scion#2328), even though the broker default is docker")
 }
 
 // TestHubDefaultGCPIdentity_PassthroughExplicitRequestProfileLocalOnStockBroker
@@ -270,10 +308,15 @@ func TestHubDefaultGCPIdentity_PassthroughExplicitRequestProfileLocalOnStockBrok
 	assert.Equal(t, "local", agent.AppliedConfig.Profile)
 }
 
-// TestHubDefaultGCPIdentity_PassthroughBlockedOnKubernetesRuntime pins the
-// runtime-aware gate: the embedded broker qualifies, but its resolved
-// runtime profile is kubernetes-type, so the hub default falls to block.
-func TestHubDefaultGCPIdentity_PassthroughBlockedOnKubernetesRuntime(t *testing.T) {
+// TestHubDefaultGCPIdentity_PassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset
+// pins the runtime-aware gate: the embedded broker qualifies, but its
+// resolved runtime profile is kubernetes-type, so the hub-default grant
+// (confined to local-container runtimes) is denied. Per ptone/scion#2328,
+// that denial leaves GCPIdentity unset rather than writing an explicit
+// "block" — which Kubernetes dispatches reject outright regardless. Leaving
+// it unset lets the broker apply its own runtime-aware default, which for
+// Kubernetes is passthrough.
+func TestHubDefaultGCPIdentity_PassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "kubernetes")
@@ -283,18 +326,23 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedOnKubernetesRuntime(t *testing.
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-k8s-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"hub-default passthrough must not apply when the resolved runtime is kubernetes-type")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-k8s-agent")
+	assert.Nil(t, identity,
+		"hub-default passthrough denied for a kubernetes-type resolved runtime must leave GCPIdentity unset, "+
+			"not write an explicit block (ptone/scion#2328)")
 	assert.Len(t, logs.recordsContaining("runtime is not a local-container runtime"), 1)
 }
 
-// TestHubDefaultGCPIdentity_PassthroughBlockedOnUnresolvableRuntime covers the
-// fail-closed side of the runtime gate: the embedded broker reports no
-// runtime profile and no default profile at all, so the dispatch's runtime
-// cannot be resolved. An unresolvable runtime must not default to
-// passthrough.
-func TestHubDefaultGCPIdentity_PassthroughBlockedOnUnresolvableRuntime(t *testing.T) {
+// TestHubDefaultGCPIdentity_PassthroughDeniedOnUnresolvableRuntimeLeavesIdentityUnset
+// covers the fail-closed side of the runtime gate: the embedded broker
+// reports no runtime profile and no default profile at all, so the
+// dispatch's runtime cannot be resolved, and the hub-default grant must not
+// apply — it is denied, and per ptone/scion#2328 that denial leaves
+// GCPIdentity unset rather than writing an explicit "block", so the broker
+// applies its own runtime-aware default (which could itself still be
+// passthrough, if the runtime the hub could not resolve turns out to be
+// Kubernetes at the broker).
+func TestHubDefaultGCPIdentity_PassthroughDeniedOnUnresolvableRuntimeLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	// No profile recorded on the broker — nothing to resolve.
@@ -304,19 +352,21 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedOnUnresolvableRuntime(t *testin
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-unresolvable-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"hub-default passthrough must not apply when the runtime cannot be resolved")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-unresolvable-agent")
+	assert.Nil(t, identity,
+		"hub-default passthrough must not apply when the runtime cannot be resolved, and the denial must leave "+
+			"GCPIdentity unset (ptone/scion#2328)")
 	assert.Len(t, logs.recordsContaining("runtime profile could not be resolved"), 1)
 }
 
-// TestHubDefaultGCPIdentity_PassthroughBlockedOnAmbiguousMultiProfileBroker
+// TestHubDefaultGCPIdentity_PassthroughDeniedOnAmbiguousMultiProfileBrokerLeavesIdentityUnset
 // covers the ambiguous case distinct from the fully-unresolvable one above: a
 // broker reports more than one profile but no DefaultProfile (e.g. a record
 // written before this field existed) and the request/project name none
-// either. There is no single profile to fall back to, so this must also
-// block rather than guess.
-func TestHubDefaultGCPIdentity_PassthroughBlockedOnAmbiguousMultiProfileBroker(t *testing.T) {
+// either. There is no single profile to fall back to, so this must also deny
+// rather than guess, again leaving GCPIdentity unset (ptone/scion#2328)
+// rather than an explicit "block".
+func TestHubDefaultGCPIdentity_PassthroughDeniedOnAmbiguousMultiProfileBrokerLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "") // two profiles, no default recorded
@@ -326,9 +376,10 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedOnAmbiguousMultiProfileBroker(t
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-ambiguous-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"an ambiguous multi-profile broker with no resolvable default must not default to passthrough")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-ambiguous-agent")
+	assert.Nil(t, identity,
+		"an ambiguous multi-profile broker with no resolvable default must leave the hub-default grant denied, "+
+			"and the denial must leave GCPIdentity unset (ptone/scion#2328)")
 	assert.Len(t, logs.recordsContaining("runtime profile could not be resolved"), 1)
 }
 
@@ -336,7 +387,13 @@ func TestHubDefaultGCPIdentity_PassthroughBlockedOnAmbiguousMultiProfileBroker(t
 // review R1: hub-default passthrough skips the broker-owner/actAs gate that
 // explicit passthrough requests go through, so it is confined to the embedded
 // broker. On any other broker — here a remote auto-provide broker — the
-// ladder falls back to block rather than exposing that broker's host identity.
+// ladder leaves GCPIdentity unset (ptone/scion#2328) rather than writing an
+// explicit "block": the operator chose "passthrough", not
+// "block", so a denial here is treated exactly like no hub default at all,
+// letting the broker apply its own runtime-aware default (unchanged "block"
+// on every runtime except Kubernetes) rather than granting that broker's
+// passthrough without the actAs/owner gate explicit passthrough requests go
+// through.
 func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -345,9 +402,8 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testi
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-remote-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"hub-default passthrough must not apply on a non-embedded broker")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-remote-agent")
+	assert.Nil(t, identity, "hub-default passthrough must not apply on a non-embedded broker")
 	// This hub has no embedded broker at all; the log says so rather than
 	// blaming the broker.
 	assert.Len(t, logs.recordsContaining("hub has no embedded broker registered"), 1)
@@ -355,10 +411,10 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker(t *testi
 }
 
 // TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel pins
-// the round-2 review: the scion.io/broker-role label is writable by the
-// broker's owner, so a user-registered broker that labels itself "embedded"
-// must not receive the hub-default passthrough. Only the broker the server
-// itself recorded as embedded qualifies.
+// that the scion.io/broker-role label is writable by the broker's owner, so
+// a user-registered broker that labels itself "embedded" must not receive
+// the hub-default passthrough. Only the broker the server itself recorded as
+// embedded qualifies.
 func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
@@ -377,9 +433,8 @@ func TestHubDefaultGCPIdentity_PassthroughNotAppliedOnSpoofedEmbeddedLabel(t *te
 
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-spoofed-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
-		"a broker-owner-set embedded label must not unlock hub-default passthrough")
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-spoofed-agent")
+	assert.Nil(t, identity, "a broker-owner-set embedded label must not unlock hub-default passthrough")
 	assert.Len(t, logs.recordsContaining("broker is not the hub's embedded broker"), 1)
 }
 
@@ -419,10 +474,12 @@ func TestHubDefaultGCPIdentity_PassthroughWaitsForPendingEmbeddedRegistration(t 
 	assert.Equal(t, store.GCPMetadataModePassthrough, identity.MetadataMode)
 }
 
-// TestHubDefaultGCPIdentity_PendingRegistrationTimeoutFallsBackToBlock covers
-// the bound on that wait: if registration never resolves, the create falls
-// back to block and the log names the pending registration as the cause.
-func TestHubDefaultGCPIdentity_PendingRegistrationTimeoutFallsBackToBlock(t *testing.T) {
+// TestHubDefaultGCPIdentity_PendingRegistrationTimeoutLeavesGCPIdentityUnset
+// covers the bound on that wait: if registration never resolves, the create
+// leaves GCPIdentity unset (ptone/scion#2328 — see
+// TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker for the
+// rationale) and the log names the pending registration as the cause.
+func TestHubDefaultGCPIdentity_PendingRegistrationTimeoutLeavesGCPIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
@@ -433,8 +490,8 @@ func TestHubDefaultGCPIdentity_PendingRegistrationTimeoutFallsBackToBlock(t *tes
 	f.srv.ExpectEmbeddedBroker()
 	logs := captureDefaultSlog(t)
 
-	identity := createdAgentIdentity(t, f, "hub-passthrough-pending-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-pending-agent")
+	assert.Nil(t, identity)
 	assert.Len(t, logs.recordsContaining("co-located broker registration still pending"), 1)
 }
 
@@ -452,8 +509,8 @@ func TestHubDefaultGCPIdentity_RegistrationFailedLogsDistinctCause(t *testing.T)
 	logs := captureDefaultSlog(t)
 
 	start := time.Now()
-	identity := createdAgentIdentity(t, f, "hub-passthrough-regfail-agent")
-	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode)
+	identity := createdAgentIdentityOrNil(t, f, "hub-passthrough-regfail-agent")
+	assert.Nil(t, identity)
 	assert.Less(t, time.Since(start), embeddedBrokerWaitTimeout,
 		"a failed registration must release waiters, not run out the wait")
 

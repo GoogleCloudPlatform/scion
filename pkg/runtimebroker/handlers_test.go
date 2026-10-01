@@ -1779,7 +1779,7 @@ func snapshotFileTimes(t *testing.T, dir string) map[string]time.Time {
 // its (safe, in this fixture) JOIN path, which still rewrites the sharer
 // registry file and would be caught by the whole-tree ModTime snapshot even
 // though Manager.Reprovision itself is never reached in that JOIN case
-// either -- see the round-2 review's identical finding.
+// either.
 func TestCreateAgentProvisionOnly_Reprovision_WorktreePerAgent_Returns409(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	srv, mgr := newTestServerWithProvisionCapture()
@@ -2654,6 +2654,98 @@ runtimes:
 		if got := mgr.lastEnv["SCION_HUB_ENDPOINT"]; got != "http://localhost:8080" {
 			t.Errorf("expected SCION_HUB_ENDPOINT='http://localhost:8080' (k8s skips bridge), got %q", got)
 		}
+	})
+}
+
+// TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus pins that the
+// Kubernetes/"block" rejection (ptone/scion#2328) reaches the HTTP caller as
+// the 400 startContextError.Status actually names, on all three dispatch
+// endpoints — not the generic 500 runtime_error every buildStartContext
+// error used to collapse into before writeStartContextError (errors.go)
+// started honoring Status.
+func TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus(t *testing.T) {
+	newKubernetesServer := func(t *testing.T) *Server {
+		t.Helper()
+		t.Setenv("HOME", t.TempDir())
+		origWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpDir := t.TempDir()
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(origWd) })
+		dotScion := filepath.Join(tmpDir, ".scion")
+		if err := os.Mkdir(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		settingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: kubernetes
+runtimes:
+    kubernetes:
+        type: kubernetes
+`
+		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.BrokerName = "test-host"
+		cfg.ForceRuntime = "kubernetes"
+		mgr := &envCapturingManager{}
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+		return New(cfg, mgr, rt)
+	}
+
+	assertRejected := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+		}
+		var resp ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode error response: %v (body: %s)", err, w.Body.String())
+		}
+		if resp.Error.Code != ErrCodeValidationError {
+			t.Errorf("expected error code %q, got %q", ErrCodeValidationError, resp.Error.Code)
+		}
+		if !strings.Contains(resp.Error.Message, "Kubernetes") {
+			t.Errorf("expected the error message to name the Kubernetes runtime, got %q", resp.Error.Message)
+		}
+	}
+
+	t.Run("create", func(t *testing.T) {
+		srv := newKubernetesServer(t)
+		body := `{"name": "gcp-block-k8s-agent", "config": {"gcpIdentity": {"metadata_mode": "block"}}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		assertRejected(t, w)
+	})
+
+	t.Run("start", func(t *testing.T) {
+		srv := newKubernetesServer(t)
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-start/start", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		assertRejected(t, w)
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		srv := newKubernetesServer(t)
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-restart/restart", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		assertRejected(t, w)
 	})
 }
 

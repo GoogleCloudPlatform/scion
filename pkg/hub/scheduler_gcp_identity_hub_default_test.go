@@ -83,13 +83,17 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *
 		"the resolved profile must be pinned so dispatch cannot use a different one than the gate checked")
 }
 
-// TestScheduledDispatch_HubDefaultPassthroughBlockedOnKubernetesRuntime
-// mirrors TestHubDefaultGCPIdentity_PassthroughBlockedOnKubernetesRuntime: the
-// runtime-aware gate applies identically on the scheduled dispatch path,
+// TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset
+// mirrors
+// TestHubDefaultGCPIdentity_PassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset:
+// the runtime-aware gate applies identically on the scheduled dispatch path,
 // since both surfaces route through hubDefaultPassthroughAllowed. The
 // embedded broker qualifies, but its resolved runtime profile is
-// kubernetes-type, so the hub default falls to block.
-func TestScheduledDispatch_HubDefaultPassthroughBlockedOnKubernetesRuntime(t *testing.T) {
+// kubernetes-type, so the hub-default grant is denied — and per
+// ptone/scion#2328, that denial leaves GCPIdentity unset rather than writing
+// an explicit "block", so the broker's own runtime-aware default
+// (passthrough, for Kubernetes) applies instead.
+func TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "kubernetes")
@@ -102,17 +106,21 @@ func TestScheduledDispatch_HubDefaultPassthroughBlockedOnKubernetesRuntime(t *te
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-k8s")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
-		"hub-default passthrough must not apply on a scheduled dispatch to a kubernetes-type runtime profile")
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"hub-default passthrough denied on a scheduled dispatch to a kubernetes-type runtime profile must leave "+
+			"GCPIdentity unset, not write an explicit block (ptone/scion#2328)")
 }
 
 // TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker
 // mirrors TestHubDefaultGCPIdentity_PassthroughNotAppliedOnNonEmbeddedBroker:
 // on a scheduled dispatch to a broker that is not the hub's embedded broker
 // (here, no embedded broker registered at all), the hub-default passthrough
-// must not apply and the dispatch falls back to block rather than exposing
-// that broker's host identity.
+// must not apply. As of ptone/scion#2328, the denial leaves GCPIdentity
+// unset rather than writing an explicit "block": the operator
+// chose "passthrough", not "block", so this is treated exactly like no hub
+// default at all, letting the broker apply its own runtime-aware default
+// (unchanged "block" on every runtime except Kubernetes) instead of exposing
+// that broker's host identity via an unchecked passthrough.
 func TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -124,10 +132,8 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker(t 
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-remote")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity,
-		"hub-default passthrough denied by the embedded-broker gate must still write an explicit block, not leave the field nil")
-	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
-		"hub-default passthrough must not apply on a non-embedded broker")
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"hub-default passthrough denied by the embedded-broker gate must leave GCPIdentity unset, not write an explicit block")
 }
 
 // setProjectDefaultGCPMode sets the project's default GCP identity mode
@@ -173,7 +179,7 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 }
 
 // TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault covers R1 from
-// review sg-rev.md: the new `case store.GCPMetadataModeBlock:` arm in
+// review sg-rev.md: the `case store.GCPMetadataModeBlock:` arm in
 // applyScheduledProjectDefaultGCPIdentity (server.go) is the only thing
 // stopping a project's explicit Block from falling through to the hub
 // default now that the default arm consults it. Before this PR, "block" and
@@ -182,6 +188,14 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 // through, even though a hub default that would otherwise apply (passthrough
 // on the embedded broker) is configured. Mirrors the HTTP path's
 // TestHubDefaultGCPIdentity_ProjectExplicitBlockWinsOverHubPassthrough.
+//
+// ptone/scion#2328: this arm now writes an explicit "block" record instead
+// of leaving GCPIdentity nil (previously nil was this path's representation
+// of both "block" and "nothing configured"). It has to, now that nil means
+// "apply the broker's runtime-aware default": an explicit project Block
+// dispatched to the Kubernetes runtime must still be rejected by the broker
+// (pkg/runtimebroker/start_context_test.go), not silently become
+// "passthrough" because it looked the same as "nothing configured".
 func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
@@ -196,9 +210,11 @@ func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-project-block-wins")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	assert.Nil(t, got.AppliedConfig.GCPIdentity,
-		"an explicit project Block must not fall through to a hub default that would otherwise apply; "+
-			"nil is the scheduled path's pre-existing representation of block for this mode")
+	require.NotNil(t, got.AppliedConfig.GCPIdentity,
+		"an explicit project Block must be written as an explicit record, not left nil, "+
+			"or it becomes indistinguishable from \"nothing configured\"")
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
+		"an explicit project Block must not fall through to a hub default that would otherwise apply")
 }
 
 // TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup is the
@@ -222,7 +238,9 @@ func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *test
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-project-block-stops-assign-lookup")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	assert.Nil(t, got.AppliedConfig.GCPIdentity)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity,
+		"an explicit project Block is written as an explicit record (ptone/scion#2328 phase 1), not left nil")
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode)
 }
 
 // TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock covers O1
@@ -272,9 +290,9 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADiffer
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-wrong-broker")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
-		"hub-default passthrough must not apply when the project's own broker is not the hub's embedded broker")
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"hub-default passthrough denied because the project's own broker is not the hub's embedded broker "+
+			"must leave GCPIdentity unset, not write an explicit block (ptone/scion#2328)")
 }
 
 // TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged double-checks,
@@ -282,7 +300,10 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADiffer
 // TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged already
 // pins: with neither a project default nor a hub default configured, the
 // scheduler path's prior behaviour is unchanged — AppliedConfig.GCPIdentity
-// stays nil, not an explicit "block" record (unlike the create path's floor).
+// stays nil. As of ptone/scion#2328 phase 1 the create path's floor now
+// matches this (see TestHubDefaultGCPIdentity_NoDefaultsLeavesGCPIdentityUnset)
+// instead of writing an explicit "block" record, so the two paths agree: nil
+// means "let the broker apply its own runtime-aware default".
 func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) {
 	f := bypassAgentsSetup(t)
 
@@ -294,6 +315,39 @@ func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) 
 	assert.Nil(t, got.AppliedConfig.GCPIdentity,
 		"with no project default and no hub default the scheduler path must keep its prior behaviour")
 }
+
+// TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit is the scheduled
+// path's twin of TestHubDefaultGCPIdentity_HubDefaultExplicitlyBlockIsExplicit:
+// a hub operator who configures "block" as the hub-wide default has made an
+// explicit choice, distinct from "nothing configured"
+// (TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged), and it must
+// stay an explicit record rather than being silently reinterpreted as "apply
+// the broker's runtime-aware default" on a Kubernetes-bound dispatch.
+func TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModeBlock,
+	})
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-hub-default-explicit-block"))
+
+	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-default-explicit-block")
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.GCPIdentity,
+		"an explicit hub-default Block must be written as an explicit record, not left nil")
+	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode)
+}
+
+// Note: this file does not additionally pin a Kubernetes-broker-specific
+// scenario for the scheduled path. The resolution ladder above is
+// runtime-agnostic — it never reads a broker's profile type — so a
+// Kubernetes-flavored variant of the tests above would duplicate them without
+// exercising anything Kubernetes-specific. What the broker actually does with
+// a nil vs. an explicit "block" GCPIdentity (passthrough default vs.
+// rejection) is covered end to end by pkg/runtimebroker/start_context_test.go
+// (TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough
+// and TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes).
 
 // TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault
 // mirrors TestScheduledDispatch_ProjectDefaultSAAssigned one rung down the
@@ -349,12 +403,14 @@ func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
 	assert.ErrorIs(t, getErr, store.ErrNotFound, "denied dispatch must not create the agent record")
 }
 
-// TestScheduledDispatch_HubDefaultPassthroughBlockedByProjectActiveProfile
-// mirrors TestHubDefaultGCPIdentity_PassthroughBlockedByProjectActiveProfileOnStockBroker
+// TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeavesIdentityUnset
+// mirrors TestHubDefaultGCPIdentity_PassthroughDeniedByProjectActiveProfileOnStockBrokerLeavesIdentityUnset
 // on the scheduled dispatch path: the project's active-profile setting must
 // be what the gate evaluates there too, not the broker's own default
 // profile, even though a scheduled dispatch never names a profile itself.
-func TestScheduledDispatch_HubDefaultPassthroughBlockedByProjectActiveProfile(t *testing.T) {
+// Per ptone/scion#2328, the denial leaves GCPIdentity unset rather than
+// writing an explicit "block".
+func TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeavesIdentityUnset(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local") // broker default points at docker
@@ -375,9 +431,9 @@ func TestScheduledDispatch_HubDefaultPassthroughBlockedByProjectActiveProfile(t 
 	got, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sched-hub-passthrough-project-remote")
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
-		"the project's active profile (remote/kubernetes) must be what the gate evaluates on scheduled dispatch, not the broker's own default")
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"the project's active profile (remote/kubernetes) must be what the gate evaluates on scheduled dispatch, "+
+			"not the broker's own default, and the denial must leave GCPIdentity unset (ptone/scion#2328)")
 }
 
 // TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges
