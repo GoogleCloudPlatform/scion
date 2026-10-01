@@ -382,12 +382,9 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 // SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID env vars that would
 // otherwise let config.IsHubContext() or FindProjectRoot() mask the "not in
 // a scion project" failure these tests guard against, plus SCION_PROJECT
-// and SCION_CREATOR (not read by name on this path — the settings
-// loaders bulk-load SCION_* vars but ignore these two — cleared
-// defensively against sandbox leakage per .gemini/styleguide.md); points
-// HOME at a fresh temp dir; and changes into a temp dir with no .scion
-// project anywhere above it (t.Chdir restores the working directory
-// itself).
+// and SCION_CREATOR, cleared defensively (see below); points HOME at a
+// fresh temp dir; and changes into a temp dir with no .scion project
+// anywhere above it (t.Chdir restores the working directory itself).
 func setupNoProjectPreRun(t *testing.T) {
 	t.Helper()
 
