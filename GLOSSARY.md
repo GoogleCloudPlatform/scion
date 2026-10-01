@@ -255,6 +255,10 @@ _Avoid_: rate limits, usage caps
 **LimitDefinition**:
 A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
 
+**Broker Settings**:
+A per-broker settings document on the Hub (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for one Runtime Broker. The effective cap resolves from the broker setting, then an entitlement binding, then the hub default.
+_Avoid_: broker-scoped entitlement (the retired way to set a per-broker cap)
+
 ## Messaging
 
 **Branch mode** (message mode):

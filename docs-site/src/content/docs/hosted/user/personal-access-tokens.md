@@ -54,7 +54,7 @@ curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
 ```
 
 When a token is created, the Hub resolves its scopes into a fixed, versioned set of
-permissions (a **permission ceiling**), checks that you hold every one of them in the target
+permissions (the token's permission ceiling), checks that you hold every one of them in the target
 project, and stores that ceiling with the token. Every later request made with the token is
 limited to that ceiling. A token whose stored ceiling is missing or has an unrecognized version is
 denied. Existing tokens are converted to versioned ceilings automatically on upgrade.
