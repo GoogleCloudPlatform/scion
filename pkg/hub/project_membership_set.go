@@ -845,6 +845,34 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			customAuthTx[PermRoleBindingDelete] = auth
 		}
 
+		// R2-2 (review r2): Phase P's CanDelegate call ran once, before the
+		// lock, against the actor's authority SOURCE at that moment
+		// (actorRolePre/hubOverridePre/customAuthPre). It is not, and cannot
+		// be, re-run in-tx (accepted FYI-2 residual). But if that source
+		// itself changed between phases — e.g. a direct owner who also holds
+		// hub role_binding.* is demoted from owner by a concurrent request
+		// before this lock lands — the committed grant is no longer the one
+		// CanDelegate evaluated: reevaluateActorTx above would now report
+		// hubOverride instead of direct ownership, and a hub-admin-only
+		// ceiling may refuse what the owner ceiling allowed. Unlike the
+		// general FYI-2 residual, this is cheap to detect without re-running
+		// CanDelegate: refuse to commit and let the client retry with a
+		// fresh request if the actor's role, hub-override status, or any
+		// asked custom-authority source moved.
+		if actorRole != actorRolePre || hubOverride != hubOverridePre {
+			return &membershipChangedError{currentRoleDefinitionIDs: roleDefIDs(current1)}
+		}
+		for _, perm := range []string{PermRoleBindingCreate, PermRoleBindingDelete} {
+			pre, preAsked := customAuthPre[perm]
+			post, postAsked := customAuthTx[perm]
+			if preAsked != postAsked {
+				continue // plan1 == plan0 by construction (current1 == current0 above)
+			}
+			if preAsked && pre.Via != post.Via {
+				return &membershipChangedError{currentRoleDefinitionIDs: roleDefIDs(current1)}
+			}
+		}
+
 		for _, ch := range plan1.changes(currentDefs1) {
 			if d := svc.governanceDecisionForChange(actorRole, isDirectOwner, hubOverride, customAuthTx, ch); d != nil {
 				return asGovernanceDenial(*d)

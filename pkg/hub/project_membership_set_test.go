@@ -1033,6 +1033,81 @@ func TestSetMemberRoles_HubOverride_DemotionOwnerToMemberAllowed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// R2-2 (review r2): TOCTOU on the actor's authority SOURCE between phases
+// ---------------------------------------------------------------------------
+
+// mmrAuthoritySwapStore wraps store.Store so a test can simulate a
+// concurrent request landing between SetMemberRoles' pre-transaction phase
+// (Phase P: reads, CanDelegate) and its locked re-read (Phase T, inside
+// WithTx). It is swapped in for ProjectMembershipService.store for the
+// duration of one SetMemberRoles call; its WithTx override runs swap()
+// exactly once, immediately before delegating to the real WithTx — which is
+// exactly the seam between Phase P (already complete by the time
+// SetMemberRoles calls svc.store.WithTx) and Phase T (whose first statement
+// is the lock). swap mutates the underlying store directly, outside of any
+// transaction, modelling an already-committed concurrent write.
+type mmrAuthoritySwapStore struct {
+	store.Store
+	swap    func()
+	didSwap bool
+}
+
+func (s *mmrAuthoritySwapStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !s.didSwap {
+		s.didSwap = true
+		s.swap()
+	}
+	return s.Store.WithTx(ctx, fn)
+}
+
+// TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused is R2-2
+// (review r2). The actor is a direct owner who ALSO holds hub
+// role_binding.* (hub-admin). Phase P's CanDelegate passes f.withinCeiling
+// against the OWNER ceiling (f.withinCeiling is deliberately "within the
+// owner's ceiling", per its fixture comment). Before the lock lands, a
+// concurrent request (mmrAuthoritySwapStore) removes the actor's own owner
+// binding. Without the R2-2 guard, Phase T's reevaluateActorTx would now
+// report hubOverride=true and customRoleAuthorityFromStore(tx) would report
+// Via:"hub_role_binding" — both pass governance on their own — and the
+// grant would commit even though CanDelegate was never evaluated against a
+// hub-admin-only ceiling, which TestSetMemberRoles_Ported_
+// HubAdminCustomProjectRole_UnchangedCeilingBehavior shows refuses this
+// exact role. The R2-2 guard detects the actorRole/hubOverride/customAuth-Via
+// mismatch between phases and refuses with 409 membership_changed instead
+// of committing.
+func TestSetMemberRoles_Escalation_TOCTOU_AuthoritySourceChangeRefused(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	mmrSeedHubAdmin(t, f.store, f.owner.ID)
+
+	realStore := f.srv.membershipService.store
+	sw := &mmrAuthoritySwapStore{Store: realStore}
+	sw.swap = func() {
+		for _, b := range mmrBindingsFor(t, realStore, "user", f.owner.ID, f.projectID) {
+			require.NoError(t, realStore.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+	f.srv.membershipService.store = sw
+	defer func() { f.srv.membershipService.store = realStore }()
+
+	svcCtx := mmrServiceCtx(f.owner.ID, f.owner.Email)
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: f.member.ID,
+		Actor:          mmrServiceIdentity(f.owner.ID, f.owner.Email),
+		DesiredRoleIDs: []string{f.memberRD.ID, f.withinCeiling.ID},
+	})
+
+	require.NotNil(t, decision, "the grant must not silently commit under a changed authority source")
+	assert.Equal(t, ErrCodeMembershipChanged, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusConflict, decision.HTTPStatus)
+
+	for _, b := range mmrBindingsFor(t, realStore, "user", f.member.ID, f.projectID) {
+		assert.NotEqual(t, f.withinCeiling.ID, b.RoleDefinitionID, "the custom grant must not have committed")
+	}
+	assert.Empty(t, mmrAuditRows(t, realStore, f.projectID), "a refused request must write no audit rows")
+}
+
+// ---------------------------------------------------------------------------
 // Principal addressing
 // ---------------------------------------------------------------------------
 
