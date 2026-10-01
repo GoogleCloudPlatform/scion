@@ -249,11 +249,11 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 // TestCanAgentDelegateToAgent_LegacyFullCanDelegateFull pins the rule that
 // keeps a genuine pre-split Full-role token (legacyScopeSchema set, carrying
 // the old 10-scope list) able to delegate the full role to a sub-agent,
-// exactly as it could before ScopesForRole(Full) grew an 11th scope:
-// canAgentDelegateToAgent must compare against effectiveAgentScopes, which
-// applies the same compatibility rule buildAgentSyntheticBindings and
-// agentScopeRestriction apply, rather than against the actor's raw,
-// pre-split scope list.
+// because its effective scopes include every scope ScopesForRole(Full)
+// requires: canAgentDelegateToAgent must compare against
+// effectiveAgentScopes, which applies the same compatibility rule
+// buildAgentSyntheticBindings and agentScopeRestriction apply, rather than
+// against the actor's raw, pre-split scope list.
 func TestCanAgentDelegateToAgent_LegacyFullCanDelegateFull(t *testing.T) {
 	authz, _ := authzTestSetup(t)
 
@@ -309,11 +309,11 @@ func TestCanAgentDelegateToAgent_CurrentCreateOnlyCannotDelegateFull(t *testing.
 // explicit project:agent:sa_assign grant (requested independently of any
 // role bundle, via GrantDescriptor.AgentScopes with AgentRole none) to a
 // child. This is the intended consequence of judging delegation by the
-// parent's effective authority rather than its literal scope list: before
-// the split, project:agent:create and project:agent:sa_assign were the same
-// scope string, so a parent holding it could already confer
-// gcp_service_account.assign on a child by delegating that scope; this pins
-// that the same parent can still confer it explicitly today.
+// parent's effective authority rather than its literal scope list: a token
+// minted under the pre-split vocabulary held gcp_service_account.assign
+// through project:agent:create, so a parent holding that scope could already
+// confer assign on a child; this pins that the same parent can still confer
+// it explicitly.
 func TestCanAgentDelegateToAgent_LegacyParentCanDelegateExplicitAssignScope(t *testing.T) {
 	authz, _ := authzTestSetup(t)
 

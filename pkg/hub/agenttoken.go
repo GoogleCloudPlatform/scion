@@ -118,7 +118,9 @@ const (
 // legacyScopeSchema's effect may be deleted once no unexpired token can
 // still predate CurrentAgentScopeSchema: the configured agent token
 // lifetime (AgentTokenConfig.TokenDuration) after this change deploys,
-// since every agent refreshes (or is re-minted) within one token lifetime.
+// since ValidateAgentToken rejects every token older than one TokenDuration
+// (the maximum TokenDuration configured at any point since deploy), so no
+// legacy token can still validate after that.
 const CurrentAgentScopeSchema = 1
 
 // AgentTokenClaims represents the custom claims in an agent JWT.
