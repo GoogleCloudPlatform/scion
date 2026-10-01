@@ -339,7 +339,27 @@ const (
 	// policy fact about the delegator. Callers should treat this like an
 	// ordinary denial, not surface it as a specific reason.
 	DenyCauseCeilingError DenyCause = "ceiling_error"
+
+	// DenyCauseResolutionError marks a deny caused by a store or resolution
+	// fault rather than a policy fact. decide() sets it on four paths:
+	// principal resolution (Step 2), role-binding resolution (Step 3),
+	// role-definition resolution (Step 4), and access-constraint load
+	// failure (Step 7c, detected after Step 9 because the failure there
+	// is folded into a deny-all restriction rather than an early return).
+	DenyCauseResolutionError DenyCause = "resolution_error"
 )
+
+// IsIndeterminate reports whether this deny was caused by a store or
+// resolution fault on the tagged paths, rather than a policy fact — the
+// access check could not be decided. Tagged: principal, role-binding,
+// role-definition and access-constraint resolution in decide(), and the
+// delegation-ceiling error. Not yet tagged: relationship-fact and
+// source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
+// progenySourceFor). A false result for those candidates does not prove a
+// policy deny.
+func (d Decision) IsIndeterminate() bool {
+	return !d.Allowed && (d.DenyCause == DenyCauseResolutionError || d.DenyCause == DenyCauseCeilingError)
+}
 
 // EvaluationDetail provides detailed info for the evaluate endpoint.
 type EvaluationDetail struct {
@@ -605,7 +625,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -648,7 +668,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -673,7 +693,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)"}
+		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -785,8 +805,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// 7c. Access constraints (AC1).
-	acRestrictions := a.loadAccessConstraintRestrictions(ctx, closure, resourceCtx)
+	// 7c. Access constraints (AC1). Calls the error-returning form directly
+	// (rather than loadAccessConstraintRestrictions) so a load failure can be
+	// tagged as DenyCauseResolutionError below, instead of looking like an
+	// ordinary policy deny. Behaviour on error is unchanged: the same
+	// deny-all "access_constraint_error" restriction is appended.
+	var constraintLoadFailed bool
+	acRestrictions, acErr := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
+	if acErr != nil {
+		a.logger.Warn("failed to load access constraints (fail-closed)", "error", acErr)
+		acRestrictions = []Restriction{{
+			Kind:        "access_constraint_error",
+			Description: "constraint loading failed (fail-closed)",
+			// nil Check denies everything.
+		}}
+		constraintLoadFailed = true
+	}
 	restrictions = append(restrictions, acRestrictions...)
 
 	// ── Step 8: Evaluate via AK1 kernel ───────────────────────────────
@@ -831,6 +865,16 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain && decision.Provenance != nil {
 			decision.Provenance.Relationships = rel.results
 		}
+	}
+
+	// If the access-constraint load failed (7c), and the outcome is a deny,
+	// tag it so callers can distinguish a store fault from a policy fact.
+	// This runs regardless of which path produced the deny (kernel or
+	// relationship candidates), because the deny-all restriction from 7c
+	// applies to both. Step 10 below only overwrites DenyCause on decisions
+	// that were allowed at this point, so it cannot clobber this tag.
+	if !decision.Allowed && constraintLoadFailed {
+		decision.DenyCause = DenyCauseResolutionError
 	}
 
 	// ── Step 10: Agent delegation ceiling (post-decision) ────────────

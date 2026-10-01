@@ -139,6 +139,9 @@ type Store interface {
 	// User operations
 	UserStore
 
+	// UserTerminalWorkspace operations
+	UserTerminalWorkspaceStore
+
 	// ProjectProvider operations
 	ProjectProviderStore
 
@@ -2480,4 +2483,33 @@ type ExternalIdentityStore interface {
 
 	// GetExternalIdentitiesByUserID returns all bindings for a given user.
 	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
+}
+
+// UserTerminalWorkspace is the persisted, per-user state of the terminal
+// viewer's (/terminals) open-terminal rail: the ordered list of open agent
+// IDs, plus which one was frontmost when it was last saved. See design
+// ptone/scion#2278 section 3.1.
+type UserTerminalWorkspace struct {
+	UserID           string    `json:"userId"`
+	AgentIDs         []string  `json:"agentIds"`         // ordered, lowercase canonical UUIDs
+	FrontmostAgentID string    `json:"frontmostAgentId"` // "" when none
+	Revision         int64     `json:"revision"`
+	Updated          time.Time `json:"updatedAt"`
+}
+
+// UserTerminalWorkspaceStore provides durable, per-user persistence for the
+// terminal viewer's open-terminal list. There is exactly one row per user.
+// The store trusts its caller to have already validated agentIDs and
+// frontmostAgentID (size bounds, UUID format, membership); see
+// pkg/hub/handlers_user_terminal_workspace.go.
+type UserTerminalWorkspaceStore interface {
+	// GetUserTerminalWorkspace returns the saved workspace for userID.
+	// Returns ErrNotFound when the user has never saved one.
+	GetUserTerminalWorkspace(ctx context.Context, userID string) (*UserTerminalWorkspace, error)
+
+	// PutUserTerminalWorkspace unconditionally upserts the workspace for
+	// userID, keyed on user_id, incrementing revision atomically
+	// (last-writer-wins: there is no expected-revision / compare-and-swap
+	// parameter). Returns the stored row.
+	PutUserTerminalWorkspace(ctx context.Context, userID string, agentIDs []string, frontmostAgentID string) (*UserTerminalWorkspace, error)
 }

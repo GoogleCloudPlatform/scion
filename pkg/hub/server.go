@@ -5022,6 +5022,9 @@ func (s *Server) registerRoutes() {
 		s.handleUserMeInjectedSkillByID(w, r, entryID)
 	}))
 
+	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
+	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
+
 	// User-scoped template endpoints (/users/me/templates)
 	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))
 	s.mux.HandleFunc("/api/v1/users/me/templates/", s.guarded("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {
