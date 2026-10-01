@@ -22,7 +22,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Agent, Capabilities } from '../shared/types.js';
 import type { AgentsChangedDetail } from './state.js';
-import { mergeChanged } from './agent-merge.js';
+import { mergeChanged, dropTombstoned } from './agent-merge.js';
 
 function agent(id: string, overrides: Partial<Agent> = {}): Agent {
   return {
@@ -267,5 +267,33 @@ describe('mergeChanged', () => {
     const untouched = result.find((a) => a.id === 'a1')!;
     expect(untouched).toBe(a1); // reference equality, not just deep equality
     expect(untouched).toEqual(a1);
+  });
+});
+
+describe('dropTombstoned', () => {
+  it('returns the same array reference when there are no deleted IDs at all', () => {
+    const held = [agent('a1'), agent('a2')];
+    expect(dropTombstoned(held, new Set())).toBe(held);
+  });
+
+  it('returns the same array reference when no held agent is tombstoned', () => {
+    const held = [agent('a1'), agent('a2')];
+    expect(dropTombstoned(held, new Set(['ghost']))).toBe(held);
+  });
+
+  it('drops a tombstoned agent and returns a new array', () => {
+    const a1 = agent('a1');
+    const a2 = agent('a2');
+    const held = [a1, a2];
+    const result = dropTombstoned(held, new Set(['a1']));
+    expect(result).not.toBe(held);
+    expect(result).toEqual([a2]);
+    expect(result[0]).toBe(a2); // the surviving agent keeps its reference
+  });
+
+  it('drops every tombstoned agent when more than one is present', () => {
+    const held = [agent('a1'), agent('a2'), agent('a3')];
+    const result = dropTombstoned(held, new Set(['a1', 'a3']));
+    expect(result.map((a) => a.id)).toEqual(['a2']);
   });
 });

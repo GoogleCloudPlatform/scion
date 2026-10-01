@@ -47,7 +47,7 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
-import { mergeChanged } from '../../client/agent-merge.js';
+import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -557,6 +557,11 @@ export class ScionPageAgents extends LitElement {
       this.agents = data.agents || [];
       this.scopeCapabilities = data._capabilities;
     }
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters `this.agents`
+    // (`stateManager.seedAgents` already drops it from its own map, but
+    // this page's own array is a separate copy).
+    this.agents = dropTombstoned(this.agents, stateManager.getDeletedAgentIds());
     stateManager.seedAgents(this.agents);
     if (this.scopeCapabilities) {
       stateManager.seedScopeCapabilities('agent', this.scopeCapabilities);

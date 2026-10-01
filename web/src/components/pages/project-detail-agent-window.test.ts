@@ -984,6 +984,50 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-new')).toBe(true);
       expect(requests.length).toBe(1); // still no request
     });
+
+    it('a REST response landing after an SSE delete does not resurrect the deleted agent', async () => {
+      const projectId = 'p-small-tombstone';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
+        )
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(true);
+
+      // The hub tells this client 'a-1' is gone.
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.deleted`,
+        data: { agentId: 'a-1' },
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(false);
+
+      // A lifecycle refresh re-fetches, and the fixture's fetch handler still
+      // returns the original fixture list — 'a-1' included — because it has
+      // no knowledge of the delete (exactly like a REST response that was
+      // already in flight, or served from a stale read replica, when the
+      // delete happened). The already-tombstoned ID must not reappear.
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+
+      expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
+      expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(false);
+    });
   });
 
   describe('paged -> legacy transitions issue exactly one request each', () => {

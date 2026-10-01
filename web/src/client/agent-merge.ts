@@ -121,3 +121,32 @@ export function mergeChanged(
   if (!changed) return held as Agent[];
   return Array.from(byId.values());
 }
+
+/**
+ * Drop any agent already tombstoned by an SSE `deleted` event.
+ *
+ * A REST response can race an SSE `deleted` that was already processed
+ * before the response arrives: `stateManager.seedAgents` already skips a
+ * tombstoned ID when populating its own map (state.ts), but a caller that
+ * also assigns the raw REST array into its *own* page-level state must
+ * apply the same rule itself, or the stale agent sits in the UI
+ * indefinitely — unlike a live `agents-changed` flush (handled by
+ * `mergeChanged` above), nothing will ever name that already-resolved ID
+ * again to remove it later.
+ *
+ * Returns `agents` itself, by reference, when nothing needs dropping —
+ * the common case, and the only one that matters for array identity here,
+ * since this runs once per REST response rather than per live delta.
+ */
+export function dropTombstoned(agents: readonly Agent[], deletedIds: ReadonlySet<string>): Agent[] {
+  if (deletedIds.size === 0) return agents as Agent[];
+  let anyTombstoned = false;
+  for (const a of agents) {
+    if (deletedIds.has(a.id)) {
+      anyTombstoned = true;
+      break;
+    }
+  }
+  if (!anyTombstoned) return agents as Agent[];
+  return agents.filter((a) => !deletedIds.has(a.id));
+}

@@ -191,6 +191,42 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     expect(el.agents.map((a) => a.id)).toEqual(['a2']);
   });
 
+  it('a REST response landing after an SSE delete does not resurrect the deleted agent', async () => {
+    const initial = [agent('a1'), agent('a2')];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: [] } }))
+      )
+    );
+
+    const el = document.createElement('scion-page-agents') as TestEl;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await flush();
+    await el.updateComplete;
+
+    expect(el.agents.map((a) => a.id).sort()).toEqual(['a1', 'a2']);
+
+    // The hub tells this client 'a1' is gone.
+    handleUpdate('agent.a1.deleted', {});
+    await flush();
+    await el.updateComplete;
+    expect(el.agents.some((a) => a.id === 'a1')).toBe(false);
+
+    // A background refresh re-fetches, and the fixture's fetch handler
+    // still returns the original fixture list — 'a1' included — because it
+    // has no knowledge of the delete (the same shape as a REST response
+    // that was already in flight, or served from a stale read replica,
+    // when the delete happened). The already-tombstoned ID must not
+    // reappear.
+    (el as unknown as { backgroundRefresh(): void }).backgroundRefresh();
+    await flush();
+    await el.updateComplete;
+
+    expect(el.agents.some((a) => a.id === 'a1')).toBe(false);
+  });
+
   it("a scoped (mine) load does not adopt a brand-new SSE-created agent, but still updates one it already holds (today's add rule)", async () => {
     const initial = [agent('a1', { projectId: 'p1' })];
     vi.stubGlobal(

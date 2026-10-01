@@ -51,7 +51,7 @@ import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
 import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
-import { mergeChanged } from '../../client/agent-merge.js';
+import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
 import { sortAgents } from '../../shared/agent-sort.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
@@ -1635,8 +1635,14 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentScopeCapabilities = data._capabilities;
     }
 
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters page-level state
+    // (`stateManager.seedAgents` already drops it from its own map, but
+    // `this.agents`/the window are this page's own copies).
+    const freshAgents = dropTombstoned(data.agents, stateManager.getDeletedAgentIds());
+
     if (data.complete) {
-      this.agents = data.agents;
+      this.agents = freshAgents;
       if (!this.agentScopeCapabilities) {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
       }
@@ -1647,10 +1653,10 @@ export class ScionPageProjectDetail extends LitElement {
       // Paged: `this.agents` stays empty, and grid/tree/stats/Stop-all read
       // the member index through `agentStats` instead (design §11).
       this.agents = [];
-      stateManager.seedAgents(data.agents, { partial: true });
+      stateManager.seedAgents(freshAgents, { partial: true });
       this.agentWindow.setPaged(
         {
-          agents: data.agents,
+          agents: freshAgents,
           nextCursor: data.nextCursor,
           totalCount: data.totalCount,
           stats: data.stats,
@@ -1747,6 +1753,9 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentScopeCapabilities = data._capabilities;
       nextCursor = data.nextCursor;
     }
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters `this.agents`.
+    this.agents = dropTombstoned(this.agents, stateManager.getDeletedAgentIds());
     if (!this.agentScopeCapabilities) {
       this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
     }
@@ -1787,7 +1796,9 @@ export class ScionPageProjectDetail extends LitElement {
     }
     const data = (await response.json()) as SortedAgentsResponse;
     return {
-      agents: data.agents,
+      // Same race as the page-load paths above: a server page can still
+      // list an ID whose SSE `deleted` this client already processed.
+      agents: dropTombstoned(data.agents, stateManager.getDeletedAgentIds()),
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
       stats: data.stats,
