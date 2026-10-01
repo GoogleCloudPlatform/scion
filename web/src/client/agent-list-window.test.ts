@@ -978,12 +978,17 @@ describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch'
     // (the same call the host makes on a failed request while paged).
     win.invalidateCursors();
     expect(win.hasNext).toBe(false);
+    // Dropping the in-flight fetch must also clear the loading flag: its
+    // finally block is skipped for a superseded generation, so nothing else
+    // would, and the pager and refresh chip would stay disabled.
+    expect(win.loading).toBe(false);
 
     // The in-flight page-0 fetch — requested before the invalidation, and
     // so carrying a cursor bound to the stale, pre-invalidation params —
     // now lands.
     resolvePending(pagedResult(page0, { nextCursor: 'c1-stale', totalCount: 4 }));
     await prevDone;
+    expect(win.loading).toBe(false);
 
     // Its result must not re-validate the stack: a late response from a
     // fetch started under now-obsolete params is exactly what the
