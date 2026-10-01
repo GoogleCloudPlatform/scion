@@ -888,6 +888,11 @@ type reincarnationRequesterContext struct {
 	CreatorResolved bool
 }
 
+// reincarnationRequesterResolveTimeout bounds buildReincarnationRequesterContext's
+// store calls (design Amendment A26.14). A package var, not a const, so a
+// test can shorten it rather than waiting out the real timeout.
+var reincarnationRequesterResolveTimeout = 5 * time.Second
+
 // buildReincarnationRequesterContext resolves the requester and, for a
 // self-migration, the creator hint, before the preamble is built (Amendments
 // A26.1, A26.2 R1). Self-migration (the AC-10/2c dogfood path) must never
@@ -902,10 +907,23 @@ type reincarnationRequesterContext struct {
 // own ID, but "never emit the agent's own handle" is stated as an absolute
 // rule.
 func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *store.Agent, requestedBy string) reincarnationRequesterContext {
+	// Amendment A26.14: resolution is best-effort preamble metadata (A26.1
+	// 7c: it must never fail the reincarnation), but it runs on the
+	// worker's own ctx after the old container is already stopped, so an
+	// unbounded store call here could stall the migration with only the
+	// replica-safe sweep's 30-minute backstop to eventually notice. The
+	// derived, timeout-bound context is used only for the resolver calls
+	// below — it is never returned or threaded into any later worker step.
+	// On timeout, resolveReincarnationRequesterName's existing error path
+	// (a non-ErrNotFound error) yields the fallback and logs a WARN, the
+	// same as any other store error.
+	resolveCtx, cancel := context.WithTimeout(ctx, reincarnationRequesterResolveTimeout)
+	defer cancel()
+
 	if requestedBy != "" && requestedBy == agent.ID {
 		ctxOut := reincarnationRequesterContext{IsSelf: true}
 		if agent.CreatedBy != "" {
-			handle, resolved := s.resolveReincarnationRequesterName(ctx, agent.CreatedBy)
+			handle, resolved := s.resolveReincarnationRequesterName(resolveCtx, agent.CreatedBy)
 			if resolved && handle != "agent:"+agent.Slug {
 				ctxOut.CreatorHandle, ctxOut.CreatorResolved = handle, true
 			}
@@ -913,7 +931,7 @@ func (s *Server) buildReincarnationRequesterContext(ctx context.Context, agent *
 		return ctxOut
 	}
 
-	handle, resolved := s.resolveReincarnationRequesterName(ctx, requestedBy)
+	handle, resolved := s.resolveReincarnationRequesterName(resolveCtx, requestedBy)
 	return reincarnationRequesterContext{Handle: handle, Resolved: resolved}
 }
 

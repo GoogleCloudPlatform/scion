@@ -2600,6 +2600,64 @@ func TestBuildReincarnationRequesterContext_A262_R1(t *testing.T) {
 	})
 }
 
+// blockingUntilDoneStore wraps a real store.Store and makes GetUser/GetAgent
+// block until the ctx passed to them is done, then return its error. Used by
+// TestBuildReincarnationRequesterContext_A2614_TimeoutBound to simulate a
+// stuck backend: the real resolution path is otherwise exercised, only the
+// store round trip is replaced.
+type blockingUntilDoneStore struct {
+	store.Store
+}
+
+func (b *blockingUntilDoneStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingUntilDoneStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestBuildReincarnationRequesterContext_A2614_TimeoutBound is the design
+// Amendment A26.14 test: an unbounded store call during requester resolution
+// must not stall the worker. With reincarnationRequesterResolveTimeout
+// shortened and a store whose GetUser/GetAgent block until their ctx is
+// done, the build must still return — with the unresolved fallback — well
+// within the shortened timeout.
+//
+// This test imposes its own bounded wait (a select with a generous
+// time.After), independent of the production timeout: if the production
+// timeout were removed, the blocking store's calls would hang on
+// context.Background() forever, and this test must fail promptly rather
+// than hang the suite — the select's time.After branch is what makes that
+// a clean failure instead of a hang.
+func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	origTimeout := reincarnationRequesterResolveTimeout
+	t.Cleanup(func() { reincarnationRequesterResolveTimeout = origTimeout })
+	reincarnationRequesterResolveTimeout = 50 * time.Millisecond
+
+	srv.store = &blockingUntilDoneStore{Store: s}
+
+	done := make(chan reincarnationRequesterContext, 1)
+	go func() {
+		done <- srv.buildReincarnationRequesterContext(context.Background(), agent, "some-other-requester-id")
+	}()
+
+	select {
+	case got := <-done:
+		assert.False(t, got.IsSelf)
+		assert.False(t, got.Resolved)
+		assert.Equal(t, reincarnationRequesterFallback, got.Handle)
+	case <-time.After(2 * time.Second):
+		t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
+	}
+}
+
 // AC-6: a start failure leaves state=failed with an error and phase=error,
 // and the previous config snapshot remains retrievable.
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
