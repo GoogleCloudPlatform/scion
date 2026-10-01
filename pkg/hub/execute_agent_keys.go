@@ -181,7 +181,8 @@ func (s *Server) beginAgentKeysRequest(w http.ResponseWriter, r *http.Request) (
 		// not an oversized one, and must not be misreported as the latter.
 		outcome := agentkeys.OutcomeInvalidRequest
 		message := "invalid request body"
-		if errors.As(err, new(*http.MaxBytesError)) {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
 			outcome = agentkeys.OutcomePayloadTooLarge
 			message = "request body exceeds the size limit"
 		}

@@ -15,8 +15,9 @@
 package hub
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -284,8 +285,8 @@ func (l *keysRateLimiter) sweepLocked(now time.Time) {
 	for k := range l.buckets {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return l.buckets[keys[i]].last.Before(l.buckets[keys[j]].last)
+	slices.SortFunc(keys, func(a, b string) int {
+		return cmp.Compare(l.buckets[a].last.UnixNano(), l.buckets[b].last.UnixNano())
 	})
 	for _, k := range keys[:len(keys)/2] {
 		delete(l.buckets, k)
