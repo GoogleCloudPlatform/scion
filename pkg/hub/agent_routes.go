@@ -311,7 +311,7 @@ func agentRouteGrammarSegmentOK(seg string) bool {
 		return false
 	}
 	lower := strings.ToLower(seg)
-	for _, bad := range []string{"%2f", "%5c", "%25"} {
+	for _, bad := range []string{"%2f", "%5c", "%25", "%00"} {
 		if strings.Contains(lower, bad) {
 			return false
 		}
@@ -325,7 +325,7 @@ func decodeAgentRouteSegment(seg string) (string, bool) {
 		return "", false
 	}
 	decoded, err := url.PathUnescape(seg)
-	if err != nil || decoded == "" || decoded == "." || decoded == ".." {
+	if err != nil || decoded == "" || decoded == "." || decoded == ".." || strings.Contains(decoded, "\x00") {
 		return "", false
 	}
 	return decoded, true
