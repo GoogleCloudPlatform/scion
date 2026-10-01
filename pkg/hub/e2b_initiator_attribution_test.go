@@ -1331,6 +1331,13 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 	// A non-user identity whose ID is nonetheless DevUserID, to kill the
 	// exec.Type()=="user" clause without also changing exec.ID().
 	nonUserDevIDExec := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: DevUserID}}}
+	// Typed-nil execs (GCP#2188 review comment, ptone/scion#2342): a non-nil
+	// Identity holding a nil concrete pointer. exec == nil is false for
+	// both, so these pin isNilIdentity's reflect-based check: the rows below
+	// require initiatorMatchesExecutor to return false without reaching
+	// exec.ID()/exec.Type(), which would otherwise panic on a nil receiver.
+	var typedNilDevUserExec *DevUser
+	var typedNilAuthenticatedUserExec *AuthenticatedUser
 
 	cases := []struct {
 		name      string
@@ -1430,6 +1437,36 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 			exec:      nil,
 			want:      false,
 		},
+		// 7a. Typed-nil executors (GCP#2188 review comment, ptone/scion#2342):
+		// a non-nil Identity holding a nil *DevUser or nil *AuthenticatedUser
+		// makes a bare exec == nil comparison false, so each row here is
+		// required to return false without panicking — one against the
+		// dev_local arm's DevUserID shape, one against a general-rule row,
+		// for both typed-nil concrete types.
+		{
+			name:      "typed-nil *DevUser executor, dev_local/DevUserID initiator: does not pair, does not panic",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      typedNilDevUserExec,
+			want:      false,
+		},
+		{
+			name:      "typed-nil *DevUser executor, general-rule initiator: does not pair, does not panic",
+			initiator: ScheduledInitiator{PrincipalKind: "user", PrincipalID: tid("e2b-ime-typed-nil-user"), CredentialKind: store.InitiatorCredentialKindUAT},
+			exec:      typedNilDevUserExec,
+			want:      false,
+		},
+		{
+			name:      "typed-nil *AuthenticatedUser executor, dev_local/DevUserID initiator: does not pair, does not panic",
+			initiator: ScheduledInitiator{PrincipalKind: "dev", PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal},
+			exec:      typedNilAuthenticatedUserExec,
+			want:      false,
+		},
+		{
+			name:      "typed-nil *AuthenticatedUser executor, general-rule initiator: does not pair, does not panic",
+			initiator: ScheduledInitiator{PrincipalKind: "user", PrincipalID: tid("e2b-ime-typed-nil-user2"), CredentialKind: store.InitiatorCredentialKindUAT},
+			exec:      typedNilAuthenticatedUserExec,
+			want:      false,
+		},
 		// 8. The general rule is unchanged for ordinary kinds: same
 		// kind/ID pairs; a kind or ID mismatch does not.
 		{
@@ -1499,6 +1536,36 @@ func TestCaptureInitiatorAttribution_NoIdentityReadsAsLegacyUnknown(t *testing.T
 	attr := captureInitiatorAttribution(context.Background())
 	assert.Equal(t, store.InitiatorAttribution{InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown}, attr)
 	assert.True(t, srv.scheduledInitiator(attr).LegacyUnknown)
+}
+
+// TestCaptureInitiatorAttribution_TypedNilIdentityReadsAsLegacyUnknown covers
+// the same defensive branch as the test above, but for a context whose
+// ambient identity is a non-nil Identity holding a nil concrete pointer (a
+// "typed nil" — GCP#2188 review comment, ptone/scion#2342, raised against
+// initiatorMatchesExecutor but equally applicable to any Identity call site
+// that only checks identity == nil). GetIdentityFromContext's
+// ctx.Value(identityContextKey{}).(Identity) type assertion returns such a
+// value unchanged if one is ever stored on the context, so this exercises
+// captureInitiatorAttribution's isNilIdentity guard directly rather than
+// relying on no production caller ever doing so.
+func TestCaptureInitiatorAttribution_TypedNilIdentityReadsAsLegacyUnknown(t *testing.T) {
+	srv := &Server{}
+
+	t.Run("typed-nil *DevUser", func(t *testing.T) {
+		var nilDevUser *DevUser
+		ctx := contextWithIdentity(context.Background(), nilDevUser)
+		attr := captureInitiatorAttribution(ctx)
+		assert.Equal(t, store.InitiatorAttribution{InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown}, attr)
+		assert.True(t, srv.scheduledInitiator(attr).LegacyUnknown)
+	})
+
+	t.Run("typed-nil *AuthenticatedUser", func(t *testing.T) {
+		var nilAuthenticatedUser *AuthenticatedUser
+		ctx := contextWithIdentity(context.Background(), nilAuthenticatedUser)
+		attr := captureInitiatorAttribution(ctx)
+		assert.Equal(t, store.InitiatorAttribution{InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown}, attr)
+		assert.True(t, srv.scheduledInitiator(attr).LegacyUnknown)
+	})
 }
 
 // TestInitiatorCredentialKindFor pins the committed

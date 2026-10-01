@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -176,11 +177,20 @@ func initiatorCredentialSnapshotJSON(cred CredentialContext) string {
 // callers that don't (BrokerDispatch has no version field at all) both see
 // an explicit legacy_unknown, never an empty string that looks like "no
 // value recorded" rather than "no recordable provenance."
+//
+// The nil check is isNilIdentity, not a bare identity == nil comparison: a
+// non-nil Identity value holding a typed-nil concrete pointer (e.g. a nil
+// *DevUser) would pass identity == nil, and the identity.Type()/identity.ID()
+// calls below would then panic on most concrete Identity implementations
+// (GCP#2188 review comment, ptone/scion#2342). GetIdentityFromContext has no
+// production path that returns such a value today, but the guard costs
+// nothing and removes the need to re-prove that invariant every time this
+// function is read.
 func captureInitiatorAttribution(ctx context.Context) store.InitiatorAttribution {
 	var attr store.InitiatorAttribution
 
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	if isNilIdentity(identity) {
 		attr.InitiatorCredentialKind = store.InitiatorCredentialKindLegacyUnknown
 		return attr
 	}
@@ -280,6 +290,44 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 	}
 }
 
+// isNilIdentity reports whether identity is either the nil interface or a
+// non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
+// example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
+// interface). In Go, an interface value equals nil only when both its type
+// and value are nil; a typed nil has a non-nil type descriptor, so
+// identity == nil is false for it even though the concrete pointer it holds
+// is nil. Every concrete Identity implementation in this package is a
+// pointer type, and several of their ID()/Type() methods dereference the
+// receiver with no nil guard (e.g. DevUser.ID() returns u.id directly), so
+// calling one on a typed-nil identity panics (GCP#2188 review comment on
+// initiatorMatchesExecutor, ptone/scion#2342).
+//
+// Deliberately reflect-based rather than a type switch enumerating every
+// concrete Identity implementation, which is what the review comment
+// suggested: a hand-written switch must be extended every time a new
+// Identity implementation is added anywhere in the package, and silently
+// stops catching that type's typed-nil case if a future author forgets. A
+// pointer-kind nil check via reflection generalizes over any current or
+// future implementation without that maintenance burden, at the cost of one
+// reflect call in a defensive guard that is not on any hot path. This helper
+// answers only the narrow nil-safety question — it says nothing about which
+// concrete type identity is or what it means; principalContextForIdentity
+// and credentialContextForIdentity's type switches (authz.go) remain the
+// place concrete Identity types are classified by meaning, and are
+// unaffected by this helper.
+func isNilIdentity(identity Identity) bool {
+	if identity == nil {
+		return true
+	}
+	v := reflect.ValueOf(identity)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 // initiatorMatchesExecutor reports whether a non-legacy initiator is the
 // same principal as exec — the identity that will actually execute/authorize
 // this fire (e.g. server.go's scheduled-dispatch success audit, via
@@ -321,9 +369,12 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 // any one of them with an unconditional true is caught by a dedicated test
 // row.
 //
-// A legacy_unknown initiator, or a nil exec, never matches.
+// A legacy_unknown initiator, or a nil or typed-nil exec (isNilIdentity;
+// GCP#2188 review comment, ptone/scion#2342 — a typed-nil exec such as a nil
+// *DevUser or nil *AuthenticatedUser would otherwise pass exec == nil and
+// then panic on exec.ID()), never matches.
 func initiatorMatchesExecutor(initiator ScheduledInitiator, exec Identity) bool {
-	if initiator.LegacyUnknown || exec == nil {
+	if initiator.LegacyUnknown || isNilIdentity(exec) {
 		return false
 	}
 	if initiator.PrincipalKind == exec.Type() && initiator.PrincipalID == exec.ID() {
