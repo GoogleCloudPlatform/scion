@@ -314,6 +314,79 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         self.assertEqual(settings["customUserSetting"], "keep-me")
         self.assertEqual(settings["colorScheme"], "light")
 
+    def test_existing_settings_user_set_color_scheme_preserved(self) -> None:
+        # Upstream Gemini review comment (GoogleCloudPlatform/scion#2190,
+        # harnesses/antigravity/provision.py:630): back-filling missing
+        # onboarding defaults into a valid-but-incomplete existing file must
+        # not override a value the user (or a prior provision) already set.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"colorScheme": "light", "model": "old-model"}, f)
+
+            provision._prestage_onboarding(
+                tmp,
+                workspace=os.path.join(tmp, "workspace"),
+                model="new-model",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["colorScheme"], "light")
+
+    def test_existing_settings_missing_onboarding_complete_is_backfilled(self) -> None:
+        # Upstream Gemini review comment: a valid existing settings.json that
+        # lacks onboardingComplete (e.g. hand-edited, or written by an older
+        # provisioner version) must get it back-filled -- otherwise a
+        # headless agent stalls on AGY's interactive onboarding, which this
+        # key exists to skip -- while every other key is preserved.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"model": "old-model", "customUserSetting": "keep-me"}, f)
+
+            provision._prestage_onboarding(
+                tmp,
+                workspace=os.path.join(tmp, "workspace"),
+                model="new-model",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertIs(settings["onboardingComplete"], True)
+        self.assertEqual(settings["customUserSetting"], "keep-me")
+
+    def test_existing_settings_workspace_appended_to_trusted_workspaces(self) -> None:
+        # Upstream Gemini review comment: the current workspace must be
+        # present in trustedWorkspaces (the trust-dialog skip) even on
+        # re-provision into a settings.json that already lists other
+        # workspaces -- existing entries must be kept, not replaced.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"model": "old-model", "trustedWorkspaces": ["/some/other/workspace"]},
+                    f,
+                )
+
+            workspace = os.path.join(tmp, "workspace")
+            provision._prestage_onboarding(tmp, workspace=workspace, model="new-model")
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(
+            settings["trustedWorkspaces"], ["/some/other/workspace", workspace]
+        )
+
     def test_existing_settings_model_provider_still_set_for_api_key_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")

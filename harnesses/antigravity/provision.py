@@ -628,6 +628,23 @@ def _prestage_onboarding(
             # prompts, which is exactly what those keys exist to skip.
             settings = loaded
             changed = False
+            # Back-fill any onboarding default missing from a valid but
+            # incomplete existing file (e.g. hand-edited, or written by an
+            # older provisioner version), without overriding a value already
+            # present.
+            if "colorScheme" not in settings:
+                settings["colorScheme"] = "dark"
+                changed = True
+            if "onboardingComplete" not in settings:
+                settings["onboardingComplete"] = True
+                changed = True
+            trusted_workspaces = settings.get("trustedWorkspaces")
+            if not isinstance(trusted_workspaces, list):
+                settings["trustedWorkspaces"] = [workspace]
+                changed = True
+            elif workspace not in trusted_workspaces:
+                trusted_workspaces.append(workspace)
+                changed = True
     if model and settings.get("model") != model:
         settings["model"] = model
         changed = True
