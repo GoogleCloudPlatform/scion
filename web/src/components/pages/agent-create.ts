@@ -126,6 +126,18 @@ export class ScionPageAgentCreate extends LitElement {
    */
   @state() private gcpIdentityUserSet = false;
   /**
+   * True when the user's most recent explicit pick was "Block", and that
+   * pick is currently suspended because normalizeGcpModeForTarget's
+   * Kubernetes constraint overrode it (Block cannot be sent on a
+   * Kubernetes target). Reinstated — mode back to "block", gcpIdentityUserSet
+   * back to true — as soon as the target stops being Kubernetes-only, so the
+   * choice is not lost to a round trip through a Kubernetes target. Cleared
+   * by any new explicit pick or by loadGCPServiceAccounts recomputing from
+   * scratch, so it only ever tracks the single most recent explicit Block
+   * pick and cannot outlive it.
+   */
+  private gcpUserBlockSuspended = false;
+  /**
    * The GCP identity mode that applies when nothing has been explicitly
    * chosen, *before* any Kubernetes-only display substitution: this page's
    * own "block" placeholder, or the project's configured default. Set only
@@ -572,34 +584,53 @@ export class ScionPageAgentCreate extends LitElement {
    * Block is never a valid value to send on a known-Kubernetes target (see
    * targetRuntimeIsKubernetesOnly) — the dispatch rejects it — so a mode of
    * "block" is corrected away regardless of whether it is an explicit user
-   * choice or this page's own placeholder default. Clearing gcpIdentityUserSet
-   * here puts the target back in the same "no explicit choice" state as if
-   * the user had never touched the picker, so a user who explicitly picked
-   * "Block" on a non-Kubernetes broker and then switched to a Kubernetes one
-   * does not have that choice silently resent as an explicit "passthrough"
-   * nobody chose for the new target (which would otherwise route through the
-   * Hub's passthrough ownership gate for a request that never asked for
-   * passthrough).
+   * choice or this page's own placeholder default. When it overrides an
+   * *explicit* choice, that choice is suspended in gcpUserBlockSuspended
+   * rather than discarded: the user picked Block for a specific (then
+   * non-Kubernetes) target, and switching through a Kubernetes target and
+   * back does not mean they take it back. Clearing gcpIdentityUserSet here
+   * puts the target back in the same "no explicit choice" state as if the
+   * user had never touched the picker, so the suspended Block (or, with no
+   * suspension, nothing) is not silently resent as an explicit "passthrough"
+   * nobody chose for the Kubernetes target (which would otherwise route
+   * through the Hub's passthrough ownership gate for a request that never
+   * asked for passthrough).
    *
-   * Once there is no explicit choice standing (either because there never
-   * was one, or because it was just cleared above), the displayed mode is
-   * recomputed fresh from defaultGcpMetadataMode — the project's configured
-   * default, or this page's own "block" placeholder — substituted to
-   * "passthrough" only when that default is itself "block" and the target is
-   * Kubernetes-only. Recomputing this on every relevant change, rather than
-   * remembering "the current value is a substitution" with a flag, means
-   * there is nothing that can go stale: a default of "passthrough" or
-   * "assign" is never at risk of being overwritten by a later target switch,
-   * because it was never treated as a substitution to reverse in the first
-   * place.
+   * Reinstating the suspended Block as soon as the target stops being
+   * Kubernetes-only — rather than only on the next explicit pick — is what
+   * makes it a *suspension* and not a discard: gcpUserBlockSuspended is
+   * cleared by any new explicit pick (sl-change) or by loadGCPServiceAccounts
+   * recomputing from scratch (a project change), so it can only ever record
+   * the single most recent explicit Block pick and cannot go stale the way a
+   * value substituted into gcpMetadataMode itself could (see
+   * defaultGcpMetadataMode's own doc comment for that history).
+   *
+   * Once there is no explicit choice standing, and no suspended one to
+   * reinstate, the displayed mode is recomputed fresh from
+   * defaultGcpMetadataMode — the project's configured default, or this
+   * page's own "block" placeholder — substituted to "passthrough" only when
+   * that default is itself "block" and the target is Kubernetes-only.
+   * Recomputing this on every relevant change, rather than remembering "the
+   * current value is a substitution" with a flag, means there is nothing
+   * that can go stale: a default of "passthrough" or "assign" is never at
+   * risk of being overwritten by a later target switch, because it was
+   * never treated as a substitution to reverse in the first place.
    *
    * Idempotent and safe to call from anywhere that just changed the broker,
    * profile, mode, or default.
    */
   private normalizeGcpModeForTarget(): void {
+    if (this.gcpUserBlockSuspended && !this.targetRuntimeIsKubernetesOnly) {
+      this.gcpMetadataMode = 'block';
+      this.gcpServiceAccountId = '';
+      this.gcpIdentityUserSet = true;
+      this.gcpUserBlockSuspended = false;
+      return;
+    }
     if (this.gcpIdentityUserSet) {
       if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
         this.gcpIdentityUserSet = false;
+        this.gcpUserBlockSuspended = true;
       } else {
         return;
       }
@@ -925,8 +956,11 @@ export class ScionPageAgentCreate extends LitElement {
     this.defaultGcpMetadataMode = 'block';
     this.defaultGcpServiceAccountId = '';
     // Recomputing defaults from scratch (initial load, or a project change):
-    // whatever this method assigns below is a default, not a user choice.
+    // whatever this method assigns below is a default, not a user choice,
+    // and any suspended explicit Block pick belonged to the previous
+    // project's context, not this one.
     this.gcpIdentityUserSet = false;
+    this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
 
     if (this.projectId) {
@@ -1936,6 +1970,7 @@ export class ScionPageAgentCreate extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
+            this.gcpUserBlockSuspended = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1976,6 +2011,7 @@ export class ScionPageAgentCreate extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
+                        this.gcpUserBlockSuspended = false;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(

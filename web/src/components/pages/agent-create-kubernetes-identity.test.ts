@@ -778,14 +778,14 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
   // An explicit "Block" pick clears gcpServiceAccountId (it is irrelevant to
   // Block). If the target then becomes Kubernetes-only, the Block constraint
-  // overrides that explicit pick and restores the project's real default —
-  // which, if that default is "assign", must restore the service account
-  // too, not leave the mode "assign" with no account selected. The identity
-  // is omitted on the Kubernetes leg itself (untouched Kubernetes targets
-  // never send one explicitly), so the broken state would otherwise only
-  // resurface on a later switch back to a non-Kubernetes target, which this
-  // test also exercises.
-  it('restores the default service account when the Block constraint overrides an explicit choice back onto an assign default', async () => {
+  // suspends that explicit pick (not discards it) and displays the project's
+  // real default while on Kubernetes — which, if that default is "assign",
+  // must restore the service account too, not leave the mode "assign" with
+  // no account selected. Switching back to a non-Kubernetes target must then
+  // reinstate the suspended Block, not the project's default: the user chose
+  // Block for a docker target, and a round trip through Kubernetes (where
+  // Block cannot apply) does not mean they take that choice back.
+  it('suspends an explicit Block pick through a Kubernetes target (displaying the real assign default) and reinstates it back on docker', async () => {
     const { bodies } = stubFetchForKubernetesProjectDefault(
       'assign',
       [makeServiceAccount('sa-a')],
@@ -818,6 +818,8 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     page.brokerId = 'broker-k8s';
     await el.updateComplete;
 
+    // The explicit Block is suspended (not discarded): the display falls
+    // back to the real project default while on Kubernetes, SA included.
     expect(page.gcpIdentityUserSet).toBe(false);
     expect(page.gcpMetadataMode).toBe('assign');
     expect(page.gcpServiceAccountId).toBe('sa-a');
@@ -828,17 +830,325 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).not.toHaveProperty('gcp_identity');
 
-    // Back to docker: the restored default must have actually been correct,
-    // not just coincidentally harmless while omitted.
+    // Back to docker: the suspended Block must be reinstated — this is what
+    // the user actually chose for this target — not the project's default.
     page.brokerId = 'broker-docker';
     await el.updateComplete;
 
-    expect(page.gcpMetadataMode).toBe('assign');
-    expect(page.gcpServiceAccountId).toBe('sa-a');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+    expect(page.gcpServiceAccountId).toBe('');
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(2);
-    expect(bodies[1].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-a' });
+    expect(bodies[1].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // Same suspend-and-reinstate behavior with a "passthrough" project default
+  // instead of "assign" — the simplest case that still has a non-block
+  // default to be mistaken for the user's choice.
+  it('suspends an explicit Block pick through a Kubernetes target (displaying the real passthrough default) and reinstates it back on docker', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('passthrough', [], 'docker');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // Profile-only variant on a mixed broker: the suspend-and-reinstate must
+  // also work when only the profile changes, not just the broker.
+  it('suspends and reinstates an explicit Block pick across a profile-only switch on a mixed broker', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-mixed',
+        name: 'mixed-broker',
+        status: 'online',
+        profiles: [
+          { name: 'k8s-profile', type: 'kubernetes', available: true },
+          { name: 'docker-profile', type: 'docker', available: true },
+        ],
+      },
+    ];
+    page.brokerId = 'broker-mixed';
+    page.profile = 'docker-profile';
+    await el.updateComplete;
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    page.profile = 'k8s-profile';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.profile = 'docker-profile';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // A fresh explicit pick must supersede a suspended Block, not coexist with
+  // it: picking something else entirely while the suspension is pending (on
+  // a Kubernetes target, where Block cannot be re-picked) must clear the
+  // suspension, so a later switch to a non-Kubernetes target reinstates
+  // nothing and keeps the fresh pick instead of resurrecting the stale Block.
+  it('drops a suspended Block once the user makes a different explicit pick before leaving Kubernetes', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      'assign',
+      [makeServiceAccount('sa-a')],
+      'docker',
+      'sa-a'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('assign');
+
+    // A fresh explicit pick while the Block suspension is pending.
+    await chooseSelect(el, select!, 'passthrough');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    // The fresh pick survives; the stale suspended Block is not resurrected.
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  // Same as above, but the fresh explicit pick is on the service-account
+  // select rather than the mode select: while a Block suspension is pending
+  // on Kubernetes, the displayed (recomputed-default) mode can itself be
+  // "assign", so the SA picker is live. Picking a different account there is
+  // just as much a fresh explicit choice as picking a different mode.
+  it('drops a suspended Block once the user picks a different service account before leaving Kubernetes', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      'assign',
+      [makeServiceAccount('sa-a'), makeServiceAccount('sa-b')],
+      'docker',
+      'sa-a'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    // A fresh explicit pick (a different account) while the Block
+    // suspension is pending.
+    const saSelect = gcpServiceAccountSelect(el);
+    expect(saSelect).not.toBeNull();
+    await chooseSelect(el, saSelect!, 'sa-b');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpServiceAccountId).toBe('sa-b');
+
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    // The fresh pick survives; the stale suspended Block is not resurrected.
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-b');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-b' });
+  });
+
+  // A project switch must also drop a pending suspension: it belongs to the
+  // previous project's context (the broker/profile state at the time the
+  // Block pick happened), not the new one. Without the clear, a Block picked
+  // for one project could resurface on an unrelated later project that never
+  // had anything to do with that choice.
+  it('drops a suspended Block on a project switch, so the new project is not stuck replaying an unrelated choice', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/api/v1/agents') && init?.method === 'POST') {
+          if (typeof init.body === 'string') {
+            bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+          }
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => ({ error: { message: 'stub: not actually created' } }),
+          } as Response);
+        }
+        if (url.includes('/api/v1/projects?')) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ projects: [{ id: 'p1', name: 'P1' }] }),
+          } as Response);
+        }
+        if (url.includes('/api/v1/runtime-brokers')) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              brokers: [
+                {
+                  id: 'broker-docker',
+                  name: 'docker-broker',
+                  status: 'online',
+                  profiles: [{ name: 'default', type: 'docker', available: true }],
+                },
+              ],
+            }),
+          } as Response);
+        }
+        if (url.includes('/api/v1/projects/p2/settings')) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ defaultGCPIdentityMode: 'passthrough' }),
+          } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        } as Response);
+      })
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+    expect(page.gcpIdentityUserSet).toBe(false);
+
+    // Switch to an unrelated project with its own "passthrough" default —
+    // this project never had anything to do with the earlier Block pick.
+    page.projectId = 'p2';
+    await page.loadGCPServiceAccounts();
+    await el.updateComplete;
+
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    // p2's own default applies; the earlier project's suspended Block does
+    // not resurface here.
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
   // The project default mode is only ever assigned inside the
