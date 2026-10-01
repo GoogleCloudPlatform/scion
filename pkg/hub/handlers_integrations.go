@@ -205,7 +205,7 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		s.handleListIntegrations(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -251,25 +251,25 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	switch action {
 	case "":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleGetIntegration(w, r, name)
 	case "config":
 		if r.Method != http.MethodPut {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPut)
 			return
 		}
 		s.handleUpdateIntegrationConfig(w, r, name)
 	case "restart":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleRestartIntegration(w, r, name)
 	case "health":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleIntegrationHealth(w, r, name)
@@ -279,13 +279,19 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			// .../update/{id} also accepts GET (status lookup, handled above);
+			// only the no-actionSub form is POST-only.
+			if actionSub != "" {
+				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+			} else {
+				MethodNotAllowed(w, http.MethodPost)
+			}
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)
 	case "install":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleInstallIntegration(w, r, name)

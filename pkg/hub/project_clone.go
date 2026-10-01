@@ -50,7 +50,7 @@ type CloneProjectRequest struct {
 // a client disconnect mid-clone does not abort cleanup.
 func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

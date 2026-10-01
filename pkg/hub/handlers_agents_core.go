@@ -271,7 +271,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createAgent(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -1412,11 +1412,52 @@ func (s *Server) createAgentInProject(
 				// Hub-default passthrough is confined to the embedded broker
 				// (see hubDefaultPassthroughAllowed for why); on any other
 				// broker the ladder bottoms out at block.
+				//
+				// The effective profile is computed here, before
+				// deriveAgentConfig would otherwise stamp AppliedConfig.Profile
+				// from the project's active-profile annotation: the gate must
+				// see the same profile the agent will actually dispatch under,
+				// not just what the request named (see
+				// effectiveRuntimeProfileName).
 				mode := store.GCPMetadataModeBlock
-				if s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID) {
+				effectiveProfile := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+				if allowed, resolvedProfile := s.hubDefaultPassthroughAllowed(ctx, runtimeBrokerID, projectID, agent.Name, effectiveProfile); allowed {
 					mode = store.GCPMetadataModePassthrough
+					// Pin the exact profile the gate checked so the broker
+					// cannot dispatch under a different one later: once
+					// AppliedConfig.Profile is set, deriveAgentConfig's
+					// applyProjectDefaults leaves it alone.
+					if agent.AppliedConfig.Profile == "" {
+						agent.AppliedConfig.Profile = resolvedProfile
+					}
+					// CreateInputs.Profile is captured a few lines up in
+					// buildAppliedConfig, before this gate runs, so the pin
+					// above never reaches it on its own. scion reincarnate
+					// replays CreateInputs, not the live AppliedConfig
+					// (design §3.3 Amendment A1), and would otherwise
+					// re-derive an empty profile against whatever the
+					// project's active profile is *at reincarnate time* —
+					// silently losing the pin while keeping the carried-over
+					// passthrough grant. Only fill it when still empty, so an
+					// explicit request profile (already captured there) is
+					// never overwritten.
+					if agent.AppliedConfig.CreateInputs != nil && agent.AppliedConfig.CreateInputs.Profile == "" {
+						agent.AppliedConfig.CreateInputs.Profile = resolvedProfile
+					}
 				}
-				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: mode}
+				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+					MetadataMode: mode,
+					// RequireLocalRuntime asks the broker to re-check the
+					// resolved runtime itself once it knows it: the hub
+					// resolves runtimeBrokerID's profile from the broker's
+					// own registration data (resolveAgentRuntimeProfileType),
+					// which the broker's own dispatch-time settings can
+					// differ from. Only ever set on a hub-default grant —
+					// mode is only passthrough here when
+					// hubDefaultPassthroughAllowed returned true. Explicit
+					// and project-level passthrough are never flagged.
+					RequireLocalRuntime: mode == store.GCPMetadataModePassthrough,
+				}
 			case store.GCPMetadataModeAssign:
 				if hubDefaults.DefaultGCPIdentityServiceAccountID != "" {
 					cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID,
@@ -2368,7 +2409,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		case http.MethodDelete:
 			s.deleteAgent(w, r, id)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 		}
 
 	default:
@@ -2963,7 +3004,7 @@ func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, action string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

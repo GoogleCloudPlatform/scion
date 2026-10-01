@@ -156,3 +156,44 @@ func TestPublicSettingsAgentDefaults(t *testing.T) {
 		})
 	}
 }
+
+// TestPublicSettingsAgentSecretsUserScopeOnly is design §10 test 5:
+// agentSecretsUserScopeOnly reflects the setting, false by default. It
+// mirrors TestPublicSettingsNativeChat's tri-state shape, but the default
+// direction is inverted (permissive, not enabled) — unset and false both
+// report false, only explicit true reports true.
+func TestPublicSettingsAgentSecretsUserScopeOnly(t *testing.T) {
+	on, off := true, false
+
+	tests := []struct {
+		name    string
+		setting *bool
+		want    bool
+	}{
+		{"unset is reported as false (permissive default)", nil, false},
+		{"explicit false is reported as false", &off, false},
+		{"explicit true is reported as true", &on, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{config: ServerConfig{AgentSecretsUserScopeOnly: tc.setting}}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+			rr := httptest.NewRecorder()
+			srv.handlePublicSettings(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+
+			var resp PublicSettingsResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+			if resp.AgentSecretsUserScopeOnly != tc.want {
+				t.Errorf("agentSecretsUserScopeOnly = %v, want %v", resp.AgentSecretsUserScopeOnly, tc.want)
+			}
+		})
+	}
+}

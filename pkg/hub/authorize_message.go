@@ -626,6 +626,12 @@ func (s *storedAgentIdentity) HasScope(_ AgentTokenScope) bool { return false }
 func (s *storedAgentIdentity) Ancestry() []string              { return s.agent.Ancestry }
 func (s *storedAgentIdentity) TokenID() string                 { return "" }
 
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from the request's JWT.
+func (s *storedAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
 func (s *storedAgentIdentity) OriginUserID() string {
 	if len(s.agent.Ancestry) > 0 {
 		return s.agent.Ancestry[0]

@@ -1781,8 +1781,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Re-resolve manager after profile update
-	mgr := s.resolveManagerForOpts(opts)
+	// Re-resolve manager after profile update. This resolution is the
+	// authoritative one for what actually starts, so the hub-default
+	// passthrough re-check runs again here. See recheckHubDefaultPassthrough.
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2087,8 +2090,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 	}
 
-	// Re-resolve manager after profile update
-	mgr := s.resolveManagerForOpts(opts)
+	// Re-resolve manager after profile update. See the identical re-check
+	// and comment in startAgent (recheckHubDefaultPassthrough).
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		s.agentLifecycleLog.Error("Agent restart failed",
@@ -3306,7 +3311,9 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 }
 
 // resolveManagerForOpts returns the appropriate agent.Manager for the given
-// start options. It loads the project's settings to determine the effective
+// start options, along with the name of the runtime type it resolved to
+// (e.g. "docker", "kubernetes" — the same string runtime.Runtime.Name()
+// returns). It loads the project's settings to determine the effective
 // runtime. If the resolved runtime differs from the broker's default, a
 // temporary manager is created and cached. Otherwise the broker's shared
 // manager is returned.
@@ -3314,16 +3321,16 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 // When opts.Profile is empty, the project's active profile (from settings.yaml)
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
-func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
+func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
-			return s.manager
+			return s.manager, s.runtime.Name()
 		}
 		s.auxiliaryRuntimesMu.RLock()
 		aux, ok := s.auxiliaryRuntimes[s.config.ForceRuntime]
 		s.auxiliaryRuntimesMu.RUnlock()
 		if ok {
-			return aux.Manager
+			return aux.Manager, aux.Runtime.Name()
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
 	}
@@ -3333,28 +3340,43 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
 	vs, _, _ := config.LoadEffectiveSettings(projectDir)
 	if vs == nil {
-		return s.manager
+		return s.manager, s.runtime.Name()
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback.
 	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// Profile or its runtime not found in settings; use default
-		return s.manager
+		return s.manager, s.runtime.Name()
 	}
 
 	if runtimeType == s.runtime.Name() {
-		return s.manager
+		return s.manager, s.runtime.Name()
 	}
 
 	// Settings specify a different runtime - resolve and create a manager.
 	// Cache it as an auxiliary manager so LookupContainerID can find agents
 	// created on non-default runtimes (e.g. K8s pods when default is docker).
+	// Always resolved fresh, not read back from that cache: a runtime is
+	// constructed from the profile's own config (context, namespace, GKE or
+	// Cloud Run settings — see runtime.GetRuntime), which differs by project
+	// and profile even when the runtime type is the same, so a type-keyed
+	// read would hand one project's or profile's client, cluster context and
+	// namespace to every other dispatch of that type.
 	//
 	// Use opts.Profile for ResolveRuntime so it picks up the same profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
-	resolved := agent.ResolveRuntime(opts.ProjectPath, opts.Name, opts.Profile)
+	//
+	// runtimeResolver is set to agent.ResolveRuntime by New() and should
+	// never be nil in production; this falls back to the same function so a
+	// Server built without New() (e.g. a test literal) resolves identically
+	// to production instead of panicking.
+	resolver := s.runtimeResolver
+	if resolver == nil {
+		resolver = agent.ResolveRuntime
+	}
+	resolved := resolver(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Settings resolved to different runtime",
@@ -3373,7 +3395,21 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 		s.auxiliaryRuntimesMu.Unlock()
 	}
 
-	return mgr
+	return mgr, resolved.Name()
+}
+
+// recheckHubDefaultPassthrough re-runs the hub-default passthrough gate's
+// downgrade check (downgradeUnverifiedHubDefaultPassthrough, start_context.go)
+// against resolvedRuntimeType, reading the current mode and
+// RequireLocalRuntime flag out of env itself. startAgent and restartAgent
+// call this once, immediately after they re-resolve the manager following
+// buildStartContext's own resolution — a later, more specific resolution
+// (after a saved-profile lookup) that buildStartContext cannot see — so the
+// check runs against the runtime that actually starts, not just the one
+// buildStartContext saw.
+func recheckHubDefaultPassthrough(env map[string]string, envCls map[string]api.EnvKind, resolvedRuntimeType string) {
+	downgradeUnverifiedHubDefaultPassthrough(env, envCls,
+		env["SCION_METADATA_MODE"], env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] == "true", resolvedRuntimeType)
 }
 
 // Helper functions

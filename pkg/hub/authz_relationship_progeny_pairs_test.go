@@ -163,8 +163,17 @@ func TestProgenyPair_DeliverUnreachableForAgentToken(t *testing.T) {
 					Action:     ActionDeliver,
 					Permission: tc.perm,
 				})
-				assert.False(t, d.Allowed, "credential kind %q: reason %q", kind, d.Reason)
-				assert.Equal(t, deliveryGateReason, d.Reason)
+				// CredentialKindAgentJWT matches the agent's own derived
+				// kind and reaches the gate, denying with its reason.
+				// "unrecognized" mismatches and denies at the entry
+				// classification check (ptone/scion#2123) instead; either
+				// way the request is not admitted.
+				if kind == CredentialKindAgentJWT {
+					assert.False(t, d.Allowed, "credential kind %q: reason %q", kind, d.Reason)
+					assert.Equal(t, deliveryGateReason, d.Reason)
+					continue
+				}
+				assertRequestNotAdmitted(t, d, "credential kind "+string(kind))
 			}
 		})
 	}

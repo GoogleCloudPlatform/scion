@@ -70,6 +70,19 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// Build profiles from settings, falling back to a default profile if none defined
 	profiles := buildStoreBrokerProfiles(settings, runtimeType)
 
+	// The broker's own active/default profile name, so the hub can resolve
+	// an agent dispatch with no explicit profile against this registration
+	// data instead of guessing — see store.RuntimeBroker.DefaultProfile's
+	// doc comment for why this is registration-time data, not a live view
+	// of the broker's own dispatch-time settings. Empty when settings define
+	// no active profile — buildStoreBrokerProfiles falls back to a single
+	// "default" profile in that case, which the hub resolves without
+	// needing this field (pkg/hub/default_gcp_identity.go).
+	var defaultProfile string
+	if settings != nil {
+		defaultProfile = settings.ActiveProfile
+	}
+
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
 	if err != nil && err != store.ErrNotFound {
 		return brokerID, fmt.Errorf("failed to check for runtime broker: %w", err)
@@ -126,8 +139,9 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 				Attach:      true,
 				Reprovision: true,
 			},
-			Profiles: profiles,
-			Labels:   brokerLabels,
+			Profiles:       profiles,
+			DefaultProfile: defaultProfile,
+			Labels:         brokerLabels,
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -150,6 +164,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		}
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
+		broker.DefaultProfile = defaultProfile
 		// Design §3.4 Amendment A2.2(b): refresh capabilities on every re-registration, not
 		// just at create. The embedded broker's capability set is fixed by
 		// the hub binary it runs in (not negotiated like a remote broker's),

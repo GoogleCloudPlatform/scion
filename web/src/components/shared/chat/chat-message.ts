@@ -39,6 +39,7 @@ import {
   extensionOf,
   isRecognizedFilePath,
   isMarkdownFileName,
+  formatFileSize,
 } from '../../../utils/chat-file-links.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
@@ -430,13 +431,6 @@ async function fetchAttachmentText(id: string): Promise<string> {
 /** Download/preview URL for an attachment. */
 function attachmentURL(id: string): string {
   return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
-}
-
-/** Format file size for display. */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**

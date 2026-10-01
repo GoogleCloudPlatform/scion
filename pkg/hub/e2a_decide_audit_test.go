@@ -200,3 +200,19 @@ func TestBuildDecisionAuditRecord_MatchesEmittedShape(t *testing.T) {
 	require.Equal(t, emitted.ResourceType, built.ResourceType)
 	require.Equal(t, emitted.Result, built.Result)
 }
+
+// TestBuildDecisionAuditRecord_UndecoratedFallsBackToSuppliedPrincipalID
+// proves the request.Principal.ID fallback fires only for a Decision built
+// without decorateDecision (e.g. a non-Decide caller of this function, such
+// as G's aggregated list-filter record) — not whenever decision.PrincipalID
+// happens to be empty.
+func TestBuildDecisionAuditRecord_UndecoratedFallsBackToSuppliedPrincipalID(t *testing.T) {
+	req := AuthzRequest{
+		Principal: PrincipalContext{ID: "supplied-claim"},
+		Resource:  Resource{Type: "project", ID: tid("undecorated-project")},
+		Action:    ActionRead,
+	}
+	decision := Decision{Allowed: true}
+	record := BuildDecisionAuditRecord(context.Background(), req, decision)
+	require.Equal(t, "supplied-claim", record.PrincipalID)
+}

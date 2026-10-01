@@ -23,18 +23,15 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import {
-  isFeatureEnabled,
-  setFeatureFlag,
-  NATIVE_CHAT_V2_FLAG,
-  NATIVE_CHAT_PALETTE_FLAG,
-} from './feature-flags.js';
+import { isFeatureEnabled, setFeatureFlag, NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
 
 // Verify removed exports at the type level — these should not exist.
 // @ts-expect-error ACCESS_BOUNDARIES_READ_FLAG was removed
 import { ACCESS_BOUNDARIES_READ_FLAG } from './feature-flags.js';
 // @ts-expect-error ACCESS_BOUNDARIES_AUTHORING_FLAG was removed
 import { ACCESS_BOUNDARIES_AUTHORING_FLAG } from './feature-flags.js';
+// @ts-expect-error NATIVE_CHAT_PALETTE_FLAG was removed (the palette is always on)
+import { NATIVE_CHAT_PALETTE_FLAG } from './feature-flags.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -50,7 +47,6 @@ beforeEach(() => {
     localStorage.removeItem('scion:feature:web.access_boundaries_read');
     localStorage.removeItem('scion:feature:web.access_boundaries_authoring');
     localStorage.removeItem('scion:feature:web.terminal_workspace');
-    localStorage.removeItem('scion:feature:web.native_chat_palette');
     localStorage.removeItem('scion:feature:test.flag');
   } catch {
     // ignore in environments without localStorage
@@ -80,6 +76,16 @@ describe('feature-flags: access boundary flags removed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed palette flag
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: palette flag removed', () => {
+  it('does not export NATIVE_CHAT_PALETTE_FLAG', () => {
+    expect(NATIVE_CHAT_PALETTE_FLAG).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Retained native_chat flags
 // ---------------------------------------------------------------------------
 
@@ -94,30 +100,6 @@ describe('feature-flags: native_chat flags retained', () => {
 
   it('web.native_chat_v2 defaults to ON', () => {
     expect(isFeatureEnabled('web.native_chat_v2')).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// native_chat_palette (temporary rollout flag) default-off
-// ---------------------------------------------------------------------------
-
-describe('feature-flags: native_chat_palette temporary flag', () => {
-  it('exports NATIVE_CHAT_PALETTE_FLAG', () => {
-    expect(NATIVE_CHAT_PALETTE_FLAG).toBe('web.native_chat_palette');
-  });
-
-  it('web.native_chat_palette defaults to OFF (not in DEFAULT_ON_FLAGS)', () => {
-    expect(isFeatureEnabled('web.native_chat_palette')).toBe(false);
-  });
-
-  it('server-injected true enables it', () => {
-    window.__SCION_FEATURES__ = { 'web.native_chat_palette': true };
-    expect(isFeatureEnabled('web.native_chat_palette')).toBe(true);
-  });
-
-  it('localStorage true enables it for local development', () => {
-    localStorage.setItem('scion:feature:web.native_chat_palette', 'true');
-    expect(isFeatureEnabled('web.native_chat_palette')).toBe(true);
   });
 });
 

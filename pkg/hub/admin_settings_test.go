@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -349,6 +350,176 @@ func TestApplySettingsUpdates_QuotasSectionGenericZeroCheck(t *testing.T) {
 	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enabled}})
 	if _, ok := raw2["quotas"]; !ok {
 		t.Error("expected quotas to be kept when a field of QuotaSettings is set")
+	}
+}
+
+// TestSingleFieldSettingsStructsGuard fails when AutoExposePortsSettings,
+// QuotaSettings or AgentSecretsSettings gains a field, since the section
+// zero-check tests above (TestApplySettingsUpdates_AutoExposePortsSectionGenericZeroCheck,
+// TestApplySettingsUpdates_QuotasSectionGenericZeroCheck and
+// TestApplySettingsUpdates_AgentSecretsSectionGenericZeroCheck) only ever
+// exercise the current single field of each struct: a new field would go
+// unverified by those "any field set" cases.
+func TestSingleFieldSettingsStructsGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+	}{
+		{"config.AutoExposePortsSettings", reflect.TypeOf(config.AutoExposePortsSettings{})},
+		{"config.QuotaSettings", reflect.TypeOf(config.QuotaSettings{})},
+		{"config.AgentSecretsSettings", reflect.TypeOf(config.AgentSecretsSettings{})},
+	} {
+		if n := tc.typ.NumField(); n != 1 {
+			t.Errorf("%s has %d fields, want 1: add a case that sets only the new field to the section zero-check tests, then update the expected field count in TestSingleFieldSettingsStructsGuard", tc.name, n)
+		}
+	}
+}
+
+// TestApplySettingsUpdates_AgentSecretsNilUserScopeOnly mirrors
+// TestApplySettingsUpdates_QuotasNilEnforceBrokerQuotas: when AgentSecrets is
+// provided but UserScopeOnly is nil, the key should be deleted to avoid
+// persisting an empty agent_secrets: {} block.
+func TestApplySettingsUpdates_AgentSecretsNilUserScopeOnly(t *testing.T) {
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"agent_secrets": map[string]interface{}{
+			"user_scope_only": true,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: &config.AgentSecretsSettings{
+			UserScopeOnly: nil, // nil signals deletion
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["agent_secrets"]; ok {
+		t.Error("expected agent_secrets key to be deleted when UserScopeOnly is nil")
+	}
+}
+
+// TestApplySettingsUpdates_AgentSecretsWithUserScopeOnly mirrors
+// TestApplySettingsUpdates_QuotasWithEnforceBrokerQuotas.
+func TestApplySettingsUpdates_AgentSecretsWithUserScopeOnly(t *testing.T) {
+	raw := map[string]interface{}{
+		"schema_version": "1",
+	}
+
+	on := true
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: &config.AgentSecretsSettings{
+			UserScopeOnly: &on,
+		},
+	}
+
+	applySettingsUpdates(raw, req)
+
+	as, ok := raw["agent_secrets"]
+	if !ok {
+		t.Fatal("expected agent_secrets key to be present")
+	}
+	asMap, ok := as.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected agent_secrets to be a map, got %T", as)
+	}
+	if asMap["user_scope_only"] != true {
+		t.Errorf("expected user_scope_only=true, got %v", asMap["user_scope_only"])
+	}
+}
+
+// TestApplySettingsUpdates_AgentSecretsNilRequest mirrors
+// TestApplySettingsUpdates_QuotasNilRequest.
+func TestApplySettingsUpdates_AgentSecretsNilRequest(t *testing.T) {
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"agent_secrets": map[string]interface{}{
+			"user_scope_only": true,
+		},
+	}
+
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: nil,
+	}
+
+	applySettingsUpdates(raw, req)
+
+	if _, ok := raw["agent_secrets"]; !ok {
+		t.Error("expected agent_secrets to be preserved when request field is nil")
+	}
+}
+
+// TestApplySettingsUpdates_AgentSecretsSectionGenericZeroCheck mirrors
+// TestApplySettingsUpdates_QuotasSectionGenericZeroCheck: the decision to
+// delete the section must look at every field (isZeroStruct), not one
+// hardcoded name, so it stays correct if AgentSecretsSettings ever gains a
+// second field.
+func TestApplySettingsUpdates_AgentSecretsSectionGenericZeroCheck(t *testing.T) {
+	raw := map[string]interface{}{
+		"schema_version": "1",
+		"agent_secrets":  map[string]interface{}{"user_scope_only": true},
+	}
+	applySettingsUpdates(raw, &ServerConfigUpdateRequest{AgentSecrets: &config.AgentSecretsSettings{}})
+	if _, ok := raw["agent_secrets"]; ok {
+		t.Error("expected agent_secrets to be deleted when every field of AgentSecretsSettings is nil")
+	}
+
+	on := true
+	raw2 := map[string]interface{}{"schema_version": "1"}
+	applySettingsUpdates(raw2, &ServerConfigUpdateRequest{AgentSecrets: &config.AgentSecretsSettings{UserScopeOnly: &on}})
+	if _, ok := raw2["agent_secrets"]; !ok {
+		t.Error("expected agent_secrets to be kept when a field of AgentSecretsSettings is set")
+	}
+}
+
+// TestHandlePutServerConfig_AgentSecretsUserScopeOnly_PersistedAndAppliedWithoutRestart
+// mirrors TestHandlePutServerConfig_EnforceBrokerQuotas_PersistedAndAppliedWithoutRestart:
+// a file-mode admin PUT writes settings.yaml and applies the new value live,
+// with no restart (design ptone/scion#2291 §5.2).
+func TestHandlePutServerConfig_AgentSecretsUserScopeOnly_PersistedAndAppliedWithoutRestart(t *testing.T) {
+	srv := &Server{}
+	if srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false before any PUT (permissive default)")
+	}
+
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"server":{"hub":{"port":9810}},"agent_secrets":{"user_scope_only":true}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not written: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	agentSecrets, _ := raw["agent_secrets"].(map[string]interface{})
+	if got, ok := agentSecrets["user_scope_only"].(bool); !ok || got != true {
+		t.Errorf("persisted agent_secrets.user_scope_only = %v, want true (settings.yaml: %s)", agentSecrets["user_scope_only"], data)
+	}
+
+	// No restart: the in-memory config must already reflect the new value.
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true immediately after PUT, without a restart")
+	}
+
+	// GET must reflect the persisted value too (design §10 test 3: "GET
+	// includes agent_secrets").
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfig(getRR)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("GET expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var getResp ServerConfigResponse
+	if err := json.NewDecoder(getRR.Body).Decode(&getResp); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if getResp.AgentSecrets == nil || getResp.AgentSecrets.UserScopeOnly == nil || !*getResp.AgentSecrets.UserScopeOnly {
+		t.Errorf("GET response AgentSecrets = %+v, want UserScopeOnly=true", getResp.AgentSecrets)
 	}
 }
 

@@ -102,7 +102,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 		case http.MethodPost:
 			authzAction = ActionCreate
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
 	} else {
@@ -121,18 +121,18 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 			case http.MethodDelete:
 				authzAction = ActionDelete
 			default:
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 				return
 			}
 		case "pause", "resume":
 			if r.Method != http.MethodPost {
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodPost)
 				return
 			}
 			authzAction = ActionUpdate
 		case "history":
 			if r.Method != http.MethodGet {
-				MethodNotAllowed(w)
+				MethodNotAllowed(w, http.MethodGet)
 				return
 			}
 			authzAction = ActionRead

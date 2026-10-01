@@ -800,7 +800,10 @@ export class ScionPageBrokerDetail extends LitElement {
       case 'hub_default':
         return 'the hub-wide default';
       case 'not_enforced':
-        return 'not enforced (quota switch is off)';
+        // No parentheses inside this label: it is always rendered inside
+        // its own "(from ...)" wrapper (see the Settings card below), and a
+        // nested "(from not enforced (...))" would read badly.
+        return 'not enforced — the quota switch is off';
       case 'unlimited':
         return 'unlimited (no quota configured)';
       case '':

@@ -1181,6 +1181,22 @@ func (a *testProgenyAgentIdentity) OriginUserID() string {
 }
 func (a *testProgenyAgentIdentity) TokenID() string { return "" }
 
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testProgenyAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification: those functions switch on
+// concrete type, not Type(), so a package-hub test fake that is passed
+// through CheckAccess/Decide (as this one is, below) must opt in explicitly
+// rather than being classified from its Type() == "agent" string.
+func (a *testProgenyAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
+
 // =============================================================================
 // C1 Regression: Members-group owner cannot escalate to project-owner
 // =============================================================================

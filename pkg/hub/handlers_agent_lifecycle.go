@@ -483,7 +483,7 @@ type StopAllAgentsResponse struct {
 // member: owners/admins stop all agents, regular members stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

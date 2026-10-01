@@ -150,7 +150,7 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createSkill(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -215,7 +215,7 @@ func (s *Server) handleSkillCRUD(w http.ResponseWriter, r *http.Request, id stri
 	case http.MethodDelete:
 		s.deleteSkill(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -642,7 +642,7 @@ func (s *Server) handleSkillVersions(w http.ResponseWriter, r *http.Request, ski
 	case http.MethodPost:
 		s.publishSkillVersion(w, r, skillID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -654,7 +654,7 @@ func (s *Server) handleSkillVersionByID(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getSkillVersion(w, r, skillID, versionID)
@@ -730,7 +730,7 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 // deprecateSkillVersion marks a published skill version as deprecated.
 func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1107,7 +1107,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 // handleSkillUpload handles requests for upload URLs for a skill.
 func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skillID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1177,7 +1177,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 // handleSkillFinalize finalizes a skill version after file upload.
 func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, skillID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1289,7 +1289,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 // handleSkillDownload returns signed URLs for downloading skill version files.
 func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, skillID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1358,7 +1358,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 // handleSkillResolveSingle resolves a single skill version (for debug/test).
 func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request, skillID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1398,7 +1398,7 @@ func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request
 // handleSkillsResolve handles batch skill resolution: POST /api/v1/skills/resolve.
 func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

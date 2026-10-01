@@ -233,7 +233,7 @@ test('a path whose real content exceeds the inline limit shows download-only, in
   await page.locator('.path-link', { hasText: 'huge.log' }).click();
   const dialog = previewDialog(page);
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('too large to preview inline');
+  await expect(dialog).toContainText("can't be shown here");
   await expect(dialog.locator('scion-code-editor')).toHaveCount(0);
   await expect(dialog.locator('sl-button', { hasText: 'Download' })).toHaveAttribute(
     'href',

@@ -220,6 +220,12 @@ From inside an agent container, use the `sciontool secret` command suite:
     ```
     *Note: `--scope` accepts `project` (default) or `user`.*
 
+    *Hub admins can restrict agents to writing user (profile) scope only. If the "Restrict
+    agent-written secrets to profile scope" setting is on (Admin > Server Config), a project-scope
+    write from an agent — including one that omits `--scope` — is rejected with a 403 and a message
+    telling you to retry with `--scope user`. This does not affect writes you make yourself through
+    the web UI or `scion hub secret set --project`.*
+
 #### Using the Hub API Directly
 Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
@@ -399,6 +405,8 @@ Run `--delete-legacy` itself only after **every** replica of this hub is running
 :::
 
 Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name until migrated — existing secrets keep resolving through their stored reference until an administrator (or, for the built-in signing keys, the hub itself at boot) rewrites it to the prefixed name. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); it is safe to run repeatedly, so a plain run followed later by a separate `--delete-legacy` run is the expected two-step workflow. Until that command's `--delete-legacy` step has run for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
+
+On a Cloud Run hub deployed with the hub-cloudrun Terraform module (private-IP Cloud SQL, Direct VPC egress, an explicit `hub_id`), run this command via the one-off Cloud Run job in [`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md); no workstation ever runs it directly against that hub's database. Hubs deployed with the manual [Deploy on GCP](/scion/hosted/ha/setup-gcp/) guide are not covered by that runbook — see that guide's "Secret Name Migration" section and [ptone/scion#2395](https://github.com/ptone/scion/issues/2395) for the tracked gap.
 
 ---
 

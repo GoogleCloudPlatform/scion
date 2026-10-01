@@ -193,7 +193,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		case http.MethodPut:
 			s.handlePutMaintenanceDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		}
 		return
 	}
@@ -226,7 +226,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		})
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -236,7 +236,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 // Authorization: enforced by routeGuard via hub.scheduler.read permission.
 func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

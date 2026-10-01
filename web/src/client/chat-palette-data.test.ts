@@ -45,6 +45,7 @@ import {
   fetchPaletteSpaces,
   fetchPaletteThreadsForSpace,
   buildThreadCandidates,
+  buildDocumentCandidates,
   PaletteLoadError,
   ChatPaletteDataController,
   type RawPaletteAgent,
@@ -53,6 +54,7 @@ import {
   type RawPaletteSpace,
   type RawPaletteThread,
 } from './chat-palette-data.js';
+import type { RecentFile } from './chat-recent-files.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -1853,5 +1855,159 @@ describe('ChatPaletteDataController: Threads group', () => {
       expect(finalResult.incomplete).toBe(false);
       expect(finalResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
     });
+  });
+});
+
+describe('buildDocumentCandidates', () => {
+  function pathFile(overrides: Partial<RecentFile> = {}): RecentFile {
+    return {
+      key: JSON.stringify(['path', 'p1', 'workspace', '', 'notes.txt']),
+      name: 'notes.txt',
+      source: {
+        conversationKey: 'topic-1',
+        messageId: 'm1',
+        sentAt: '2026-09-28T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+      target: {
+        kind: 'path',
+        projectId: 'p1',
+        containerPath: '/workspace/notes.txt',
+        location: { kind: 'workspace', filePath: 'notes.txt' },
+      },
+      ...overrides,
+    } as RecentFile;
+  }
+
+  function attachmentFile(overrides: Partial<RecentFile> = {}): RecentFile {
+    return {
+      key: JSON.stringify(['attachment', 'att-1']),
+      name: 'photo.png',
+      source: {
+        conversationKey: 'dm:agent:a1:user:self',
+        messageId: 'm2',
+        sentAt: '2026-09-28T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+      target: { kind: 'attachment', id: 'att-1', mime: 'image/png', size: 1234 },
+      ...overrides,
+    } as RecentFile;
+  }
+
+  it('maps a path file to a Documents-group candidate with the container path and project in searchFields', () => {
+    const [candidate] = buildDocumentCandidates([pathFile()]);
+    expect(candidate.group).toBe('documents');
+    expect(candidate.label).toBe('notes.txt');
+    expect(candidate.searchFields).toEqual(['notes.txt', '/workspace/notes.txt', 'Alpha']);
+    expect(candidate.secondaryLabel).toBe('Alpha — /workspace/notes.txt');
+    expect(candidate.activityMs).toBe(Date.parse('2026-09-28T12:00:00Z'));
+    expect(candidate.target).toEqual({ kind: 'document', file: pathFile() });
+  });
+
+  it('maps an attachment file with a project-and-metadata-labeled secondary line and no path in searchFields', () => {
+    const [candidate] = buildDocumentCandidates([attachmentFile()]);
+    expect(candidate.group).toBe('documents');
+    expect(candidate.label).toBe('photo.png');
+    expect(candidate.searchFields).toEqual(['photo.png', 'Alpha']);
+    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 28');
+  });
+
+  it('two attachments sharing a name and project are distinguishable by size and date', () => {
+    // Midday UTC, not midnight: the formatted date is local-time
+    // (toLocaleDateString), and a midnight-UTC fixture rolls back to the
+    // previous day in every timezone west of UTC (i.e. most of the Americas)
+    // — this must pass under any TZ, not just the one this suite happens to
+    // run under here.
+    const older = attachmentFile({
+      key: 'att-older',
+      target: { kind: 'attachment', id: 'att-older', mime: 'image/png', size: 500 },
+      source: {
+        conversationKey: 'dm:a',
+        messageId: 'm-older',
+        sentAt: '2026-01-01T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const newer = attachmentFile({
+      key: 'att-newer',
+      target: { kind: 'attachment', id: 'att-newer', mime: 'image/png', size: 50_000 },
+      source: {
+        conversationKey: 'dm:b',
+        messageId: 'm-newer',
+        sentAt: '2026-06-01T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const [a, b] = buildDocumentCandidates([older, newer]);
+    expect(a.label).toBe(b.label); // both "photo.png" — the same-name case this exists for
+    expect(a.secondaryLabel).not.toBe(b.secondaryLabel);
+    expect(a.secondaryLabel).toBe('Alpha — Attachment · 500 B · Jan 1');
+    expect(b.secondaryLabel).toBe('Alpha — Attachment · 48.8 KB · Jun 1');
+  });
+
+  it('omits the date from an attachment secondary label when sentAt is a Go zero timestamp', () => {
+    const file = attachmentFile({
+      source: {
+        conversationKey: 'dm:x',
+        messageId: 'm2',
+        sentAt: '0001-01-01T00:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB');
+  });
+
+  it('omits the project name from the path secondary label and searchFields when absent', () => {
+    const file = pathFile({
+      source: { conversationKey: 'topic-1', messageId: 'm1', sentAt: '2026-09-28T12:00:00Z' },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('/workspace/notes.txt');
+    expect(candidate.searchFields).toEqual(['notes.txt', '/workspace/notes.txt']);
+  });
+
+  it('falls back to plain "Attachment · <size> · <date>" when an attachment has no captured project name', () => {
+    const file = attachmentFile({
+      source: { conversationKey: 'dm:x', messageId: 'm2', sentAt: '2026-09-28T12:00:00Z' },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('Attachment · 1.2 KB · Sep 28');
+    expect(candidate.searchFields).toEqual(['photo.png']);
+  });
+
+  it('produces a stable JSON-tuple candidate ID from the file key', () => {
+    const file = pathFile();
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.id).toBe(JSON.stringify(['document', file.key]));
+  });
+
+  it('treats a Go-zero sentAt as activityMs 0', () => {
+    const file = pathFile({
+      source: {
+        conversationKey: 'topic-1',
+        messageId: 'm1',
+        sentAt: '0001-01-01T00:00:00Z',
+        projectId: 'p1',
+      },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.activityMs).toBe(0);
+  });
+
+  it('maps every record in the snapshot, preserving order', () => {
+    const a = pathFile({ key: 'a', name: 'a.txt' });
+    const b = attachmentFile({ key: 'b', name: 'b.png' });
+    const candidates = buildDocumentCandidates([a, b]);
+    expect(candidates.map((c) => c.label)).toEqual(['a.txt', 'b.png']);
+  });
+
+  it('returns an empty list for an empty snapshot', () => {
+    expect(buildDocumentCandidates([])).toEqual([]);
   });
 });

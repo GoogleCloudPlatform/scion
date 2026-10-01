@@ -170,7 +170,7 @@ func (s *Server) handleAdminLimits(w http.ResponseWriter, r *http.Request) {
 		}
 		s.createLimitDefinition(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -207,7 +207,7 @@ func (s *Server) handleAdminLimitByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.deleteLimitDefinition(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -228,7 +228,7 @@ func (s *Server) handleLimitEntitlements(w http.ResponseWriter, r *http.Request,
 		}
 		s.createEntitlement(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -257,7 +257,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 		}
 		s.deleteEntitlement(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -268,7 +268,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 // handleAdminUsage handles GET on /api/v1/admin/usage.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getUsageSummary(w, r)
@@ -277,7 +277,7 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 // handleAdminUsageByLimit handles GET on /api/v1/admin/usage/:limitID.
 func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	limitID := extractID(r, "/api/v1/admin/usage")
@@ -291,7 +291,7 @@ func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request)
 // handleUsageMe handles GET on /api/v1/usage/me.
 func (s *Server) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getMyUsage(w, r)
@@ -415,6 +415,15 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Trim before comparing/validating so a PUT that merely pads a field
+	// with whitespace is normalised rather than treated as a change.
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	// unit is trimmed but not required: createLimitDefinition accepts an
+	// empty unit (the admin UI treats it as optional, rendering "—"),
+	// and unit is not read by quota resolution, so requiring it here
+	// would make existing empty-unit rows permanently uneditable.
+	req.Unit = strings.TrimSpace(req.Unit)
+
 	// System-seeded limit definitions: only default_value and description
 	// may be changed (ptone/scion#2061 P1a, ptone/scion#2063). This is the
 	// supported admin path for the hub-wide max_agents_per_broker value
@@ -425,16 +434,10 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	} else {
-		req.ResourceType = strings.TrimSpace(req.ResourceType)
 		if req.ResourceType == "" {
 			BadRequest(w, "resource type is required")
 			return
 		}
-		// unit is trimmed but not required: createLimitDefinition accepts an
-		// empty unit (the admin UI treats it as optional, rendering "—"),
-		// and unit is not read by quota resolution, so requiring it here
-		// would make existing empty-unit rows permanently uneditable.
-		req.Unit = strings.TrimSpace(req.Unit)
 		existing.Name = req.Name
 		existing.ResourceType = req.ResourceType
 		existing.Unit = req.Unit
@@ -837,6 +840,20 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]myUsageEntry, 0, len(defs))
 	for _, def := range defs {
+		// max_agents_per_broker reservations are held at store.QuotaScopeBroker
+		// (subject = broker ID, not the user) rather than store.QuotaScopeSystem
+		// (ptone/scion#2061 P2.2, broker_quota.go), so the per-user query below
+		// always finds none for it: the row showed "0 used" regardless of real
+		// broker usage. It also isn't a per-user quota at all — it's an
+		// infrastructure ceiling on a broker — so unlike getUsageSummary and
+		// getUsageByLimit (which sum broker reservations for their hub-wide
+		// admin view), the correct fix here is to omit the row from a user's
+		// own usage entirely rather than reporting a broker-wide count under
+		// "my usage". ptone/scion#2313.
+		if def.Name == store.LimitMaxAgentsPerBroker {
+			continue
+		}
+
 		// Resolve effective limit for this user at system scope.
 		effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(
 			r.Context(), def.ID, userID, store.QuotaScopeSystem, "")

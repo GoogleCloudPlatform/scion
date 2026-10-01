@@ -101,6 +101,13 @@ test-hub-sqlite:
 # preserve). Fixing those is out of scope for this design; -run keeps this
 # job to what it was scoped to test.
 #
+# The -run regex also includes the broker-settings compare-and-set and
+# row-lock tests (TestPutBrokerSettings*, TestDeleteBrokerSettings*,
+# TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert
+# dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
+# tests do, so they belong in this job's Postgres coverage rather than running
+# only against SQLite.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -133,7 +140,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

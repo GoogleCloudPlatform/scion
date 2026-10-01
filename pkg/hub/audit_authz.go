@@ -102,10 +102,20 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		result = "allow"
 	}
 
+	// On a decorated Decision, PrincipalID is the principal ID Decide
+	// evaluated, including an empty ID for an identity that derived none.
+	// request.Principal.ID, the caller-supplied AuthzRequest field, is used
+	// only for an undecorated Decision (e.g. a non-Decide caller of this
+	// function that built a Decision by hand).
+	principalID := decision.PrincipalID
+	if !decision.principalDecorated {
+		principalID = request.Principal.ID
+	}
+
 	record := &store.DecisionAuditRecord{
 		Timestamp:      time.Now(),
 		PrincipalKind:  string(decision.PrincipalKind),
-		PrincipalID:    request.Principal.ID,
+		PrincipalID:    principalID,
 		CredentialID:   decision.CredentialID,
 		CredentialType: decision.CredentialKind,
 		ResourceType:   request.Resource.Type,
@@ -792,6 +802,13 @@ func (a *explainAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (a *explainAgentIdentity) HasScope(AgentTokenScope) bool { return false }
 func (a *explainAgentIdentity) Ancestry() []string            { return a.ancestry }
 func (a *explainAgentIdentity) TokenID() string               { return "" }
+
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from a JWT.
+func (a *explainAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
 func (a *explainAgentIdentity) OriginUserID() string {
 	if len(a.ancestry) > 0 {
 		return a.ancestry[0]

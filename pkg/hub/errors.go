@@ -210,15 +210,43 @@ const (
 	// same response: discard the cursor and restart pagination from the
 	// first page (an empty cursor).
 	ErrCodeInvalidCursor = "invalid_cursor"
+
+	// ErrCodeSecretScopeRestricted is returned when an agent's secret write
+	// resolves to project scope while the hub admin setting
+	// agent_secrets.user_scope_only is on. Distinct from ErrCodeForbidden
+	// so clients (the web terminal pane) can recognise the rejection
+	// reliably and show a specific message (design ptone/scion#2291 §6).
+	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
 )
+
+// elevatedClientErrorStatus reports whether a 4xx status code should be
+// logged at INFO instead of DEBUG. Two motivating cases (ptone/scion#2352)
+// were invisible at DEBUG in production: a 422 when no runtime broker is
+// available for agent create, and a 400 on outbound agent messages surfaced
+// during HA deployment validation. Both land in this set. 401/403/404/429
+// stay at DEBUG on purpose — they fire routinely (stale credentials,
+// polling for a not-yet-created resource, rate limiting) and promoting them
+// would flood operator logs without adding diagnostic signal.
+func elevatedClientErrorStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
 
 // writeError writes a JSON error response.
 // For 5xx errors, it logs the error details for debugging.
 func writeError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
-	// Log 5xx errors at ERROR level, 4xx at DEBUG level for diagnostics
-	if statusCode >= 500 {
+	// Log 5xx errors at ERROR level. Most 4xx stay at DEBUG; a narrow set
+	// (see elevatedClientErrorStatus) is promoted to INFO.
+	switch {
+	case statusCode >= 500:
 		slog.Error("API Error", "status", statusCode, "code", code, "message", message)
-	} else if statusCode >= 400 {
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error", "status", statusCode, "code", code, "message", message)
+	case statusCode >= 400:
 		slog.Debug("API client error", "status", statusCode, "code", code, "message", message)
 	}
 
@@ -295,15 +323,34 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		message = "Internal server error"
 	}
 
-	// Log 5xx errors with the underlying error for debugging, 4xx at DEBUG
-	if statusCode >= 500 {
+	// Log 5xx errors with the underlying error for debugging. Most 4xx stay
+	// at DEBUG with the underlying error attached; a narrow set (see
+	// elevatedClientErrorStatus) is promoted to INFO, logging only the
+	// public message there so the elevated log line never carries more
+	// detail than the response already returned. The raw error remains
+	// available at DEBUG for that same narrow set.
+	switch {
+	case statusCode >= 500:
 		slog.Error("API Error from Go error",
 			"status", statusCode,
 			"code", code,
 			"requestID", requestID,
 			"error", err,
 		)
-	} else if statusCode >= 400 {
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error from Go error",
+			"status", statusCode,
+			"code", code,
+			"message", message,
+			"requestID", requestID,
+		)
+		slog.Debug("API client error from Go error (underlying)",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
+		)
+	case statusCode >= 400:
 		slog.Debug("API client error from Go error",
 			"status", statusCode,
 			"code", code,

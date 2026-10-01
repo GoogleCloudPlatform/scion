@@ -16,10 +16,10 @@
 
 /**
  * Tests for chat.ts's native chat quick command palette support: the
- * People/Threads group loaders, retry dispatch, the 30s per-group cache with
- * SSE invalidation and 500ms debounced refresh, the Threads palette-select
- * path, and the project-routing/encoding behavior shared by
- * `navigateToThread` (rail selection) and the legacy `handleSwitcherSelect`.
+ * People/Threads/Documents group loaders, retry dispatch, the 30s per-group
+ * cache with SSE invalidation and 500ms debounced refresh, the palette
+ * selection paths, and `navigateToThread`'s project-routing/encoding
+ * behavior.
  *
  * Elements are created but never appended (no connectedCallback), following
  * chat.test.ts's convention — these are plain-method/state tests, not
@@ -37,6 +37,8 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { apiFetch } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
+import { chatRecentFiles } from '../../client/chat-recent-files.js';
+import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -96,11 +98,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
-/** A page instance with a signed-in user and the palette flag on, never appended to the DOM. */
+/** A page instance with a signed-in user, never appended to the DOM. */
 function createPage(): any {
   const el = document.createElement('scion-page-chat') as any;
   el.pageData = { user: { id: 'self-user' } };
-  el.isPaletteEnabled = true;
   return el;
 }
 
@@ -275,103 +276,6 @@ describe('navigateToThread: routing when a project has no known slug', () => {
 
       expect(navigateTo).toHaveBeenCalledWith('/chat/beta/topic-x');
     });
-  });
-});
-
-describe('handleSwitcherSelect: legacy flat switcher routing and encoding', () => {
-  it("routes a thread by its own projectId, not another project's cached slug, when its project has none", () => {
-    const el = createPage();
-    el._slugToProjectId.set('alpha', 'p1');
-    el._projectIdToSlug.set('p1', 'alpha');
-    el.v2SwitcherConversations = [
-      {
-        conversationKey: 'topic-x',
-        name: 'General',
-        spaceName: 'Beta',
-        isDM: false,
-        projectId: 'p2',
-      },
-    ];
-
-    el.handleSwitcherSelect(
-      new CustomEvent('switcher-select', { detail: { conversationKey: 'topic-x' } })
-    );
-
-    expect(navigateTo).toHaveBeenCalledWith('/chat/space/p2/thread/topic-x');
-  });
-
-  it('uses the known slug and encodes both segments when the project has one', () => {
-    const el = createPage();
-    // See the equivalent navigateToThread test's comment: characters that
-    // change route meaning if left raw, not just spaces.
-    el._projectIdToSlug.set('p2', 'a/b?c');
-    el.v2SwitcherConversations = [
-      {
-        conversationKey: 'k#1',
-        name: 'General',
-        spaceName: 'Beta',
-        isDM: false,
-        projectId: 'p2',
-      },
-    ];
-
-    el.handleSwitcherSelect(
-      new CustomEvent('switcher-select', { detail: { conversationKey: 'k#1' } })
-    );
-
-    expect(navigateTo).toHaveBeenCalledWith(
-      `/chat/${encodeURIComponent('a/b?c')}/${encodeURIComponent('k#1')}`
-    );
-    expect(navigateTo).toHaveBeenCalledWith('/chat/a%2Fb%3Fc/k%231');
-  });
-
-  it("encodes both the projectId and the conversation key in handleSwitcherSelect's fallback route", () => {
-    const el = createPage();
-    el.v2SwitcherConversations = [
-      {
-        conversationKey: 'k#1',
-        name: 'General',
-        spaceName: 'Beta',
-        isDM: false,
-        projectId: 'p2/weird?x',
-      },
-    ];
-
-    el.handleSwitcherSelect(
-      new CustomEvent('switcher-select', { detail: { conversationKey: 'k#1' } })
-    );
-
-    expect(navigateTo).toHaveBeenCalledWith(
-      `/chat/space/${encodeURIComponent('p2/weird?x')}/thread/${encodeURIComponent('k#1')}`
-    );
-    expect(navigateTo).toHaveBeenCalledWith('/chat/space/p2%2Fweird%3Fx/thread/k%231');
-  });
-
-  it('falls back to plain /chat when the thread is not found in the cached list at all', () => {
-    const el = createPage();
-    el.v2SwitcherConversations = [];
-    el.handleSwitcherSelect(
-      new CustomEvent('switcher-select', { detail: { conversationKey: 'topic-x' } })
-    );
-    expect(navigateTo).toHaveBeenCalledWith('/chat');
-  });
-
-  it('a DM key still routes through /chat/dm/, encoded', () => {
-    const el = createPage();
-    el.handleSwitcherSelect(
-      new CustomEvent('switcher-select', {
-        detail: { conversationKey: 'dm:agent:a1:user:u1' },
-      })
-    );
-    expect(navigateTo).toHaveBeenCalledWith(
-      `/chat/dm/${encodeURIComponent('dm:agent:a1:user:u1')}`
-    );
-  });
-
-  it('an empty detail is a no-op — no navigation at all', () => {
-    const el = createPage();
-    el.handleSwitcherSelect(new CustomEvent('switcher-select', { detail: {} }));
-    expect(navigateTo).not.toHaveBeenCalled();
   });
 });
 
@@ -575,6 +479,360 @@ describe('_handlePaletteSelect: People (dm/user) targets', () => {
     );
 
     expect(openDMSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// Palette Documents selection (_handlePaletteSelect) and after-hide preview
+// ===========================================================================
+
+function documentFile(overrides: Partial<RecentFile> = {}): RecentFile {
+  return {
+    key: JSON.stringify(['path', 'p1', 'workspace', '', 'notes.txt']),
+    name: 'notes.txt',
+    source: {
+      conversationKey: 'topic-1',
+      messageId: 'm1',
+      sentAt: '2026-09-28T12:00:00Z',
+      projectId: 'p1',
+    },
+    target: {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+    },
+    ...overrides,
+  } as RecentFile;
+}
+
+function documentCandidate(file: RecentFile): PaletteCandidate {
+  return {
+    id: JSON.stringify(['document', file.key]),
+    group: 'documents',
+    label: file.name,
+    searchFields: [file.name],
+    secondaryLabel: '',
+    activityMs: 0,
+    target: { kind: 'document', file },
+  } as PaletteCandidate;
+}
+
+function emptySnapshot(): RecentFilesSnapshot {
+  return { records: [], persistent: true };
+}
+
+describe('Documents group: chatRecentFiles subscription lifecycle', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+  });
+
+  it('a v1 page (isV2 false) never subscribes to or reads chatRecentFiles', () => {
+    const subscribeSpy = vi.spyOn(chatRecentFiles, 'subscribe');
+    const snapshotSpy = vi.spyOn(chatRecentFiles, 'snapshot');
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = false;
+
+    document.body.appendChild(el);
+
+    expect(subscribeSpy).not.toHaveBeenCalled();
+    expect(snapshotSpy).not.toHaveBeenCalled();
+  });
+
+  it('a v2 page seeds the Documents group from the current snapshot on connect', () => {
+    const file = documentFile();
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue({ records: [file], persistent: true });
+    vi.spyOn(chatRecentFiles, 'subscribe').mockReturnValue(() => {});
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+
+    document.body.appendChild(el);
+
+    expect(el.v2PaletteGroups.documents?.status).toBe('ready');
+    expect(el.v2PaletteGroups.documents?.candidates).toHaveLength(1);
+    expect(el.v2PaletteGroups.documents?.candidates[0].label).toBe(file.name);
+  });
+
+  it('a v2 page subscribes to chatRecentFiles exactly once on connect', () => {
+    const subscribeSpy = vi.spyOn(chatRecentFiles, 'subscribe').mockReturnValue(() => {});
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+
+    document.body.appendChild(el);
+
+    expect(subscribeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a snapshot pushed through the subscription callback later refreshes the Documents group', () => {
+    let publish: ((s: RecentFilesSnapshot) => void) | null = null;
+    vi.spyOn(chatRecentFiles, 'subscribe').mockImplementation((cb) => {
+      publish = cb;
+      return () => {};
+    });
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+    document.body.appendChild(el);
+    expect(el.v2PaletteGroups.documents?.candidates).toHaveLength(0);
+
+    const file = documentFile();
+    publish!({ records: [file], persistent: true });
+
+    expect(el.v2PaletteGroups.documents?.candidates).toHaveLength(1);
+  });
+
+  it('disconnecting calls the unsubscribe function chatRecentFiles.subscribe returned', () => {
+    const unsubscribe = vi.fn();
+    vi.spyOn(chatRecentFiles, 'subscribe').mockReturnValue(unsubscribe);
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+    document.body.appendChild(el);
+    expect(unsubscribe).not.toHaveBeenCalled();
+
+    el.remove();
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnecting after a disconnect subscribes again — once per connect, not accumulating', () => {
+    const unsubscribe1 = vi.fn();
+    const unsubscribe2 = vi.fn();
+    const subscribeSpy = vi
+      .spyOn(chatRecentFiles, 'subscribe')
+      .mockReturnValueOnce(unsubscribe1)
+      .mockReturnValueOnce(unsubscribe2);
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+
+    document.body.appendChild(el);
+    el.remove();
+    document.body.appendChild(el);
+
+    expect(subscribeSpy).toHaveBeenCalledTimes(2);
+    expect(unsubscribe1).toHaveBeenCalledTimes(1);
+    expect(unsubscribe2).not.toHaveBeenCalled();
+  });
+
+  it('disconnecting twice in a row without an intervening connect does not call the unsubscribe function a second time', () => {
+    const unsubscribe = vi.fn();
+    vi.spyOn(chatRecentFiles, 'subscribe').mockReturnValue(unsubscribe);
+    vi.spyOn(chatRecentFiles, 'snapshot').mockReturnValue(emptySnapshot());
+    vi.mocked(apiFetch).mockResolvedValue(jsonResponse({}));
+    const el = createPage();
+    el.isV2 = true;
+    document.body.appendChild(el);
+
+    el.remove();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+
+    // A second disconnect with no intervening reconnect must not re-invoke
+    // the same already-called unsubscribe function; only clearing the
+    // stored reference to null after calling it once guards this.
+    el.disconnectedCallback();
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('_handlePaletteSelect: Document targets', () => {
+  it('closes the palette and records a pending preview target when the document candidate is still present', () => {
+    const el = createPage();
+    const file = documentFile();
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [documentCandidate(file)] } };
+    el.v2PaletteOpen = true;
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el.v2PaletteOpen).toBe(false);
+    expect(el._pendingDocumentPreviewTarget).toEqual({
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    });
+    // The preview must not open until the palette's own close animation
+    // actually finishes (see _handlePaletteAfterHide) — setting it here,
+    // before sl-after-hide, would risk both dialogs fighting for focus at
+    // the same time.
+    expect(el._paletteFilePreviewTarget).toBeNull();
+  });
+
+  it('converts an attachment target to the preview shape, adding the display name', () => {
+    const el = createPage();
+    const file = documentFile({
+      key: JSON.stringify(['attachment', 'att-1']),
+      name: 'photo.png',
+      target: { kind: 'attachment', id: 'att-1', mime: 'image/png', size: 10 },
+    });
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [documentCandidate(file)] } };
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el._pendingDocumentPreviewTarget).toEqual({
+      kind: 'attachment',
+      id: 'att-1',
+      name: 'photo.png',
+      mime: 'image/png',
+      size: 10,
+    });
+  });
+
+  it('a stale document candidate (no longer present after a refresh) does not set a pending preview', () => {
+    const el = createPage();
+    const file = documentFile();
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [] } };
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el._pendingDocumentPreviewTarget).toBeNull();
+  });
+
+  it('a candidate with a different file key does not count as present', () => {
+    const el = createPage();
+    const file = documentFile();
+    const other = documentFile({ key: 'different-key', name: 'other.txt' });
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [documentCandidate(other)] } };
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el._pendingDocumentPreviewTarget).toBeNull();
+  });
+
+  it('a same-keyed candidate of a different kind does not count as present — the kind check, not just the key match, guards this', () => {
+    // Only `document`-kind candidates are ever published into
+    // v2PaletteGroups.documents today, so this array shape can't arise
+    // through the palette's own real loaders — but nothing in the type
+    // system stops a future group-population bug from putting a
+    // differently-shaped candidate here, and `c.target.file` would be
+    // `undefined` on one, not a `document` target's `file` object. Forcing
+    // the mismatched shape directly (bypassing the type checker, the same
+    // way the codebase already does for other "can't happen through the
+    // real API" guard tests) proves the `kind` half of the guard is load
+    // -bearing on its own, not redundant with the key comparison.
+    const el = createPage();
+    const file = documentFile();
+    const impostor = {
+      id: JSON.stringify(['dm', 'agent', 'x']),
+      group: 'documents',
+      label: file.name,
+      searchFields: [file.name],
+      secondaryLabel: '',
+      activityMs: 0,
+      target: { kind: 'dm', peerKind: 'agent', peerId: 'x', displayName: file.name },
+    } as unknown as PaletteCandidate;
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [impostor] } };
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el._pendingDocumentPreviewTarget).toBeNull();
+  });
+
+  it('a same-keyed candidate of a different kind does not count as present, even when it exposes a matching file.key at the same shape a document target would', () => {
+    // This impostor has a `file.key` equal to the document's, so only the
+    // `kind` check (not a key mismatch or a thrown error) can reject it.
+    const el = createPage();
+    const file = documentFile();
+    const impostor = {
+      id: JSON.stringify(['dm', 'agent', 'x']),
+      group: 'documents',
+      label: file.name,
+      searchFields: [file.name],
+      secondaryLabel: '',
+      activityMs: 0,
+      target: {
+        kind: 'dm',
+        peerKind: 'agent',
+        peerId: 'x',
+        displayName: file.name,
+        file: { key: file.key },
+      },
+    } as unknown as PaletteCandidate;
+    el.v2PaletteGroups = { documents: { status: 'ready', candidates: [impostor] } };
+
+    el._handlePaletteSelect(
+      new CustomEvent('palette-select', { detail: { target: { kind: 'document', file } } })
+    );
+
+    expect(el._pendingDocumentPreviewTarget).toBeNull();
+  });
+
+  it('_handlePaletteAfterHide opens the preview from a pending document target and leaves the invoker captured for later', () => {
+    const el = createPage();
+    el.isV2 = true;
+    vi.spyOn(el, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(el, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(el, '_isUnrelatedModalActive').mockReturnValue(false);
+    el._pendingDocumentPreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+    const invoker = document.createElement('textarea');
+    el._paletteInvoker = invoker;
+    const restoreSpy = vi.spyOn(el, '_restorePaletteInvokerFocus');
+    const focusComposerSpy = vi.spyOn(el, '_focusComposerAfterPaletteSelection');
+
+    const dialog = document.createElement('div');
+    dialog.classList.add('palette-dialog');
+    el._handlePaletteAfterHide({ composedPath: () => [dialog] } as unknown as Event);
+
+    expect(el._paletteFilePreviewTarget).toEqual({
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    });
+    expect(el._pendingDocumentPreviewTarget).toBeNull();
+    // The preview dialog becomes the sole modal in control of focus — the
+    // palette's own after-hide must not also restore the invoker or focus a
+    // composer.
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(focusComposerSpy).not.toHaveBeenCalled();
+    expect(el._paletteInvoker).toBe(invoker);
+  });
+
+  it('_closePaletteFilePreview clears the target and restores the captured invoker', () => {
+    const el = createPage();
+    const invoker = document.createElement('textarea');
+    document.body.appendChild(invoker);
+    el._paletteInvoker = invoker;
+    el._paletteFilePreviewTarget = {
+      kind: 'attachment',
+      id: 'att-1',
+      name: 'photo.png',
+      mime: 'image/png',
+      size: 10,
+    };
+
+    el._closePaletteFilePreview();
+
+    expect(el._paletteFilePreviewTarget).toBeNull();
+    expect(document.activeElement).toBe(invoker);
+    document.body.removeChild(invoker);
   });
 });
 
@@ -1252,13 +1510,6 @@ describe('palette group dirty-marking: SSE invalidation', () => {
       })
     );
     expect(el._paletteGroupDirty).toMatchObject({ agents: true, people: true, threads: true });
-  });
-
-  it('dirty-marking is a no-op when the palette feature flag is off', () => {
-    const el = createPage();
-    el.isPaletteEnabled = false;
-    el.handleChatTopic(new CustomEvent('chat-topic-updated', { detail: {} }));
-    expect(el._paletteGroupDirty.threads).toBeUndefined();
   });
 
   it('marking a group dirty while the palette is open schedules a debounced refresh', () => {

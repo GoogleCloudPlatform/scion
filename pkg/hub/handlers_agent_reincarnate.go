@@ -385,7 +385,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// this exact claim instant, not rec.RequestedAt — the store stamps that
 	// a few ms later inside CreateAgentReincarnation, after the gate in the
 	// three delivery paths could already have started deferring messages.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt, requestedBy, &plan, targetGeneration)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
 		AgentID:    agent.ID,

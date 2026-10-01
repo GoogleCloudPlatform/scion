@@ -83,6 +83,12 @@ func (u *DevUser) ID() string { return u.id }
 // Type returns the identity type ("dev").
 func (u *DevUser) Type() string { return "dev" }
 
+// localAncestryProvenance reports that a dev user is a local user: the root
+// of its own ancestry chain.
+func (u *DevUser) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
 // Username returns the user's login name.
 func (u *DevUser) Username() string { return u.username }
 

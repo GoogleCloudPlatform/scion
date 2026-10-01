@@ -101,7 +101,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createProject(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -1190,7 +1190,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -2019,7 +2019,7 @@ func (s *Server) handleProjectByIDInternal(w http.ResponseWriter, r *http.Reques
 	case http.MethodDelete:
 		s.deleteProject(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -2062,7 +2062,7 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		case http.MethodPost:
 			s.createProjectAgent(w, r, project.ID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 
 	case ProjectAgentRouteRoot:
@@ -2075,7 +2075,7 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 		case http.MethodDelete:
 			s.deleteProjectAgent(w, r, project.ID, agentIDRaw)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 		}
 
 	default:
@@ -2442,7 +2442,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// (/api/v1/agents/{id}/messages/stream), matching handleAgentByID.
 
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

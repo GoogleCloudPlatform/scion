@@ -106,12 +106,53 @@ export function rootUserOf(agent: Agent): string | undefined {
   return chain && chain.length > 0 ? chain[0] : undefined;
 }
 
+/** Deterministic string ordering, used everywhere an id needs a stable tie-break. */
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * A signature that changes iff a layout input the forest/layout functions
+ * actually read would change: membership (add/remove), direct-parent
+ * structure (reparent, via ancestry's last entry), the root user a tree is
+ * grouped under in layoutForestWithUsers (ancestry's first entry — a
+ * separate input from the direct parent, and read only when `showUsers` is
+ * on, but included unconditionally so toggling `showUsers` after an
+ * ancestry-only change still invalidates correctly), name (sort order and
+ * label), collapse state, the show-users toggle, or orientation. Two agent
+ * lists that differ only in object identity or in fields outside this set
+ * (status, capabilities, messageability, etc.) produce the same signature.
+ * Callers use this to cache layout across status-only renders, pans, zooms
+ * and hovers, and to invalidate it exactly on the changes that affect
+ * topology or geometry.
+ *
+ * Sorted by ID before hashing so the signature is independent of the input
+ * array's order (e.g. after an SSE-triggered re-sort with no real change).
+ * Ties in `buildLineageForest`'s name sort break on ID (see `byName` below),
+ * so ID + parent + root user + name fully determines layout: nothing the
+ * layout depends on varies while producing the same signature.
+ */
+export function topologySignature(
+  agents: readonly Agent[],
+  collapsedIds: ReadonlySet<string>,
+  showUsers: boolean,
+  orientation: Orientation
+): string {
+  const rows = agents
+    .map((a) => [a.id, parentIdOf(a) ?? '', rootUserOf(a) ?? '', a.name] as const)
+    .sort((a, b) => compareIds(a[0], b[0]));
+  const collapsed = [...collapsedIds].sort();
+  return JSON.stringify({ rows, collapsed, showUsers, orientation });
+}
+
 /**
  * Builds the lineage forest. An agent is attached under its parent only when
  * the parent is another agent in the given set; otherwise it becomes a root
  * (its parent is a user, filtered out, or deleted). A visited guard keeps
- * malformed cyclic ancestry from hanging the layout: any agent not reachable
- * from a root is promoted to a root.
+ * malformed cyclic ancestry from hanging the layout: for each cycle among
+ * agents unreachable from any legitimate root, exactly one member (the
+ * lowest id) is promoted to a root, and the rest of that cycle — plus any
+ * ordinary descendants hanging off it — attach beneath it as usual.
  */
 export function buildLineageForest(agents: Agent[]): LineageNode[] {
   const byId = new Map<string, LineageNode>();
@@ -130,7 +171,13 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     }
   }
 
-  const byName = (a: LineageNode, b: LineageNode) => a.agent.name.localeCompare(b.agent.name);
+  // ID tie-break makes ordering a pure function of (id, name) — not of input
+  // array order — so equal-named siblings/roots always land in the same
+  // position regardless of history. This matters for the layout cache
+  // (topologySignature): the signature is order-independent, so the layout
+  // it keys must be too, or a cache hit can draw a stale ordering for ties.
+  const byName = (a: LineageNode, b: LineageNode) =>
+    a.agent.name.localeCompare(b.agent.name) || compareIds(a.agent.id, b.agent.id);
   for (const node of byId.values()) {
     node.children.sort(byName);
   }
@@ -138,8 +185,8 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
 
   // Walk the forest, assigning depths. Dropping already-visited children as
   // we go turns any malformed cyclic ancestry into plain tree edges instead
-  // of infinite recursion; nodes unreachable from a root (cycle members) are
-  // then promoted to roots.
+  // of infinite recursion; nodes still unreachable afterward are handled
+  // below by promoting one member per cycle.
   const visited = new Set<string>();
   const visit = (node: LineageNode, depth: number) => {
     if (visited.has(node.agent.id)) return;
@@ -149,10 +196,38 @@ export function buildLineageForest(agents: Agent[]): LineageNode[] {
     for (const child of node.children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
-  for (const node of byId.values()) {
-    if (!visited.has(node.agent.id)) {
-      roots.push(node);
-      visit(node, 0);
+  // Every unvisited node's parent exists and is itself unvisited (otherwise
+  // the node would already be visited above), so walking up from it must
+  // eventually repeat — that repeat is the cycle it hangs off, which may be
+  // itself or an ancestor further up a tail. Promote only that cycle's
+  // lowest-id member and let `visit` walk back down through it: this reaches
+  // every real descendant via its existing `children` entry, dropping no
+  // edge except the one into the promoted member. Starting points are
+  // processed in id order (not input order) so promoted roots are appended
+  // in a deterministic order, keeping the layout a pure function of
+  // topologySignature's inputs.
+  const unvisitedAscending = [...byId.values()]
+    .filter((n) => !visited.has(n.agent.id))
+    .sort((a, b) => compareIds(a.agent.id, b.agent.id));
+  for (const node of unvisitedAscending) {
+    if (visited.has(node.agent.id)) continue; // reached by an earlier promotion in this loop
+    const path: LineageNode[] = [];
+    const pathIndexById = new Map<string, number>();
+    let cur = node;
+    while (!pathIndexById.has(cur.agent.id)) {
+      pathIndexById.set(cur.agent.id, path.length);
+      path.push(cur);
+      cur = byId.get(parentIdOf(cur.agent)!)!; // guaranteed to exist and be unvisited; see above
+    }
+    // typed local: slice() accepts undefined, so a bare "!" is a lint no-op
+    const cycleStartIndex: number = pathIndexById.get(cur.agent.id)!;
+    const cycle = path.slice(cycleStartIndex);
+    const cycleRoot = cycle.reduce((min, n) =>
+      compareIds(n.agent.id, min.agent.id) < 0 ? n : min
+    );
+    if (!visited.has(cycleRoot.agent.id)) {
+      roots.push(cycleRoot);
+      visit(cycleRoot, 0);
     }
   }
 

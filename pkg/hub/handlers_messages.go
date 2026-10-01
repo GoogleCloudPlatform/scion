@@ -32,7 +32,7 @@ import (
 // Lists messages for the authenticated user.
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -196,7 +196,11 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	MethodNotAllowed(w)
+	if action == "read" {
+		MethodNotAllowed(w, http.MethodPost)
+	} else {
+		MethodNotAllowed(w, http.MethodGet)
+	}
 }
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.
@@ -206,7 +210,7 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 // who share read access to the same agent.
 func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -374,7 +378,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 // deployment with no additional configuration.
 func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

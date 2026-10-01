@@ -152,6 +152,13 @@ type ProjectProvider struct {
 	// no max_agents_per_broker definition exists, or resolution failed for
 	// this provider; a broker with no agents reports 0, not unset.
 	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker", "entitlement",
+	// "hub_default", "unlimited", or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch is off — AgentLimit is then informational only, not
+	// enforced on create). Empty when resolution didn't run or failed, the
+	// same conditions that leave AgentLimit and AgentCount unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // ProjectSettings represents project configuration settings.
