@@ -162,11 +162,43 @@ func applyAgentAttributeAndRelationshipFilters(filter *store.AgentFilter, query 
 }
 
 type ListAgentsResponse struct {
-	Agents       []AgentWithCapabilities `json:"agents"`
-	NextCursor   string                  `json:"nextCursor,omitempty"`
-	TotalCount   int                     `json:"totalCount"`
-	ServerTime   time.Time               `json:"serverTime"`
-	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+	Agents     []AgentWithCapabilities `json:"agents"`
+	NextCursor string                  `json:"nextCursor,omitempty"`
+	TotalCount int                     `json:"totalCount"`
+	// Sort and Dir echo the request's sort mode (design lists-graph.md 4.6).
+	// Both are omitted unless the request supplied "sort" (4.1, 4.6, N3):
+	// legacy-mode responses never set these.
+	Sort string `json:"sort,omitempty"`
+	Dir  string `json:"dir,omitempty"`
+	// Complete is set only when the request supplied "fit" (sorted mode): true
+	// iff the unphased candidate set had at most fit members, in which case
+	// Agents is its whole readable subset (design 4.6, 4.1 "fit"). A pointer
+	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
+	// complete: false".
+	Complete *bool `json:"complete,omitempty"`
+	// Stats is populated only when the request supplied "stats=1" (design
+	// 4.6). It is computed over the request filter with Phase cleared, kept
+	// label/scope/projectId/broker/includeDeleted, and (project user path)
+	// read-filtered the same way the page is.
+	Stats        *ListAgentsStats `json:"stats,omitempty"`
+	ServerTime   time.Time        `json:"serverTime"`
+	Capabilities *Capabilities    `json:"_capabilities,omitempty"`
+}
+
+// ListAgentsStats is the sorted-mode "stats" response block (design
+// lists-graph.md 4.6).
+type ListAgentsStats struct {
+	// Total is the exact readable, label(k=v)-filtered count, phase NOT
+	// applied (design 4.6, R2-B4).
+	Total int `json:"total"`
+	// Running is the count of phase == "running" among the same population,
+	// always present regardless of the request's own phase filter.
+	Running int `json:"running"`
+	// Agents is exactly the counted population as [id, phase] pairs. The
+	// project endpoint is already bounded by the 2,000 candidate ceiling
+	// (design 5.3), so it is never omitted here — the N6 >2000 omission rule
+	// applies only to the global endpoint (P2 scope).
+	Agents [][2]string `json:"agents"`
 }
 
 type CreateAgentRequest struct {

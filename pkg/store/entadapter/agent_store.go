@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
 // defaultAgentListLimit and maxAgentListLimit mirror the pagination bounds of
@@ -847,6 +849,96 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		result.Items = items
 	}
 	return result, nil
+}
+
+// CountAgents returns the number of agents matching filter, using the exact
+// predicate ListAgents applies for its own total count (agentFilterPredicates),
+// with no row loaded. It backs the sorted-mode candidate ceiling pre-check
+// (design lists-graph.md 5.3 step 0): a cheap COUNT before any member row is
+// read, so a candidate pool above the ceiling costs no more than one query.
+func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return 0, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	return query.Count(ctx)
+}
+
+// ListAgentMembers returns up to max agents matching filter, projected down
+// to the narrow AgentMember shape and ordered per the section-4.2 total
+// order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+//
+// The candidate set is bounded by the caller's ceiling check to at most a
+// couple thousand rows, so this fetches every matching row up to max (with
+// no ORDER BY at the SQL level — order does not matter for a candidate pool
+// this small, and comparing every row afterward with agentsort.SortRows
+// keeps exactly one implementation of the tie-break rules instead of asking
+// each dialect to reproduce it) and sorts them in Go.
+//
+// Every row is built by projecting a full decoded Agent down to AgentMember,
+// rather than a narrower SQL SELECT: it costs one extra JSON decode per
+// candidate row versus a column-level projection, but it guarantees
+// AgentMember.ToAgent() reconstructs a Resource that is byte-for-byte the
+// projection agentResource would read from the same row, which is the
+// property the non-waivable member/full equality gate (S6) exists to prove.
+// A follow-up may narrow the SELECT itself once that guarantee is
+// independently covered by a fixture that also exercises the SQL column
+// list, so a narrowed SELECT cannot silently drop a field agentResource
+// reads.
+func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	if max <= 0 {
+		max = defaultAgentListLimit
+	}
+	rows, err := query.Limit(max).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]store.AgentMember, 0, len(rows))
+	rowsForSort := make([]agentsort.Row, 0, len(rows))
+	for _, a := range rows {
+		sa := entAgentToStore(a)
+		m := store.AgentMember{
+			ID:                sa.ID,
+			OwnerID:           sa.OwnerID,
+			ProjectID:         sa.ProjectID,
+			Labels:            sa.Labels,
+			Ancestry:          sa.Ancestry,
+			Phase:             sa.Phase,
+			Created:           sa.Created,
+			Updated:           sa.Updated,
+			LastActivityEvent: sa.LastActivityEvent,
+		}
+		members = append(members, m)
+		rowsForSort = append(rowsForSort, agentsort.KeyFor(sortKey, m.ID, m.Created, m.Updated, m.LastActivityEvent))
+	}
+
+	// Sort members using the same permutation computed over rowsForSort, by
+	// sorting a slice of indices rather than re-deriving keys mid-sort.
+	idx := make([]int, len(members))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		return agentsort.Less(sortKey, dir, rowsForSort[idx[i]], rowsForSort[idx[j]])
+	})
+	ordered := make([]store.AgentMember, len(members))
+	for i, j := range idx {
+		ordered[i] = members[j]
+	}
+	return ordered, nil
 }
 
 // ListAgentsWithStaleNonTerminalReincarnationState is the agent-state
