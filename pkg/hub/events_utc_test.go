@@ -23,8 +23,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// TestChannelEventPublisher_AgentEventTimestampsAreInstantCorrect covers tz
-// task #1 (design §2.1.7, findings "Message SSE event"/"agent events" rows):
+// TestChannelEventPublisher_AgentEventTimestampsAreInstantCorrect covers
+// tz-refactor task 1 (design §2.1.7, findings "Message SSE event"/"agent
+// events" rows):
 // before the fix, events.go:491,502,534 formatted a non-UTC time.Time with a
 // layout ending in "Z07:00" without first converting to UTC. For a wall
 // clock in a zone ahead of UTC that prints the *local* digits followed by
@@ -34,7 +35,7 @@ import (
 // a formatting nit. This test proves instant equality survives a round trip
 // through the publisher under a non-UTC *time.Time location, which is what
 // callers hand these methods on a hub that has not pinned time.Local (e.g.
-// before U1's pin runs, or for any value sourced from a non-UTC location).
+// before the U1 pin runs, or for any value sourced from a non-UTC location).
 // Run this suite under TZ=Asia/Tokyo and TZ=Asia/Kathmandu (dev-common.md);
 // both exercise a zone whose offset would otherwise corrupt the instant.
 func TestChannelEventPublisher_AgentEventTimestampsAreInstantCorrect(t *testing.T) {

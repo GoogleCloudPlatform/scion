@@ -1,4 +1,4 @@
-# tz task #1: Pin server processes to UTC, embed tzdata, fix literal-`Z` sites
+# tz-refactor task 1: Pin server processes to UTC, embed tzdata, fix literal-`Z` sites
 
 **Date:** 2026-10-01
 **Branch:** `scion/tz-t1`
@@ -11,7 +11,7 @@ host happened to have. On a non-UTC host this leaked local offsets into logs,
 cron parsing, and — worse — a handful of call sites formatted a **local wall
 clock with a literal trailing `Z`**, which doesn't just mislabel the offset,
 it reports the **wrong instant**. See `design.md` §0/§2.1 and
-`impl-issues.md` task #1 for the full design context (tz-refactor, Option A
+`impl-issues.md` task 1 for the full design context (tz-refactor, Option A
 as decided).
 
 ## Changes
@@ -92,12 +92,12 @@ See the PR for the exact command output and `gh pr checks`.
 - `pkg/hub/events.go:637,669,811,833` and other sites that already call
   `.UTC()` before formatting with a fixed `.000Z`/`15:04:05.000` literal —
   these are correct instants today (not this bug class) and are not in
-  task #1's scope list.
-- `make time-literals` (the regression gate) is task #5 (U2d), landing after
-  U1 and U2 merge.
+  this task's scope list.
+- `make time-literals` (the regression gate) is tz-refactor task 5 (U2d),
+  landing after U1 and U2 merge.
 - The SQLite store boundary (DSN `_timezone=UTC`, ent hook, predicates) is
-  task #2 (U2a).
+  tz-refactor task 2 (U2a).
 
 ## Follow-ups noticed, not fixed here
 
-- None beyond what's already tracked in `impl-issues.md` tasks #2-#23.
+- None beyond what's already tracked in `impl-issues.md` tasks 2-23.

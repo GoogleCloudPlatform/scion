@@ -21,7 +21,7 @@ import "time"
 // This exists so every "format a time as a wire timestamp" call site goes
 // through one place: without it, it is easy to add .Format(...) and forget
 // the leading .UTC(), which silently mislabels a local wall clock with a
-// trailing "Z" or offset that does not match it (tz task #1, design §2.2).
+// trailing "Z" or offset that does not match it (tz-refactor task 1, design §2.2).
 // Both call sites it replaces — the GitHub App token expiry
 // (handlers_github_app_webhook.go) and the invite audit-log expires_at
 // (admin_invites.go) — used to call .Format directly, one of them (the

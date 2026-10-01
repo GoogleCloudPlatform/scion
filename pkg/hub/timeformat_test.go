@@ -19,11 +19,11 @@ import (
 	"time"
 )
 
-// TestFormatUTCTimestamp is the tz task #1 table test for the "literal
-// timestamp formatting" defect class (design §2.1.7/§2.2): a time.Time in a
-// non-UTC location, formatted without first converting to UTC, prints the
-// wrong instant under a trailing "Z" or "Z07:00". Each row below is one of
-// the sites task #1 fixes:
+// TestFormatUTCTimestamp is the tz-refactor task 1 table test for the
+// "literal timestamp formatting" defect class (design §2.1.7/§2.2): a
+// time.Time in a non-UTC location, formatted without first converting to
+// UTC, prints the wrong instant under a trailing "Z" or "Z07:00". Each row
+// below is one of the sites this task fixes:
 //   - "github token expiry" is handlers_github_app_webhook.go:808
 //     (previously .Format("2006-01-02T15:04:05Z"), no .UTC() at all).
 //   - "invite audit-log expires_at" is admin_invites.go:177 (previously
