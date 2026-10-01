@@ -220,11 +220,11 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}},
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
-	// AgentRouteActionKeys has no ops entry, like message and set_message_mode
-	// above: the keys action has no catalog operation; it is authorized by
-	// authorizeAgentKeys, called from its own early-branch choke point in
-	// handleAgentAction, not by the generic authz block this table's ops
-	// mapping feeds.
+	// AgentRouteActionKeys has no ops entry, like message above: the keys
+	// action is routed and authorized by its own early-branch choke point
+	// (authorizeAgentKeys in handleAgentAction), not by the generic authz
+	// block this table's ops mapping feeds. The keys action has no catalog
+	// operation.
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
 
 	// --- /api/v1/projects/{projectId}/agents ---
