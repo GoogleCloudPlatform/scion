@@ -58,9 +58,13 @@ type KeysAuthzDecision struct {
 // authorizeAgentKeys is the single authorization gate for the agent-keys
 // operation (contract §3 "Authorization"). It maps decision 2's initial
 // policy — the route action is not a new independently granted permission —
-// onto the existing attach authority, with exact parity to
-// authorizeAgentLifecycle(ActionAttach), the same check the PTY endpoint
-// already enforces (pty_handlers.go):
+// onto the existing attach authority for user and dev callers, who get
+// attach parity through the same AK1 kernel CheckAccess(ActionAttach) call
+// the PTY endpoint uses. The agent-credential branch below checks
+// ScopeAgentLifecycle plus same-project membership and does not call
+// Decide; relationship evaluation for agent callers is required before
+// keys execution is wired, tracked in ptone/scion#2460 (keys contract
+// Phase 5):
 //
 //   - Human session / user access token: ActionAttach on the target agent,
 //     evaluated through the same AK1 kernel CheckAccess call every other
