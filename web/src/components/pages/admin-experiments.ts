@@ -392,6 +392,7 @@ export class ScionAdminExperiments extends LitElement {
           : nothing}
         <div class="row-controls">
           <sl-switch
+            aria-label=${`Enable ${exp.title}`}
             ?checked=${exp.enabled}
             ?disabled=${this.pending || this.malformed}
             @sl-change=${(): void => {

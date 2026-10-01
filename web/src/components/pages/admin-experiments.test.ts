@@ -171,7 +171,9 @@ describe('scion-admin-experiments', () => {
     expect(text).toContain('Opens agent terminals');
     const link = query(element, 'a[href*="github.com"]');
     expect(link?.getAttribute('href')).toBe('https://github.com/ptone/scion/issues/1662');
-    expect(query(element, 'sl-switch')).toBeTruthy();
+    const switchEl = query(element, 'sl-switch');
+    expect(switchEl).toBeTruthy();
+    expect(switchEl?.getAttribute('aria-label')).toBe('Enable Persistent terminal workspace');
   });
 
   it('shows the empty state when no experiments are registered', async () => {
