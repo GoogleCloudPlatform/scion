@@ -247,3 +247,60 @@ deviation.
 
 New head after this round: `e9f9585f2` (fast-forward push, no rebase
 needed). Round-2 review is picking this up.
+
+## Round 2 review response
+
+Verdict: REQUEST CHANGES (1 blocking, 5 non-blocking, 1 nit). S6, S9, A3
+passed; A15 failed.
+
+**B-1 (blocking, A15 FAIL):** the round-1 B3 fix (clamp `limit` to 500) kept
+a single request's page from growing unbounded, but at limit=500 a paged
+request still costs `5+n+7*limit` decisions -- over the 4,005 A15 ceiling
+for any n > 500 with no race at all (4,205 at n=700, the round-1 regression
+test's own pinned value; 5,505 at n=2,000, the reviewer's probe). The design
+author ruled **erratum E2** (lists-graph-errata.md): bound the paged
+branch's actual page size to `P_eff = min(limit, floor((4000-n)/7))`, where
+`n` is the step-1 binding count (`len(members)`), not the step-0 COUNT.
+`P_eff` deliberately is not part of the cursor binding, so `n` can differ
+page to page without invalidating a cursor; the complete branch is
+unchanged (ignores `limit`, costs `5+n+7R`). Implemented as
+`effectivePagedPageSize`. The old `TestListProjectAgentsSorted_LimitClampedTo500`
+(which pinned the now-known-wrong 4,205) is replaced with three tests
+matching erratum E2's own list: an exact page-size/decision-count table at
+the design's n values (500, 501, 700, 1200, 2000; all ≤ 4,005), a limit=500
+walk at n=2,000 with R=n and R=400 (every readable agent returned exactly
+once despite P_eff < limit), and an all-page-items-raced variant (n=501,
+4,498 decisions, inside the 4,504 raced exception).
+
+**N-1..N-5 and nit-1 (non-blocking, all closed, per CLAUDE.md "non-blocking
+does not mean optional"):**
+- N-1: `countingAgentStore`'s `getByIDsCalls` assertion was vacuous after
+  round 1's B4 fix moved the full-row read off `GetAgentsByIDs`. Added
+  `ListAgents` call/IDs tracking and a real assertion (exactly one call per
+  request, IDs exactly the page).
+- N-2: the S6 fixture's skip list was missing `HarnessConfig` (same
+  "enriched, not persisted" field class as the three it did list). Added it,
+  plus `assertNonSkippedFieldsNonZero` so the fixture proves its own
+  coverage rather than trusting a comment.
+- N-3: extended the E1 byte-identity test to invalid values, a cursor
+  already in play (raw-byte comparison including the emitted
+  nextCursor/binding), and the global endpoint.
+- N-4: made the nil-vs-empty end-to-end test table-driven over
+  {Labels, Ancestry} x {nil->empty, empty->nil}, all 4 cases at exactly 13
+  decisions.
+- N-5: added a walk using a non-owner member identity with a strict
+  readable subset (R=15/n=40), agents across 3 projects (cross-project-leak
+  noise), mixed phases, an empty-value label, checked against a reference
+  order built independently of `ListAgentMembers` (agentsort.Less/SortRows
+  over `GetAgentsByIDs`-fetched rows).
+- nit-1: fixed together with B-1 (the clamp comment's A15 claim was wrong;
+  now points to `effectivePagedPageSize`/erratum E2).
+
+Verification: `go build ./...` pass; `go vet ./pkg/hub/... ./pkg/store/...`
+pass; `go test -p 2 -count=1 ./pkg/hub/... -run
+'TestListProjectAgentsSorted|TestListProjectAgentsLegacy|TestResourceEqual|TestMergeCapabilities'
+-v` -- 62 subtests, 0 failures, including every new/changed test this round.
+
+New head after this round: `b4dedcc7e487cf2a6ace65d63c0cca88fb4dfa41`
+(fast-forward push, no rebase needed). Full disposition table and test
+output: gs://scion-xproject-exchange/slow-list/reports/lists-p1b-dev.md.
