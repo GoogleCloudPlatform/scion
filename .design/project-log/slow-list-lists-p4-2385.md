@@ -309,8 +309,10 @@ Disposition of the FYIs and the deferred optional item:
   on that one agent's own next delta, instead of on any agent's next flush
   as main's full rebuild happened to provide. The seed-epoch machinery
   already used for drains is the natural fix once these load paths adopt
-  it. Not blocking: the design explicitly removes full rebuilds. Noted in
-  the PR body as a known limitation.
+  it. Not blocking: the design explicitly removes full rebuilds. **Decided
+  by ptone (2026-10-01 23:05Z): postponed to the list-window phase,
+  tracked as `ptone/scion#2560`.** Noted in the PR body as a known
+  limitation referencing that issue.
 - **F1** (paged-fetcher page-shortening edge case): no action. Dropping a
   tombstoned row can shorten a server page, which can make the "empty page
   i>0 steps back" rule step back one page early if that page held only the
