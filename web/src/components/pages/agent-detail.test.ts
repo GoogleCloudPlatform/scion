@@ -31,26 +31,45 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 /** Stand-in for the global stateManager: only the surface agent-detail.ts uses. */
 class FakeStateManager extends EventTarget {
   private agentsById = new Map<string, { id: string }>();
+  /** Mirrors the real state manager's tombstone set (state.ts `deletedAgentIds`). */
+  private deletedIds = new Set<string>();
   setAgent(agent: { id: string }): void {
     this.agentsById.set(agent.id, agent);
+    this.deletedIds.delete(agent.id);
   }
+  /** Prune a stale row without a tombstone (mirrors the real `removeAgent`). */
   removeAgent(id: string): void {
+    this.agentsById.delete(id);
+  }
+  /** Simulate a real SSE `deleted` event: tombstone, then remove. */
+  deleteAgent(id: string): void {
+    this.deletedIds.add(id);
     this.agentsById.delete(id);
   }
   getAgent(id: string): { id: string } | undefined {
     return this.agentsById.get(id);
+  }
+  getDeletedAgentIds(): Set<string> {
+    return this.deletedIds;
   }
   getProject(): undefined {
     return undefined;
   }
   setScope(): void {}
   seedAgents(agents: Array<{ id: string }>): void {
-    for (const a of agents) this.agentsById.set(a.id, a);
+    for (const a of agents) {
+      if (!this.deletedIds.has(a.id)) this.agentsById.set(a.id, a);
+    }
   }
   seedProjects(): void {}
   /** Fire the same coalesced event the real state manager dispatches after a flush. */
   notifyAgentsUpdated(): void {
     this.dispatchEvent(new CustomEvent('agents-updated'));
+  }
+  /** Test-only: reset between specs so state never leaks across them. */
+  reset(): void {
+    this.agentsById.clear();
+    this.deletedIds.clear();
   }
 }
 const fakeStateManager = new FakeStateManager();
@@ -81,13 +100,24 @@ vi.mock('../../client/main.js', () => ({
 }));
 
 // Auto-confirm every showConfirm() call (the delete and force-delete prompts)
-// so the action proceeds without a real dialog in the test DOM.
+// so the action proceeds without a real dialog in the test DOM. Individual
+// tests override this with `mockResolvedValueOnce` to exercise a decline.
 vi.mock('../shared/confirm-dialog.js', () => ({
   showConfirm: vi.fn(() => Promise.resolve(true)),
 }));
 
+// showToast() creates a real `sl-alert` and calls its `.toast()` method,
+// which only exists once Shoelace's element definition is registered. This
+// file never loads that definition (it would pull in the real component
+// tree), so the N1 failed-delete/declined-force-delete tests — which hit
+// the error path — mock the util instead, the same way api.js is mocked.
+vi.mock('../../utils/toast.js', () => ({
+  showToast: vi.fn(),
+}));
+
 await import('./agent-detail.js');
 import { DELETE_REDIRECT_DELAY_MS } from './agent-detail.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
 type ScionPageAgentDetail = import('./agent-detail.js').ScionPageAgentDetail;
 type Agent = import('../../shared/types.js').Agent;
 
@@ -149,21 +179,30 @@ async function mount(
   return el;
 }
 
-function stubLocation(): { assignedHref: string | undefined } {
-  const tracker = { assignedHref: undefined as string | undefined };
+let originalLocationDescriptor: PropertyDescriptor | undefined;
+
+/** Stubbed `pathname` is mutable so tests can simulate navigating elsewhere. */
+function stubLocation(): { assignedHref: string | undefined; pathname: string } {
+  originalLocationDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
+  const state = { assignedHref: undefined as string | undefined, pathname: `/agents/${AGENT_ID}` };
   Object.defineProperty(window, 'location', {
     configurable: true,
     value: {
-      pathname: `/agents/${AGENT_ID}`,
+      get pathname() {
+        return state.pathname;
+      },
+      set pathname(v: string) {
+        state.pathname = v;
+      },
       get href() {
-        return tracker.assignedHref ?? '';
+        return state.assignedHref ?? '';
       },
       set href(v: string) {
-        tracker.assignedHref = v;
+        state.assignedHref = v;
       },
     },
   });
-  return tracker;
+  return state;
 }
 
 describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
@@ -171,7 +210,8 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
   let navClickListener: (e: Event) => void;
 
   beforeEach(() => {
-    fakeStateManager.removeAgent(AGENT_ID);
+    fakeStateManager.reset();
+    vi.mocked(showConfirm).mockClear();
     navClicks = [];
     navClickListener = (e: Event) => {
       navClicks.push((e as CustomEvent<{ path: string }>).detail);
@@ -183,6 +223,11 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     document.removeEventListener('nav-click', navClickListener);
     document.body.innerHTML = '';
     vi.useRealTimers();
+    // N2: restore window.location rather than leaving the stub in place.
+    if (originalLocationDescriptor) {
+      Object.defineProperty(window, 'location', originalLocationDescriptor);
+      originalLocationDescriptor = undefined;
+    }
   });
 
   it('delete: does not assign location.href and requests SPA navigation', async () => {
@@ -237,9 +282,10 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     const el = await mount(makeAgent());
     fakeStateManager.setAgent({ id: AGENT_ID });
 
-    // Simulate the SSE `deleted` event: the real state manager removes the
-    // agent from its map before dispatching the coalesced 'agents-updated'.
-    fakeStateManager.removeAgent(AGENT_ID);
+    // Simulate the SSE `deleted` event: the real state manager tombstones
+    // the ID and removes it from its map before dispatching the coalesced
+    // 'agents-updated'.
+    fakeStateManager.deleteAgent(AGENT_ID);
     fakeStateManager.notifyAgentsUpdated();
     await el.updateComplete;
 
@@ -254,6 +300,7 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
   });
 
   it('shows the deleted state before the SPA redirect fires (fake timers)', async () => {
+    stubLocation();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const el = await mount(makeAgent());
     const internals = el as unknown as {
@@ -277,5 +324,231 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     vi.advanceTimersByTime(1);
     await Promise.resolve();
     expect(navClicks).toEqual([{ path: '/agents' }]);
+  });
+
+  // --- R1: absence from stateManager is not the same as "deleted" ---------
+
+  it('R1: an agents-updated flush during page load (project fetch held) does not show the deleted state', async () => {
+    let resolveProject!: (value: Response) => void;
+    const heldProject = new Promise<Response>((resolve) => {
+      resolveProject = resolve;
+    });
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: string) => {
+      if (url === '/api/v1/projects/proj-1') return heldProject;
+      return Promise.resolve({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({}),
+      } as unknown as Response);
+    });
+
+    const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail & {
+      pageData: unknown;
+      agentId: string;
+    };
+    el.agentId = AGENT_ID;
+    el.pageData = {
+      path: `/agents/${AGENT_ID}`,
+      title: 'Agent',
+      data: makeAgent({ projectId: 'proj-1' }),
+    };
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // loadData is still awaiting the held project fetch, so this page has
+    // not reseeded stateManager with its own agent yet — mirrors setScope()
+    // clearing the map ahead of that reseed.
+    expect((el as unknown as { loading: boolean }).loading).toBe(true);
+    expect(fakeStateManager.getAgent(AGENT_ID)).toBeUndefined();
+
+    // An unrelated flush (e.g. a status delta for any agent in the
+    // project) arrives in that window.
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+    expect(navClicks).toEqual([]);
+
+    resolveProject(okJson({ id: 'proj-1', name: 'Proj One' }));
+    await vi.waitFor(() => {
+      expect((el as unknown as { loading: boolean }).loading).toBe(false);
+    });
+  });
+
+  it('R1: an unrelated prune (removeAgent without a tombstone) does not show the deleted state', async () => {
+    const el = await mount(makeAgent());
+    fakeStateManager.setAgent({ id: AGENT_ID });
+
+    // A stale-row prune (chat.ts's use of removeAgent) with no deletion.
+    fakeStateManager.removeAgent(AGENT_ID);
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+    expect(navClicks).toEqual([]);
+  });
+
+  // --- R2: the redirect must not fire off-route or while hidden -----------
+
+  it('R2: an SSE delete while hidden behind /terminals does not pull the user out of the terminal workspace', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const tracker = stubLocation();
+    const el = await mount(makeAgent());
+    fakeStateManager.setAgent({ id: AGENT_ID });
+
+    // renderRoute (main.ts) keeps this page connected-but-hidden behind
+    // /terminals rather than disconnecting it.
+    tracker.pathname = '/terminals';
+
+    fakeStateManager.deleteAgent(AGENT_ID);
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(true);
+
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    // No stray SPA navigation pulls the user out of /terminals.
+    expect(navClicks).toEqual([]);
+    // The deleted state still offers a way out, instead of "Redirecting…" forever.
+    expect(el.shadowRoot?.querySelector('[data-testid="agent-deleted-link"]')).not.toBeNull();
+  });
+
+  it('R2: opening /terminals within the 1s delete-redirect window suppresses the redirect', async () => {
+    const tracker = stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+
+    // The user opens the terminal workspace before the 1s delay elapses.
+    tracker.pathname = '/terminals';
+
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(tracker.assignedHref).toBeUndefined();
+    expect(navClicks).toEqual([]);
+  });
+
+  // --- N1: guards that already existed, now pinned by a test --------------
+
+  it('N1: a failed delete (non-502/503) does not enter the deleted state', async () => {
+    stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({}),
+      } as unknown as Response)
+    );
+
+    await internals.handleAction('delete');
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+    expect(navClicks).toEqual([]);
+  });
+
+  it('N1: a declined force-delete does not enter the deleted state', async () => {
+    stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: false,
+        status: 502,
+        json: () => Promise.resolve({}),
+      } as unknown as Response)
+    );
+    // Confirm the delete prompt, then decline the force-delete prompt.
+    vi.mocked(showConfirm).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await internals.handleAction('delete');
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+    expect(navClicks).toEqual([]);
+  });
+
+  it('N1: a local delete success followed by an SSE delete produces exactly one nav-click', async () => {
+    stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+
+    // An SSE delete for the same agent arrives before the redirect fires;
+    // the `deleted` guard must make this a no-op.
+    fakeStateManager.deleteAgent(AGENT_ID);
+    fakeStateManager.notifyAgentsUpdated();
+    await el.updateComplete;
+
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(navClicks).toEqual([{ path: '/agents' }]);
+  });
+
+  it('N1: removing the element during the delay produces no nav-click', async () => {
+    stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+
+    el.remove();
+
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(navClicks).toEqual([]);
+  });
+
+  // --- N3: reconnecting while deleted must not strand the page -----------
+
+  it('N3: disconnecting and reconnecting while deleted leaves a way out, with no stray timer', async () => {
+    stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+    await el.updateComplete;
+
+    el.remove(); // disconnectedCallback clears the pending redirect timer
+    document.body.appendChild(el); // reconnected; no timer re-arms
+    await el.updateComplete;
+
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(true);
+    expect(el.shadowRoot?.querySelector('[data-testid="agent-deleted-link"]')).not.toBeNull();
+
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS * 10);
+    await Promise.resolve();
+    expect(navClicks).toEqual([]);
   });
 });

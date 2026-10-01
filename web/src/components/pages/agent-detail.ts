@@ -667,10 +667,20 @@ export class ScionPageAgentDetail extends LitElement {
       this.agent = { ...this.agent, ...updatedAgent };
       return;
     }
-    // The agent was present and is now gone from state — it was removed by
-    // an SSE `deleted` event (deleted elsewhere). Show the same deleted
-    // state and SPA-redirect as a delete initiated from this page.
-    if (!updatedAgent && this.agent && !this.deleted) {
+    // The agent is missing from stateManager's map. That alone does not
+    // mean it was deleted: setScope() clears the map before this page's
+    // own reseed lands at the end of loadData (which awaits the project,
+    // auth/me, notification and subscription fetches first), and
+    // removeAgent() prunes stale rows without a tombstone. Either way, an
+    // unrelated `agents-updated` flush during that window would otherwise
+    // be read as "this agent was deleted". Key on the authoritative
+    // tombstone instead of absence.
+    if (
+      !updatedAgent &&
+      this.agent &&
+      !this.deleted &&
+      stateManager.getDeletedAgentIds().has(this.agentId)
+    ) {
       this.showDeletedStateThenRedirect();
     }
   }
@@ -683,11 +693,31 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
+   * True while this element is still attached AND the app's current route
+   * is still this agent's detail page. Guards the deferred SPA-redirect in
+   * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
+   * previous page connected-but-hidden behind `/terminals`, so
+   * `isConnected` alone cannot distinguish "visible" from "hidden behind
+   * another route". An `endsWith` check (rather than importing
+   * `stripBasePath` from main.ts, which is out of scope for this fix)
+   * tolerates a reverse-proxy base path.
+   */
+  private isOnThisAgentRoute(): boolean {
+    if (!this.isConnected || typeof window === 'undefined') return false;
+    return window.location.pathname.endsWith(`/agents/${this.agentId}`);
+  }
+
+  /**
    * Show a brief client-side-only "deleted" state, then SPA-navigate to the
    * project page (or /agents if there is no project). Used both for a
    * delete/force-delete initiated from this page and for an SSE `deleted`
    * event removing this agent elsewhere. The timer is cancellable so a
-   * disconnect (or a test using fake timers) does not leak it.
+   * disconnect (or a test using fake timers) does not leak it. The redirect
+   * itself only fires while this page is still the active route — see
+   * `isOnThisAgentRoute` — so it never pulls the user out of `/terminals`.
+   * When the redirect is skipped (or the element is disconnected and
+   * reconnected with no timer left to fire), `renderDeletedState` still
+   * offers a link out instead of leaving the page on "Redirecting…" forever.
    */
   private showDeletedStateThenRedirect(): void {
     if (this.deleted) return;
@@ -695,7 +725,9 @@ export class ScionPageAgentDetail extends LitElement {
     const target = this.project ? `/projects/${this.project.id}` : '/agents';
     this.deleteRedirectTimer = setTimeout(() => {
       this.deleteRedirectTimer = null;
-      this.navigateViaSpa(target);
+      if (this.isOnThisAgentRoute()) {
+        this.navigateViaSpa(target);
+      }
     }, DELETE_REDIRECT_DELAY_MS);
   }
 
@@ -2614,13 +2646,22 @@ export class ScionPageAgentDetail extends LitElement {
    * Brief client-side-only state shown after a successful delete (or an
    * SSE `deleted` event for this agent), before the SPA redirect fires.
    * Action buttons are not rendered here, so there is nothing left to
-   * click on the way out.
+   * click on the way out. The link covers the cases where the timer-driven
+   * redirect is skipped or never re-arms — hidden behind `/terminals`
+   * (see `isOnThisAgentRoute`), or a disconnect/reconnect while deleted —
+   * so the page never strands the user on "Redirecting…" indefinitely.
    */
   private renderDeletedState() {
+    const target = this.project ? `/projects/${this.project.id}` : '/agents';
+    const targetLabel = this.project ? `Go to ${this.project.name}` : 'Go to Agents';
     return html`
       <div class="loading-state" data-testid="agent-deleted-state">
         <sl-icon name="trash"></sl-icon>
         <p>Agent deleted. Redirecting…</p>
+        <a href="${target}" class="back-link" data-testid="agent-deleted-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          ${targetLabel}
+        </a>
       </div>
     `;
   }
