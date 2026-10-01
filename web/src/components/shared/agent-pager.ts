@@ -30,8 +30,9 @@ import { customElement, property } from 'lit/decorators.js';
 
 export type AgentPagerTotal = number | { loaded: number; capped: true };
 
-const PAGE_SIZES = [25, 50, 100] as const;
-export type AgentPagerPageSize = (typeof PAGE_SIZES)[number];
+/** Exported so the host (the single owner of the persisted value, round 1 review B4) can validate a stored size against the same source of truth. */
+export const AGENT_PAGER_PAGE_SIZES = [25, 50, 100] as const;
+export type AgentPagerPageSize = (typeof AGENT_PAGER_PAGE_SIZES)[number];
 
 @customElement('scion-agent-pager')
 export class ScionAgentPager extends LitElement {
@@ -66,19 +67,16 @@ export class ScionAgentPager extends LitElement {
   @property({ type: Boolean })
   showChip = false;
 
-  /** localStorage key for the persisted page size; empty disables persistence. */
+  /**
+   * localStorage key to persist a page-size change to; empty disables
+   * persistence. This component is otherwise fully controlled (round 1
+   * review B4): it never reads storage itself on connect, so the host is
+   * the single source of truth for `pageSize` — including the value used
+   * for the first request's `limit`, which only the host can know about
+   * before this component even exists.
+   */
   @property({ type: String })
   storageKey = '';
-
-  override connectedCallback(): void {
-    super.connectedCallback();
-    if (this.storageKey) {
-      const stored = Number(localStorage.getItem(this.storageKey));
-      if (PAGE_SIZES.includes(stored as AgentPagerPageSize)) {
-        this.pageSize = stored as AgentPagerPageSize;
-      }
-    }
-  }
 
   static override styles = css`
     :host {
@@ -176,7 +174,7 @@ export class ScionAgentPager extends LitElement {
               Number((e.target as HTMLElement & { value: string }).value) as AgentPagerPageSize
             )}
         >
-          ${PAGE_SIZES.map(
+          ${AGENT_PAGER_PAGE_SIZES.map(
             (size) => html`<sl-option value=${String(size)}>${size} / page</sl-option>`
           )}
         </sl-select>

@@ -190,6 +190,42 @@ describe('agent-sort — W1: moved comparator matches both pre-change inline blo
     }
   }
 
+  describe('createdAt/updatedAt legacy fallback (round 1 review N6)', () => {
+    // project-detail.ts's pre-change comparator fell back to createdAt/
+    // updatedAt when created/updated were absent; agents.ts's did not. The
+    // main pairwise loop above never sets these fields (matching every real
+    // API response, per the comment on `Agent` in ./types.ts), so it never
+    // actually exercises that fallback branch. These agents do, and are
+    // compared against `projectDetailCompare` only — `agentsPageCompare`
+    // must keep the fields unset, which it already does by construction.
+    const fallbackRand = mulberry32(7);
+    const fallbackAgents: Agent[] = Array.from({ length: 24 }, (_, i) => {
+      const a = genAgent(fallbackRand, i);
+      const { created, updated, ...rest } = a;
+      return {
+        ...rest,
+        createdAt: created,
+        updatedAt: updated,
+      } as Agent;
+    });
+
+    for (const field of ['created', 'updated'] as const) {
+      for (const dir of DIRS) {
+        it(`agentCompare matches project-detail.ts's createdAt/updatedAt fallback for ${field}/${dir}`, () => {
+          for (let i = 0; i < fallbackAgents.length; i++) {
+            for (let j = 0; j < fallbackAgents.length; j++) {
+              expect(
+                Math.sign(agentCompare(fallbackAgents[i], fallbackAgents[j], field, dir))
+              ).toBe(
+                Math.sign(projectDetailCompare(fallbackAgents[i], fallbackAgents[j], field, dir))
+              );
+            }
+          }
+        });
+      }
+    }
+  });
+
   it('is a stable sort: ties preserve created-desc, id-desc REST order (design §4.2)', () => {
     const tied: Agent[] = [
       {
@@ -257,5 +293,13 @@ describe('agent-sort — serverOrderCompare (design §4.2 total order)', () => {
     const b = { ...base, id: 'aaa', updated: 'same', created: 'same' } as Agent;
     expect(serverOrderCompare(a, b, 'desc')).toBeLessThan(0);
     expect(serverOrderCompare(a, b, 'asc')).toBeLessThan(0);
+  });
+
+  it('is reflexive: the same id (identical key and created) compares equal to itself (round 1 review N5)', () => {
+    const a = { ...base, id: 'same-id', updated: 'k', created: 'c' } as Agent;
+    const b = { ...base, id: 'same-id', updated: 'k', created: 'c' } as Agent;
+    expect(serverOrderCompare(a, b, 'desc')).toBe(0);
+    expect(serverOrderCompare(a, b, 'asc')).toBe(0);
+    expect(serverOrderCompare(a, a, 'desc')).toBe(0);
   });
 });

@@ -36,7 +36,7 @@ export type SortDir = 'asc' | 'desc';
  * zero-time sentinel (`0001-...`), otherwise `updated` (falling back to the
  * legacy `updatedAt` field, as project-detail.ts does today).
  */
-function updatedKey(a: Agent): string {
+export function updatedKey(a: Agent): string {
   return a.lastActivityEvent && !a.lastActivityEvent.startsWith('0001')
     ? a.lastActivityEvent
     : a.updated || a.updatedAt || '';
@@ -103,6 +103,7 @@ export function serverOrderCompare(a: Agent, b: Agent, dir: SortDir): number {
     // created DESC, regardless of dir.
     return ac < bc ? 1 : -1;
   }
+  if (a.id === b.id) return 0; // reflexive (N5, round 1 review): same id is never "less than" itself.
   // id DESC, regardless of dir.
   return a.id < b.id ? 1 : -1;
 }

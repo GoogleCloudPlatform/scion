@@ -60,6 +60,8 @@ import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/agent-message-viewer.js';
 import '../shared/agent-pager.js';
+import { AGENT_PAGER_PAGE_SIZES } from '../shared/agent-pager.js';
+import type { AgentPagerPageSize } from '../shared/agent-pager.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import {
@@ -93,6 +95,7 @@ interface SortedAgentsResponse {
 
 // User-level (not per-project) sticky preference for the agents section height.
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
+const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
@@ -239,12 +242,25 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private sortedRefusedForLabel: string | null = null;
 
+  /** `committedLabel`'s value just before a label commit, so a non-OK response can restore it (round 1 review N3) instead of leaving every later request re-sending a rejected label. */
+  private labelBeforeCommit = '';
+
+  /** Bumped at the start of every page-level agents load; checked after each `await` so an older trigger's response can never overwrite a newer one (round 1 review B5). */
+  private agentsLoadGen = 0;
+
+  /** Aborts whatever page-level agents request (not the window's own page fetches) was still in flight when a new trigger starts (round 1 review B5). */
+  private agentsAbortController: AbortController | null = null;
+
   /**
-   * Page size for the list view's window (design Q4; persisted by
-   * `<scion-agent-pager>` itself via `storageKey`).
+   * Page size for the list view's window (design Q4), persisted under
+   * `scion-pagesize-project-agents`. Read once in `connectedCallback`
+   * (round 1 review B4) — `<scion-agent-pager>` is a controlled component
+   * and does not read storage itself, so this is the single source of
+   * truth both for the first request's `limit` and for the pager's
+   * rendered value.
    */
   @state()
-  private pagerPageSize = 25;
+  private pagerPageSize: AgentPagerPageSize = 25;
 
   /**
    * Whether the list view currently has valid window data (small or paged)
@@ -263,7 +279,10 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * The list view's window (design §4.3, §6.1). P1c implements only the
    * small and paged states (design §11); held and capped land in P5 with
-   * `agent-drain.ts`.
+   * `agent-drain.ts`. The small state reads `this.agents` live through
+   * `getHeldAgents` rather than a copy (round 1 review B1), so an SSE
+   * update applied by `onAgentsUpdated` is visible immediately with no
+   * re-adoption step.
    */
   private agentWindow = new AgentListWindow({
     viewState: {
@@ -273,8 +292,10 @@ export class ScionPageProjectDetail extends LitElement {
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
     },
+    getProjectId: () => this.projectId,
     fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
     getAgent: (id: string) => stateManager.getAgent(id),
+    getHeldAgents: () => this.agents,
   });
 
   private boundOnWindowChange = () => {
@@ -291,7 +312,14 @@ export class ScionPageProjectDetail extends LitElement {
     this.agentWindow.markResync();
   };
 
-  /** "Agents"/"Running" stats and Stop-all visibility: from `this.agents` normally, or the member index while paged (design §6.2, §11 P1c). */
+  /**
+   * "Agents"/"Running" stats and Stop-all visibility: the member index
+   * while genuinely paged, or `this.agents` otherwise (design §6.2, §11
+   * P1c). Gated on `state !== 'paged'`, not on any particular non-paged
+   * value (round 1 review B2) — `this.agents` is correct for `'small'`
+   * whether it holds a complete fit/legacy set or a truncated legacy one,
+   * exactly as grid/tree already render it.
+   */
   private get agentStats(): { total: number; running: number } {
     if (this.agentWindow.state === 'paged') {
       return this.agentWindow.stats;
@@ -1083,18 +1111,25 @@ export class ScionPageProjectDetail extends LitElement {
       }
     }
 
+    // Read the persisted page size (round 1 review B4) before the window's
+    // view state is synced and the first request is sent, so both the
+    // request's `limit` and the pager's rendered size start out correct —
+    // `<scion-agent-pager>` is a controlled component and no longer reads
+    // storage itself.
+    const storedPageSize = Number(localStorage.getItem(PAGER_PAGE_SIZE_STORAGE_KEY));
+    if (AGENT_PAGER_PAGE_SIZES.includes(storedPageSize as AgentPagerPageSize)) {
+      this.pagerPageSize = storedPageSize as AgentPagerPageSize;
+    }
+
     // Sync the window's view state with the persisted values read above,
     // before the initial load (design §6.3).
-    this.agentWindow.setViewState(
-      {
-        phaseFilter: this.phaseFilter,
-        label: this.labelFilter,
-        sortField: this.sortField,
-        sortDir: this.sortDir,
-        pageSize: this.pagerPageSize,
-      },
-      { refetchIfPaged: false }
-    );
+    this.agentWindow.setViewState({
+      phaseFilter: this.phaseFilter,
+      label: this.labelFilter,
+      sortField: this.sortField,
+      sortDir: this.sortDir,
+      pageSize: this.pagerPageSize,
+    });
 
     void this.loadData();
     void this.loadHubProjectCapabilities();
@@ -1453,9 +1488,32 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
+   * Starts a new page-level agents load: bumps the stale-response guard
+   * (round 1 review B5 — two overlapping triggers, e.g. a label commit
+   * racing a lifecycle refresh, must not let the older response win) and
+   * aborts whatever page-level request was still in flight. Returns the
+   * generation to check after every `await` and the signal to pass to
+   * `apiFetch`. Does not apply to the window's own page fetches
+   * (`fetchAgentsPage`), which already guard themselves with their own
+   * generation counter.
+   */
+  private beginAgentsLoad(): { gen: number; signal: AbortSignal } {
+    this.agentsAbortController?.abort();
+    const controller = new AbortController();
+    this.agentsAbortController = controller;
+    const gen = ++this.agentsLoadGen;
+    return { gen, signal: controller.signal };
+  }
+
+  private isStaleAgentsLoad(gen: number): boolean {
+    return gen !== this.agentsLoadGen;
+  }
+
+  /**
    * The project page's single request-choosing function (design §4.3,
    * §11 P1c). Called exactly once per trigger by `loadData` and
-   * `fetchAndMergeAgents`.
+   * `fetchAndMergeAgents`, and by `syncAgentsForViewState` for a view-state
+   * change that needs a fresh paged request.
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
     const label = this.committedLabel.trim();
@@ -1463,6 +1521,8 @@ export class ScionPageProjectDetail extends LitElement {
       await this.loadLegacyAgents(trigger);
       return;
     }
+
+    const { gen, signal } = this.beginAgentsLoad();
 
     const params = new URLSearchParams();
     params.set('sort', 'updated');
@@ -1475,22 +1535,29 @@ export class ScionPageProjectDetail extends LitElement {
 
     let response: Response;
     try {
-      response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${params.toString()}`);
+      response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${params.toString()}`, {
+        signal,
+      });
     } catch (err) {
+      if (this.isAbortError(err)) return; // superseded by a later trigger.
       console.warn('Failed to load agents:', err);
       return;
     }
+    if (this.isStaleAgentsLoad(gen)) return;
 
     if (response.status === 422) {
       // Candidate ceiling (design §4.3, §5.3 step 0): remember the refusal
       // for this committed label and fall back to a drain (today's legacy
       // load, until agent-drain.ts lands in P5).
       this.sortedRefusedForLabel = label;
-      await this.loadLegacyAgents(trigger);
+      await this.loadLegacyAgents(trigger, { gen, signal });
       return;
     }
 
     if (!response.ok) {
+      if (trigger === 'label-commit') {
+        this.committedLabel = this.labelBeforeCommit; // N3: don't keep re-sending a rejected label.
+      }
       if (trigger === 'page-load') {
         this.agents = [];
         this.agentScopeCapabilities = undefined;
@@ -1501,6 +1568,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     const data = (await response.json()) as SortedAgentsResponse;
+    if (this.isStaleAgentsLoad(gen)) return;
     if (data._capabilities) {
       this.agentScopeCapabilities = data._capabilities;
     }
@@ -1511,25 +1579,33 @@ export class ScionPageProjectDetail extends LitElement {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
       }
       stateManager.seedAgents(this.agents);
-      this.agentWindow.setSmall(this.agents);
+      this.agentWindow.setSmall();
       this.listViewUsesWindow = true;
     } else {
       // Paged: `this.agents` stays empty, and grid/tree/stats/Stop-all read
       // the member index through `agentStats` instead (design §11 P1c).
       this.agents = [];
       stateManager.seedAgents(data.agents, { partial: true });
-      this.agentWindow.setPaged({
-        agents: data.agents,
-        nextCursor: data.nextCursor,
-        totalCount: data.totalCount,
-        stats: data.stats,
-      });
+      this.agentWindow.setPaged(
+        {
+          agents: data.agents,
+          nextCursor: data.nextCursor,
+          totalCount: data.totalCount,
+          stats: data.stats,
+        },
+        label
+      );
       this.listViewUsesWindow = true;
     }
   }
 
   /** Today's unsorted request (design §4.3's "legacy mode"), used when the view state is not P1-eligible, or sorted mode was refused for this label. */
-  private async loadLegacyAgents(trigger: AgentsViewTrigger): Promise<void> {
+  private async loadLegacyAgents(
+    trigger: AgentsViewTrigger,
+    carried?: { gen: number; signal: AbortSignal }
+  ): Promise<void> {
+    const { gen, signal } = carried ?? this.beginAgentsLoad();
+
     const params = new URLSearchParams();
     const label = this.committedLabel.trim();
     if (label && label.includes('=')) {
@@ -1542,8 +1618,9 @@ export class ScionPageProjectDetail extends LitElement {
 
     let response: Response;
     try {
-      response = await apiFetch(url);
+      response = await apiFetch(url, { signal });
     } catch (err) {
+      if (this.isAbortError(err)) return;
       if (trigger === 'page-load') {
         this.agents = [];
         this.agentScopeCapabilities = undefined;
@@ -1552,8 +1629,12 @@ export class ScionPageProjectDetail extends LitElement {
       console.warn('Failed to load agents:', err);
       return;
     }
+    if (this.isStaleAgentsLoad(gen)) return;
 
     if (!response.ok) {
+      if (trigger === 'label-commit') {
+        this.committedLabel = this.labelBeforeCommit; // N3
+      }
       if (trigger === 'page-load') {
         this.agents = [];
         this.agentScopeCapabilities = undefined;
@@ -1567,6 +1648,7 @@ export class ScionPageProjectDetail extends LitElement {
     const data = (await response.json()) as
       | { agents?: Agent[]; _capabilities?: Capabilities; nextCursor?: string }
       | Agent[];
+    if (this.isStaleAgentsLoad(gen)) return;
 
     let nextCursor: string | undefined;
     if (Array.isArray(data)) {
@@ -1583,17 +1665,20 @@ export class ScionPageProjectDetail extends LitElement {
 
     stateManager.seedAgents(this.agents);
 
-    if (nextCursor) {
-      // Truncated (> 500 candidates): the window has no valid data for the
-      // list view until a sorted-eligible view state issues its own fit
-      // request (design §11 P1c interim costs).
-      this.listViewUsesWindow = false;
-    } else {
-      // Complete: adopt as the small H with no further request, even if the
-      // list view isn't the one currently showing (design §4.3).
-      this.listViewUsesWindow = true;
-      this.agentWindow.setSmall(this.agents);
-    }
+    // Exit the window out of `'paged'` unconditionally (round 1 review B2):
+    // a truncated legacy set is still rendered through `this.agents`
+    // directly (grid/tree, exactly as before P1c), and leaving the window
+    // `'paged'` here is what caused `onAgentsUpdated` to keep skipping and
+    // `agentStats` to keep reading a member index seeded for a now-stale
+    // request. `listViewUsesWindow` alone still gates whether the *list
+    // view* may render from the window.
+    this.agentWindow.setSmall();
+    this.listViewUsesWindow = !nextCursor;
+  }
+
+  /** `true` iff `err` is the `AbortError` from an intentionally superseded request (round 1 review B5). */
+  private isAbortError(err: unknown): boolean {
+    return err instanceof Error && err.name === 'AbortError';
   }
 
   /** The window's own page-navigation (and, while paged, sort/phase/page-size-change) fetches (design §6.1). */
@@ -1622,18 +1707,31 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * Called after a view/sort change (design §11 P1c interim costs): issues
-   * the one request needed to make the new view state renderable, or none
-   * if the window (or the legacy `this.agents`) already has what it needs.
+   * The single place that decides whether a phase, sort, page-size or view
+   * change needs a request (round 1 review B3 — the window's own
+   * `setViewState` never fetches). Covers both directions of the §11 P1c
+   * interim-cost transitions: becoming P1-eligible with no adopted data
+   * yet, or a paged view state whose server-side sort/phase just changed
+   * (one fresh request either way); and leaving P1-eligible while the
+   * window is still paged (one legacy load, then free once `this.agents`
+   * is populated — §11 "then 0 while it is held").
    */
   private async syncAgentsForViewState(): Promise<void> {
     if (this.isP1Eligible()) {
-      if (!this.listViewUsesWindow && this.sortedRefusedForLabel !== this.committedLabel.trim()) {
+      if (
+        this.agentWindow.state === 'paged' ||
+        (!this.listViewUsesWindow && this.sortedRefusedForLabel !== this.committedLabel.trim())
+      ) {
         await this.loadAgentsForView('view-change');
       }
-    } else if (this.agentWindow.state === 'paged' && this.agents.length === 0) {
+      return;
+    }
+    if (this.agentWindow.state === 'paged') {
       await this.loadLegacyAgents('view-change');
     }
+    // Otherwise `this.agents` already holds whatever legacy/small data is
+    // available (possibly truncated above 500) and needs no further
+    // request (held, per §11 interim costs).
   }
 
   private async autoDiscoverGitHubApp(): Promise<void> {
@@ -1761,7 +1859,14 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     if (action === 'delete') {
-      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      // `this.agents` is empty while paged (round 1 review N4): fall back to
+      // the window's current page, then to state (an off-page agent, e.g.
+      // acted on right after a chip click elsewhere).
+      const agentName =
+        this.agents.find((a) => a.id === agentId)?.name ??
+        this.agentWindow.items.find((a) => a.id === agentId)?.name ??
+        stateManager.getAgent(agentId)?.name ??
+        'this agent';
       if (
         !event?.altKey &&
         !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
@@ -1868,6 +1973,7 @@ export class ScionPageProjectDetail extends LitElement {
       localStorage.removeItem(`scion-filter-project-agents-phase-${this.projectId}`);
     }
     this.agentWindow.setViewState({ phaseFilter: phase });
+    void this.syncAgentsForViewState();
   }
 
   private toggleSort(field: AgentSortField): void {
@@ -1948,17 +2054,21 @@ export class ScionPageProjectDetail extends LitElement {
           .value=${this.labelFilter}
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
-            // Live preview only — no request per keystroke (design §4.3, §6.4 row 8).
-            this.agentWindow.setViewState({ label: this.labelFilter }, { refetchIfPaged: false });
+            // Live preview only — no request per keystroke (design §4.3, §6.4
+            // row 8). `setViewState` never fetches (round 1 review B3), so
+            // this is always free regardless of window state.
+            this.agentWindow.setViewState({ label: this.labelFilter });
           }}
           @sl-change=${() => {
+            this.labelBeforeCommit = this.committedLabel;
             this.committedLabel = this.labelFilter;
             this.backgroundRefresh('label-commit');
           }}
           @sl-clear=${() => {
+            this.labelBeforeCommit = this.committedLabel;
             this.labelFilter = '';
             this.committedLabel = '';
-            this.agentWindow.setViewState({ label: '' }, { refetchIfPaged: false });
+            this.agentWindow.setViewState({ label: '' });
             this.backgroundRefresh('label-commit');
           }}
           style="max-width: 220px;"
@@ -2841,7 +2951,7 @@ export class ScionPageProjectDetail extends LitElement {
               </table>
             `}
         <scion-agent-pager
-          storageKey="scion-pagesize-project-agents"
+          .storageKey=${PAGER_PAGE_SIZE_STORAGE_KEY}
           .pageIndex=${this.agentWindow.pageIndex}
           .rowsOnPage=${items.length}
           .total=${this.agentWindow.total}
@@ -2854,16 +2964,17 @@ export class ScionPageProjectDetail extends LitElement {
           @prev=${() => void this.agentWindow.prev()}
           @next=${() => void this.agentWindow.next()}
           @chip-click=${() => void this.agentWindow.refresh()}
-          @page-size-change=${(e: CustomEvent<{ pageSize: number }>) =>
+          @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>) =>
             this.onPagerSizeChange(e.detail.pageSize)}
         ></scion-agent-pager>
       </div>
     `;
   }
 
-  private onPagerSizeChange(size: number): void {
+  private onPagerSizeChange(size: AgentPagerPageSize): void {
     this.pagerPageSize = size;
     this.agentWindow.setViewState({ pageSize: size });
+    void this.syncAgentsForViewState();
   }
 
   private renderAgentRow(agent: Agent) {
