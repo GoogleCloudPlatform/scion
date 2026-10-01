@@ -1663,9 +1663,13 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 // principal" engine (review r1 F3). By the time this is called,
 // SetMemberRoles has already run the credential gate, the governance matrix
 // / custom-role authority (design-d3-addendum.md) including the F1
-// role_binding.* structural guard, CanDelegate and the last-owner check —
-// the same ordering AddMember/UpdateMemberRole/TransferOwnership use before
-// replaceBindingTx above. A dedicated OperationID (e.g.
+// role_binding.* structural guard, and CanDelegate — the same ordering
+// AddMember/UpdateMemberRole/TransferOwnership use before replaceBindingTx
+// above. The last-owner check runs AFTER this call, inside the same
+// transaction: it is a post-state count over the full binding set (the
+// Remove/Create pairs this function just applied), and a violation rolls
+// back every mutation this call made, along with everything else in the
+// transaction (review r2 R2-1). A dedicated OperationID (e.g.
 // project.membership.set) is deferred: wiring one needs a route_metadata.go
 // entry, out of scope for P1 (ptone/scion#2529).
 //
