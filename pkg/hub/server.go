@@ -4554,12 +4554,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	slog.Info("Hub API server shutting down...")
 
-	// Stop the DB pool-stats sampler. Safe to call more than once: it wraps
-	// either a context.CancelFunc or a no-op from StartPoolSampler.
-	if s.stopPoolSampler != nil {
-		s.stopPoolSampler()
-	}
-
 	// Run the shared background-service teardown (control channel, broker
 	// auth, scheduler, dispatchers, preview service, link services, event
 	// publisher, command bus, etc). CleanupResources is sync.Once-guarded,
@@ -4588,6 +4582,14 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Stop the DB pool-stats sampler. Safe to call more than once: it
+		// wraps either a context.CancelFunc or a no-op from
+		// StartPoolSampler. Lives in the Once body so combined mode (which
+		// only calls CleanupResources, never Shutdown) also stops it.
+		if s.stopPoolSampler != nil {
+			s.stopPoolSampler()
+		}
 
 		// Cancel server-lifetime context to stop background goroutines
 		if s.ctxCancel != nil {
