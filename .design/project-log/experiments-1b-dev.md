@@ -35,10 +35,10 @@ Web-only. No Go changes.
   "Reset to default" shows only when an override exists. Tab-level
   attribution ("Last changed by … at …") comes from the last write response.
   A one-line note lists any `unknown_overrides` by name.
-- `web/src/components/pages/admin-server-config.ts`: exactly the four
-  changes in the design — one import, the Experiments `<sl-tab>` last in the
-  nav, its `<sl-tab-panel>` last, and the "Save & Reload"/"Reset" actions bar
-  plus the harness-config error message are wrapped in one
+- `web/src/components/pages/admin-server-config.ts`: exactly four changes:
+  one import, the Experiments `<sl-tab>` last in the nav, its
+  `<sl-tab-panel>` last, and the "Save & Reload"/"Reset" actions bar plus
+  the harness-config error message are wrapped in one
   `activeTab !== 'experiments'` condition so both are hidden on that tab.
 - `web/src/client/open-terminal.ts` and
   `web/src/components/shared/chat/chat-members.ts`: the `'web.terminal_workspace'`
@@ -71,8 +71,8 @@ and the `/terminals` branch of `renderRoute()`. It does not touch
 `applyServerFeatureFlags`. This branch's `main.ts` edits stayed in the
 import line, the `applyServerFeatureFlags` call site, and the
 `TERMINAL_WORKSPACE_FLAG` literal replacement, with no overlap on the hunks
-ptone/scion#2289 owns. Since ptone/scion#2289 has not landed, this branch
-rebases onto it (or onto whichever lands second).
+ptone/scion#2289 owns. The two branches merge cleanly; whichever lands
+second rebases onto the other.
 
 ## Verification
 
@@ -103,7 +103,9 @@ rebases onto it (or onto whichever lands second).
   pane, owner, lifecycle, workspace): every failure observed on this branch
   was reproduced on a clean upstream-main worktree with no 1b code, using
   the same test, same assertion, same failure line. None fails only with
-  1b. Detail in `phases/1b-terminal-evidence.md`.
+  1b. The one borderline case, a timing-sensitive layout-restore test, was
+  settled with a 20-run-per-branch, interleaved comparison showing an
+  identical pass rate on both.
 
 ## Size
 
