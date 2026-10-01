@@ -17,14 +17,19 @@ package auditevent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
 func TestSlogSinkEmitsExactStructuredEnvelope(t *testing.T) {
@@ -71,6 +76,71 @@ func TestSlogSinkUsesOneDefensiveRenderSnapshot(t *testing.T) {
 	assert.NotContains(t, encoded, "principal-private-canary")
 	assert.NotContains(t, encoded, "resource-private-canary")
 	assert.Contains(t, encoded, `"id":"constraint-1"`)
+}
+
+func TestSlogSinkUsesHandlerPortableNestedValues(t *testing.T) {
+	t.Parallel()
+
+	handler := &captureSlogHandler{}
+	sink, err := NewSlogSink(slog.New(handler))
+	require.NoError(t, err)
+	event := fullCreateEvent(t)
+
+	require.NoError(t, sink.Emit(context.Background(), event))
+	record := handler.Records()[0]
+	attrs := recordAttrs(t, record)
+	for _, key := range []string{"request", "initiator", "principal", "executor", "credential", "resource", "payload"} {
+		assert.Equal(t, slog.KindGroup, attrs[key].Kind(), key)
+	}
+	payload := groupAttrs(attrs["payload"])
+	assert.Equal(t, slog.KindGroup, payload["impact_counts"].Kind())
+	assert.Equal(t, slog.KindAny, payload["changed_fields"].Kind())
+	assert.IsType(t, []string{}, payload["changed_fields"].Any())
+	resource := groupAttrs(attrs["resource"])
+	assert.NotContains(t, resource, "Scope")
+	assert.NotContains(t, resource, "scope")
+
+	got, err := json.Marshal(slogRecordMap(t, record))
+	require.NoError(t, err)
+	want, err := Render(event)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(want), string(got))
+}
+
+func TestSlogSinkPreservesNestedSchemaThroughOTel(t *testing.T) {
+	t.Parallel()
+
+	exporter := &captureOTelExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	sink, err := NewSlogSink(slog.New(logging.NewOTelHandler("auditevent-test", provider)))
+	require.NoError(t, err)
+	event := fullCreateEvent(t)
+
+	require.NoError(t, sink.Emit(context.Background(), event))
+	records := exporter.Records()
+	require.Len(t, records, 1)
+	got, err := json.Marshal(otelRecordMap(records[0]))
+	require.NoError(t, err)
+	want, err := Render(event)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(want), string(got))
+	assert.NotContains(t, string(got), "Scope")
+}
+
+func TestSlogSinkRecordsEmitCallerPC(t *testing.T) {
+	t.Parallel()
+
+	handler := &captureSlogHandler{}
+	sink, err := NewSlogSink(slog.New(handler))
+	require.NoError(t, err)
+	require.NoError(t, sink.Emit(context.Background(), validCreateEvent(t)))
+
+	record := handler.Records()[0]
+	require.NotZero(t, record.PC)
+	frame, _ := runtime.CallersFrames([]uintptr{record.PC}).Next()
+	assert.Contains(t, frame.Function, "TestSlogSinkRecordsEmitCallerPC")
+	assert.True(t, strings.HasSuffix(frame.File, "pkg/hub/auditevent/slog_sink_test.go"), frame.File)
 }
 
 func TestSlogSinkReturnsValidationAndHandlerErrors(t *testing.T) {
@@ -139,4 +209,145 @@ func recordAttrsJSON(t *testing.T, record slog.Record) []byte {
 	return []byte(strings.TrimSpace(output.String()))
 }
 
+func fullCreateEvent(t *testing.T) EnvelopeV1 {
+	t.Helper()
+	event := validCreateEvent(t)
+	event.Request = &RequestRef{ID: "corr-1", Method: "POST", Route: "/api/v1/access-constraints", Surface: "api"}
+	event.Initiator = &IdentityRef{Kind: IdentityUser, ID: "initiator-1"}
+	event.Executor = &IdentityRef{Kind: IdentitySystem, ID: "executor-1"}
+	credential := mustCredentialRef(t, CredentialRefInput{
+		Kind: CredentialUAT, ID: "token-1", Name: "deploy",
+		BoundaryKind: CredentialBoundaryProject, BoundaryProjectID: "project-1",
+		Labels: map[string]string{"purpose": "automation"},
+	})
+	event.Credential = &credential
+	event.Payload = AccessBoundaryPayload{
+		Classification: BoundaryTighten,
+		ImpactCounts:   &ImpactCounts{Agents: 1, Users: 2, Projects: 3},
+		ChangedFields:  []string{"permissions", "subjects"},
+	}
+	return event
+}
+
+func recordAttrs(t *testing.T, record slog.Record) map[string]slog.Value {
+	t.Helper()
+	attrs := make(map[string]slog.Value)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value.Resolve()
+		return true
+	})
+	return attrs
+}
+
+func groupAttrs(value slog.Value) map[string]slog.Value {
+	attrs := make(map[string]slog.Value)
+	for _, attr := range value.Group() {
+		attrs[attr.Key] = attr.Value.Resolve()
+	}
+	return attrs
+}
+
+func slogRecordMap(t *testing.T, record slog.Record) map[string]any {
+	t.Helper()
+	result := make(map[string]any)
+	record.Attrs(func(attr slog.Attr) bool {
+		result[attr.Key] = slogValue(t, attr.Value.Resolve())
+		return true
+	})
+	return result
+}
+
+func slogValue(t *testing.T, value slog.Value) any {
+	t.Helper()
+	switch value.Kind() {
+	case slog.KindBool:
+		return value.Bool()
+	case slog.KindFloat64:
+		return value.Float64()
+	case slog.KindInt64:
+		return value.Int64()
+	case slog.KindString:
+		return value.String()
+	case slog.KindUint64:
+		return value.Uint64()
+	case slog.KindGroup:
+		result := make(map[string]any)
+		for _, attr := range value.Group() {
+			result[attr.Key] = slogValue(t, attr.Value.Resolve())
+		}
+		return result
+	case slog.KindAny:
+		strings, ok := value.Any().([]string)
+		require.True(t, ok, "unexpected KindAny value %T", value.Any())
+		return strings
+	default:
+		require.FailNow(t, "unexpected slog value kind", value.Kind().String())
+		return nil
+	}
+}
+
+type captureOTelExporter struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func (e *captureOTelExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range records {
+		e.records = append(e.records, records[i].Clone())
+	}
+	return nil
+}
+
+func (*captureOTelExporter) Shutdown(context.Context) error { return nil }
+
+func (*captureOTelExporter) ForceFlush(context.Context) error { return nil }
+
+func (e *captureOTelExporter) Records() []sdklog.Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]sdklog.Record(nil), e.records...)
+}
+
+func otelRecordMap(record sdklog.Record) map[string]any {
+	result := make(map[string]any)
+	record.WalkAttributes(func(attr attribute.KeyValue) bool {
+		result[string(attr.Key)] = otelValue(attr.Value)
+		return true
+	})
+	return result
+}
+
+func otelValue(value attribute.Value) any {
+	switch value.Type() {
+	case attribute.BOOL:
+		return value.AsBool()
+	case attribute.INT64:
+		return value.AsInt64()
+	case attribute.FLOAT64:
+		return value.AsFloat64()
+	case attribute.STRING:
+		return value.AsString()
+	case attribute.STRINGSLICE:
+		return value.AsStringSlice()
+	case attribute.SLICE:
+		values := value.AsSlice()
+		result := make([]any, len(values))
+		for i := range values {
+			result[i] = otelValue(values[i])
+		}
+		return result
+	case attribute.MAP:
+		result := make(map[string]any)
+		for _, attr := range value.AsMap() {
+			result[string(attr.Key)] = otelValue(attr.Value)
+		}
+		return result
+	default:
+		return value.AsInterface()
+	}
+}
+
 var _ slog.Handler = (*captureSlogHandler)(nil)
+var _ sdklog.Exporter = (*captureOTelExporter)(nil)
