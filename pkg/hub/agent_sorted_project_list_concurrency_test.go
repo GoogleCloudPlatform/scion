@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -160,4 +161,97 @@ func TestListProjectAgentsSorted_Concurrency_KeyBumpMovesRowOutOfLaterPage(t *te
 		assert.NotEqual(t, target, a.ID,
 			"a row bumped to be newer than everything already shown must be skipped by the walk, not shown a second time on the old cursor's continuation")
 	}
+}
+
+// regressingAfterNCallsStore makes one agent's position key appear older
+// than it actually is, starting from the Nth call to ListAgentMembers. Real
+// write paths in this store cannot regress a key (every write stamps
+// time.Now(), monotonically non-decreasing — see the package doc comment
+// above), so this reverse crossing ("moves from before the cursor to after
+// it" in design 4.5, the "duplicate" table row) is exercised at this
+// synthetic boundary instead of through a real mutation.
+type regressingAfterNCallsStore struct {
+	store.Store
+	agentID      string
+	regressAfter int // ListAgentMembers call number (1-indexed) after which the row regresses
+	olderThan    time.Time
+	calls        int
+}
+
+func (r *regressingAfterNCallsStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
+	members, err := r.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
+	if err != nil {
+		return nil, err
+	}
+	r.calls++
+	if r.calls > r.regressAfter {
+		for i := range members {
+			if members[i].ID == r.agentID {
+				// Older than everything else in the fixture: K becomes the
+				// oldest, LastActivityEvent cleared so K falls back to
+				// Updated under the COALESCE rule.
+				members[i].Updated = r.olderThan
+				members[i].LastActivityEvent = time.Time{}
+			}
+		}
+	}
+	return members, nil
+}
+
+// TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow is D6:
+// a row already shown on an earlier page, whose key then regresses to sort
+// after the cursor, is shown again on a later page of the same walk. This
+// is the design 4.5 contract's stated behavior for that crossing direction
+// ("X appears twice"), not a bug — the test exists to prove the walk
+// reaches that documented outcome (via re-reading and repositioning, not an
+// offset) rather than silently deduplicating or skipping, and to pin it as
+// a regression guard since positionAfterCursor's comparison is symmetric
+// (pkg/store/agentsort.Less has no direction-specific branch): if the
+// "skip" direction (tested above) works, this proves the same code path
+// also produces the mirror-image "duplicate" outcome the design specifies.
+func TestListProjectAgentsSorted_Concurrency_KeyRegressionDuplicatesRow(t *testing.T) {
+	f := sortedListSetup(t)
+	const n = 6
+	const limit = 3
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		a := f.createAgent(t, fmt.Sprintf("regress-%d", i), string(state.PhaseStopped), nil)
+		ids[i] = a.ID
+	}
+	// ids[n-1] was created last, so it leads page 0 under dir=desc.
+	target := ids[n-1]
+
+	veryOld := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	raced := &regressingAfterNCallsStore{Store: f.store, agentID: target, regressAfter: 1, olderThan: veryOld}
+	f.srv.store = raced
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&dir=desc&limit="+strconv.Itoa(limit)), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	page0 := mustDecodeListAgentsResponse(t, rec.Body)
+	require.NotEmpty(t, page0.NextCursor)
+	var sawOnPage0 bool
+	for _, a := range page0.Agents {
+		if a.ID == target {
+			sawOnPage0 = true
+		}
+	}
+	require.True(t, sawOnPage0, "target must lead page 0 before regressing")
+
+	// Walk the rest of the pages; the regressed row now sorts after
+	// everything, so it surfaces again on the last page.
+	cursor := page0.NextCursor
+	var seenAgain bool
+	for pages := 0; cursor != "" && pages < 10; pages++ {
+		rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
+			f.listPath("sort=updated&dir=desc&limit="+strconv.Itoa(limit)+"&cursor="+url.QueryEscape(cursor)), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		page := mustDecodeListAgentsResponse(t, rec.Body)
+		for _, a := range page.Agents {
+			if a.ID == target {
+				seenAgain = true
+			}
+		}
+		cursor = page.NextCursor
+	}
+	assert.True(t, seenAgain, "a row whose key regresses below the cursor must resurface later in the same walk (design 4.5, documented behavior)")
 }

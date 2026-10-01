@@ -98,6 +98,38 @@ func (f *sortedListFixture) createAgent(t *testing.T, slug, phase string, labels
 	return a
 }
 
+// createAgentsBulk creates n agents in f.project inside one transaction
+// (store.Store.WithTx), so a large fixture (hundreds to low thousands of
+// rows) is fast regardless of the per-statement autocommit cost a loop of
+// plain CreateAgent calls would otherwise pay. ownerFor, when non-nil,
+// picks the OwnerID for agent index i (0-based); nil means every agent is
+// owned by f.owner, matching createAgent's single-agent default.
+func (f *sortedListFixture) createAgentsBulk(t *testing.T, n int, slugPrefix, phase string, ownerFor func(i int) string) []*store.Agent {
+	t.Helper()
+	agents := make([]*store.Agent, n)
+	err := f.store.WithTx(context.Background(), func(tx store.Store) error {
+		for i := 0; i < n; i++ {
+			owner := f.owner.ID
+			if ownerFor != nil {
+				owner = ownerFor(i)
+			}
+			slug := fmt.Sprintf("%s-%d", slugPrefix, i)
+			a := &store.Agent{
+				ID: tid("sl-bulk-" + slug), Slug: slug, Name: slug,
+				ProjectID: f.project.ID, Phase: phase,
+				CreatedBy: owner, OwnerID: owner,
+			}
+			if err := tx.CreateAgent(context.Background(), a); err != nil {
+				return err
+			}
+			agents[i] = a
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return agents
+}
+
 func mustDecodeListAgentsResponse(t *testing.T, rec interface{ Bytes() []byte }) ListAgentsResponse {
 	t.Helper()
 	var resp ListAgentsResponse

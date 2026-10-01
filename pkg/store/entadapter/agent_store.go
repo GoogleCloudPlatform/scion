@@ -868,9 +868,60 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 	return query.Count(ctx)
 }
 
+// agentMemberSelectFields is the exact SQL column list ListAgentMembers
+// selects: precisely the fields agentResource (pkg/hub/capabilities.go)
+// reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
+// Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
+// stats. This list, not a separately maintained one, is the projection's
+// definition (design lists-graph.md 5.1, N7): widening agentResource's
+// inputs without adding the new field here is exactly what the S6
+// reflection-filled equality test (TestListAgentMembers_ProjectionEqualsFullRow)
+// exists to catch.
+var agentMemberSelectFields = []string{
+	agent.FieldID,
+	agent.FieldOwnerID,
+	agent.FieldProjectID,
+	agent.FieldLabels,
+	agent.FieldAncestry,
+	agent.FieldPhase,
+	agent.FieldCreated,
+	agent.FieldUpdated,
+	agent.FieldLastActivityEvent,
+}
+
+// entAgentToMember converts a partial *ent.Agent — one hydrated only from
+// agentMemberSelectFields — into a store.AgentMember. Unlike entAgentToStore,
+// it never reads a field outside that list, so a row fetched via the narrow
+// SELECT below can never appear to carry a value (e.g. an AppliedConfig)
+// that was simply never selected.
+func entAgentToMember(a *ent.Agent) store.AgentMember {
+	m := store.AgentMember{
+		ID:        a.ID.String(),
+		ProjectID: a.ProjectID.String(),
+		Labels:    a.Labels,
+		Ancestry:  a.Ancestry,
+		Phase:     a.Phase,
+		Created:   a.Created,
+		Updated:   a.Updated,
+	}
+	if a.OwnerID != nil {
+		m.OwnerID = a.OwnerID.String()
+	}
+	if a.LastActivityEvent != nil {
+		m.LastActivityEvent = *a.LastActivityEvent
+	}
+	return m
+}
+
 // ListAgentMembers returns up to max agents matching filter, projected down
 // to the narrow AgentMember shape and ordered per the section-4.2 total
 // order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+//
+// The SQL SELECT list is exactly agentMemberSelectFields — no wide column
+// (AppliedConfig in particular) is ever read off the wire for a candidate
+// row — which is what keeps a 2,000-row candidate scan cheap enough for the
+// server's request WriteTimeout, not just what the design's equality gate
+// requires.
 //
 // The candidate set is bounded by the caller's ceiling check to at most a
 // couple thousand rows, so this fetches every matching row up to max (with
@@ -878,17 +929,6 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // this small, and comparing every row afterward with agentsort.SortRows
 // keeps exactly one implementation of the tie-break rules instead of asking
 // each dialect to reproduce it) and sorts them in Go.
-//
-// Every row is built by projecting a full decoded Agent down to AgentMember,
-// rather than a narrower SQL SELECT: it costs one extra JSON decode per
-// candidate row versus a column-level projection, but it guarantees
-// AgentMember.ToAgent() reconstructs a Resource that is byte-for-byte the
-// projection agentResource would read from the same row, which is the
-// property the non-waivable member/full equality gate (S6) exists to prove.
-// A follow-up may narrow the SELECT itself once that guarantee is
-// independently covered by a fixture that also exercises the SQL column
-// list, so a narrowed SELECT cannot silently drop a field agentResource
-// reads.
 func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -901,7 +941,7 @@ func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFil
 	if max <= 0 {
 		max = defaultAgentListLimit
 	}
-	rows, err := query.Limit(max).All(ctx)
+	rows, err := query.Select(agentMemberSelectFields...).Limit(max).All(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -909,18 +949,7 @@ func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFil
 	members := make([]store.AgentMember, 0, len(rows))
 	rowsForSort := make([]agentsort.Row, 0, len(rows))
 	for _, a := range rows {
-		sa := entAgentToStore(a)
-		m := store.AgentMember{
-			ID:                sa.ID,
-			OwnerID:           sa.OwnerID,
-			ProjectID:         sa.ProjectID,
-			Labels:            sa.Labels,
-			Ancestry:          sa.Ancestry,
-			Phase:             sa.Phase,
-			Created:           sa.Created,
-			Updated:           sa.Updated,
-			LastActivityEvent: sa.LastActivityEvent,
-		}
+		m := entAgentToMember(a)
 		members = append(members, m)
 		rowsForSort = append(rowsForSort, agentsort.KeyFor(sortKey, m.ID, m.Created, m.Updated, m.LastActivityEvent))
 	}
