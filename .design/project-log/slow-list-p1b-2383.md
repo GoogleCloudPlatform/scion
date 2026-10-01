@@ -151,6 +151,55 @@ entry is the summary for the project log.
 
 New head after this round: `f74135786f75988d1209a42e50701cf4e4113851`.
 
+## Formal round-1 review (slow-list-lists-rev-p1b-1): REQUEST CHANGES, now closed
+
+8 blocking, 7 non-blocking, 2 nit. The two hard gates S6 and A15 both failed
+as submitted:
+
+- **S6 failed**: `resourceEqual` was a hand field list (already silently
+  missing `Resource.ScopeUserID`), not the whole-Resource compare the design
+  and security sign-off require, and the "reflection-filled" equality test
+  was neither reflection-filled nor able to fail. Fixed: `resourceEqual` is
+  now `reflect.DeepEqual` over normalized copies, with a mutation test that
+  reflection-fills a `Resource` and mutates every field; the equality gate
+  itself is now a reflection-filled `store.Agent` written and read back
+  through the real `ListAgentMembers`/`GetAgentsByIDs`. Re-ran the
+  reviewer's exact `ScopeUserID: a.Slug` mutation after the fix and
+  confirmed the test now fails with the predicted diff, then reverted
+  cleanly (`git diff` empty).
+- **A15 failed**: sorted mode never clamped `limit`, so `limit=700` over 700
+  agents cost 5,605 decisions with no race at all. Fixed: `limit` is clamped
+  to 500 before the `fit>=limit` check, with a regression test pinning the
+  exact reproduction case to 500 items / 4,205 decisions.
+
+Also fixed: `includeDeleted=true` silently dropped soft-deleted agents in
+sorted mode (full rows are now loaded via `ListAgents`, which honors it,
+instead of `GetAgentsByIDs`, which doesn't); the step-5a filter re-check was
+a hand duplicate missing `HarnessConfig` (replaced with a store-driven
+recheck using the store's own predicate); plus the full B6/B7/B8/N1-N7/nit
+list — new tests for the OwnerID-change race, exact race-drop decision
+counts, a short-page-continues case, an end-to-end nil/empty-Labels
+zero-redecision count, four cursor-rejection gaps, an HTTP page walk at
+n=1,200 with a committed `agentsort` golden fixture, two more S9 real-row
+cases, an S10 R<=fit case, a bumped CLI-walk size, a store-level fail-closed
+check on sort/dir, and an S2 byte-identity test for the EM's N6 ruling.
+
+One deviation disclosed, not silently dropped: B6(b) (scoped-UAT/hub-admin/
+super-admin identity classes through `ComputeCapabilitiesForActions`) was
+not added — that code path is identical to what `ComputeCapabilitiesBatch`
+already uses and has its own coverage in the general authz suites.
+
+Rebasing onto `origin/main` for this round hit one real conflict: another
+branch had independently widened the same `test-launch-store-postgres`
+Makefile `-run` line (adding broker-settings test names) in parallel with
+this branch's own D7 widening. Merged both sets additively and verified
+with `go test -tags integration -list`.
+
+New head after this round: `c661c2d21fdeddc7c6ac30ae1242f9195ec2a0c9`
+(force-pushed after the rebase; the branch is exclusively owned by this
+task, so this follows normal feature-branch-rebase practice, not a shared
+ref).
+
 ## Verification
 
 - `go build ./...`: pass.
