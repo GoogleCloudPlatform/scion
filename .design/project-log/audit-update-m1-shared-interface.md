@@ -132,3 +132,41 @@ At implementation commit `4c9ce00636dc078bfbbee7d9b05fc50870b25c67`:
 Local `make ci` and `make ci-full` remain intentionally unrun under the
 campaign broker workload rule. The approved scope/project-ID catalog matrix
 is unchanged, and governance integration remains with the retained author.
+
+## Review round 2 fix
+
+Resolved the empty-request parity finding from the review of
+`e414f8dc8e5e4470d5201d61698f22a6c5d2ee9f`. A non-nil, all-empty
+`RequestRef` is now canonicalized to absence when the immutable render
+snapshot is created. Both the validation event and serialized envelope refer
+to that canonical value, so `Render`, raw slog records, JSON handlers, and the
+repository's real `logging.NewOTelHandler` path all omit `request` rather than
+disagreeing between `{}` and absence.
+
+The correction is intentionally confined to the shared snapshot boundary.
+Populated request references continue to be defensively cloned and rendered
+unchanged. No sibling optional-pointer policy, validation rule, catalog-owned
+scope/project-ID matrix, nested slog schema, or source-PC behavior changed.
+Governance integration remains outside this slice.
+
+The focused regression first failed against the reviewed checkpoint by
+showing non-nil snapshot request pointers and a rendered `"request":{}` while
+the raw slog and OTel paths omitted the group. After the correction, it proves
+snapshot, Render, raw slog/JSON, and real OTel parity for the all-empty case;
+the existing complete-event parity regressions continue to cover populated
+request preservation.
+
+### Verification after round 2
+
+At implementation commit `d1b5fd4ff`:
+
+- `go test -count=1 -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -race -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -p 2 ./pkg/util/logging -run 'Test(NewOTelHandler|SetupWithOTel)'` — PASS.
+- `go vet -p 2 ./pkg/hub/auditevent` — PASS.
+- `GOGC=40 golangci-lint run --new-from-rev=e414f8dc8e5e4470d5201d61698f22a6c5d2ee9f --concurrency=1 ./pkg/hub/auditevent/...` — PASS (`0 issues`).
+- `test -z "$(gofmt -l pkg/hub/auditevent/*.go)"` — PASS.
+- `git diff --check` — PASS.
+
+Local `make ci` and `make ci-full` were not run because the campaign broker
+workload rule prohibits them.
