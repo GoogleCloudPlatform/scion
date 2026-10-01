@@ -458,6 +458,21 @@ View and modify configuration settings.
 - `migrate`: Migrate configuration to the latest versioned format.
 - `dir`: Print the path to the active configuration directory.
 
+`config get` supports the top-level settings keys (`active_profile`, `default_template`,
+`default_harness_config`, `workspace_path`, `image_registry`, `project_id`, `cli.autohelp`,
+`hub.enabled`, `hub.linked`, `hub.endpoint`, `hub.local_only`, `hub.brokerId`,
+`hub.brokerToken`, `hub.brokerNickname` — note that `hub.brokerToken` prints its value,
+as it always has), plus dotted paths into a named entry of the `profiles` or `runtimes`
+maps: `profiles.<name>.<field>` and `runtimes.<name>.<field>`, where `<field>` is one of
+that entry's scalar settings named by its `settings.yaml` key (e.g.
+`profiles.local.runtime`, `runtimes.kubernetes.namespace`). Within a profiles/runtimes
+entry, structured fields (maps, lists, nested objects — e.g. `env`, `volumes`,
+`secrets`, `harness_overrides`) and credential-like field names are not supported and
+return an error rather than a partial, reformatted, or unmasked value.
+`harness_configs.<name>.<field>` is not supported: harness configs are normally
+resolved from on-disk harness-config directories, not merged into `settings.yaml`;
+use `scion harness-config` to inspect them instead.
+
 ### `scion cd-config`
 
 Open a new shell in the active Scion configuration directory.
