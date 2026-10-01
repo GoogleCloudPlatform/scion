@@ -894,9 +894,9 @@ func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForDockerBoundProject(t 
 }
 
 // A project whose linked brokers mix runtime types is not "reliably known" to
-// be Kubernetes-bound (Q2 of the findings doc). The write is allowed here;
-// the broker that ends up serving a given dispatch rejects block itself if it
-// turns out to be Kubernetes (Phase 1).
+// be Kubernetes-bound. The write is allowed here; the broker that ends up
+// serving a given dispatch rejects block itself if it turns out to be
+// Kubernetes (Phase 1).
 func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForMixedRuntimeProject(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)

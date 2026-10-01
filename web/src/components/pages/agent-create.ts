@@ -126,14 +126,33 @@ export class ScionPageAgentCreate extends LitElement {
    */
   @state() private gcpIdentityUserSet = false;
   /**
-   * True when the currently displayed gcpMetadataMode is normalizeGcpModeFor-
-   * Target's own "block" → "passthrough" display substitution rather than a
-   * real default or user choice. Lets a later switch to a non-Kubernetes
-   * target restore "block" instead of leaving the substitute in place to be
-   * sent as an explicit choice nobody made. Cleared by any explicit
-   * `sl-change` pick and by loadGCPServiceAccounts recomputing from scratch.
+   * The GCP identity mode that applies when nothing has been explicitly
+   * chosen, *before* any Kubernetes-only display substitution: this page's
+   * own "block" placeholder, or the project's configured default. Set only
+   * in loadGCPServiceAccounts, in lockstep with the same assignments that
+   * seed gcpMetadataMode's initial value, so the two can never drift apart
+   * from each other even if other state changes mid-request.
+   *
+   * normalizeGcpModeForTarget derives the untouched display value fresh from
+   * this field on every relevant change, rather than remembering "the
+   * current value is a substitution" with a sticky flag — a flag like that
+   * can outlive the specific default it was tracking (for example, it stays
+   * set across an awaited settings fetch that later assigns a real default
+   * of "passthrough" or "assign", with nothing to clear it), and then
+   * misfires on an unrelated later change. Recomputing from this field
+   * instead means there is nothing to go stale.
    */
-  private gcpModeSubstitutedForK8s = false;
+  @state() private defaultGcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
+  /**
+   * The service account ID that goes with defaultGcpMetadataMode === 'assign'
+   * (empty otherwise). Set only in loadGCPServiceAccounts, alongside
+   * defaultGcpMetadataMode and gcpServiceAccountId's own initial value, for
+   * the same reason: so normalizeGcpModeForTarget can restore the correct
+   * service account, not just the correct mode, if an explicit choice that
+   * cleared gcpServiceAccountId is later undone by the Kubernetes Block
+   * constraint (see normalizeGcpModeForTarget).
+   */
+  @state() private defaultGcpServiceAccountId = '';
   /**
    * This project's own default GCP identity mode ('block', 'passthrough',
    * 'assign'), or '' when the project has none configured. Set in
@@ -522,22 +541,19 @@ export class ScionPageAgentCreate extends LitElement {
     // Block is not offered for a Kubernetes runtime target: the <sl-option>
     // is not rendered, so a mode of "block" would leave the select showing
     // nothing. Re-check whenever the broker/profile selection, the broker
-    // list itself, or the mode changes, and fall back to displaying
-    // "passthrough" instead. This runs in willUpdate (before render), not
-    // updated, so the correction lands in the same update cycle instead of
-    // scheduling a second one. (This is a display-only correction — whether
-    // an explicit identity is actually sent on submit is gated separately by
-    // gcpIdentityUserSet; see buildConfig/handleSubmit.)
-    //
-    // gcpMetadataMode is in the trigger list above, so this check re-runs
-    // whenever loadGCPServiceAccounts assigns it directly (its own default,
-    // or a project default of "block") — no separate call is needed for
-    // that path.
+    // list, the mode, or the underlying default changes, and fall back to
+    // displaying "passthrough" instead. This runs in willUpdate (before
+    // render), not updated, so the correction lands in the same update cycle
+    // instead of scheduling a second one. (This is a display-only correction
+    // — whether an explicit identity is actually sent on submit is gated
+    // separately by gcpIdentityUserSet; see buildConfig/handleSubmit.)
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
       changedProperties.has('brokers') ||
-      changedProperties.has('gcpMetadataMode')
+      changedProperties.has('gcpMetadataMode') ||
+      changedProperties.has('defaultGcpMetadataMode') ||
+      changedProperties.has('defaultGcpServiceAccountId')
     ) {
       this.normalizeGcpModeForTarget();
     }
@@ -551,49 +567,61 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Corrects the *displayed* gcpMetadataMode away from "block" when the
-   * current broker/profile target is reliably known to be Kubernetes (see
-   * targetRuntimeIsKubernetesOnly) — purely so the select has a matching,
-   * rendered option — and restores it when the target later becomes
-   * non-Kubernetes again.
+   * Keeps the *displayed* gcpMetadataMode correct for the current target.
    *
-   * The substitution only ever fires when the displayed mode is "block" (the
-   * condition checks for exactly that), so the value it overwrites is always
-   * "block" itself, whether that came from this page's own placeholder
-   * default or a project/user choice of Block. gcpModeSubstitutedForK8s
-   * records that the current "passthrough" is this substitution rather than
-   * a real choice, so switching back to a non-Kubernetes target can restore
-   * "block" instead of leaving the substituted value in place to be sent
-   * as an explicit choice nobody made — on a non-Kubernetes target this page
-   * always sends the current mode explicitly (see buildConfig/handleSubmit),
-   * so a stale "passthrough" here would reach the Hub's passthrough
-   * ownership gate for a value the user never picked, where main would have
-   * sent "block". The flag is cleared by any explicit `sl-change` pick (that
-   * pick is a real choice, not a substitution to reverse) and by
-   * loadGCPServiceAccounts recomputing the defaults from scratch.
+   * Block is never a valid value to send on a known-Kubernetes target (see
+   * targetRuntimeIsKubernetesOnly) — the dispatch rejects it — so a mode of
+   * "block" is corrected away regardless of whether it is an explicit user
+   * choice or this page's own placeholder default. Clearing gcpIdentityUserSet
+   * here puts the target back in the same "no explicit choice" state as if
+   * the user had never touched the picker, so a user who explicitly picked
+   * "Block" on a non-Kubernetes broker and then switched to a Kubernetes one
+   * does not have that choice silently resent as an explicit "passthrough"
+   * nobody chose for the new target (which would otherwise route through the
+   * Hub's passthrough ownership gate for a request that never asked for
+   * passthrough).
    *
-   * Also clears gcpIdentityUserSet when it substitutes "block" away. Without
-   * this, a user who explicitly picked "Block" on a non-Kubernetes broker and
-   * then switched to a Kubernetes one would keep gcpIdentityUserSet true
-   * while the mode was silently rewritten to "passthrough" out from under
-   * them — submit would then send that auto-substituted passthrough as if
-   * the user had chosen it, through the Hub's passthrough ownership gate,
-   * for a value they never picked for this target. Clearing the flag puts
-   * the target back in the same "no explicit choice" state as if the user
-   * had never touched the picker, so an untouched target still submits with
-   * no explicit gcp_identity at all, and the hint reflects that.
+   * Once there is no explicit choice standing (either because there never
+   * was one, or because it was just cleared above), the displayed mode is
+   * recomputed fresh from defaultGcpMetadataMode — the project's configured
+   * default, or this page's own "block" placeholder — substituted to
+   * "passthrough" only when that default is itself "block" and the target is
+   * Kubernetes-only. Recomputing this on every relevant change, rather than
+   * remembering "the current value is a substitution" with a flag, means
+   * there is nothing that can go stale: a default of "passthrough" or
+   * "assign" is never at risk of being overwritten by a later target switch,
+   * because it was never treated as a substitution to reverse in the first
+   * place.
    *
    * Idempotent and safe to call from anywhere that just changed the broker,
-   * profile, or mode.
+   * profile, mode, or default.
    */
   private normalizeGcpModeForTarget(): void {
-    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
-      this.gcpMetadataMode = 'passthrough';
-      this.gcpModeSubstitutedForK8s = true;
-      this.gcpIdentityUserSet = false;
-    } else if (this.gcpModeSubstitutedForK8s && !this.targetRuntimeIsKubernetesOnly) {
-      this.gcpMetadataMode = 'block';
-      this.gcpModeSubstitutedForK8s = false;
+    if (this.gcpIdentityUserSet) {
+      if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
+        this.gcpIdentityUserSet = false;
+      } else {
+        return;
+      }
+    }
+    const effective: 'block' | 'passthrough' | 'assign' =
+      this.targetRuntimeIsKubernetesOnly && this.defaultGcpMetadataMode === 'block'
+        ? 'passthrough'
+        : this.defaultGcpMetadataMode;
+    if (this.gcpMetadataMode !== effective) {
+      this.gcpMetadataMode = effective;
+    }
+    // Keep the service account in step with the mode: restoring "assign" is
+    // useless without also restoring which account it assigns — an explicit
+    // pick of a different mode clears gcpServiceAccountId (see the mode
+    // select's own sl-change handler below), and the Kubernetes Block
+    // constraint above can undo that pick without going through sl-change.
+    if (effective === 'assign') {
+      if (this.gcpServiceAccountId !== this.defaultGcpServiceAccountId) {
+        this.gcpServiceAccountId = this.defaultGcpServiceAccountId;
+      }
+    } else if (this.gcpServiceAccountId) {
+      this.gcpServiceAccountId = '';
     }
   }
 
@@ -894,11 +922,11 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpServiceAccounts = [];
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
+    this.defaultGcpMetadataMode = 'block';
+    this.defaultGcpServiceAccountId = '';
     // Recomputing defaults from scratch (initial load, or a project change):
-    // whatever this method assigns below is a default, not a user choice,
-    // and not a Kubernetes display substitution to reverse later.
+    // whatever this method assigns below is a default, not a user choice.
     this.gcpIdentityUserSet = false;
-    this.gcpModeSubstitutedForK8s = false;
     this.projectGCPIdentityDefaultMode = '';
 
     if (this.projectId) {
@@ -914,7 +942,12 @@ export class ScionPageAgentCreate extends LitElement {
         // Non-critical
       }
 
-      // Apply project default GCP identity if configured
+      // Apply project default GCP identity if configured. gcpMetadataMode and
+      // defaultGcpMetadataMode are always assigned together here, so they can
+      // never drift apart — normalizeGcpModeForTarget relies on
+      // defaultGcpMetadataMode staying exactly in sync with whatever default
+      // this method applied, no matter what renders happen during the awaits
+      // above and below.
       const settings = await this.fetchProjectSettings(this.projectId);
       if (settings?.defaultGCPIdentityMode) {
         this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
@@ -926,10 +959,13 @@ export class ScionPageAgentCreate extends LitElement {
           );
           if (match) {
             this.gcpMetadataMode = 'assign';
+            this.defaultGcpMetadataMode = 'assign';
             this.gcpServiceAccountId = match.id;
+            this.defaultGcpServiceAccountId = match.id;
           }
         } else if (mode === 'passthrough' || mode === 'block') {
           this.gcpMetadataMode = mode;
+          this.defaultGcpMetadataMode = mode;
         }
       }
     }
@@ -1900,7 +1936,6 @@ export class ScionPageAgentCreate extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
-            this.gcpModeSubstitutedForK8s = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1941,7 +1976,6 @@ export class ScionPageAgentCreate extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
-                        this.gcpModeSubstitutedForK8s = false;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(

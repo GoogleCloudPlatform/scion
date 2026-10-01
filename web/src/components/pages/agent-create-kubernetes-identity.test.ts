@@ -53,6 +53,7 @@ interface AgentCreateInternals {
   brokerId: string;
   profile: string;
   gcpMetadataMode: string;
+  defaultGcpMetadataMode: string;
   gcpServiceAccountId: string;
   gcpIdentityUserSet: boolean;
   gcpServiceAccounts: GCPServiceAccountFixture[];
@@ -135,7 +136,8 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
 function stubFetchForKubernetesProjectDefault(
   mode: string = 'block',
   serviceAccounts: GCPServiceAccountFixture[] = [],
-  brokerType: 'kubernetes' | 'docker' = 'kubernetes'
+  brokerType: 'kubernetes' | 'docker' = 'kubernetes',
+  serviceAccountId?: string
 ): { bodies: Array<Record<string, unknown>> } {
   const bodies: Array<Record<string, unknown>> = [];
   const brokerId = brokerType === 'kubernetes' ? 'broker-k8s' : 'broker-docker';
@@ -181,7 +183,10 @@ function stubFetchForKubernetesProjectDefault(
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ defaultGCPIdentityMode: mode }),
+          json: async () => ({
+            defaultGCPIdentityMode: mode,
+            ...(serviceAccountId ? { defaultGCPIdentityServiceAccountID: serviceAccountId } : {}),
+          }),
         } as Response);
       }
       if (url.includes('/gcp-service-accounts')) {
@@ -656,6 +661,186 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
+  // A project default of "passthrough" or "assign" is a real, sendable
+  // choice on a Kubernetes target (only "block" needs the display
+  // substitution). defaultGcpMetadataMode must track it faithfully so a
+  // later switch to a non-Kubernetes target sends that real default,
+  // instead of a "block" that was never the applicable default in the
+  // first place.
+  it('sends the project default of passthrough after switching from a Kubernetes broker to docker', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('passthrough');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  it('sends the project default of assign (with its service account) after switching from a Kubernetes broker to docker', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      'assign',
+      [makeServiceAccount('sa-a')],
+      'kubernetes',
+      'sa-a'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-a' });
+  });
+
+  // The restore logic must never touch an explicit user choice: once the
+  // user has picked Assign on a Kubernetes target, switching to docker must
+  // keep that pick (and its service account), not fall back to "block".
+  it('keeps an explicit Assign choice after switching from a Kubernetes broker to docker', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      '',
+      [makeServiceAccount('sa-a')],
+      'kubernetes'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'assign');
+    const saSelect = gcpServiceAccountSelect(el);
+    expect(saSelect).not.toBeNull();
+    await chooseSelect(el, saSelect!, 'sa-a');
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-a' });
+  });
+
+  // An explicit "Block" pick clears gcpServiceAccountId (it is irrelevant to
+  // Block). If the target then becomes Kubernetes-only, the Block constraint
+  // overrides that explicit pick and restores the project's real default —
+  // which, if that default is "assign", must restore the service account
+  // too, not leave the mode "assign" with no account selected. The identity
+  // is omitted on the Kubernetes leg itself (untouched Kubernetes targets
+  // never send one explicitly), so the broken state would otherwise only
+  // resurface on a later switch back to a non-Kubernetes target, which this
+  // test also exercises.
+  it('restores the default service account when the Block constraint overrides an explicit choice back onto an assign default', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      'assign',
+      [makeServiceAccount('sa-a')],
+      'docker',
+      'sa-a'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    const select = gcpIdentitySelect(el);
+    await chooseSelect(el, select!, 'block');
+    expect(page.gcpIdentityUserSet).toBe(true);
+    expect(page.gcpServiceAccountId).toBe('');
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    // Untouched on a Kubernetes target: gcp_identity is omitted regardless,
+    // so this leg alone would not surface a broken "assign" with no account.
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toHaveProperty('gcp_identity');
+
+    // Back to docker: the restored default must have actually been correct,
+    // not just coincidentally harmless while omitted.
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].gcp_identity).toEqual({ metadata_mode: 'assign', service_account_id: 'sa-a' });
+  });
+
   // The project default mode is only ever assigned inside the
   // `if (settings?.defaultGCPIdentityMode)` branch — it must still be reset
   // to '' at the top of every call, or a stale "Block" default from a
@@ -691,6 +876,68 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     expect(gcpIdentityHint(el)).not.toContain("This project's default GCP identity is Block");
     expect(gcpIdentityHint(el)).toContain('this project has no default configured');
+  });
+
+  // defaultGcpMetadataMode and defaultGcpServiceAccountId must also be reset
+  // to the page's own placeholder on every call, the same as
+  // projectGCPIdentityDefaultMode above — otherwise a stale "assign" default
+  // (and its service account) from a previous project would keep being
+  // applied after switching to one with no default configured at all.
+  it('resets the stale assign default after switching to a project with no default', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault(
+      'assign',
+      [makeServiceAccount('sa-a')],
+      'docker',
+      'sa-a'
+    );
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.gcpMetadataMode).toBe('assign');
+    expect(page.gcpServiceAccountId).toBe('sa-a');
+
+    // Settings are cached per-projectId (fetchProjectSettings), so observing
+    // a reset requires an actual project switch, not a second call for the
+    // same project.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.includes('/api/v1/agents') && init?.method === 'POST') {
+          if (typeof init.body === 'string') {
+            bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+          }
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => ({ error: { message: 'stub: not actually created' } }),
+          } as Response);
+        }
+        if (url.includes('/api/v1/projects/p2/settings')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [] }),
+        } as Response);
+      })
+    );
+    page.projectId = 'p2';
+
+    await page.loadGCPServiceAccounts();
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('block');
+    expect(page.gcpServiceAccountId).toBe('');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
   it('says the hub-wide or Kubernetes default applies when this project has no default configured', async () => {
@@ -888,8 +1135,13 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el);
     page.gcpServiceAccounts = [makeServiceAccount('sa-a'), makeServiceAccount('sa-b')];
+    // Direct state writes in the test, not a user pick — defaultGcpMetadataMode
+    // must agree with gcpMetadataMode or normalize corrects the mode back to
+    // the (unset) default on the next render, same as it would for any other
+    // untouched mismatch.
+    page.defaultGcpMetadataMode = 'assign';
     page.gcpMetadataMode = 'assign';
-    page.gcpIdentityUserSet = false; // the line above is a direct state write in the test, not a user pick
+    page.gcpIdentityUserSet = false;
     await el.updateComplete;
 
     const saSelect = gcpServiceAccountSelect(el);
