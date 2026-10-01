@@ -126,9 +126,10 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     ApplyLaunchReport/RunLaunchReaperTick write them. They are also json:"-"
 //     and never reach agentResource.
 //
-// Every other exported field, including Slug (the field a past reviewer's
-// ScopeUserID mutation probe reads), is filled and persisted through CreateAgent
-// followed by one UpdateAgent call (which covers the handful of fields
+// Every other exported field, including Slug (which a mutation of
+// agentResource to read ScopeUserID would depend on), is filled and
+// persisted through CreateAgent followed by one UpdateAgent call (which
+// covers the handful of fields
 // CreateAgent itself does not set, e.g. ExitCode/ExitReason/
 // ReincarnationState/ReincarnationUpdatedAt).
 // reflectFillStoreAgentSkipFields is the single source of truth for which
@@ -247,9 +248,8 @@ func fillGenericNonZero(t *testing.T, f reflect.Value, name string, seq int) {
 // not round-trip is invisible to it ... assert that every non-skipped field
 // of the re-read store.Agent is non-zero. That makes the fixture prove its
 // own coverage."). Without this, a field silently falling out of round-trip
-// (like HarnessConfig once did, undetected until a review caught it) would
-// just quietly stop being exercised by the decision-count gate rather than
-// failing loudly.
+// (like HarnessConfig once did) would just quietly stop being exercised by
+// the decision-count gate rather than failing loudly.
 func assertNonSkippedFieldsNonZero(t *testing.T, a *store.Agent) {
 	t.Helper()
 	v := reflect.ValueOf(a).Elem()

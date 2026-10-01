@@ -40,12 +40,11 @@ import (
 // cold-build compile time, not to real per-row insert cost.
 
 // TestListProjectAgentsSorted_DecisionCounts_DesignSizes is the non-waivable
-// decision-count hard gate at the design's own n values, all-readable
-// (R=n). n <= 500 can be a
-// complete fit response (fit's valid range is 1..500, design 4.1); n > 500
-// cannot, so those two sizes exercise the paged formula instead, with
-// limit=25 to match the design's own illustrative P (section 6.4: "n + 180"
-// is 7P with P=25).
+// decision-count hard gate at the design's own n values, all-readable (R=n).
+// n <= 500 can be a complete fit response (fit's valid range is 1..500,
+// design 4.1); n > 500 cannot, so those two sizes exercise the paged formula
+// instead, with limit=25 to match the design's own illustrative P (section
+// 6.4: "n + 180" is 7P with P=25).
 func TestListProjectAgentsSorted_DecisionCounts_DesignSizes(t *testing.T) {
 	sizes := []int{25, 100, 500, 501, 1200}
 	for _, n := range sizes {

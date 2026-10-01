@@ -243,9 +243,9 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 // (the IsScopedUserIdentity branch and the CheckAccess branch) must stay in
 // lockstep, field for field, with ComputeCapabilitiesForActions's loops over
 // an explicit action list. They are intentionally a duplicated body rather
-// than one delegating to the other, because capabilities.go is shared with
-// #2377's `withAuthzInputMemo` install site and the EM ruled against
-// touching this function's body for P1b.
+// than one delegating to the other: this function's body is deliberately
+// left unchanged here so the shared `withAuthzInputMemo` install site in
+// this file is unaffected.
 // TestListProjectAgentsSorted_CapsDeepEqualLegacy asserts the two stay
 // byte-identical on real requests; if you change one loop, change the other
 // and re-run that test.

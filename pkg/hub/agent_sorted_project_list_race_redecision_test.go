@@ -46,13 +46,13 @@ func softDeleteAgentForTest(t *testing.T, s store.Store, id string) {
 	require.NoError(t, s.UpdateAgent(ctx, a))
 }
 
-// TestListProjectAgentsSorted_IncludeDeleted_Complete reproduces and fixes
-// a past finding: a complete response with includeDeleted=true
-// used to silently drop the soft-deleted agent (classified as "missing
-// between the two reads" by GetAgentsByIDs's hard-coded DeletedAtIsNil()),
-// while CountAgents/ListAgentMembers/stats already honored IncludeDeleted --
-// so the page, totalCount and stats disagreed with each other and with
-// legacy mode.
+// TestListProjectAgentsSorted_IncludeDeleted_Complete reproduces and fixes a
+// bug where a complete response with includeDeleted=true used to silently
+// drop the soft-deleted agent (classified as "missing between the two
+// reads" by GetAgentsByIDs's hard-coded DeletedAtIsNil()), while
+// CountAgents/ListAgentMembers/stats already honored IncludeDeleted -- so
+// the page, totalCount and stats disagreed with each other and with legacy
+// mode.
 func TestListProjectAgentsSorted_IncludeDeleted_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 	live := f.createAgent(t, "live-complete", string(state.PhaseStopped), nil)

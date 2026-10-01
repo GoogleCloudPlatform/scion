@@ -28,13 +28,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file covers the finding that the decision-count and
-// caps-deep-equal tests must exercise more than one identity class.
-// ComputeCapabilitiesForActions is a separate copy of
-// ComputeCapabilitiesBatch's loop (not a shared call, per the EM's ruling),
-// so its IsScopedUserIdentity/DecideFromContext branch is only proven
-// correct if a scoped UAT actually exercises it end to end --
-// owner/member/agent-JWT alone never take that branch.
+// This file proves that the decision-count and caps-deep-equal tests
+// exercise more than one identity class. ComputeCapabilitiesForActions is a
+// separate copy of ComputeCapabilitiesBatch's loop (intentionally not a
+// shared call; see the PINNED comment in capabilities.go), so its
+// IsScopedUserIdentity/DecideFromContext branch is only proven correct if a
+// scoped UAT actually exercises it end to end -- owner/member/agent-JWT
+// alone never take that branch.
 //
 // Each test mints the identity class via the real token/role-binding path
 // (never a hand-built Identity value), hits both the legacy and sorted

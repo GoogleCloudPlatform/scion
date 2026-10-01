@@ -404,3 +404,34 @@ No behavior, logic, identifier (other than test-function renames), or
 assertion value changed. Verification: `go vet ./pkg/hub/... ./pkg/store/...`
 passes; `go test -p 2 ./pkg/store/...` passes; `go test -p 2 -run
 'Sorted|Cursor|AgentSort' ./pkg/hub/...` passes (288s, 0 failures).
+
+### Hygiene pass, round 2 (follow-up review requested changes)
+
+A follow-up hygiene review found the first pass incomplete: the first pass's
+own ID-detection check used word-boundary matching, which does not match an
+ID glued to an underscore (e.g. two test names still carried "_E2_"), and
+was case-sensitive, so a lowercase fixture-ID fragment survived. It also
+found four lingering pointers to internal documents and roles (a
+non-existent "dev report", three "EM ruling" references) that a hygiene pass
+should have replaced with the underlying technical reason, some leftover
+review-process narrative phrasing, and several ragged comment paragraphs
+left behind by the first pass's edits. One new commit fixed all of it:
+
+- Renamed the two test functions still carrying the erratum ID in their
+  names (and every doc comment cross-reference) to name the invariant
+  instead (page-size bound) rather than the erratum.
+- Replaced the four dangling pointers with the underlying technical reason
+  inline, with no document or role reference left.
+- Reworded the remaining review-process narrative phrasing (e.g. "a past
+  reviewer's probe", "a past finding") to describe the property or fixture
+  directly.
+- Renamed the remaining finding-ID-derived test fixture literals (IDs,
+  slugs, emails, names) to describe what they are for instead of which
+  finding named them.
+- Hand-rewrapped every ragged comment paragraph the first pass's edits left
+  behind.
+
+Verification: `go vet ./pkg/hub/... ./pkg/store/...` passes; `go test -p 2
+./pkg/store/...` passes (store/agentsort/entadapter/enttest/storetest all
+ok); `go test -p 2 -run 'Sorted|Cursor|AgentSort' ./pkg/hub/...` passes
+(393s, 0 failures). Pushed before running tests, per convention.

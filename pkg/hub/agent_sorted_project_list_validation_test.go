@@ -149,15 +149,15 @@ func TestListProjectAgentsSorted_Fit_IncompleteEvenWhenReadableAtOrBelowFit(t *t
 	ctx := context.Background()
 
 	caller := &store.User{
-		ID: tid("sl-n2-caller"), Email: "sl-n2@test.com", DisplayName: "Caller",
+		ID: tid("sl-fitgap-caller"), Email: "sl-fitgap@test.com", DisplayName: "Caller",
 		Role: store.UserRoleMember, Status: "active",
 	}
 	require.NoError(t, f.store.CreateUser(ctx, caller))
 	ensureHubMembership(ctx, f.store, caller.ID)
-	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-n2-role")
+	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-fitgap-role")
 
 	const n, fit = 6, 5 // R = 5 (caller owns 5), n = 6 > fit
-	f.createAgentsBulk(t, n, "n2", string(state.PhaseStopped), func(i int) string {
+	f.createAgentsBulk(t, n, "fitgap", string(state.PhaseStopped), func(i int) string {
 		if i < fit {
 			return caller.ID
 		}
@@ -190,33 +190,32 @@ func rawBodyWithoutServerTime(rec *httptest.ResponseRecorder) []byte {
 	return serverTimeJSONRe.ReplaceAll(rec.Body.Bytes(), []byte(`"serverTime":""`))
 }
 
-// TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical is the EM
-// ruling, architect-confirmed: without "sort", fit/stats/dir are
-// silently ignored and the response is byte-identical to the same request
-// without them, apart from serverTime. This covers more than the original
-// version: only the project endpoint, only valid values, no cursor in
-// play, and a decoded-map compare rather than raw bytes. This version adds
-// invalid values (dir=sideways, fit=0, and others), a cursor already in
-// play (so the emitted nextCursor/binding is part of what must match), raw
-// byte comparison, and the global endpoint (whose legacy path P1b leaves
+// TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical pins the
+// legacy contract: without "sort", fit/stats/dir are silently ignored and
+// the response is byte-identical to the same request without them, apart
+// from serverTime. This covers more than the original version: only the
+// project endpoint, only valid values, no cursor in play, and a
+// decoded-map compare rather than raw bytes. This version adds invalid
+// values (dir=sideways, fit=0, and others), a cursor already in play (so
+// the emitted nextCursor/binding is part of what must match), raw byte
+// comparison, and the global endpoint (whose legacy path P1b leaves
 // unchanged, so cheap to add).
 func TestListProjectAgentsLegacy_IgnoresFitStatsDir_ByteIdentical(t *testing.T) {
 	f := sortedListSetup(t)
-	f.createAgent(t, "n6-a", string(state.PhaseRunning), nil)
-	f.createAgent(t, "n6-b", string(state.PhaseStopped), nil)
-	// A third agent: with only 2 agents, the
-	// project_endpoint_cursor_present sub-case's page-2 responses (the ones
-	// actually compared) were always the *last* page, so neither ever had a
-	// nextCursor, even though its comment claimed the emitted
-	// nextCursor/binding was part of the byte comparison. A 3rd agent makes
-	// page 2 non-terminal, so it carries a real nextCursor too.
-	f.createAgent(t, "n6-c", string(state.PhaseStopped), nil)
+	f.createAgent(t, "legacy-a", string(state.PhaseRunning), nil)
+	f.createAgent(t, "legacy-b", string(state.PhaseStopped), nil)
+	// A third agent: with only 2 agents, the project_endpoint_cursor_present
+	// sub-case's page-2 responses (the ones actually compared) were always
+	// the *last* page, so neither ever had a nextCursor, even though its
+	// comment claimed the emitted nextCursor/binding was part of the byte
+	// comparison. A 3rd agent makes page 2 non-terminal, so it carries a
+	// real nextCursor too.
+	f.createAgent(t, "legacy-c", string(state.PhaseStopped), nil)
 
-	// Valid values (the original test's case), plus the invalid shapes a
-	// past reviewer's probe used (dir=sideways, fit=0) plus two more
-	// unparsable ones -- all of these would be 400s in sorted mode (design
-	// 4.1), and must instead be silently ignored here, exactly like the
-	// valid case.
+	// Valid values (the original test's case), plus invalid shapes such as
+	// dir=sideways, fit=0, plus two more unparsable ones -- all of these
+	// would be 400s in sorted mode (design 4.1), and must instead be
+	// silently ignored here, exactly like the valid case.
 	extras := []string{
 		"fit=500&stats=1&dir=asc",
 		"dir=sideways",

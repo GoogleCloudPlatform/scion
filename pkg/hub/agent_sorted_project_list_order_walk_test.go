@@ -37,11 +37,11 @@ import (
 // (1,200 agents) than the small fixtures used elsewhere in this package.
 //
 // Scope note (documented deviation): design 9 asks for page sizes
-// {1, 7, 25, 500} at n=1,200. Sorted mode's per-request cost is 5+n+7P --
-// every page re-evaluates the read pass over all 1,200
-// candidates, so a fine-grained walk (e.g. limit=1, 1,200 requests) at that
-// N costs well over a million decisions and would make this single test the
-// slowest thing in the suite by a wide margin. This test instead: (a) walks
+// {1, 7, 25, 500} at n=1,200. Sorted mode's per-request cost is 5+n+7P -- every
+// page re-evaluates the read pass over all 1,200 candidates, so a
+// fine-grained walk (e.g. limit=1, 1,200 requests) at that N costs well over
+// a million decisions and would make this single test the slowest thing in
+// the suite by a wide margin. This test instead: (a) walks
 // n=1,200 at limit=500 (3 pages, the page size real drains actually use,
 // design 8) for both directions, and (b) walks the full {1,7,25} page-size
 // set from the design's list at a smaller n=100, which exercises the same
@@ -205,14 +205,14 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 	// because this store only ever had one project in it.
 	for _, suffix := range []string{"other-a", "other-b"} {
 		otherProject := &store.Project{
-			ID: tid("sl-n5-" + suffix), Name: "Other " + suffix, Slug: "sl-n5-" + suffix,
+			ID: tid("sl-pr-" + suffix), Name: "Other " + suffix, Slug: "sl-pr-" + suffix,
 			OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
 		}
 		require.NoError(t, f.store.CreateProject(ctx, otherProject))
 		f.srv.createProjectMembersGroup(ctx, otherProject)
 		for i := 0; i < 5; i++ {
 			a := &store.Agent{
-				ID: tid(fmt.Sprintf("sl-n5-%s-agent-%d", suffix, i)), Slug: fmt.Sprintf("n5-%s-%d", suffix, i), Name: fmt.Sprintf("n5-%s-%d", suffix, i),
+				ID: tid(fmt.Sprintf("sl-pr-%s-agent-%d", suffix, i)), Slug: fmt.Sprintf("pr-%s-%d", suffix, i), Name: fmt.Sprintf("pr-%s-%d", suffix, i),
 				ProjectID: otherProject.ID, Phase: string(state.PhaseRunning),
 				CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 			}
@@ -225,12 +225,12 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 	// agents (the same grantProjectListOnly + per-agent-ownership technique
 	// designsizes_test.go uses for R<n).
 	caller := &store.User{
-		ID: tid("sl-n5-caller"), Email: "sl-n5-caller@test.com", DisplayName: "Caller",
+		ID: tid("sl-pr-caller"), Email: "sl-pr-caller@test.com", DisplayName: "Caller",
 		Role: store.UserRoleMember, Status: "active",
 	}
 	require.NoError(t, f.store.CreateUser(ctx, caller))
 	ensureHubMembership(ctx, f.store, caller.ID)
-	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-n5-list-only")
+	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-pr-list-only")
 
 	const n = 40
 	const r = 15 // the first r agents are caller-owned (readable); the rest are owner-owned (unreadable to caller)
@@ -247,7 +247,7 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 				labels = map[string]string{"team": ""} // a label with an empty value
 			}
 			a := &store.Agent{
-				ID: tid(fmt.Sprintf("sl-n5-agent-%d", i)), Slug: fmt.Sprintf("n5-agent-%d", i), Name: fmt.Sprintf("n5-agent-%d", i),
+				ID: tid(fmt.Sprintf("sl-pr-agent-%d", i)), Slug: fmt.Sprintf("pr-agent-%d", i), Name: fmt.Sprintf("pr-agent-%d", i),
 				ProjectID: f.project.ID, Phase: phases[i%2], // mixed phases
 				CreatedBy: owner, OwnerID: owner, Labels: labels,
 			}

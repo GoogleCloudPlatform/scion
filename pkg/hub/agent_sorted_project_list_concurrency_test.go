@@ -31,15 +31,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file covers the design lists-graph.md 4.5 concurrency contract.
-// Every project sorted-mode page request re-reads the full (bounded) member
+// This file covers the design lists-graph.md 4.5 concurrency contract. Every
+// project sorted-mode page request re-reads the full (bounded) member
 // snapshot and positions after the cursor by comparison
 // (pkg/store/agentsort), not by a stored offset, so each row of the 4.5
-// table falls out of that
-// construction rather than needing bespoke handling per case. These tests
-// exercise the three directions reachable through the real store's forward-
-// only clock (CreateAgent/UpdateAgent(Status) always stamp time.Now(), so a
-// real agent's sort key never regresses):
+// table falls out of that construction rather than needing bespoke handling
+// per case. These tests exercise the three directions reachable through the
+// real store's forward-only clock (CreateAgent/UpdateAgent(Status) always
+// stamp time.Now(), so a real agent's sort key never regresses):
 //
 //   - delete before the next page fetch: the row disappears, nothing shifts;
 //   - insert before the next page fetch: for a desc sort a new row always
@@ -56,8 +55,8 @@ import (
 // stamps time.Now(), monotonically non-decreasing) cannot produce for a real
 // agent; the same comparison code path handles both directions
 // symmetrically (pkg/store/agentsort.Less has no direction-specific special
-// case), so this is a reasoned, not merely asserted, gap — see the P1b dev
-// report.
+// case), so the gap is covered directly instead, below, via a store
+// decorator that forces a key regression.
 func TestListProjectAgentsSorted_Concurrency_DeleteBetweenPages(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 6
