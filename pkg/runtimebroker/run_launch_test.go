@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -494,6 +495,89 @@ func TestRunLaunch_LocalCancelDuringStart_SendsNoTerminal(t *testing.T) {
 	for _, r := range rtb.getLaunchReports() {
 		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
 			t.Fatalf("a local cancel during Start must send no terminal, got %+v", r.Report)
+		}
+	}
+}
+
+// TestRunLaunch_AbortRecordedDuringDownload_NoStart covers the IsAborted
+// check right after the GCS download step: the download is held open via
+// launchCtx.downloadWorkspaceFromGCS (a test-only override; beginAsyncLaunch
+// never sets it, so production always uses Server.downloadWorkspaceFromGCS)
+// long enough for a keepalive abort to be recorded while it is still
+// running, so by the time the download returns the abort is already there
+// for this check -- not the identical ones before it (the claim already
+// succeeded and WaitSuperseded/the marker step are both instantaneous here,
+// well before the keepalive's first attempt at the 1s mark) and not a later
+// one, since nothing follows this check but Start.
+func TestRunLaunch_AbortRecordedDuringDownload_NoStart(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	abortAnswered := make(chan struct{})
+	var abortAnsweredOnce sync.Once
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if claimState(req) {
+			return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+		}
+		abortAnsweredOnce.Do(func() { close(abortAnswered) })
+		return &hubclient.AgentLaunchReportResult{HTTPStatus: http.StatusConflict, Code: hubclient.AgentLaunchReportCodeStaleLaunch, Reason: hubclient.AgentLaunchReportReasonDeleted}, nil
+	}
+
+	releaseDownload := make(chan struct{})
+	downloadStarted := make(chan struct{})
+	var downloadStartedOnce sync.Once
+
+	rec := newLaunchRecord("L-guard-d", "agent-guard-d", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	lc := launchCtx{
+		req:  CreateAgentRequest{LaunchKeepaliveSeconds: 1},
+		opts: api.StartOptions{Name: "agent-guard-d"},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-guard-d"},
+		downloadWorkspaceFromGCS: func(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error) {
+			downloadStartedOnce.Do(func() { close(downloadStarted) })
+			select {
+			case <-releaseDownload:
+			case <-ctx.Done():
+			}
+			return opts, "", "", nil
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(context.Background(), rec, lc)
+		close(done)
+	}()
+
+	select {
+	case <-downloadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the download to start")
+	}
+	select {
+	case <-abortAnswered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the keepalive's abort-triggering answer")
+	}
+	// Let recordKeepaliveAbort finish well before the download returns.
+	time.Sleep(100 * time.Millisecond)
+	close(releaseDownload)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runLaunch did not return after the download finished with an abort already recorded")
+	}
+
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the abort was already recorded during the download, got %d calls", n)
+	}
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("expected the already-recorded abort to trigger cleanup once the download returns")
+	}
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			t.Fatalf("an abort recorded during the download must send no terminal, got %+v", r.Report)
 		}
 	}
 }

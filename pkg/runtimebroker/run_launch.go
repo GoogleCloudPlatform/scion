@@ -131,6 +131,12 @@ type launchCtx struct {
 	key             launchKey
 	sharedWorkspace bool
 	supersededDone  <-chan struct{}
+	// downloadWorkspaceFromGCS, when set, replaces Server.downloadWorkspaceFromGCS
+	// for this launch. Always nil in production (beginAsyncLaunch never sets
+	// it); tests use it to control how long the download step takes without
+	// a real GCS bucket, e.g. to land a concurrent keepalive answer inside
+	// the download's window.
+	downloadWorkspaceFromGCS func(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error)
 }
 
 // runLaunch is the async-create launch goroutine (design §3.8.2 step 5). It
@@ -238,7 +244,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 	// Step 3: optional GCS workspace download, identical to the synchronous
 	// path's admission step (§3.1), just run here instead.
-	opts, _, _, dlErr := s.downloadWorkspaceFromGCS(ctx, lc.req, lc.opts)
+	download := s.downloadWorkspaceFromGCS
+	if lc.downloadWorkspaceFromGCS != nil {
+		download = lc.downloadWorkspaceFromGCS
+	}
+	opts, _, _, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlErr.Error())
 		return
