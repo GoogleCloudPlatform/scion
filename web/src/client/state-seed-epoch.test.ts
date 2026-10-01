@@ -231,7 +231,7 @@ describe('W3 seed epoch', () => {
 
   it('N2 (round 2 review): a partial (compact-drain) seed with a recorded epoch delta keeps full fields and applies the delta', () => {
     // §8's compact drain calls seedAgents(result.agents, {token, partial:
-    // true}) — the combination round 1's W3 tests never exercised together.
+    // true}) — a combination not otherwise exercised together.
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 

@@ -346,7 +346,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
           expectedUnknown.delete(ev.id);
         } else if (ev.kind === 'status') {
           // Ports events for an absent ID are dropped outright (accepted
-          // deviation 2, FYI round 2) — never buffered, never recorded in
+          // deviation 2) — never buffered, never recorded in
           // dirty.unknown — so only "status" deltas populate this set.
           if (!knownThisWindow.has(ev.id) && !deletedIdsShadow.has(ev.id)) {
             expectedUnknown.add(ev.id);
