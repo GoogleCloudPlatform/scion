@@ -2734,12 +2734,12 @@ profiles:
 }
 
 // TestEnvGather_VertexAI_EmptySettingsEnvFallsThroughToHarnessConfigDir
-// pins the corrected launch model for an auth-candidate key (round-2 review
-// finding 1): run.go's Start deletes an empty GOOGLE_CLOUD_PROJECT entry
-// from opts.Env after auth resolves (its resolved.EnvVars only ever carries
-// non-empty values), which clears the way for finalScionCfg.Env — here, the
-// harness-config directory's own non-empty value — to reach the container.
-// So an empty settings value for an auth key does NOT block the directory's
+// pins the corrected launch model for an auth-candidate key: run.go's Start
+// deletes an empty GOOGLE_CLOUD_PROJECT entry from opts.Env after auth
+// resolves (its resolved.EnvVars only ever carries non-empty values), which
+// clears the way for finalScionCfg.Env — here, the harness-config
+// directory's own non-empty value — to reach the container. So an empty
+// settings value for an auth key does NOT block the directory's
 // fall-through the way it would for an ordinary key.
 func TestEnvGather_VertexAI_EmptySettingsEnvFallsThroughToHarnessConfigDir(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
@@ -2833,24 +2833,24 @@ profiles:
 	}
 }
 
-// The tests below close review round 1 on ptone/scion#2295 (kr-vertexenv):
-// an empty ResolvedEnv/Config.Env entry must still block a lower-ranked
-// settings/dir fill (F1), the hydrated harness-config directory must be
-// preferred over an on-disk one of the same name (F2), auto-detect must see
-// settings env but not directory env (F3), and the outer needs/hubHas check
-// must be exercised directly, not just the auth-key-group path (finding 6).
+// The tests below cover: an empty ResolvedEnv/Config.Env entry must still
+// block a lower-ranked settings/dir fill, the hydrated harness-config
+// directory must be preferred over an on-disk one of the same name,
+// auto-detect must see settings env but not directory env, and the outer
+// needs/hubHas check must be exercised directly, not just the
+// auth-key-group path.
 
 // TestEnvGather_VertexAI_EmptyResolvedEnvBlocksSettingsFill pins the
 // documented conservative choice for an empty ResolvedEnv/Config.Env entry
 // on an auth-candidate key: at launch, run.go's Start deletes an empty
 // auth-candidate opts.Env entry after auth resolves regardless of where the
 // empty value came from, so the pod may still receive the settings or
-// directory value — this test's own value would actually reach the
-// container (see the round-2 review's agent probe). The preflight
-// deliberately reports the key as missing anyway, because it cannot tell
-// this case apart from the common real Hub-dispatch case where the empty
-// entry also outranks the directory/settings inside the container's own
-// config and the pod really does end up empty (see authCandidateKeyValue).
+// directory value — this test's own value actually reaches the container.
+// The preflight deliberately reports the key as missing anyway, because it
+// cannot tell this case apart from the common real Hub-dispatch case where
+// the empty entry also outranks the directory/settings inside the
+// container's own config and the pod really does end up empty (see
+// authCandidateKeyValue).
 func TestEnvGather_VertexAI_EmptyResolvedEnvBlocksSettingsFill(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
@@ -3077,8 +3077,8 @@ profiles:
 }
 
 // TestEnvGather_OuterCheck_SettingsEnvSatisfiesNonAuthRequiredKey exercises
-// the outer needs/hubHas fold-in directly (finding 6): a key that Phase 2
-// marks required because some OTHER harness_configs entry declares it with
+// the outer needs/hubHas fold-in directly: a key that Phase 2 marks
+// required because some OTHER harness_configs entry declares it with
 // an empty value (extractRequiredEnvKeys walks every harness_configs entry,
 // not just the selected one) must still be satisfied when the SELECTED
 // harness config's own resolved settings env supplies a non-empty value —
@@ -3122,19 +3122,19 @@ profiles:
 	}
 }
 
-// The tests below close round-2 review findings 2 and 3 on ptone/scion#2295:
-// the harness-config directory's own expansion (F3, the r1 fix for F4) had
-// no direct test, and the preflight did not search template-bundled
-// harness-config dirs the way launch's resolveHarnessConfigDir does (F2).
+// The tests below cover: the harness-config directory's own variable
+// expansion had no direct test, and the preflight did not search
+// template-bundled harness-config dirs the way launch's
+// resolveHarnessConfigDir does.
 
 // TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing confirms that a dir
 // env value referencing an unset variable is dropped, matching
 // buildAgentEnv (pkg/agent/run.go), which also drops it.
 func TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing(t *testing.T) {
-	_ = os.Unsetenv("R2_UNSET_VAR")
+	_ = os.Unsetenv("DIR_ENV_UNSET_VAR")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
-			"env:\n  GOOGLE_CLOUD_PROJECT: \"${R2_UNSET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+			"env:\n  GOOGLE_CLOUD_PROJECT: \"${DIR_ENV_UNSET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
@@ -3158,7 +3158,7 @@ profiles:
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 (${R2_UNSET_VAR} is unset; buildAgentEnv would drop it), got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 202 (${DIR_ENV_UNSET_VAR} is unset; buildAgentEnv would drop it), got %d: %s", w.Code, w.Body.String())
 	}
 	var envReqs EnvRequirementsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
@@ -3178,10 +3178,10 @@ profiles:
 // TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied confirms a dir env
 // value referencing a set variable expands and satisfies the requirement.
 func TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied(t *testing.T) {
-	t.Setenv("R2_SET_VAR", "proj-x")
+	t.Setenv("DIR_ENV_SET_VAR", "proj-x")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
-			"env:\n  GOOGLE_CLOUD_PROJECT: \"${R2_SET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+			"env:\n  GOOGLE_CLOUD_PROJECT: \"${DIR_ENV_SET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
@@ -3205,7 +3205,7 @@ profiles:
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 (${R2_SET_VAR} expands to a non-empty value), got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 201 (${DIR_ENV_SET_VAR} expands to a non-empty value), got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -3293,15 +3293,15 @@ profiles:
 }
 
 // TestEnvGather_HarnessDeclaredAuthKey_EmptySettingsEnvFallsThroughToHarnessConfigDir
-// closes round-3 review finding 2: authCandidateEnvKeys' harness-declared
-// half (every required_env name across authMeta.Types, not just the six GCP
-// shared names) was untested. CLAUDE_CODE_OAUTH_TOKEN is declared under the
-// harness's "oauth-token" auth type, not the selected "vertex-ai" one, so it
-// is required only via Phase 2 (settings declares it with an empty value)
-// and checked only by the outer needs/hubHas path — not by the
-// auth-key-group loop, which only ever sees the selected auth type's own
-// groups. Settings' empty value must still fall through to the
-// harness-config directory's value, exactly as for a GCP-shared key.
+// covers authCandidateEnvKeys' harness-declared half (every required_env
+// name across authMeta.Types, not just the six GCP shared names).
+// CLAUDE_CODE_OAUTH_TOKEN is declared under the harness's "oauth-token"
+// auth type, not the selected "vertex-ai" one, so it is required only via
+// Phase 2 (settings declares it with an empty value) and checked only by
+// the outer needs/hubHas path — not by the auth-key-group loop, which only
+// ever sees the selected auth type's own groups. Settings' empty value
+// must still fall through to the harness-config directory's value, exactly
+// as for a GCP-shared key.
 func TestEnvGather_HarnessDeclaredAuthKey_EmptySettingsEnvFallsThroughToHarnessConfigDir(t *testing.T) {
 	unsetHostGCPEnv(t)
 	_ = os.Unsetenv("CLAUDE_CODE_OAUTH_TOKEN")
@@ -3339,15 +3339,15 @@ profiles:
 	}
 }
 
-// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate closes
-// round-3 review finding 1: for a hub-dispatched agent (TemplateID set),
-// launch's own dispatch path (start_context.go) hydrates the template and
-// resolves the harness-config chain from that hydrated local path, not from
-// a same-named template slug found on the broker's local disk. The
-// preflight now hydrates the template the same way (createAgent, next to
-// the harness-config hydration) and uses the hydrated path in place of the
-// slug — so a stale local template of the same name, which launch will
-// never actually use, must be ignored in favor of the hydrated one.
+// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate covers:
+// for a hub-dispatched agent (TemplateID set), launch's own dispatch path
+// (start_context.go) hydrates the template and resolves the harness-config
+// chain from that hydrated local path, not from a same-named template slug
+// found on the broker's local disk. The preflight now hydrates the
+// template the same way (createAgent, next to the harness-config
+// hydration) and uses the hydrated path in place of the slug — so a stale
+// local template of the same name, which launch will never actually use,
+// must be ignored in favor of the hydrated one.
 func TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
@@ -3539,8 +3539,8 @@ func TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch(t *testing
 	}
 }
 
-// TestEnvGather_CreateAgent_ScoresHydratedTemplate closes round-4 review
-// finding 3. TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate
+// TestEnvGather_CreateAgent_ScoresHydratedTemplate complements
+// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate, which
 // calls hydrateTemplate and extractRequiredEnvKeys directly — exercising the
 // same logic createAgent's own preflight wiring uses, but not that wiring
 // itself. This one goes through the full HTTP handler with a real hub
@@ -3549,11 +3549,11 @@ func TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch(t *testing
 // path (not just extractRequiredEnvKeys accepting one) is covered end to
 // end. The region key is deliberately left unset in both the stale and
 // hydrated harness-configs, so the request always ends in 202 and never
-// reaches full dispatch — avoiding the unrelated panic noted in
-// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate's own
-// history, where a real hub connection makes buildStartContext exercise
-// hubclient.Client methods this package's stubs do not implement. The needs
-// list shows which harness-config directory the preflight actually scored.
+// reaches full dispatch: the stub hub client lacks the hubclient.Client
+// methods that buildStartContext would call, so a real hub connection
+// reaching full dispatch here would panic on the nil embedded interface.
+// The needs list shows which harness-config directory the preflight
+// actually scored.
 func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
 	unsetHostGCPEnv(t)
 	hc := "harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n" + claudeAuthBlock
@@ -3627,20 +3627,20 @@ func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
 	}
 }
 
-// TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey closes round-3
-// review finding 5: authCandidateKeyValue must consult the same expanded
-// dir-env view fillAbsentDirEnv uses (expandDirEnv), not look the directory
-// up by a raw, unexpanded key. A dir entry whose KEY is itself a ${VAR}
-// reference that expands to an auth-candidate name (here GOOGLE_CLOUD_PROJECT)
-// reaches the container under that expanded name — buildAgentEnv
-// (pkg/agent/run.go) expands dir-env keys too — so the preflight must find
-// it. Looking the directory up by the literal, unexpanded key would report
-// a value the pod actually receives as missing (false-missing).
+// TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey covers:
+// authCandidateKeyValue must consult the same expanded dir-env view
+// fillAbsentDirEnv uses (expandDirEnv), not look the directory up by a raw,
+// unexpanded key. A dir entry whose KEY is itself a ${VAR} reference that
+// expands to an auth-candidate name (here GOOGLE_CLOUD_PROJECT) reaches the
+// container under that expanded name — buildAgentEnv (pkg/agent/run.go)
+// expands dir-env keys too — so the preflight must find it. Looking the
+// directory up by the literal, unexpanded key would report a value the pod
+// actually receives as missing (false-missing).
 func TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey(t *testing.T) {
-	t.Setenv("R4_KEY_NAME", "GOOGLE_CLOUD_PROJECT")
+	t.Setenv("DIR_ENV_KEY_NAME", "GOOGLE_CLOUD_PROJECT")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
-			"env:\n  \"${R4_KEY_NAME}\": dir-proj\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+			"env:\n  \"${DIR_ENV_KEY_NAME}\": dir-proj\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
 		`
 schema_version: "1"
 harness_configs:
