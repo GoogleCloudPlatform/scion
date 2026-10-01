@@ -4584,7 +4584,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// under multi-replica Postgres (see CONNECTION-BUDGET.md).
 	if rec := s.dbMetrics; rec != nil {
 		if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-			s.stopPoolSampler = dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			stop := dbmetrics.StartPoolSampler(ctx, rec, dbp.DB(), 0)
+			s.mu.Lock()
+			s.stopPoolSampler = stop
+			s.mu.Unlock()
 		}
 	}
 
@@ -4652,83 +4655,63 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server. It is safe to call even when
+// the Server was never started (e.g. New() followed directly by Shutdown()):
+// the background-service teardown below always runs via CleanupResources,
+// and only the final HTTP listener shutdown is skipped when there is no
+// listener to shut down. It is also safe to call more than once, or
+// together with CleanupResources, since CleanupResources is idempotent and
+// http.Server.Shutdown tolerates repeated calls.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
-	cc := s.controlChannel
 	s.mu.RUnlock()
+
+	slog.Info("Hub API server shutting down...")
+
+	// Run the shared background-service teardown (control channel, broker
+	// auth, scheduler, dispatchers, preview service, link services, event
+	// publisher, command bus, etc). CleanupResources is sync.Once-guarded,
+	// so this is a no-op if it already ran.
+	_ = s.CleanupResources(ctx)
 
 	if srv == nil {
 		return nil
 	}
 
-	slog.Info("Hub API server shutting down...")
-
-	// Cancel server-lifetime context to stop background goroutines
-	if s.ctxCancel != nil {
-		s.ctxCancel()
-	}
-
-	// Shutdown control channel first
-	if cc != nil {
-		cc.Shutdown()
-	}
-
-	// Stop the nonce cache cleanup goroutine
-	if s.brokerAuthService != nil {
-		s.brokerAuthService.Close()
-	}
-
-	// Stop scheduler
-	if s.scheduler != nil {
-		s.scheduler.Stop()
-	}
-
-	// Stop the DB pool-stats sampler.
-	if s.stopPoolSampler != nil {
-		s.stopPoolSampler()
-	}
-
-	// Stop notification dispatcher before closing event publisher
-	if s.notificationDispatcher != nil {
-		s.notificationDispatcher.Stop()
-	}
-
-	// Stop lifecycle hook evaluator before closing event publisher
-	if s.lifecycleHookEvaluator != nil {
-		s.lifecycleHookEvaluator.Stop()
-	}
-
-	// Stop presence manager before closing event publisher
-	if s.presenceManager != nil {
-		s.presenceManager.Stop()
-	}
-
-	// Close event publisher
-	if s.events != nil {
-		s.events.Close()
-	}
-	if s.commandBus != nil {
-		s.commandBus.Close()
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	return srv.Shutdown(ctx)
+	return srv.Shutdown(shutdownCtx)
 }
 
 // CleanupResources shuts down Hub-owned resources (control channel, broker auth,
 // event publisher) without stopping an HTTP server. Use this in combined mode
 // where the Hub API is mounted on the WebServer and has no listener of its own.
+// It is also called internally by Shutdown, and is safe to call more than
+// once, including after Shutdown: the teardown below runs at most once.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
 		cc := s.controlChannel
+		stopPoolSampler := s.stopPoolSampler
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
+
+		// Stop the DB pool-stats sampler. Safe to call more than once: it
+		// wraps either a context.CancelFunc or a no-op from
+		// StartPoolSampler. Lives in the Once body so combined mode (which
+		// only calls CleanupResources, never Shutdown) also stops it.
+		//
+		// Read under s.mu above rather than accessed directly here: in
+		// combined mode, StartBackgroundServices (which writes this field)
+		// runs in one goroutine while the CleanupResources-on-ctx.Done
+		// goroutine started earlier (see cmd/server_foreground.go) can race
+		// it, so the write and this read must share a lock.
+		if stopPoolSampler != nil {
+			stopPoolSampler()
+		}
 
 		// Cancel server-lifetime context to stop background goroutines
 		if s.ctxCancel != nil {
@@ -4762,6 +4745,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.teamsLinkService != nil {
 			s.teamsLinkService.Close()
+		}
+		// Stop the B3 preview engine's nonce cleanup goroutine.
+		if s.previewService != nil {
+			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
 		if s.presenceManager != nil {
