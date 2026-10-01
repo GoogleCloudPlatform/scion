@@ -1074,8 +1074,8 @@ func TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected(t *testing.T
 // cycle, ...): it must reject the candidate with that error as the reason,
 // never treat an error as if it were success. evalSymlinks deliberately returns the
 // candidate ITSELF alongside the error (not "" or some other path): that
-// makes "real != candidate" false regardless of the error, so a mutant that
-// stops checking err (e.g. `real, _ := d.evalSymlinks(candidate)`) sees
+// makes "real != candidate" false regardless of the error, so a regression
+// that stops checking err (e.g. `real, _ := d.evalSymlinks(candidate)`) sees
 // real == candidate, skips the resolved-chain walk entirely, and returns
 // "usable" — accepting the workspace instead of falling back. Only actually
 // checking err catches that.
