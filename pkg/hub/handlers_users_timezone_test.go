@@ -89,6 +89,51 @@ func TestUpdateUser_Preferences_TimezoneEmptyClears(t *testing.T) {
 	assert.Equal(t, "", updated.Preferences.Timezone)
 }
 
+// TestUpdateUser_Preferences_TimezoneNullClears verifies the PR body's other
+// documented clearing form: a JSON `null` for timezone clears it the same
+// way an explicit "" does (review round 2, R2-4).
+func TestUpdateUser_Preferences_TimezoneNullClears(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	devUser := getDevUser(t, srv, s)
+
+	devUser.Preferences = &store.UserPreferences{Timezone: "Asia/Tokyo"}
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+		map[string]any{"preferences": map[string]any{"timezone": nil}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, devUser.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Preferences)
+	assert.Equal(t, "", updated.Preferences.Timezone)
+}
+
+// TestUpdateUser_Preferences_TopLevelNullIsNoop verifies the PR body's other
+// documented null behaviour: a top-level `"preferences": null` is a no-op
+// (200, nothing cleared), unlike a sub-field null or "" (review round 2,
+// R2-4). A future change that treated it as "clear everything" would
+// silently break the stated contract without this test.
+func TestUpdateUser_Preferences_TopLevelNullIsNoop(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	devUser := getDevUser(t, srv, s)
+
+	devUser.Preferences = &store.UserPreferences{Theme: "dark", Timezone: "Asia/Tokyo"}
+	require.NoError(t, s.UpdateUser(ctx, devUser))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+		map[string]any{"preferences": nil})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, devUser.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Preferences)
+	assert.Equal(t, "dark", updated.Preferences.Theme, "top-level preferences:null must not clear theme")
+	assert.Equal(t, "Asia/Tokyo", updated.Preferences.Timezone, "top-level preferences:null must not clear timezone")
+}
+
 // TestUpdateUser_Preferences_InvalidTimezoneRejected verifies that an
 // unparseable IANA zone name is rejected with 400 and not persisted.
 func TestUpdateUser_Preferences_InvalidTimezoneRejected(t *testing.T) {

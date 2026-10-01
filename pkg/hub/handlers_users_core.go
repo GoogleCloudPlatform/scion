@@ -33,7 +33,7 @@ import (
 // failing the request (the caller's response then falls back to the session
 // or token fields alone, and the UI treats the display timezone as Auto).
 // Any other store error also degrades, but is logged, so a broken store does
-// not silently masquerade as "no preferences set" (review round 1, R1-5).
+// not silently masquerade as "no preferences set".
 func loadUserPreferences(ctx context.Context, st store.Store, uid string) *store.UserPreferences {
 	if st == nil || uid == "" {
 		return nil
@@ -302,17 +302,11 @@ type userPreferencesPatch struct {
 	Timezone        *string
 }
 
-// validateUserTimezone validates a user display-timezone preference value.
-// "" means Auto (the browser-detected zone) and is always valid. "Local" is
-// rejected because it resolves to the server process's zone rather than a
-// portable IANA name.
 // nonPortableTimezoneNames denylists zoneinfo entries that time.LoadLocation
 // accepts but that do not name a portable IANA zone: each one resolves to
 // something local to the server rather than to a fixed place, which is
 // exactly what the Auto/explicit-zone split exists to avoid, and which
-// task 11's Intl.DateTimeFormat-based formatters cannot render (review round
-// 1, R1-1). "Local" is also rejected as a map key here for symmetry, though
-// it is denied unconditionally below regardless of case.
+// task 11's Intl.DateTimeFormat-based formatters cannot render.
 var nonPortableTimezoneNames = map[string]bool{
 	"Local":      true,
 	"localtime":  true,
@@ -334,6 +328,10 @@ func decodeStringPref(key string, rv json.RawMessage) (string, error) {
 	return v, nil
 }
 
+// validateUserTimezone validates a user display-timezone preference value.
+// "" means Auto (the browser-detected zone) and is always valid. Any name in
+// nonPortableTimezoneNames is rejected (a case-sensitive lookup), and every
+// other value must resolve via time.LoadLocation.
 func validateUserTimezone(tz string) error {
 	if tz == "" {
 		return nil
