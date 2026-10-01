@@ -15,11 +15,11 @@
  */
 
 /**
- * End-to-end coverage (design §9 W2/W3) for the `/agents` page's
- * `agents-changed` consumption via `mergeChanged` (design §7, §11): this
- * replaces the old per-event `onAgentsUpdated` full rebuild. Exercises the
- * real `stateManager` singleton (SSE deltas go through its actual
- * coalescing pipeline), with only `fetch` and `localStorage` faked.
+ * End-to-end coverage for the `/agents` page's `agents-changed` consumption
+ * via `mergeChanged` (design §7, §11): this replaces the old per-event
+ * `onAgentsUpdated` full rebuild. Exercises the real `stateManager`
+ * singleton (SSE deltas go through its actual coalescing pipeline), with
+ * only `fetch` and `localStorage` faked.
  */
 
 // @vitest-environment happy-dom
@@ -143,7 +143,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     expect(el.agents).not.toBe(before);
     const a1After = el.agents.find((a) => a.id === 'a1');
     expect(a1After?.phase).toBe('stopped');
-    // ...but every untouched agent is carried through by reference (W2 A10).
+    // ...but every untouched agent is carried through by reference.
     expect(el.agents.find((a) => a.id === 'a2')).toBe(a2Before);
     expect(el.agents.find((a) => a.id === 'a3')).toBe(before.find((a) => a.id === 'a3'));
     expect(requests.length).toBe(1); // no request for a live update
@@ -165,6 +165,50 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
 
     expect(el.agents.some((a) => a.id === 'a4')).toBe(true);
     expect(requests.length).toBe(1); // still no request
+  });
+
+  it('an SSE-created agent keeps its inherited capabilities across its next status delta', async () => {
+    const initial = [agent('a1')];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: ['stop'] } }))
+      )
+    );
+
+    const el = document.createElement('scion-page-agents') as TestEl;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await flush();
+    await el.updateComplete;
+
+    // An SSE-created agent, carrying no `_capabilities` of its own, as a
+    // real create event does.
+    handleUpdate('agent.a4.created', {
+      agentId: 'a4',
+      id: 'a4',
+      name: 'a4',
+      projectId: 'p1',
+      template: 't',
+      phase: 'running',
+      created: '2026-01-02T00:00:00Z',
+      updated: '2026-01-02T00:00:00Z',
+      messageMode: 'project',
+    });
+    await flush();
+    await el.updateComplete;
+
+    const afterCreate = el.agents.find((a) => a.id === 'a4');
+    expect(afterCreate?._capabilities).toBeTruthy();
+
+    // Its next delta carries no `_capabilities` either.
+    handleUpdate('agent.a4.status', { agentId: 'a4', phase: 'stopped' });
+    await flush();
+    await el.updateComplete;
+
+    const afterStatus = el.agents.find((a) => a.id === 'a4');
+    expect(afterStatus?.phase).toBe('stopped');
+    expect(afterStatus?._capabilities).toBe(afterCreate?._capabilities);
   });
 
   it('removes an agent on an SSE delete', async () => {
