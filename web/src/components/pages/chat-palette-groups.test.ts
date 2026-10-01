@@ -1680,3 +1680,262 @@ describe('palette group invalidation during an in-flight load', () => {
     expect(el._shouldUseCachedPaletteGroup('threads')).toBe(true);
   });
 });
+
+describe('palette group refresh: a dirty-mark debounce firing mid-load defers instead of aborting/restarting it', () => {
+  it('Agents: the debounce does not re-enter the controller while its fetch is still in flight; it reloads exactly once the fetch frees up', async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    vi.useFakeTimers();
+
+    let resolveLoad!: (v: PaletteCandidate[]) => void;
+    const controller = el._paletteDataController;
+    const loadSpy = vi
+      .spyOn(controller, 'loadAgentsGroup')
+      .mockImplementation(() => new Promise((resolve) => (resolveLoad = resolve)));
+
+    const firstLoad = el._loadPaletteAgents();
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+
+    el._handleAgentsUpdated();
+    expect(el._paletteGroupDirty.agents).toBe(true);
+
+    vi.advanceTimersByTime(500);
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+
+    resolveLoad([]);
+    await firstLoad;
+    expect(el.v2PaletteGroups.agents?.status).toBe('ready');
+    expect(el._paletteGroupDirty.agents).toBe(true);
+
+    vi.advanceTimersByTime(500);
+    expect(loadSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('_paletteGroupLoadToken: a superseded load cannot clear or overwrite a newer load for the same group', () => {
+  it("Agents: load A superseded by load B does not clear B's token, and the next debounce tick leaves B alone", async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    const controller = el._paletteDataController;
+
+    let resolveA!: (v: PaletteCandidate[]) => void;
+    let resolveB!: (v: PaletteCandidate[]) => void;
+    const loadSpy = vi
+      .spyOn(controller, 'loadAgentsGroup')
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveA = resolve)))
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveB = resolve)));
+
+    const loadA = el._loadPaletteAgents();
+    const tokenAfterA = el._paletteGroupLoadToken.agents;
+    expect(tokenAfterA).toBeDefined();
+
+    const loadB = el._loadPaletteAgents();
+    const tokenAfterB = el._paletteGroupLoadToken.agents;
+    expect(tokenAfterB).toBeDefined();
+    expect(tokenAfterB).not.toBe(tokenAfterA);
+
+    // A (superseded) resolves and unwinds first.
+    resolveA([]);
+    await loadA;
+    // A's own `finally` must not have cleared B's token.
+    expect(el._paletteGroupLoadToken.agents).toBe(tokenAfterB);
+
+    // A debounce tick running right now must see the group as still
+    // occupied (by B), not call the controller a third time.
+    el._refreshDirtyPaletteGroups();
+    expect(loadSpy).toHaveBeenCalledTimes(2);
+
+    resolveB([]);
+    await loadB;
+    expect(el._paletteGroupLoadToken.agents).toBeUndefined();
+    expect(el.v2PaletteGroups.agents?.status).toBe('ready');
+  });
+
+  it("People: a load superseded via _peopleLoadSeq while resolving identity does not clear a newer load's token", async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    el.pageData = { user: {} }; // forces _resolveSelfUserId to await /auth/me for both loads
+
+    let resolveAuthA!: (v: Response) => void;
+    let resolveAuthB!: (v: Response) => void;
+    vi.mocked(apiFetch)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveAuthA = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveAuthB = resolve;
+          })
+      );
+    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockResolvedValue([]);
+
+    const loadA = el._loadPalettePeople();
+    const tokenAfterA = el._paletteGroupLoadToken.people;
+    expect(tokenAfterA).toBeDefined();
+
+    // B supersedes A via `_peopleLoadSeq` before either identity fetch
+    // resolves — both are still pending at this point.
+    const loadB = el._loadPalettePeople();
+    const tokenAfterB = el._paletteGroupLoadToken.people;
+    expect(tokenAfterB).not.toBe(tokenAfterA);
+
+    // A's identity fetch resolves first; A takes its `mySeq` early return
+    // while B's own identity fetch is still pending.
+    resolveAuthA(jsonResponse({ id: 'self-user', email: 's@example.com', displayName: 'Self' }));
+    await loadA;
+    // A's `finally` must not have cleared B's token.
+    expect(el._paletteGroupLoadToken.people).toBe(tokenAfterB);
+
+    resolveAuthB(jsonResponse({ id: 'self-user', email: 's@example.com', displayName: 'Self' }));
+    await loadB;
+    expect(el._paletteGroupLoadToken.people).toBeUndefined();
+    expect(el.v2PaletteGroups.people?.status).toBe('ready');
+  });
+
+  it("Threads: load A superseded by load B does not clear B's token, and the next debounce tick leaves B alone", async () => {
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    const controller = el._paletteDataController;
+
+    let rejectA!: (err: unknown) => void;
+    let resolveB!: (v: { candidates: PaletteCandidate[]; incomplete: boolean }) => void;
+    const loadSpy = vi
+      .spyOn(controller, 'loadThreadsGroup')
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => (rejectA = reject)))
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveB = resolve)));
+
+    const loadA = el._loadPaletteThreads();
+    const tokenAfterA = el._paletteGroupLoadToken.threads;
+    expect(tokenAfterA).toBeDefined();
+
+    const loadB = el._loadPaletteThreads();
+    const tokenAfterB = el._paletteGroupLoadToken.threads;
+    expect(tokenAfterB).toBeDefined();
+    expect(tokenAfterB).not.toBe(tokenAfterA);
+
+    // A (superseded) is rejected the way the real data controller's own
+    // generation check rejects a stale call — an AbortError-shaped
+    // rejection — and unwinds first.
+    rejectA(new DOMException('superseded by a later load', 'AbortError'));
+    await loadA;
+    // A's own `finally` must not have cleared B's token.
+    expect(el._paletteGroupLoadToken.threads).toBe(tokenAfterB);
+
+    // A debounce tick running right now must see the group as still
+    // occupied (by B), not call the controller a third time.
+    el._refreshDirtyPaletteGroups();
+    expect(loadSpy).toHaveBeenCalledTimes(2);
+
+    resolveB({ candidates: [], incomplete: false });
+    await loadB;
+    expect(el._paletteGroupLoadToken.threads).toBeUndefined();
+    expect(el.v2PaletteGroups.threads?.status).toBe('ready');
+  });
+
+  it("People: load A's loadPeopleGroup resolving after load B has already taken over (still awaiting its own identity) does not publish A's stale result", async () => {
+    // The one reachable publish guard: A is already past `_resolveSelfUserId`
+    // and inside `loadPeopleGroup` — nothing the data controller tracks has
+    // superseded that specific call — while B is still awaiting its own
+    // `/auth/me`. Unlike the overlap test above (A superseded while
+    // resolving identity), here A is the one that resolves successfully
+    // first, and must not be allowed to publish over B's still-in-flight
+    // load.
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    el.pageData = { user: { id: 'self-user' } }; // known id: _resolveSelfUserId resolves synchronously
+
+    let resolveAuthB!: (v: Response) => void;
+    vi.mocked(apiFetch).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAuthB = resolve;
+        })
+    );
+
+    let resolveLoadA!: (v: PaletteCandidate[]) => void;
+    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockImplementationOnce(
+      () => new Promise((resolve) => (resolveLoadA = resolve))
+    );
+
+    const loadA = el._loadPalettePeople();
+    const tokenAfterA = el._paletteGroupLoadToken.people;
+    // `_resolveSelfUserId` still suspends at its own `await`, even on the
+    // known-id path with no real fetch — let A actually reach and call
+    // `loadPeopleGroup` before touching anything else.
+    await vi.waitFor(() => expect(resolveLoadA).toBeDefined());
+
+    // B starts — known id is already gone (pageData.user.id cleared) so it
+    // awaits its own `/auth/me`, still pending.
+    el.pageData = { user: {} };
+    const loadB = el._loadPalettePeople();
+    const tokenAfterB = el._paletteGroupLoadToken.people;
+    expect(tokenAfterB).not.toBe(tokenAfterA);
+
+    // A's loadPeopleGroup resolves while B is still awaiting identity.
+    const finishSpy = vi.spyOn(el, '_finishPaletteGroupLoad' as never);
+    resolveLoadA([]);
+    await loadA;
+
+    // A must not have published `ready`, cached, or cleared B's token.
+    expect(el.v2PaletteGroups.people?.status).not.toBe('ready');
+    expect(finishSpy).not.toHaveBeenCalled();
+    expect(el._paletteGroupLoadToken.people).toBe(tokenAfterB);
+
+    resolveAuthB(jsonResponse({ id: 'self-user', email: 's@example.com', displayName: 'Self' }));
+    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockResolvedValueOnce([]);
+    await loadB;
+    expect(el.v2PaletteGroups.people?.status).toBe('ready');
+  });
+
+  it("People: load A's loadPeopleGroup rejecting (a real, non-abort failure) after load B has already taken over does not publish A's stale error", async () => {
+    // Same window as the success-path test above, but A fails instead of
+    // succeeding: nothing the data controller tracks has superseded A's
+    // call, so without this check A's `catch` would publish a stale `error`
+    // (wiping candidates) over B's own in-progress or already-`ready` state.
+    const el = createPage();
+    el.v2PaletteOpen = true;
+    el.pageData = { user: { id: 'self-user' } };
+
+    let resolveAuthB!: (v: Response) => void;
+    vi.mocked(apiFetch).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAuthB = resolve;
+        })
+    );
+
+    let rejectLoadA!: (err: unknown) => void;
+    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLoadA = reject;
+        })
+    );
+
+    const loadA = el._loadPalettePeople();
+    const tokenAfterA = el._paletteGroupLoadToken.people;
+    await vi.waitFor(() => expect(rejectLoadA).toBeDefined());
+
+    el.pageData = { user: {} };
+    const loadB = el._loadPalettePeople();
+    const tokenAfterB = el._paletteGroupLoadToken.people;
+    expect(tokenAfterB).not.toBe(tokenAfterA);
+
+    // A fails for a real (non-abort) reason while B is still awaiting identity.
+    rejectLoadA(new Error('network down'));
+    await loadA;
+
+    // A must not have published `error` (wiping candidates) or cleared B's token.
+    expect(el.v2PaletteGroups.people?.status).not.toBe('error');
+    expect(el._paletteGroupLoadToken.people).toBe(tokenAfterB);
+
+    resolveAuthB(jsonResponse({ id: 'self-user', email: 's@example.com', displayName: 'Self' }));
+    vi.spyOn(el._paletteDataController, 'loadPeopleGroup').mockResolvedValueOnce([]);
+    await loadB;
+    expect(el.v2PaletteGroups.people?.status).toBe('ready');
+  });
+});
