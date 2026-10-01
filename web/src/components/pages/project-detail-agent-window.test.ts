@@ -402,7 +402,9 @@ describe('project-detail — agent list window', () => {
         `scion-sort-project-agents-${projectId}`,
         JSON.stringify({ field: 'updated', dir: 'desc' })
       );
-      const agents = Array.from({ length: PROJECT_AGENTS_FIT_THRESHOLD }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: PROJECT_AGENTS_FIT_THRESHOLD }, (_, i) =>
+        makeAgent(i, { projectId })
+      );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -476,7 +478,7 @@ describe('project-detail — agent list window', () => {
       // any size up to 500, so this holds above the fit threshold too.
       const projectId = 'p-w10-grid';
       localStorage.setItem('scion-view-project-agents', 'grid');
-      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -509,7 +511,7 @@ describe('project-detail — agent list window', () => {
       // Every agent carries env=prod, so committing that label keeps the
       // candidate set above the threshold and the window stays paged.
       const agents = Array.from({ length: count }, (_, i) =>
-        makeAgent(i, { labels: { env: 'prod' } })
+        makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
@@ -650,7 +652,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-422';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 10 }, (_, i) =>
-        makeAgent(i, { labels: { env: 'prod' } })
+        makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
@@ -694,7 +696,7 @@ describe('project-detail — agent list window', () => {
     it('a non-OK label-commit response keeps the previously loaded agents', async () => {
       const projectId = 'p-label-400';
       localStorage.setItem('scion-view-project-agents', 'grid'); // not sorted-eligible: exercises the legacy path directly
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let failNext = false;
       vi.stubGlobal(
@@ -763,7 +765,7 @@ describe('project-detail — agent list window', () => {
 
     it('an off-page phase change with no phase filter is counts-only — stats update live, no chip, no request', async () => {
       const projectId = 'p-paged-counts';
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -794,7 +796,7 @@ describe('project-detail — agent list window', () => {
     it('an off-page change that newly passes the active phase filter raises the chip', async () => {
       const projectId = 'p-paged-newly-passes';
       const agents = Array.from({ length: 30 }, (_, i) =>
-        makeAgent(i, { phase: i === 29 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i === 29 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
@@ -824,9 +826,9 @@ describe('project-detail — agent list window', () => {
     it('an off-page status change for a non-member under a different committed label never inflates stats.total and never raises the chip', async () => {
       const projectId = 'p-paged-label';
       const members = Array.from({ length: 30 }, (_, i) =>
-        makeAgent(i, { labels: { env: 'prod' } })
+        makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
-      const nonMember = makeAgent(999, { labels: { env: 'dev' }, phase: 'stopped' });
+      const nonMember = makeAgent(999, { projectId, labels: { env: 'dev' }, phase: 'stopped' });
       const agents = [...members, nonMember];
       const requests: AgentsRequest[] = [];
       localStorage.setItem('scion-view-project-agents', 'list');
@@ -880,7 +882,7 @@ describe('project-detail — agent list window', () => {
 
     it('on-page delete and phase-filter-failure still show the chip (backfill)', async () => {
       const projectId = 'p-paged-backfill';
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -901,7 +903,7 @@ describe('project-detail — agent list window', () => {
 
     it('reconnect (agents-resync) raises the chip with no request (plumbing only — state.ts owns resync detection itself)', async () => {
       const projectId = 'p-paged-resync';
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       const el = await mountForcedPaged(projectId, agents, requests);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -923,7 +925,7 @@ describe('project-detail — agent list window', () => {
         `scion-sort-project-agents-${projectId}`,
         JSON.stringify({ field: 'updated', dir: 'desc' })
       );
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -983,7 +985,7 @@ describe('project-detail — agent list window', () => {
     it('sort -> name (legacy) and name -> updated (paged again) each issue exactly one request; a phase change while paged issues exactly one', async () => {
       const projectId = 'p-b2b3';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1033,7 +1035,7 @@ describe('project-detail — agent list window', () => {
       // 30 agents; the sorted endpoint reports complete once asked again
       // with the real fit threshold, so after one legacy load and one
       // fit retry the window settles into 'small' and further toggles are free.
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1084,7 +1086,7 @@ describe('project-detail — agent list window', () => {
     it('always-paged (fit=0): a dir flip costs one request, and list<->grid toggles cost exactly one each, alternating legacy and fit', async () => {
       const projectId = 'p-b3-always-paged';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1145,7 +1147,7 @@ describe('project-detail — agent list window', () => {
       // Every 5th agent carries the env=prod label, so the current page has
       // a predictable, non-trivial filtered subset.
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, i % 5 === 0 ? { labels: { env: 'prod' } } : {})
+        makeAgent(i, { projectId, ...(i % 5 === 0 ? { labels: { env: 'prod' } } : {}) })
       );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
@@ -1196,9 +1198,9 @@ describe('project-detail — agent list window', () => {
   });
 
   describe('a paged -> small transition resets pageIndex to 0', () => {
-    function fixture60() {
+    function fixture60(projectId: string) {
       return Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { labels: i < 10 ? { env: 'prod' } : { env: 'dev' } })
+        makeAgent(i, { projectId, labels: i < 10 ? { env: 'prod' } : { env: 'dev' } })
       );
     }
 
@@ -1231,7 +1233,7 @@ describe('project-detail — agent list window', () => {
     it('a k=v label commit whose set fits (paged -> small via the fit path) lands on page 0', async () => {
       const projectId = 'p-r3a1';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = fixture60();
+      const agents = fixture60(projectId);
       const requests: AgentsRequest[] = [];
       stubAlwaysPagedUnlessLabelled(projectId, agents, requests);
 
@@ -1257,7 +1259,7 @@ describe('project-detail — agent list window', () => {
     it('a bare-key label commit (legacy path, paged -> small) lands on page 0', async () => {
       const projectId = 'p-r3a2';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = fixture60();
+      const agents = fixture60(projectId);
       const requests: AgentsRequest[] = [];
       stubAlwaysPagedUnlessLabelled(projectId, agents, requests);
 
@@ -1285,7 +1287,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-b4';
       localStorage.setItem('scion-view-project-agents', 'list');
       localStorage.setItem('scion-pagesize-project-agents', '50');
-      const agents = Array.from({ length: 80 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 80 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1311,7 +1313,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-b4-invalid';
       localStorage.setItem('scion-view-project-agents', 'list');
       localStorage.setItem('scion-pagesize-project-agents', '17');
-      const agents = Array.from({ length: 10 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 10 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -1334,9 +1336,9 @@ describe('project-detail — agent list window', () => {
     it('an older trigger whose response resolves later never overwrites a newer one', async () => {
       const projectId = 'p-b5';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const mountAgents = [makeAgent(0, { name: 'mount' })];
-      const firstTriggerAgents = [makeAgent(1, { name: 'first-trigger' })];
-      const secondTriggerAgents = [makeAgent(2, { name: 'second-trigger' })];
+      const mountAgents = [makeAgent(0, { projectId, name: 'mount' })];
+      const firstTriggerAgents = [makeAgent(1, { projectId, name: 'first-trigger' })];
+      const secondTriggerAgents = [makeAgent(2, { projectId, name: 'second-trigger' })];
       const requests: AgentsRequest[] = [];
 
       let sortedCallCount = 0;
@@ -1444,7 +1446,7 @@ describe('project-detail — agent list window', () => {
     it('a Next click while a lifecycle refresh is in flight is a no-op; the refresh then lands on page 0 as intended', async () => {
       const projectId = 'p-n1-prime';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let holdNextPageZeroFit = false;
       let heldResolve: ((r: Response) => void) | null = null;
@@ -1525,7 +1527,7 @@ describe('project-detail — agent list window', () => {
       // disabled for the duration of every agent action.
       const projectId = 'p-n2-prime-small';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let holdNextSorted = false;
       let heldResolve: ((r: Response) => void) | null = null;
@@ -1607,7 +1609,7 @@ describe('project-detail — agent list window', () => {
         const projectId = `p-r3b-${kind}`;
         localStorage.setItem('scion-view-project-agents', 'list');
         const agents = Array.from({ length: 60 }, (_, i) =>
-          makeAgent(i, { phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
+          makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
         );
         const requests: AgentsRequest[] = [];
         let holdNextPageZeroFit = false;
@@ -1687,7 +1689,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-n1-triple-prime';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
@@ -1757,7 +1759,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-n1-quad-prime-net';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
@@ -1815,7 +1817,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-n1-sorted-parse-error';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
@@ -1889,7 +1891,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-n1-quad-prime-legacy';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
@@ -1958,7 +1960,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-legacy-network-error';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running' })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
@@ -2029,7 +2031,7 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-label-commit-network-error';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
-        makeAgent(i, { phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
+        makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running', labels: { env: 'dev' } })
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
@@ -2100,7 +2102,9 @@ describe('project-detail — agent list window', () => {
     it('a label commit routed to the legacy path whose response is ok but json() rejects reverts committedLabel, with no unhandled rejection', async () => {
       const projectId = 'p-legacy-parse-error-label-commit';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { labels: { env: 'dev' } }));
+      const agents = Array.from({ length: 5 }, (_, i) =>
+        makeAgent(i, { projectId, labels: { env: 'dev' } })
+      );
       const requests: AgentsRequest[] = [];
       let failNextLegacy = false;
       vi.stubGlobal(
@@ -2168,7 +2172,7 @@ describe('project-detail — agent list window', () => {
     it('a 400 on the sorted (fit) path keeps the previous data and reverts committedLabel', async () => {
       const projectId = 'p-n3-fit-400';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let failLabelOnFitPath = false;
       vi.stubGlobal(
@@ -2222,7 +2226,7 @@ describe('project-detail — agent list window', () => {
     it('shows "Loading agents…" while the legacy fallback is in flight, then the grid once it lands', async () => {
       const projectId = 'p-n5-loading';
       localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let holdLegacy = false;
       let heldResolve: ((r: Response) => void) | null = null;
@@ -2276,7 +2280,9 @@ describe('project-detail — agent list window', () => {
     it('a lifecycle refresh in grid with a phase filter matching nothing shows the filter-empty message, not a loading flicker', async () => {
       const projectId = 'p-n2-prime';
       localStorage.setItem('scion-view-project-agents', 'grid'); // not P1-eligible: this.agents is populated via the legacy path
-      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { phase: 'running' }));
+      const agents = Array.from({ length: 5 }, (_, i) =>
+        makeAgent(i, { projectId, phase: 'running' })
+      );
       const requests: AgentsRequest[] = [];
       let holdNext = false;
       let heldResolve: ((r: Response) => void) | null = null;
