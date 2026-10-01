@@ -17,10 +17,6 @@ terraform {
       source  = "hashicorp/kubernetes"
       version = "~> 2.35"
     }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
     # random and time are used transitively via hub-cloudrun and
     # cloudsql-database (both pin the same constraints in their own
     # versions.tf); declared explicitly here too so the root's

@@ -14,7 +14,7 @@ locals {
   # flows into settings.yaml's hub_id and SCION_SERVER_HUB_HUBID below — both
   # must resolve to the exact same value ResolveHubID() (pkg/config/
   # hub_config.go) will see, or GCPBackend.Get computes a different
-  # scion-hub-<hash>-* secret name than the one hub-identity actually
+  # scion-<hash>-* secret name than the one hub-identity actually
   # provisioned (split-brain secret lookup). The caller (configurations/hub)
   # feeds var.hub_name from its own local.hub_id for the same reason, so this
   # is the same value end to end, named at each layer that touches it.
@@ -333,69 +333,23 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
 
 # --- OIDC signing key ---
 #
-# SCION_REQUIRE_STABLE_SIGNING_KEY=true (below) makes pkg/hub/oidckeys.go:467
-# refuse to generate the RSA OIDC signing key at boot — the agent and user
-# signing keys are derived from the session secret, but the OIDC key has no
-# derivation path, so with no key pre-provisioned no new hub could start.
-# Terraform pre-provisions it instead of the hub generating it.
-#
-# Pinned to the legacy pre-#2152 hash, not the new hub-prefixed one: keep
-# this pre-provision (and hub-identity's legacy secretmanager.admin grant it
-# relies on) until this hub's image carries ptone/scion#2152 and
-# `migrate --delete-legacy` has run — only then does the hub start looking
-# for this secret under the new hub-prefixed name instead.
-#
-# The secret ID is built directly from hub-identity's hub_scope_secret_hash
-# (not recomputed here), so it lands under the hub SA's legacy conditioned
-# secretmanager.admin grant (scion-hub-<hash>-*) with no new IAM: the hub
-# finds it through GCPBackend.Get's no-DB-record path (computes the name,
-# reads accessLatestVersion), then backs it up to the store. Set() on an
-# existing secret only adds versions and never rewrites labels, so later
-# hub rotations (RotateKey) and boot re-syncs cause no Terraform drift.
-resource "tls_private_key" "oidc_signing_key" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-resource "google_secret_manager_secret" "oidc_signing_key" {
-  project   = var.project_id
-  secret_id = "scion-hub-${var.hub_scope_secret_hash}-oidc_signing_key"
-
-  # Mirrors pkg/secret/gcpbackend.go's buildLabels for this secret's real
-  # identity, so it shows up in the console exactly as if the hub had
-  # created it itself.
-  labels = {
-    "scion-scope"    = "hub"
-    "scion-scope-id" = local.hub_id
-    "scion-type"     = "internal"
-    "scion-name"     = "oidc_signing_key"
-    "scion-target"   = "oidc_signing_key"
-    "scion-hub-name" = local.hub_id
-  }
-
-  replication {
-    auto {}
-  }
-}
-
-resource "google_secret_manager_secret_version" "oidc_signing_key" {
-  secret = google_secret_manager_secret.oidc_signing_key.id
-  # Must be PKCS#8 ("-----BEGIN PRIVATE KEY-----"): decodePEMPrivateKey
-  # rejects the PKCS#1 form (private_key_pem, "-----BEGIN RSA PRIVATE KEY-----").
-  secret_data = tls_private_key.oidc_signing_key.private_key_pem_pkcs8
-}
+# Not pre-provisioned by Terraform. The hub generates its own OIDC signing
+# key on first boot (pkg/hub/oidckeys.go) and stores it under the
+# hub-prefixed Secret Manager name, covered by hub-identity's
+# hub_secretmanager_admin_hub_prefixed grant, with a DB-store backup for
+# cold-start races.
 
 # --- IAM propagation guard (measured at ~70s for this project) ---
 #
 # IAM changes are eventually consistent, and the hub creates its
-# scion-hub-<h12>-* signing keys AT BOOT. A service created immediately
+# scion-<h12>-* signing keys AT BOOT. A service created immediately
 # after its IAM would crash-loop with 403s on the very first apply. This is
 # purely a timer: it depends on every hub-SA IAM grant (hub-identity), waits,
 # and the Cloud Run service below depends on it. triggers include the
 # condition expression, so the sleep re-arms if that condition is ever
 # changed (e.g. a different hub) — a create-only sleep would protect only
 # the first apply and silently stop protecting a later condition change.
-# See the README troubleshooting note: a 403 on scion-hub-<h12>-... shortly
+# See the README troubleshooting note: a 403 on scion-<h12>-... shortly
 # after a first apply is IAM propagation. Re-apply. Do NOT widen the
 # condition to work around it.
 # The caller used to express this module's ordering requirements
@@ -428,7 +382,6 @@ resource "time_sleep" "iam_propagation" {
   create_duration = "120s"
 
   triggers = {
-    condition          = var.hub_iam_condition_expression
     condition_prefixed = var.hub_iam_condition_expression_prefixed
     hub_sa             = var.hub_sa_email
     # On an EXISTING hub (an upgrade, not a fresh create), condition/hub_sa
@@ -536,10 +489,6 @@ resource "google_cloud_run_v2_service" "hub" {
       env {
         name  = "HOME"
         value = "/home/scion"
-      }
-      env {
-        name  = "SCION_REQUIRE_STABLE_SIGNING_KEY"
-        value = "true"
       }
       env {
         name  = "KUBECONFIG"
@@ -721,7 +670,6 @@ resource "google_cloud_run_v2_service" "hub" {
     google_secret_manager_secret_version.settings,
     google_secret_manager_secret_version.kubeconfig,
     google_secret_manager_secret_version.session_secret,
-    google_secret_manager_secret_version.oidc_signing_key,
     google_secret_manager_secret_iam_member.hub_reads_settings,
     google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
     google_secret_manager_secret_iam_member.hub_reads_session_secret,
