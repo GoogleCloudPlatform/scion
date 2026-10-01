@@ -69,11 +69,11 @@ func TestRestart_AuxListErrorWithNoMatch_AbortsWithoutStart(t *testing.T) {
 	if w.Code < 500 {
 		t.Fatalf("status=%d body=%s, want 5xx (an unlistable runtime may hold the agent)", w.Code, w.Body.String())
 	}
-	if defaultMgr.startCalls != 0 {
-		t.Errorf("Start called %d time(s); restart must not start when the target cannot be determined", defaultMgr.startCalls)
+	if defaultMgr.StartCalls() != 0 {
+		t.Errorf("Start called %d time(s); restart must not start when the target cannot be determined", defaultMgr.StartCalls())
 	}
-	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
-		t.Errorf("Stop calls default=%d aux=%d, want none", defaultMgr.stopCalls, auxMgr.stopCalls)
+	if defaultMgr.StopCalls() != 0 || auxMgr.StopCalls() != 0 {
+		t.Errorf("Stop calls default=%d aux=%d, want none", defaultMgr.StopCalls(), auxMgr.StopCalls())
 	}
 }
 
@@ -89,8 +89,8 @@ func TestRestart_FallbackStageListError_AbortsWithoutStart(t *testing.T) {
 	if w.Code < 500 {
 		t.Fatalf("status=%d body=%s, want 5xx", w.Code, w.Body.String())
 	}
-	if mgr.startCalls != 0 {
-		t.Errorf("Start called %d time(s); want 0", mgr.startCalls)
+	if mgr.StartCalls() != 0 {
+		t.Errorf("Start called %d time(s); want 0", mgr.StartCalls())
 	}
 }
 
@@ -112,9 +112,9 @@ func TestRestart_TwoAuxMatches_StopTargetAndManagerAgree(t *testing.T) {
 		if w.Code != http.StatusAccepted {
 			t.Fatalf("iteration %d: status=%d body=%s, want 202", i, w.Code, w.Body.String())
 		}
-		if mgrA.stopCalls != 1 || mgrA.lastStopAgentID != "c-a" || mgrB.stopCalls != 0 || defaultMgr.stopCalls != 0 {
+		if mgrA.StopCalls() != 1 || mgrA.LastStopAgentID() != "c-a" || mgrB.StopCalls() != 0 || defaultMgr.StopCalls() != 0 {
 			t.Fatalf("iteration %d: stops aux-a=%d(%q) aux-b=%d(%q) default=%d(%q), want only aux-a stopping c-a",
-				i, mgrA.stopCalls, mgrA.lastStopAgentID, mgrB.stopCalls, mgrB.lastStopAgentID, defaultMgr.stopCalls, defaultMgr.lastStopAgentID)
+				i, mgrA.StopCalls(), mgrA.LastStopAgentID(), mgrB.StopCalls(), mgrB.LastStopAgentID(), defaultMgr.StopCalls(), defaultMgr.LastStopAgentID())
 		}
 	}
 }

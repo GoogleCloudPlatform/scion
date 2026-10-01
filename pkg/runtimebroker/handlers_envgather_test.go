@@ -501,8 +501,8 @@ runtimes:
 	if w1.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d: %s", w1.Code, w1.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("first create: expected startCalls=1, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("first create: expected startCalls=1, got %d", mgr.StartCalls())
 	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -512,8 +512,8 @@ runtimes:
 	if w2.Code != http.StatusCreated {
 		t.Fatalf("second create: expected 201 replay, got %d: %s", w2.Code, w2.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.StartCalls())
 	}
 }
 

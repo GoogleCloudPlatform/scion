@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,8 +40,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// mockManager implements agent.Manager for testing
+// mockManager implements agent.Manager for testing.
+//
+// mu guards every mutable bookkeeping field below (the counters and the
+// last-* capture fields), because more than one Server-owned goroutine can
+// call into the same mockManager concurrently — most notably HeartbeatService,
+// which runs its own background goroutine per hub connection and calls
+// List() on a timer, independently of whatever the test's own goroutine is
+// doing with the same manager. A shared, unsynchronized field written by
+// both racing writers is exactly the shape of bug `go test -race` exists to
+// catch (and did: concurrent heartbeat goroutines writing lastListFilter).
+// Every write below holds mu; every external (test-file) read goes through
+// the matching accessor method below, which also holds mu — direct field
+// access from outside this file is the bug this comment exists to prevent
+// from coming back.
 type mockManager struct {
+	mu                    sync.Mutex
 	agents                []api.AgentInfo
 	startCalls            int
 	stopCalls             int
@@ -80,28 +95,37 @@ func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*
 }
 
 func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	m.mu.Lock()
 	m.startCalls++
 	m.lastStartOpts = opts
 	m.lastStartCtx = ctx
-	if m.startErr != nil {
-		return nil, m.startErr
+	startErr := m.startErr
+	m.mu.Unlock()
+	if startErr != nil {
+		return nil, startErr
 	}
 	agent := &api.AgentInfo{
 		ID:    "test-container-id",
 		Name:  opts.Name,
 		Phase: "running",
 	}
+	m.mu.Lock()
 	m.agents = append(m.agents, *agent)
+	m.mu.Unlock()
 	return agent, nil
 }
 
 func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+	m.mu.Lock()
 	m.stopCalls++
 	m.lastStopAgentID = agentID
+	defer m.mu.Unlock()
 	return m.stopErr
 }
 
 func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
 	m.lastDeleteAgentID = agentID
 	m.deleteCalls++
@@ -109,6 +133,8 @@ func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bo
 }
 
 func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath
 	m.lastDeleteAgentID = agentName
 	m.lastDeleteContainerID = containerID
@@ -118,11 +144,97 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 }
 
 func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lastListFilter = filter
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
 	return m.agents, nil
+}
+
+// --- Locked accessors for mockManager's mutable bookkeeping fields ---
+//
+// Every one of these guards the same mu the methods above lock, so a test
+// reading, say, StartCalls() while a concurrent HeartbeatService goroutine
+// is inside Start() always sees a consistent value instead of racing it.
+// Methods, not exported fields, so they're promoted the same way onto
+// filteringMockManager/scopedThenFailManager/countingListManager (which all
+// embed mockManager) without those types needing their own locking.
+
+func (m *mockManager) StartCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startCalls
+}
+
+func (m *mockManager) LastStartOpts() api.StartOptions {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastStartOpts
+}
+
+func (m *mockManager) LastStartCtx() context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastStartCtx
+}
+
+func (m *mockManager) StopCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopCalls
+}
+
+func (m *mockManager) LastStopAgentID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastStopAgentID
+}
+
+func (m *mockManager) DeleteCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deleteCalls
+}
+
+// SetDeleteCalls resets the deleteCalls counter — tests use this between
+// sub-cases that reuse the same mockManager instance — under the same lock
+// every other mutation of this field uses.
+func (m *mockManager) SetDeleteCalls(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteCalls = n
+}
+
+func (m *mockManager) LastDeleteProjectPath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteProjectPath
+}
+
+func (m *mockManager) LastDeleteAgentID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteAgentID
+}
+
+func (m *mockManager) LastDeleteContainerID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteContainerID
+}
+
+func (m *mockManager) LastDeleteFiles() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDeleteFiles
+}
+
+func (m *mockManager) LastListFilter() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastListFilter
 }
 
 func (m *mockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
@@ -362,7 +474,7 @@ func TestListAgents_GroveIDQueryParamNotHonoured(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	if v, ok := mgr.lastListFilter["scion.project_id"]; ok {
+	if v, ok := mgr.LastListFilter()["scion.project_id"]; ok {
 		t.Errorf("groveId-only query must not scope the list filter, got scion.project_id=%q", v)
 	}
 }
@@ -664,14 +776,14 @@ func TestRestartAgent(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 1 {
-		t.Fatalf("expected Stop to be called once, got %d", mgr.stopCalls)
+	if mgr.StopCalls() != 1 {
+		t.Fatalf("expected Stop to be called once, got %d", mgr.StopCalls())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("expected Start to be called once, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("expected Start to be called once, got %d", mgr.StartCalls())
 	}
-	if mgr.lastStartOpts.Name != "test-agent-1" {
-		t.Fatalf("expected restart to start agent 'test-agent-1', got %q", mgr.lastStartOpts.Name)
+	if mgr.LastStartOpts().Name != "test-agent-1" {
+		t.Fatalf("expected restart to start agent 'test-agent-1', got %q", mgr.LastStartOpts().Name)
 	}
 }
 
@@ -687,11 +799,11 @@ func TestRestartAgent_StartFailure(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 1 {
-		t.Fatalf("expected Stop to be called once, got %d", mgr.stopCalls)
+	if mgr.StopCalls() != 1 {
+		t.Fatalf("expected Stop to be called once, got %d", mgr.StopCalls())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("expected Start to be called once, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("expected Start to be called once, got %d", mgr.StartCalls())
 	}
 }
 
@@ -709,11 +821,11 @@ func TestRestartAgent_StopFailureTolerated(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 1 {
-		t.Fatalf("expected Stop to be called once, got %d", mgr.stopCalls)
+	if mgr.StopCalls() != 1 {
+		t.Fatalf("expected Stop to be called once, got %d", mgr.StopCalls())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("expected Start to be called once, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("expected Start to be called once, got %d", mgr.StartCalls())
 	}
 }
 
@@ -728,7 +840,7 @@ func TestRestartAgent_BrokerModeSet(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if !mgr.lastStartOpts.BrokerMode {
+	if !mgr.LastStartOpts().BrokerMode {
 		t.Fatalf("expected BrokerMode to be true in restart start options")
 	}
 }
@@ -4674,14 +4786,14 @@ func TestDeleteAgent_HubManagedProject_NoContainer(t *testing.T) {
 	}
 
 	// Verify the mock manager's Delete was called with the correct project path
-	if mgr.deleteCalls != 1 {
-		t.Fatalf("expected 1 Delete call, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 1 {
+		t.Fatalf("expected 1 Delete call, got %d", mgr.DeleteCalls())
 	}
-	if mgr.lastDeleteProjectPath != scionDir {
-		t.Errorf("expected projectPath %q, got %q", scionDir, mgr.lastDeleteProjectPath)
+	if mgr.LastDeleteProjectPath() != scionDir {
+		t.Errorf("expected projectPath %q, got %q", scionDir, mgr.LastDeleteProjectPath())
 	}
-	if mgr.lastDeleteAgentID != agentName {
-		t.Errorf("expected agentID %q, got %q", agentName, mgr.lastDeleteAgentID)
+	if mgr.LastDeleteAgentID() != agentName {
+		t.Errorf("expected agentID %q, got %q", agentName, mgr.LastDeleteAgentID())
 	}
 }
 
@@ -4723,8 +4835,8 @@ func TestDeleteAgent_RejectsTraversalName(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Fatalf("expected no Delete calls, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected no Delete calls, got %d", mgr.DeleteCalls())
 	}
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("project directory must survive untouched, but stat failed: %v", err)
@@ -4763,10 +4875,10 @@ func TestDeleteAgent_ContainerOnlyRemovalSurvivesBadName(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusNoContent, rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 1 {
-		t.Fatalf("expected 1 Delete call (container-only removal must still succeed), got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 1 {
+		t.Fatalf("expected 1 Delete call (container-only removal must still succeed), got %d", mgr.DeleteCalls())
 	}
-	if mgr.lastDeleteFiles {
+	if mgr.LastDeleteFiles() {
 		t.Fatal("expected deleteFiles to be false for a container-only removal")
 	}
 }
@@ -4794,8 +4906,8 @@ func TestDeleteAgent_InvalidIDWithDeleteFilesRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Fatalf("expected no Delete call for a rejected id, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected no Delete call for a rejected id, got %d", mgr.DeleteCalls())
 	}
 }
 

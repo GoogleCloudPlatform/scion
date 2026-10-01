@@ -120,8 +120,8 @@ func TestStopAgent_ProjectScopedDisambiguation(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d (%s)", w.Code, w.Body.String())
 	}
-	if mgr.lastStopAgentID != "container-B" {
-		t.Errorf("stop targeted %q, want container-B (cross-project slug collision)", mgr.lastStopAgentID)
+	if mgr.LastStopAgentID() != "container-B" {
+		t.Errorf("stop targeted %q, want container-B (cross-project slug collision)", mgr.LastStopAgentID())
 	}
 }
 
@@ -183,8 +183,8 @@ func TestStopAgent_NotFoundInProjectIsNoOp(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 (idempotent no-op), got %d (%s)", w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.StopCalls())
 	}
 }
 
@@ -223,8 +223,8 @@ func TestStopAgent_LookupErrorReturns5xx(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected %d for a runtime-listing failure, got %d (%s)", http.StatusServiceUnavailable, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); a lookup failure must not be treated as a successful stop", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must not be treated as a successful stop", mgr.StopCalls())
 	}
 	if strings.Contains(w.Body.String(), "10.0.0.5") || strings.Contains(w.Body.String(), "scion-prod") {
 		t.Errorf("response body leaked the raw runtime-listing error: %s", w.Body.String())
@@ -275,8 +275,8 @@ func TestStopAgent_AmbiguousMatchAbortsWithoutStop(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeError {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.StopCalls())
 	}
 	if strings.Contains(w.Body.String(), "ambiguous") || strings.Contains(w.Body.String(), "container-A2") {
 		t.Errorf("response body leaked the raw lookup error: %s", w.Body.String())
@@ -307,8 +307,8 @@ func TestStopAgent_NoContainerIDIsNoOp(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.StopCalls())
 	}
 }
 
@@ -344,7 +344,7 @@ func TestStopAgent_AuxiliaryListErrorAbortsWithout202(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 (not the idempotent 202 no-op, nor a bare 500) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
 	}
-	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+	if defaultMgr.StopCalls() != 0 || auxMgr.StopCalls() != 0 {
 		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
 	}
 	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
@@ -543,11 +543,11 @@ func TestRestartAgent_LookupErrorAbortsWithoutStart(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected %d for a runtime-listing failure, got %d (%s)", http.StatusServiceUnavailable, w.Code, w.Body.String())
 	}
-	if mgr.startCalls != 0 {
-		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.startCalls)
+	if mgr.StartCalls() != 0 {
+		t.Errorf("Start was called %d time(s); a lookup failure during restart must not start a second container", mgr.StartCalls())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); a lookup failure must abort before stopping", mgr.StopCalls())
 	}
 	if strings.Contains(w.Body.String(), "10.0.0.5") || strings.Contains(w.Body.String(), "scion-prod") {
 		t.Errorf("response body leaked the raw runtime-listing error: %s", w.Body.String())
@@ -581,10 +581,10 @@ func TestRestartAgent_AuxiliaryListErrorAbortsWithoutStart(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 (not proceed-with-start) when an auxiliary runtime's list fails, got %d (%s)", w.Code, w.Body.String())
 	}
-	if defaultMgr.startCalls != 0 || auxMgr.startCalls != 0 {
+	if defaultMgr.StartCalls() != 0 || auxMgr.StartCalls() != 0 {
 		t.Error("Start must not be called when the auxiliary list failure aborts the lookup")
 	}
-	if defaultMgr.stopCalls != 0 || auxMgr.stopCalls != 0 {
+	if defaultMgr.StopCalls() != 0 || auxMgr.StopCalls() != 0 {
 		t.Error("Stop must not be called when the auxiliary list failure aborts the lookup")
 	}
 	if strings.Contains(w.Body.String(), "docker ps: connection refused") {
@@ -625,11 +625,11 @@ func TestRestartAgent_NotFoundInProjectProceedsWithStart(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); must not stop a same-slug agent in another project", mgr.StopCalls())
 	}
-	if mgr.startCalls != 1 {
-		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.StartCalls())
 	}
 }
 
@@ -675,11 +675,11 @@ func TestRestartAgent_AmbiguousMatchAbortsWithoutStart(t *testing.T) {
 	if resp.Error.Code != ErrCodeRuntimeError {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
 	}
-	if mgr.startCalls != 0 {
-		t.Errorf("Start was called %d time(s); an ambiguous match must not start a second container", mgr.startCalls)
+	if mgr.StartCalls() != 0 {
+		t.Errorf("Start was called %d time(s); an ambiguous match must not start a second container", mgr.StartCalls())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); an ambiguous match must abort before stopping", mgr.StopCalls())
 	}
 	if strings.Contains(w.Body.String(), "ambiguous") || strings.Contains(w.Body.String(), "container-A2") {
 		t.Errorf("response body leaked the raw lookup error: %s", w.Body.String())
@@ -710,10 +710,10 @@ func TestRestartAgent_NoContainerIDProceedsWithStart(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.stopCalls != 0 {
-		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.stopCalls)
+	if mgr.StopCalls() != 0 {
+		t.Errorf("Stop was called %d time(s); a no-container agent has nothing to stop", mgr.StopCalls())
 	}
-	if mgr.startCalls != 1 {
-		t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Errorf("expected Start to be called once, got %d", mgr.StartCalls())
 	}
 }
