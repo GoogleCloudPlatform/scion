@@ -2563,6 +2563,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// updates.Config is nil or the raw object can't be recovered for
 	// whatever reason -- recordExplicitEdits treats a nil/empty map as
 	// "nothing present", which is always the safe direction here.
+	//
+	// Keys are lower-cased: encoding/json itself matches struct field names
+	// case-insensitively when there is no exact match (so a non-canonical
+	// caller's `"System_Prompt"` still decodes into cfg.SystemPrompt), and
+	// the presence check must agree with that or a non-canonical-case
+	// request would decode the field but be read as "absent" and silently
+	// dropped from CreateInputs.
 	var presentConfigKeys map[string]bool
 	if updates.Config != nil {
 		var rawTop struct {
@@ -2573,7 +2580,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			if err := json.Unmarshal(rawTop.Config, &rawFields); err == nil {
 				presentConfigKeys = make(map[string]bool, len(rawFields))
 				for k := range rawFields {
-					presentConfigKeys[k] = true
+					presentConfigKeys[strings.ToLower(k)] = true
 				}
 			}
 		}
@@ -2657,8 +2664,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// snapshot above and the recordExplicitEdits call below -- never
 		// after it. See recordExplicitEdits' doc comment for why.
 		if agent.AppliedConfig.CreateInputs != nil {
+			// canViewAgentEnv is the same attach-equivalent-access gate the
+			// GET response's Env redaction uses (ResponseView). A caller who
+			// fails it never saw the live Env to begin with, so their
+			// request's env map cannot be trusted to list every key that
+			// still exists live -- see recordExplicitEdits' env-removal gate.
+			canAttachEnv := canViewAgentEnv(ctx, s, agent)
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher()))
+				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
 		}
 
 		if cfg.Image != "" {

@@ -404,3 +404,198 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	assert.Equal(t, "original-harness-config", ci.InlineConfig.HarnessConfig,
 		"a PATCHed harness_config must never reach CreateInputs.InlineConfig.HarnessConfig either")
 }
+
+// ============================================================================
+// Review round 1 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-1.md)
+// ============================================================================
+
+// TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone is R1-1's
+// hub-side regression test: a live config carrying real hub-stamped
+// telemetry and an explicit env key, PATCHed with the body the FIXED
+// agent-configure.ts buildConfig now sends for a fully untouched form --
+// which, after the R1-1 web fix, omits "env" and "telemetry" entirely rather
+// than echoing synthesized values -- must leave both untouched in
+// CreateInputs. Before the fix, buildConfig always sent `env.
+// SCION_AUTO_EXPOSE_PORTS` and `telemetry: {enabled}`, which this helper
+// would have recorded as explicit edits and frozen into CreateInputs,
+// dropping the hub telemetry config at the next reincarnate.
+func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Env = map[string]string{"EXPLICIT_KEY": "explicit-value", "SCION_AUTO_EXPOSE_PORTS": "false"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Env:       map[string]string{"EXPLICIT_KEY": "explicit-value", "SCION_AUTO_EXPOSE_PORTS": "false"},
+			Telemetry: &api.TelemetryConfig{Enabled: boolPtr(true)},
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+
+	// No "env" key, no "telemetry" key -- exactly what buildConfig sends for
+	// an untouched form after the R1-1 fix (populateForm/buildConfig in
+	// agent-configure.ts). Owned scalar fields are still echoed explicit-empty.
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"thinking_level":     nil,
+		"branch":             "",
+		"user":               "",
+		"agent_instructions": "",
+		"system_prompt":      "",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after),
+		"an untouched Save (no env/telemetry keys at all) must leave CreateInputs' env and telemetry alone")
+}
+
+// TestApplyAgentUpdate_ImageCompareCanonicalizesBothSides is R1-2: old.Image
+// is registry-qualified only after a broker echo; a `created`-phase agent
+// whose image came bare from a template still has a bare old.Image. A bare
+// echo of that bare image must not be recorded as a diff just because the
+// request side gets canonicalised and the live side doesn't.
+func TestApplyAgentUpdate_ImageCompareCanonicalizesBothSides(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "registry.example.com"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Image = "old-image:v1" // bare: never broker-echoed
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"image": "old-image:v1", // echoed bare, exactly as loaded
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	if ci := updated.AppliedConfig.CreateInputs; ci.InlineConfig != nil {
+		assert.Empty(t, ci.InlineConfig.Image,
+			"a bare echo of a bare live image (both canonicalising to the same registry-qualified form) must not be recorded")
+	}
+}
+
+// TestApplyAgentUpdate_EnvRemovalSkippedWithoutAttach is R1-3's first case: a
+// caller with agent.update but not agent.attach (a project-owner/admin who
+// is not the agent's creator, per projectOwnerPermissionIDs/
+// projectAdminPermissionIDs excluding agent.attach, miller79/scion#88) gets
+// an empty Env from the GET response (ResponseView/canViewAgentEnv), so
+// their client's echo cannot be trusted to list every key that still exists
+// live. An empty env PATCH from that caller must not wipe the agent's
+// existing explicit CreateInputs env.
+func TestApplyAgentUpdate_EnvRemovalSkippedWithoutAttach(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+	srv.createProjectMembersGroup(ctx, project)
+
+	owner := makeProjectMemberUser(t, s, project, tid("project-owner-no-attach"), "Owner", store.GroupMemberRoleOwner)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		// Owned/created by someone else, so the caller gets no attach via
+		// the resource-owner/ancestor relationship either.
+		a.OwnerID = tid("agent-creator")
+		a.CreatedBy = tid("agent-creator")
+		a.Ancestry = []string{tid("agent-creator")}
+		a.AppliedConfig.Env = map[string]string{"FOO": "bar"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: map[string]string{"FOO": "bar"}}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Env: map[string]string{"FOO": "bar"}},
+		}
+	})
+
+	// The caller's GET would have seen an empty Env (no attach), so their
+	// client echoes env back empty -- but cfg.Env is still non-nil (an empty
+	// object, not an absent key), which is what makes this scenario distinct
+	// from "didn't touch env at all".
+	rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{"config": map[string]interface{}{"env": map[string]interface{}{}}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "bar", ci.InlineConfig.Env["FOO"],
+		"an empty env echo from a caller without attach must not be read as the user removing every env key")
+}
+
+// TestApplyAgentUpdate_GitHubTokenNeverTreatedAsRemoved is R1-3's second
+// case: GITHUB_TOKEN is stripped from EVERY API response unconditionally
+// (store.AgentAppliedConfig's MarshalJSON / ResponseView doc comment), even
+// for an attach-capable caller, so its absence from any request's env map is
+// never evidence that the user removed it -- regardless of attach status.
+func TestApplyAgentUpdate_GitHubTokenNeverTreatedAsRemoved(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Env = map[string]string{"GITHUB_TOKEN": "ghp_secret", "FOO": "bar"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: map[string]string{"GITHUB_TOKEN": "ghp_secret", "FOO": "bar"}}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Env: map[string]string{"GITHUB_TOKEN": "ghp_secret", "FOO": "bar"}},
+		}
+	})
+
+	// doRequest uses the dev-admin token (attach-capable), echoing the
+	// visible FOO key but -- as every caller must, since the GET response
+	// never includes it -- omitting GITHUB_TOKEN.
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"FOO": "bar"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "ghp_secret", ci.InlineConfig.Env["GITHUB_TOKEN"],
+		"GITHUB_TOKEN must never be treated as removed, since no caller's response ever includes it to echo back")
+}
+
+// TestApplyAgentUpdate_PresenceDetectionIsCaseInsensitive is R1-5:
+// encoding/json matches struct field names case-insensitively when there is
+// no exact match, so a non-canonical-case request key must still count as
+// "present" -- otherwise the field decodes and changes the live value, but
+// recordExplicitEdits silently drops it from CreateInputs because its
+// lower-cased presence check misses the differently-cased raw key.
+func TestApplyAgentUpdate_PresenceDetectionIsCaseInsensitive(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"System_Prompt": "be helpful", // non-canonical case
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	ci := updated.AppliedConfig.CreateInputs
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Equal(t, "be helpful", ci.InlineConfig.SystemPrompt,
+		"a non-canonical-case JSON key must still count as present, matching encoding/json's own case-insensitive field match")
+}

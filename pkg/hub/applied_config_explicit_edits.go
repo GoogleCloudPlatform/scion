@@ -70,12 +70,19 @@ var explicitEditExcludedFields = map[string]bool{
 //     comparison must be against the value that is about to be written, not
 //     the raw alias the requester typed;
 //   - present is the set of JSON key names actually present in the
-//     request's raw "config" object (applyAgentUpdate decodes this
-//     separately from updates.Config: every ScionConfig field in the PATCH
-//     body is `omitempty`, so the decoded struct alone cannot distinguish an
-//     omitted field from one explicitly set to its Go zero value, and
-//     "absent" versus "present and cleared" is exactly the distinction the
-//     "other inline fields" pass below needs).
+//     request's raw "config" object, lower-cased (applyAgentUpdate decodes
+//     this separately from updates.Config: every ScionConfig field in the
+//     PATCH body is `omitempty`, so the decoded struct alone cannot
+//     distinguish an omitted field from one explicitly set to its Go zero
+//     value, and "absent" versus "present and cleared" is exactly the
+//     distinction the "other inline fields" pass below needs; lower-cased
+//     because encoding/json itself matches struct field names
+//     case-insensitively, so a non-canonical-case key from a non-web caller
+//     must still count as present — see recordOtherInlineFieldEdits);
+//   - canAttachEnv is whether the caller has attach-equivalent access to the
+//     agent (canViewAgentEnv) — the same gate the GET response's Env
+//     redaction uses. When false, the per-key env "removed" half below is
+//     skipped (see the Env block).
 //
 // A nil ci (no CreateInputs -- the agent predates the field, or was created
 // before explicit inputs were captured) is a no-op: the reincarnate fallback
@@ -89,7 +96,7 @@ var explicitEditExcludedFields = map[string]bool{
 // land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
 // below) and be replayed by task #16's I1(a) as a pin the request never
 // asked for. See the call site in applyAgentUpdate for the marked seam.
-func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, imageRegistry string) {
+func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, imageRegistry string, canAttachEnv bool) {
 	if ci == nil {
 		return
 	}
@@ -101,13 +108,20 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 		return ci.InlineConfig
 	}
 
-	// Image: compared in canonical (registry-qualified) form, so an echo of
-	// the already-qualified live value is not a diff -- old.Image already
-	// holds the registry-qualified form the broker actually ran (see
-	// buildFreshAppliedConfig's own comment on this). "" means "unchanged"
-	// here, exactly like applyAgentUpdate's own live write: an empty Image
-	// never clears anything, live or explicit.
-	if cfg.Image != "" && config.RewriteImageRegistry(cfg.Image, imageRegistry) != old.Image {
+	// Image: both sides are canonicalised (registry-qualified) before
+	// comparing, so an echo is not a diff regardless of which form old.Image
+	// happens to be in -- old.Image is registry-qualified only after a
+	// broker echo (httpdispatcher.go's applyBrokerResponse); before that --
+	// for example a `created`-phase agent whose image came bare from a
+	// template -- it is bare. Canonicalising only the request side would
+	// read a bare echo of a bare old.Image as a diff and freeze the
+	// template's image into CreateInputs. computeReincarnationPlan
+	// (reincarnate_config.go) canonicalises both sides for exactly this
+	// reason; this mirrors it. "" means "unchanged" here, exactly like
+	// applyAgentUpdate's own live write: an empty Image never clears
+	// anything, live or explicit.
+	if cfg.Image != "" &&
+		config.RewriteImageRegistry(cfg.Image, imageRegistry) != config.RewriteImageRegistry(old.Image, imageRegistry) {
 		ensureInline().Image = cfg.Image
 	}
 
@@ -135,11 +149,22 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 
 	// Env, per key: nil means the request didn't touch env at all (same
 	// guard as the live write, which skips the whole map in that case). A
-	// key added or changed against the live old.Env is set; a key the live
-	// old.Env had that the request's Env no longer has is deleted. An
-	// unchanged echoed key is left alone.
+	// key added or changed against the live old.Env is set. A key the live
+	// old.Env had that the request's Env no longer has is deleted -- UNLESS
+	// canAttachEnv is false: the GET response withholds Env entirely from a
+	// viewer without attach-equivalent access (canViewAgentEnv,
+	// ResponseView), so that viewer's client can only ever load an empty
+	// env and echo it back empty. Treating every one of its absent keys as
+	// "removed" would read a response-redaction artifact as the user
+	// deleting every explicit env key, turning a recoverable live-only loss
+	// into a permanent one in CreateInputs. Additions are unaffected by this
+	// gate: those can only come from someone typing a new key/value, which
+	// is unambiguous regardless of what the viewer can see.
 	if cfg.Env != nil {
 		added, removed := diffExplicitEnvKeys(old.Env, cfg.Env)
+		if !canAttachEnv {
+			removed = nil
+		}
 		if len(added) > 0 || len(removed) > 0 {
 			inline := ensureInline()
 			if inline.Env == nil && len(added) > 0 {
@@ -158,7 +183,7 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 	// configure page (or any other caller) doesn't render is never present
 	// in the request, so it is left alone here regardless of its live
 	// value -- absent is never treated as cleared. A present field that
-	// differs from the current CreateInputs.InlineConfig value (empty
+	// differs from the live AppliedConfig.InlineConfig value (empty
 	// included) is recorded; this is what lets a field be cleared back to
 	// "not explicit" (re-derived from the template at reincarnate) by
 	// sending it as an explicit empty value -- see agent-configure.ts's
@@ -180,8 +205,14 @@ func thinkingLevelEqual(a, b *int) bool {
 // diffExplicitEnvKeys compares a request's env map against the live env it
 // would replace, per §5 of ptone/scion#2493's options.md: added returns
 // every key in newEnv that is missing from oldEnv or whose value differs;
-// removed returns every key oldEnv has that newEnv does not. A key present
-// in both with an unchanged value appears in neither.
+// removed returns every key oldEnv has that newEnv does not, EXCEPT
+// GITHUB_TOKEN, which is never reported as removed: store.AgentAppliedConfig's
+// MarshalJSON strips it from every API response unconditionally, even for an
+// attach-capable viewer (see ResponseView's doc comment), so no caller's
+// client can ever legitimately echo it back -- its absence from a request is
+// therefore never evidence that the user removed it, only that the response
+// never contained it to begin with. A key present in both with an unchanged
+// value appears in neither return.
 //
 // Deliberately separate from reincarnate_config.go's diffEnvKeys, which
 // compares key names only (never values, since it feeds a user-facing plan
@@ -198,6 +229,9 @@ func diffExplicitEnvKeys(oldEnv, newEnv map[string]string) (added map[string]str
 		}
 	}
 	for k := range oldEnv {
+		if k == "GITHUB_TOKEN" {
+			continue
+		}
 		if _, ok := newEnv[k]; !ok {
 			removed = append(removed, k)
 		}
@@ -216,6 +250,15 @@ func diffExplicitEnvKeys(oldEnv, newEnv map[string]string) (added map[string]str
 // the CreateInputs InlineConfig that ensureInline returns (allocated lazily,
 // and only once at least one field actually changed, so a no-op PATCH never
 // turns a nil CreateInputs.InlineConfig into a non-nil empty one).
+//
+// present is keyed by lower-cased JSON field name (see recordExplicitEdits):
+// encoding/json matches struct field names case-insensitively when there is
+// no exact match, so a request sending `"System_Prompt"` still sets
+// cfg.SystemPrompt even though present's key (built from the SAME raw
+// bytes by applyAgentUpdate) would otherwise read "System_Prompt" while this
+// function's canonical struct-tag name reads "system_prompt" -- two
+// spellings of the same presence fact that must compare equal. The lookup
+// below lower-cases the canonical name to match.
 //
 // Implemented via reflection over the JSON struct tags, rather than a
 // hand-written field list, so a new ScionConfig field is covered by this
@@ -249,7 +292,7 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 			// against the wrong baseline.
 			continue
 		}
-		if !present[name] {
+		if !present[strings.ToLower(name)] {
 			continue
 		}
 		if !reflect.DeepEqual(cfgVal.Field(i).Interface(), oldVal.Field(i).Interface()) {
