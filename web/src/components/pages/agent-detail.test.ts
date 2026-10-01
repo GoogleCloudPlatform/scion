@@ -526,6 +526,43 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 
+  it(
+    'N1: after a skipped redirect (hidden behind /terminals, then back) shows no ' +
+      '"Redirecting" text and still shows the link',
+    async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const tracker = stubLocation();
+      const el = await mount(makeAgent());
+      fakeStateManager.setAgent({ id: AGENT_ID });
+
+      // renderRoute (main.ts) keeps this page connected-but-hidden behind
+      // /terminals rather than disconnecting it.
+      tracker.pathname = '/terminals';
+
+      fakeStateManager.deleteAgent(AGENT_ID);
+      fakeStateManager.notifyAgentsUpdated();
+      await el.updateComplete;
+
+      // The timer fires while still hidden, so the redirect is skipped and
+      // the timer is cleared without ever navigating.
+      vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+      await Promise.resolve();
+      await el.updateComplete;
+      expect(navClicks).toEqual([]);
+
+      // Coming back to this agent's own route does not re-arm the timer.
+      tracker.pathname = `/agents/${AGENT_ID}`;
+      await el.updateComplete;
+
+      const text =
+        el.shadowRoot?.querySelector('[data-testid="agent-deleted-state"]')?.textContent ?? '';
+      expect(text).not.toContain('Redirecting');
+      expect(text).toContain('Agent deleted.');
+      expect(el.shadowRoot?.querySelector('[data-testid="agent-deleted-link"]')).not.toBeNull();
+      expect(navClicks).toEqual([]);
+    }
+  );
+
   // --- N3: reconnecting while deleted must not strand the page -----------
 
   it('N3: disconnecting and reconnecting while deleted leaves a way out, with no stray timer', async () => {

@@ -22,6 +22,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -625,7 +626,13 @@ export class ScionPageAgentDetail extends LitElement {
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
-  /** Pending SPA-redirect timer for the deleted state; cancellable on disconnect. */
+  /**
+   * Pending SPA-redirect timer for the deleted state; cancellable on
+   * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
+   * "Redirecting…") the moment the timer fires or is cleared, not just when
+   * `deleted` changes.
+   */
+  @state()
   private deleteRedirectTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
@@ -674,13 +681,9 @@ export class ScionPageAgentDetail extends LitElement {
     // removeAgent() prunes stale rows without a tombstone. Either way, an
     // unrelated `agents-updated` flush during that window would otherwise
     // be read as "this agent was deleted". Key on the authoritative
-    // tombstone instead of absence.
-    if (
-      !updatedAgent &&
-      this.agent &&
-      !this.deleted &&
-      stateManager.getDeletedAgentIds().has(this.agentId)
-    ) {
+    // tombstone instead of absence. (No `!this.deleted` guard here:
+    // `showDeletedStateThenRedirect` already no-ops once `deleted` is true.)
+    if (!updatedAgent && this.agent && stateManager.getDeletedAgentIds().has(this.agentId)) {
       this.showDeletedStateThenRedirect();
     }
   }
@@ -708,6 +711,20 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   /**
+   * Where the deleted-state redirect (and its link/back-link fallbacks) go:
+   * the agent's project page if known, otherwise the agents list. Shared by
+   * the deferred redirect timer, `renderDeletedState` and `renderError` so
+   * they cannot disagree about the destination computed from the same
+   * `this.project`. Deliberately *not* captured at schedule time: the timer
+   * re-reads this getter when it fires, so a project that finishes loading
+   * after the delete but before the 1s redirect still wins. The two can only
+   * differ in that window, and both destinations are valid.
+   */
+  private get redirectTarget(): string {
+    return this.project ? `/projects/${this.project.id}` : '/agents';
+  }
+
+  /**
    * Show a brief client-side-only "deleted" state, then SPA-navigate to the
    * project page (or /agents if there is no project). Used both for a
    * delete/force-delete initiated from this page and for an SSE `deleted`
@@ -722,11 +739,10 @@ export class ScionPageAgentDetail extends LitElement {
   private showDeletedStateThenRedirect(): void {
     if (this.deleted) return;
     this.deleted = true;
-    const target = this.project ? `/projects/${this.project.id}` : '/agents';
     this.deleteRedirectTimer = setTimeout(() => {
       this.deleteRedirectTimer = null;
       if (this.isOnThisAgentRoute()) {
-        this.navigateViaSpa(target);
+        this.navigateViaSpa(this.redirectTarget);
       }
     }, DELETE_REDIRECT_DELAY_MS);
   }
@@ -2646,19 +2662,21 @@ export class ScionPageAgentDetail extends LitElement {
    * Brief client-side-only state shown after a successful delete (or an
    * SSE `deleted` event for this agent), before the SPA redirect fires.
    * Action buttons are not rendered here, so there is nothing left to
-   * click on the way out. The link covers the cases where the timer-driven
-   * redirect is skipped or never re-arms — hidden behind `/terminals`
-   * (see `isOnThisAgentRoute`), or a disconnect/reconnect while deleted —
-   * so the page never strands the user on "Redirecting…" indefinitely.
+   * click on the way out. "Redirecting…" is shown only while
+   * `deleteRedirectTimer` is still pending; once it has fired (or was
+   * skipped — hidden behind `/terminals`, see `isOnThisAgentRoute` — or
+   * never re-armed after a disconnect/reconnect while deleted), the copy
+   * drops back to a plain statement so the page never claims a redirect
+   * that is not actually coming. The link covers all of those cases, so
+   * the user always has a way out.
    */
-  private renderDeletedState() {
-    const target = this.project ? `/projects/${this.project.id}` : '/agents';
+  private renderDeletedState(): TemplateResult {
     const targetLabel = this.project ? `Go to ${this.project.name}` : 'Go to Agents';
     return html`
       <div class="loading-state" data-testid="agent-deleted-state">
         <sl-icon name="trash"></sl-icon>
-        <p>Agent deleted. Redirecting…</p>
-        <a href="${target}" class="back-link" data-testid="agent-deleted-link">
+        <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
+        <a href="${this.redirectTarget}" class="back-link" data-testid="agent-deleted-link">
           <sl-icon name="arrow-left"></sl-icon>
           ${targetLabel}
         </a>
@@ -2668,7 +2686,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
+      <a href="${this.redirectTarget}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
         ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>
