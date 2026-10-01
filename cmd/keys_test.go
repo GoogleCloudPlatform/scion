@@ -15,10 +15,29 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,79 +77,131 @@ func TestKeysCmd_IsRegistered(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Hub-aware keys: Raw=true reaches the hub as a structured message, for both
-// agent and user (human) senders. sendKeysViaHub reuses the same
-// StructuredMessage + SendStructuredMessage path `scion message --raw` uses,
-// so these tests mirror TestSendMessageViaHub_SingleAgent in message_test.go.
+// Hub-aware keys: sendKeysViaHub must POST {"keys": ...} to the dedicated
+// /keys route (never /message, never a Raw StructuredMessage) for both agent
+// and human senders, and must never retry or fall back on failure.
 // ---------------------------------------------------------------------------
 
-func TestSendKeysViaHub_AgentSender_RawReachesHub(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+type capturedKeysRequest struct {
+	Method string
+	Path   string
+	Keys   string
+}
 
-	projectID := "project-keys-agent"
-	server, sent := newMessageMockHubServer(t, projectID, nil)
+// newKeysMockHubServer builds a Hub mock that answers only the project-scoped
+// /keys route, recording each request's path and decoded body.
+func newKeysMockHubServer(t *testing.T, projectID string, resp agentkeys.Response, status int) (*httptest.Server, *[]capturedKeysRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var captured []capturedKeysRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost:
+			var body agentkeys.Request
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			captured = append(captured, capturedKeysRequest{Method: r.Method, Path: r.URL.Path, Keys: body.Keys})
+			mu.Unlock()
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return server, &captured
+}
+
+func TestSendKeysViaHub_PostsToKeysRoute(t *testing.T) {
+	projectID := "project-keys-route"
+	resp := agentkeys.Response{Status: agentkeys.StatusDispatched, OperationID: "op-1", AgentID: "agent-id-1"}
+	server, captured := newKeysMockHubServer(t, projectID, resp, http.StatusOK)
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
 
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
 	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
 	require.NoError(t, err)
 
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "target-agent", (*sent)[0].AgentName)
-	require.NotNil(t, (*sent)[0].StructuredMsg)
-	assert.True(t, (*sent)[0].StructuredMsg.Raw, "keys must set Raw=true on the structured message")
-	assert.False(t, (*sent)[0].StructuredMsg.Plain)
-	assert.Equal(t, "agent:sender-agent", (*sent)[0].StructuredMsg.Sender)
-	assert.Equal(t, "Escape", (*sent)[0].StructuredMsg.Msg)
+	require.Len(t, *captured, 1)
+	got := (*captured)[0]
+	assert.Equal(t, "/api/v1/projects/"+projectID+"/agents/target-agent/keys", got.Path,
+		"keys must POST to the dedicated /keys route, never /message")
+	assert.Equal(t, "Escape", got.Keys)
 }
 
-func TestSendKeysViaHub_UserSender_RawReachesHub(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-	// Explicitly clear SCION_AGENT_NAME so resolveSenderIdentity takes the
-	// human/user path — the test process itself may be running inside an
-	// agent container where the variable is already set in the ambient
-	// environment.
-	t.Setenv("SCION_AGENT_NAME", "")
-
-	projectID := "project-keys-user"
-	server, sent := newMessageMockHubServer(t, projectID, nil)
+func TestSendKeysViaHub_ErrorWrapsHubError(t *testing.T) {
+	projectID := "project-keys-error"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/healthz" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "agent_not_running",
+				"message": "target is not running",
+				"details": map[string]interface{}{"operation_id": "op-err"},
+			},
+		})
+	}))
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
 
-	hubCtx := &HubContext{
-		Client:    client,
-		Endpoint:  server.URL,
-		ProjectID: projectID,
-	}
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent_not_running")
 
-	err = sendKeysViaHub(hubCtx, "target-agent", "C-c")
+	var apiErr *apiclient.APIError
+	require.True(t, errors.As(err, &apiErr), "expected the outcome code/operation_id to survive as a wrapped *apiclient.APIError")
+	assert.Equal(t, "agent_not_running", apiErr.Code)
+	require.NotNil(t, apiErr.Details)
+	assert.Equal(t, "op-err", apiErr.Details["operation_id"])
+}
+
+// TestSendKeysViaHub_NoReplay proves the CLI's hub path, end to end, sends
+// the keys request exactly once even when the client is built with retries
+// and the server answers with a 5xx — the binding "never replayed" guarantee
+// exercised at the command layer, not just inside hubclient.
+func TestSendKeysViaHub_NoReplay(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL, hubclient.WithRetry(5, time.Millisecond))
 	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-no-replay"}
 
-	require.Len(t, *sent, 1)
-	assert.Equal(t, "target-agent", (*sent)[0].AgentName)
-	require.NotNil(t, (*sent)[0].StructuredMsg)
-	assert.True(t, (*sent)[0].StructuredMsg.Raw, "keys must set Raw=true on the structured message")
-	assert.False(t, strings.HasPrefix((*sent)[0].StructuredMsg.Sender, "agent:"),
-		"a human/user sender's structured message must not carry an agent: sender identity")
-	assert.Equal(t, "C-c", (*sent)[0].StructuredMsg.Msg)
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.EqualValues(t, 1, atomic.LoadInt32(&hits), "scion keys must never replay even with client-side retries configured")
 }
 
 // ---------------------------------------------------------------------------
 // Cross-project refusal (UX layer): keys must not work as a cross-project
-// command. The authoritative refusal is hub-side (ExecuteAgentDM); this is
+// command. The authoritative refusal is hub-side (ExecuteAgentKeys); this is
 // the CLI-side check that fails fast without a round trip.
 // ---------------------------------------------------------------------------
 
@@ -138,6 +209,12 @@ func TestKeysCmd_RunE_CrossProjectTarget_Refused(t *testing.T) {
 	origProjectPath := projectPath
 	defer func() { projectPath = origProjectPath }()
 
+	// Hermetic: a regression in the cross-project refusal would otherwise
+	// let this reach a live Hub (this test process's own ambient container
+	// sets a real SCION_HUB_ENDPOINT/credentials) before the refusal fires.
+	server, hits := newCountingHubServer(t)
+	defer server.Close()
+	setHermeticHubEnv(t, server)
 	t.Setenv("SCION_AGENT_NAME", "sender-agent")
 	t.Setenv("SCION_PROJECT", "own-project")
 
@@ -148,4 +225,699 @@ func TestKeysCmd_RunE_CrossProjectTarget_Refused(t *testing.T) {
 	err := keysCmd.RunE(cmd, []string{"target-agent", "Escape"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cross-project")
+	assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+}
+
+// ---------------------------------------------------------------------------
+// Local-mode project isolation (AC): a fixture with the same agent name in
+// two local projects must resolve uniquely within the *selected* project and
+// fail ambiguity rather than falling back to an unscoped first match.
+// ---------------------------------------------------------------------------
+
+// writeLocalProjectSettings creates a minimal .scion project directory whose
+// settings.json carries the given Hub-linked project ID — the same identity
+// pkg/agent/run.go labels a locally-started container with (settings.Hub.ProjectID),
+// independent of the Hub endpoint being reachable.
+func writeLocalProjectSettings(t *testing.T, dir, hubProjectID string) string {
+	t.Helper()
+	scionDir := filepath.Join(dir, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+	// Deliberately no "schema_version" field — matches the working pattern
+	// already established by setupEnvProjectWithHubProjectID in
+	// hub_env_test.go. (Adding one routes this fixture through a different,
+	// unrelated versioned-settings load path that errors on an ambient
+	// default; omitting it is the tested, stable shape.)
+	settings := map[string]interface{}{
+		"project_id": "test-project-" + hubProjectID,
+		"hub": map[string]interface{}{
+			"projectId": hubProjectID,
+		},
+	}
+	data, err := json.Marshal(settings)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.json"), data, 0644))
+	return dir
+}
+
+// filteringMockRuntime wraps runtime.MockRuntime's List with real label
+// filtering semantics (every filter key/value must match the entry's
+// Labels), matching how a real container runtime's label filter behaves.
+// The sendkeys_test.go mocks in pkg/agent ignore the filter entirely because
+// resolution there is scoped by the test setting up exactly the agents it
+// wants returned; here the whole point under test is that the filter itself
+// enforces project isolation, so a faithful mock is the test.
+func filteringMockRuntime(agents []api.AgentInfo, exec func(id string, cmd []string)) *runtime.MockRuntime {
+	return &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			var out []api.AgentInfo
+			for _, a := range agents {
+				match := true
+				for k, v := range filter {
+					if a.Labels[k] != v {
+						match = false
+						break
+					}
+				}
+				if match {
+					out = append(out, a)
+				}
+			}
+			return out, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if exec != nil {
+				exec(id, cmd)
+			}
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			if exec != nil {
+				exec(id, cmd)
+			}
+			return "", nil
+		},
+	}
+}
+
+func twoProjectSameNameAgents(projA, projB string) []api.AgentInfo {
+	return []api.AgentInfo{
+		{
+			Name:        "builder",
+			ContainerID: "container-a",
+			ProjectID:   projA,
+			Phase:       string(state.PhaseRunning),
+			Labels: map[string]string{
+				"scion.name":               "builder",
+				"agent_id":                 "agent-a",
+				projectkeys.LabelProjectID: projA,
+			},
+		},
+		{
+			Name:        "builder",
+			ContainerID: "container-b",
+			ProjectID:   projB,
+			Phase:       string(state.PhaseRunning),
+			Labels: map[string]string{
+				"scion.name":               "builder",
+				"agent_id":                 "agent-b",
+				projectkeys.LabelProjectID: projB,
+			},
+		},
+	}
+}
+
+func TestResolveLocalKeysTarget_SameNameTwoProjects_ResolvesSelectedProjectOnly(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp) // isolate from any ambient ~/.scion global settings
+	dirA := writeLocalProjectSettings(t, filepath.Join(tmp, "proj-a"), "proj-a-id")
+	writeLocalProjectSettings(t, filepath.Join(tmp, "proj-b"), "proj-b-id")
+
+	agents := twoProjectSameNameAgents("proj-a-id", "proj-b-id")
+	mockRT := filteringMockRuntime(agents, nil)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = dirA
+	target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-a-id", scope.hubProjectID)
+	assert.Empty(t, scope.projectPath, "a Hub-linked project must scope by project ID, not path")
+	assert.Equal(t, "container-a", target.ContainerID, "must resolve to project A's agent, not project B's same-named one")
+	assert.Equal(t, "agent-a", target.Labels["agent_id"])
+}
+
+func TestResolveLocalKeysTarget_SelectsOtherProjectWhenSwitched(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	writeLocalProjectSettings(t, filepath.Join(tmp, "proj-a"), "proj-a-id")
+	dirB := writeLocalProjectSettings(t, filepath.Join(tmp, "proj-b"), "proj-b-id")
+
+	agents := twoProjectSameNameAgents("proj-a-id", "proj-b-id")
+	mockRT := filteringMockRuntime(agents, nil)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = dirB
+	target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-b-id", scope.hubProjectID)
+	assert.Equal(t, "container-b", target.ContainerID)
+	assert.Equal(t, "agent-b", target.Labels["agent_id"])
+}
+
+// TestResolveLocalKeysTarget_NoHubProjectID_UsesPathScope proves the r1
+// review finding #3 correction: a project with NO Hub-linked project ID
+// must still resolve successfully, scoped by its resolved project-config
+// directory path (agent.Manager.SendKeysLocal's scope) rather than being
+// refused outright.
+func TestResolveLocalKeysTarget_NoHubProjectID_UsesPathScope(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	// A project directory with no settings.json at all: no Hub-linked
+	// project ID exists. resolveLocalKeysTarget must still resolve by path.
+	unlinkedDir := filepath.Join(tmp, "unlinked")
+	require.NoError(t, os.MkdirAll(unlinkedDir, 0755))
+	resolvedDir, err := filepath.EvalSymlinks(unlinkedDir)
+	require.NoError(t, err)
+
+	agents := []api.AgentInfo{
+		{
+			Name:        "builder",
+			ContainerID: "container-local",
+			Phase:       string(state.PhaseRunning),
+			Labels: map[string]string{
+				"scion.name":                 "builder",
+				"agent_id":                   "agent-local",
+				projectkeys.LabelProjectPath: resolvedDir,
+			},
+		},
+	}
+	mockRT := filteringMockRuntime(agents, nil)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = unlinkedDir
+	target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.NoError(t, err)
+	assert.Empty(t, scope.hubProjectID, "an unlinked project must not invent a Hub project ID")
+	assert.Equal(t, resolvedDir, scope.projectPath)
+	assert.Equal(t, "container-local", target.ContainerID)
+	assert.Equal(t, "agent-local", target.Labels["agent_id"])
+}
+
+// TestResolveLocalKeysTarget_NoProjectAtAll_FailsClearly covers the one
+// remaining hard refusal: no Hub-linked project ID AND no resolvable
+// project directory at all (e.g. run outside any scion project with no
+// --project given) has no stable identity to scope the call to.
+func TestResolveLocalKeysTarget_NoProjectAtAll_FailsClearly(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	mgr := agent.NewManager(filteringMockRuntime(nil, nil))
+	defer mgr.Close()
+
+	// No project marker reachable from cwd (a fresh temp dir), HOME unset
+	// so even the global-dir fallback cannot resolve, and every hub-context
+	// env var cleared — this test process's own ambient container sets
+	// SCION_HUB_ENDPOINT/SCION_PROJECT_ID, which would otherwise make
+	// config.IsHubContext() true and FindProjectRoot synthesize a path
+	// anyway (see FindProjectRoot's "Hub context fallback"). This is the
+	// one combination that makes config.GetResolvedProjectDir return "".
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+
+	projectPath = ""
+	_, _, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not resolve a project")
+}
+
+func TestResolveLocalKeysTarget_NotFoundInSelectedProject(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dirA := writeLocalProjectSettings(t, filepath.Join(tmp, "proj-a"), "proj-a-id")
+
+	// Only project B has an agent named "builder".
+	agents := twoProjectSameNameAgents("proj-a-id", "proj-b-id")[1:]
+	mockRT := filteringMockRuntime(agents, nil)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = dirA
+	_, _, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// ---------------------------------------------------------------------------
+// JSON mode (AC): `scion keys` in JSON mode must emit exactly one parseable
+// result on stdout, with no progress text mixed in.
+// ---------------------------------------------------------------------------
+
+func TestSendKeysViaHub_JSONMode_EmitsExactlyOneParseableResult(t *testing.T) {
+	origFormat := outputFormat
+	defer func() { outputFormat = origFormat }()
+	outputFormat = "json"
+
+	projectID := "project-keys-json"
+	resp := agentkeys.Response{Status: agentkeys.StatusDispatched, OperationID: "op-json-1", AgentID: "agent-json-1"}
+	server, _ := newKeysMockHubServer(t, projectID, resp, http.StatusOK)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	var cmdErr error
+	stdout := captureStdout(t, func() {
+		stderr := captureStderr(t, func() {
+			cmdErr = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+		})
+		assert.Empty(t, stderr, "JSON mode must suppress progress/status text entirely")
+	})
+	require.NoError(t, cmdErr)
+
+	// Exactly one JSON value: a Decoder that successfully reads one value
+	// and then reports io.EOF (not another value) proves there is nothing
+	// else on stdout — no progress text, no second result.
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	var result ActionResult
+	require.NoError(t, dec.Decode(&result), "stdout must contain exactly one parseable JSON result")
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "keys", result.Command)
+	assert.Equal(t, "target-agent", result.Agent)
+	require.NotNil(t, result.Details)
+	assert.Equal(t, "op-json-1", result.Details["operation_id"])
+
+	var extra json.RawMessage
+	err = dec.Decode(&extra)
+	assert.ErrorIs(t, err, io.EOF, "stdout must contain nothing after the single JSON result")
+}
+
+// TestSendKeysViaHub_OldHub_FailsClearly_NeverFallsBackToMessage proves the
+// binding obligation "never auto-fall back to raw messaging against an old
+// Hub; fail clearly": an old Hub with no /keys route at all answers with a
+// plain, non-agentkeys-shaped 404 (the generic mux "not found", not the
+// keys handler's own envelope). sendKeysViaHub must surface a clear error —
+// never silently retry through /message, even though this mock server would
+// happily accept that request and report success if it were ever made.
+func TestSendKeysViaHub_OldHub_FailsClearly_NeverFallsBackToMessage(t *testing.T) {
+	var messageRouteHit int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case strings.HasSuffix(r.URL.Path, "/keys"):
+			// An old Hub's generic action dispatcher: a 404 in the same
+			// envelope every other Hub route uses, naming the action rather
+			// than the keys outcome — it has never heard of this route, so
+			// no operation_id is ever minted.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "not_found",
+					"message": "Action not found",
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/message"):
+			atomic.AddInt32(&messageRouteHit, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-old-hub"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err, "an old Hub without /keys must fail clearly, not silently succeed")
+	assert.EqualValues(t, 0, atomic.LoadInt32(&messageRouteHit),
+		"must never fall back to /message when /keys is unavailable")
+	assert.Contains(t, err.Error(), "does not support the keys operation, or the project was not found",
+		"a 404 with no operation_id (old Hub, or AK-21e's project-not-found) must be reported as this shared shape, not a generic failure")
+}
+
+// ---------------------------------------------------------------------------
+// sendKeysLocalWithManager end to end, with a mock manager/runtime, proving
+// the exact delivery payload (AC2) reaches the runtime with no added Enter.
+// ---------------------------------------------------------------------------
+
+// cmdExecRecord captures one Exec/ExecWithStdin call (target container ID,
+// argv, and the full stdin payload) for the end-to-end delivery assertions
+// below — unlike filteringMockRuntime's exec callback, which only reports
+// argv.
+type cmdExecRecord struct {
+	id    string
+	argv  string
+	stdin string
+}
+
+// filteringMockRuntimeWithStdin is filteringMockRuntime's sibling for tests
+// that need to inspect the exact stdin payload SendKeys/SendKeysLocal
+// delivers (the tmux script) and which container it targeted, not just argv.
+func filteringMockRuntimeWithStdin(agents []api.AgentInfo, captured *[]cmdExecRecord) *runtime.MockRuntime {
+	record := func(id string, cmd []string, stdin io.Reader) {
+		data := ""
+		if stdin != nil {
+			buf := make([]byte, 4096)
+			n, _ := stdin.Read(buf)
+			data = string(buf[:n])
+		}
+		*captured = append(*captured, cmdExecRecord{id: id, argv: strings.Join(cmd, " "), stdin: data})
+	}
+	return &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			var out []api.AgentInfo
+			for _, a := range agents {
+				match := true
+				for k, v := range filter {
+					if a.Labels[k] != v {
+						match = false
+						break
+					}
+				}
+				if match {
+					out = append(out, a)
+				}
+			}
+			return out, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			record(id, cmd, nil)
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			record(id, cmd, stdin)
+			return "", nil
+		},
+	}
+}
+
+// expectedSendKeysScript is a golden reimplementation of pkg/agent's
+// unexported sendKeysScript/tmuxOctalEscape (.design/agent-keys-contract.md
+// §2.3: one tmux send-keys command, keys embedded as a fully octal-escaped,
+// double-quoted argument), used to assert the exact delivered payload from
+// outside that package.
+func expectedSendKeysScript(target, keys string) string {
+	const octalDigits = "01234567"
+	var b strings.Builder
+	for i := 0; i < len(keys); i++ {
+		c := keys[i]
+		b.WriteByte('\\')
+		b.WriteByte(octalDigits[(c>>6)&07])
+		b.WriteByte(octalDigits[(c>>3)&07])
+		b.WriteByte(octalDigits[c&07])
+	}
+	return fmt.Sprintf("send-keys -t %s -- \"%s\"\n", target, b.String())
+}
+
+func TestSendKeysLocalWithManager_HubLinkedProject_ExactDelivery(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dirA := writeLocalProjectSettings(t, filepath.Join(tmp, "proj-a"), "proj-a-id")
+
+	agent1 := twoProjectSameNameAgents("proj-a-id", "proj-b-id")[0]
+	var captured []cmdExecRecord
+	mockRT := filteringMockRuntimeWithStdin([]api.AgentInfo{agent1}, &captured)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = dirA
+	err := sendKeysLocalWithManager(context.Background(), mgr, "builder", "Escape")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, captured)
+	last := captured[len(captured)-1]
+	assert.Equal(t, "container-a", last.id, "delivery must target the resolved container")
+	assert.Equal(t, "tmux source-file -", last.argv)
+	assert.Equal(t, expectedSendKeysScript("scion:0", "Escape"), last.stdin,
+		"the exact delivered keys must match byte for byte (an exact match also proves no Enter was appended)")
+}
+
+func TestSendKeysLocalWithManager_UnlinkedProject_ExactDelivery(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	unlinkedDir := filepath.Join(tmp, "unlinked")
+	require.NoError(t, os.MkdirAll(unlinkedDir, 0755))
+	resolvedDir, err := filepath.EvalSymlinks(unlinkedDir)
+	require.NoError(t, err)
+
+	fixture := api.AgentInfo{
+		Name:        "builder",
+		ContainerID: "container-local",
+		Phase:       string(state.PhaseRunning),
+		Labels: map[string]string{
+			"scion.name":                 "builder",
+			"agent_id":                   "agent-local",
+			projectkeys.LabelProjectPath: resolvedDir,
+		},
+	}
+	var captured []cmdExecRecord
+	mockRT := filteringMockRuntimeWithStdin([]api.AgentInfo{fixture}, &captured)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = unlinkedDir
+	err = sendKeysLocalWithManager(context.Background(), mgr, "builder", "C-c")
+	require.NoError(t, err)
+
+	require.NotEmpty(t, captured)
+	last := captured[len(captured)-1]
+	assert.Equal(t, "container-local", last.id, "delivery must target the resolved container")
+	assert.Equal(t, "tmux source-file -", last.argv)
+	assert.Equal(t, expectedSendKeysScript("scion:0", "C-c"), last.stdin,
+		"the exact delivered keys must match byte for byte (an exact match also proves no Enter was appended)")
+}
+
+// ---------------------------------------------------------------------------
+// An empty --raw/keys body must be rejected locally before any network call
+// (Hub) or List call (local), not sent through to be rejected server-side.
+// ---------------------------------------------------------------------------
+
+func TestSendKeysViaHub_EmptyKeys_RejectedBeforeNetworkCall(t *testing.T) {
+	var hit bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-empty"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "")
+	require.Error(t, err)
+	assert.False(t, hit, "an empty keys value must be rejected locally, before any request reaches the Hub")
+}
+
+func TestSendKeysLocalWithManager_EmptyKeys_RejectedBeforeListCall(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	var listCalled bool
+	mgr := agent.NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			listCalled = true
+			return nil, nil
+		},
+	})
+	defer mgr.Close()
+
+	err := sendKeysLocalWithManager(context.Background(), mgr, "target-agent", "")
+	require.Error(t, err)
+	assert.False(t, listCalled, "an empty keys value must be rejected before any target resolution")
+}
+
+// ---------------------------------------------------------------------------
+// A 5xx with no contract body (or a 503 from something other than the keys
+// handler itself) must classify as unknown, never a definite rejection.
+// ---------------------------------------------------------------------------
+
+func newKeysMockHubServerFailing(t *testing.T, contentType string, status int, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.WriteHeader(status)
+		if body != "" {
+			_, _ = w.Write([]byte(body))
+		}
+	}))
+}
+
+func TestSendKeysViaHub_BareHTML5xx_IsUnknownNeverRejected(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"502_bad_gateway", http.StatusBadGateway},
+		{"504_gateway_timeout", http.StatusGatewayTimeout},
+		{"500_internal_server_error", http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newKeysMockHubServerFailing(t, "text/html", tc.status, "<html><body>gateway error</body></html>")
+			defer server.Close()
+
+			client, err := hubclient.New(server.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-bare-5xx"}
+
+			err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "keys unknown for agent",
+				"a bare HTML 5xx with no contract body must classify as unknown, never a definite rejection")
+			assert.NotContains(t, err.Error(), "keys rejected",
+				"must never be reported as safe to retry")
+		})
+	}
+}
+
+func TestSendKeysViaHub_JSON500InternalError_IsUnknownNotRejected(t *testing.T) {
+	server := newKeysMockHubServerFailing(t, "application/json", http.StatusInternalServerError,
+		`{"error":{"code":"internal_error","message":"unexpected error"}}`)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-500-json"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keys unknown for agent",
+		"a 500 internal_error must classify as unknown, not a definite rejection")
+	assert.Contains(t, err.Error(), "check before resending",
+		"an unknown outcome must tell the caller a resend could be a second injection, never invite a blind retry")
+}
+
+func TestSendKeysViaHub_503WithoutKeysUnavailableCode_IsUnknownNotRejected(t *testing.T) {
+	// A proxy or load balancer's own 503 (e.g. "service_unavailable" from an
+	// upstream health check), not the Hub's own keys_unavailable: only the
+	// Hub's own, explicit keys_unavailable 503 proves dispatch definitively
+	// did not start. Anything else wearing a 503 must stay unknown.
+	server := newKeysMockHubServerFailing(t, "application/json", http.StatusServiceUnavailable,
+		`{"error":{"code":"service_unavailable","message":"upstream unhealthy"}}`)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-503-generic"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keys unknown for agent",
+		"a 503 not carrying the Hub's own keys_unavailable code must classify as unknown")
+}
+
+func TestSendKeysViaHub_503WithKeysUnavailableCode_IsDefiniteRejection(t *testing.T) {
+	// Control: the Hub's own keys_unavailable 503 IS a definite rejection
+	// (contract §2.5: "dispatch definitively did not start").
+	server := newKeysMockHubServerFailing(t, "application/json", http.StatusServiceUnavailable,
+		`{"error":{"code":"keys_unavailable","message":"no broker route","details":{"operation_id":"op-503"}}}`)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-503-keys-unavailable"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keys rejected for agent",
+		"the Hub's own keys_unavailable 503 is a definite non-delivery, safe to classify as rejected")
+}
+
+// TestSendKeysViaHub_JSONMode_FailureEmitsOneResultWithUnknownOutcome proves
+// JSON mode emits exactly one parseable result on failure too, with the
+// outcome visible in Details.
+func TestSendKeysViaHub_JSONMode_FailureEmitsOneResultWithUnknownOutcome(t *testing.T) {
+	origFormat := outputFormat
+	defer func() { outputFormat = origFormat }()
+	outputFormat = "json"
+
+	server := newKeysMockHubServerFailing(t, "text/html", http.StatusBadGateway, "<html>gateway</html>")
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-json-fail"}
+
+	var cmdErr error
+	stdout := captureStdout(t, func() {
+		stderr := captureStderr(t, func() {
+			cmdErr = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+		})
+		assert.Empty(t, stderr, "JSON mode must suppress progress text entirely, including on failure")
+	})
+	require.Error(t, cmdErr)
+
+	dec := json.NewDecoder(strings.NewReader(stdout))
+	var result ActionResult
+	require.NoError(t, dec.Decode(&result), "stdout must contain exactly one parseable JSON result even on failure")
+	assert.Equal(t, "error", result.Status)
+	require.NotNil(t, result.Details)
+	assert.Equal(t, "unknown", result.Details["outcome"])
+
+	var extra json.RawMessage
+	decErr := dec.Decode(&extra)
+	assert.ErrorIs(t, decErr, io.EOF, "stdout must contain nothing after the single JSON result")
+}
+
+// ---------------------------------------------------------------------------
+// resolveLocalKeysTarget's own "is ambiguous" branch, distinct from
+// pkg/agent's own ambiguity handling, needs its own coverage.
+// ---------------------------------------------------------------------------
+
+func TestSendKeysLocalWithManager_Ambiguous_NoExec(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dirA := writeLocalProjectSettings(t, filepath.Join(tmp, "proj-a"), "proj-a-id")
+
+	a := api.AgentInfo{
+		Name:        "builder",
+		ContainerID: "container-a1",
+		Phase:       string(state.PhaseRunning),
+		Labels: map[string]string{
+			"scion.name":               "builder",
+			"agent_id":                 "agent-a1",
+			projectkeys.LabelProjectID: "proj-a-id",
+		},
+	}
+	b := a
+	b.ContainerID = "container-a2"
+	b.Labels = map[string]string{
+		"scion.name":               "builder",
+		"agent_id":                 "agent-a2",
+		projectkeys.LabelProjectID: "proj-a-id",
+	}
+
+	var captured []cmdExecRecord
+	mockRT := filteringMockRuntimeWithStdin([]api.AgentInfo{a, b}, &captured)
+	mgr := agent.NewManager(mockRT)
+	defer mgr.Close()
+
+	projectPath = dirA
+	err := sendKeysLocalWithManager(context.Background(), mgr, "builder", "Escape")
+	require.Error(t, err)
+	// Pin resolveLocalKeysTarget's own wording specifically: pkg/agent's
+	// resolution error also contains "ambiguous", so that substring alone
+	// would still pass even if this CLI-level branch were removed.
+	assert.Contains(t, err.Error(), "containers match in project")
+	assert.Empty(t, captured, "an ambiguous local target must never be delivered to")
 }
