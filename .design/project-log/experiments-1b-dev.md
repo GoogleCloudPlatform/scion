@@ -123,3 +123,40 @@ the four-change `admin-server-config.ts` edit, and a few literal swaps) and
 the e2e spec). Most of the total is `admin-experiments.ts` and its test
 file: an admin tab with four states (normal, 403, malformed, empty),
 sequential-write semantics, and a test for each state and write path.
+
+## Follow-up hardening (GoogleCloudPlatform/scion#2191)
+
+Four defensive fixes for malformed or missing response fields in the admin
+experiments tab and the boot flag fetch; one possible guard was left out
+because `exec()` already handles that input.
+
+- `setServerFlags()` read `window.__SCION_FEATURES__` and iterated its
+  argument unconditionally: a non-browser caller, or a null or undefined
+  argument, would throw, and a string or array argument would silently
+  write junk numeric keys into the bag. Added the `typeof window` guard
+  already used by `isFeatureEnabled()` and `setFeatureFlag()`, and return
+  early on a null, non-object, or array argument.
+- An experiment row without a `layers` array threw out of `render()` on
+  `exp.layers.map()`. Defaulted to an empty array so the row still renders.
+- `updated_by` is null only when `updated_at` is null too (no stored row,
+  so no attribution is shown). When attribution renders, the only
+  degenerate value is an empty string (a write with no caller email);
+  that, and a missing value, now renders as "unknown" instead of blank
+  attribution text.
+- `typeof [] === 'object'`, so an array-shaped `experiments` field in the
+  `/api/v1/experiments` response would pass the call site's object check
+  and reach `setServerFlags()`. Covered by the `Array.isArray` guard added
+  to `setServerFlags()` above, rather than a second check at the call
+  site.
+- The `issueUrl()` regex match was checked for a possible null-argument
+  throw, but `RegExp.prototype.exec()` coerces its argument to a string and
+  never throws on `null`/`undefined`/empty input; the existing
+  `m ? ... : null` ternary and the render-time `nothing` fallback already
+  handle every outcome. Left unchanged.
+
+Each fix added or extended a vitest case, and each new case was confirmed
+to fail against the pre-fix code (mutation check) before being restored
+alongside the fix. Gates run: `npm run typecheck` (clean), `npx eslint` on
+the touched source files and `npx prettier --check` on all touched files
+(clean), and targeted `npx vitest run` across the touched test files (all
+passing).
