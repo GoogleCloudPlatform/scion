@@ -59,14 +59,14 @@ type KeysAuthzDecision struct {
 // operation (contract §3 "Authorization"). It maps decision 2's initial
 // policy — the route action is not a new independently granted permission —
 // onto the existing attach authority for user and dev callers, who get
-// attach decision parity through the same AK1 kernel evaluation — Decide
-// with ActionAttach — the PTY endpoint uses. The resulting audit record
+// attach decision parity through the same AK1 kernel evaluation (Decide
+// with ActionAttach) that the PTY endpoint uses. The resulting audit record
 // carries no explicit permission ID for this path, because keys calls
-// CheckAccess without one (auditPermissionID, authz.go ~1786-1790). The
-// agent-credential branch below checks ScopeAgentLifecycle plus
-// same-project membership and does not call Decide; relationship
-// evaluation for agent callers is required before keys execution is
-// wired, tracked in ptone/scion#2460 (keys contract Phase 5):
+// CheckAccess without one (see auditPermissionID). The agent-credential
+// branch below checks ScopeAgentLifecycle plus same-project membership and
+// does not call Decide; relationship evaluation for agent callers is
+// required before keys execution is wired, tracked in ptone/scion#2460
+// (keys contract Phase 5):
 //
 //   - Human session / user access token: ActionAttach on the target agent,
 //     evaluated through the same AK1 kernel decision (Decide with
