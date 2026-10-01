@@ -59,6 +59,7 @@ import {
 } from '../../client/chat-palette-data.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
+import { paginateAll } from '../../client/paginate-all.js';
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import '../shared/chat/chat-thread.js';
@@ -69,6 +70,9 @@ import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
 const loadSpaceRail = () => import('../shared/chat/chat-space-rail.js');
 // Lazy-load the members sidebar only when v2 is active
 const loadChatMembers = () => import('../shared/chat/chat-members.js');
+
+/** Page size for the hub members sidebar's full users/agents walk (ptone/scion#2367). */
+const HUB_MEMBERS_PAGE_SIZE = 100;
 
 /** Members panel width bounds, in px. */
 const MEMBERS_WIDTH_DEFAULT = 240;
@@ -187,6 +191,45 @@ function agentDetailMessage(a: { detail?: { message?: string }; message?: string
   return a.detail?.message || a.message || '';
 }
 
+/** The subset of a raw `/api/v1/users` row `loadHubMembers` reads. */
+interface RawHubUser {
+  id: string;
+  displayName: string;
+  email?: string;
+  avatarUrl?: string;
+  role?: string;
+  status?: string;
+}
+
+/** `paginateAll`'s page extractor for `/api/v1/users` (ptone/scion#2367). */
+function parseHubUsersPage(body: unknown): { items: RawHubUser[]; nextCursor?: string } {
+  const data = body as { users?: RawHubUser[]; nextCursor?: string };
+  return { items: data.users ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
+}
+
+/** The subset of a raw `/api/v1/agents` row `loadHubMembers` reads. */
+interface RawHubAgent {
+  id: string;
+  name: string;
+  slug?: string;
+  phase?: string;
+  status?: string;
+  activity?: string;
+  message?: string;
+  detail?: { message?: string };
+  lastSeen?: string;
+  lastActivityEvent?: string;
+  updated?: string;
+  projectId?: string;
+  canAttach?: boolean;
+}
+
+/** `paginateAll`'s page extractor for `/api/v1/agents` (ptone/scion#2367). */
+function parseHubAgentsPage(body: unknown): { items: RawHubAgent[]; nextCursor?: string } {
+  const data = body as { agents?: RawHubAgent[]; nextCursor?: string };
+  return { items: data.agents ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
+}
+
 // ---- V2 types ----
 
 interface V2ConversationState {
@@ -270,6 +313,27 @@ export class ScionPageChat extends LitElement {
   /** Bound listener for the rail's own-tab "Mark unread" notification. */
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
+  /**
+   * Coalescing gate for {@link loadHubMembers} (ptone/scion#2367). `loadHubMembers`
+   * has at least four call sites (route parse, `initV2`'s no-conversation
+   * branch, a rail-data re-parse, and the fallback poll) that can all fire
+   * within the same synchronous turn on a cold `/chat` mount, plus later,
+   * genuinely independent triggers while a walk is still in flight.
+   *
+   * `_hubMembersScheduled` batches every call that arrives before the
+   * scheduled walk actually starts: those calls are indistinguishable from
+   * each other (same turn, nothing could have changed between them), so they
+   * collapse into the single `queueMicrotask`-deferred walk with zero extra
+   * requests. `_hubMembersInFlight` is true only once that walk's network
+   * requests are actually in flight; a call arriving then sets
+   * `_hubMembersReloadQueued` instead of starting a second walk, and
+   * `_runHubMembersLoad`'s loop performs exactly one trailing walk once the
+   * current one settles — further calls during that trailing walk set the
+   * same flag again rather than queuing a second one.
+   */
+  private _hubMembersScheduled = false;
+  private _hubMembersInFlight = false;
+  private _hubMembersReloadQueued = false;
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
@@ -2168,28 +2232,75 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Load hub-level members (all users and agents in the hub) for the
-   * members sidebar when no specific space/project is selected.
+   * Load hub-level members (every user and agent in the hub, fully
+   * paginated) for the members sidebar when no specific space/project is
+   * selected.
+   *
+   * Entry point for {@link _hubMembersScheduled}'s coalescing gate — see its
+   * doc comment for why this has to batch its many call sites rather than
+   * issue one request per call. Synchronous and fire-and-forget so every
+   * existing `void this.loadHubMembers();` call site keeps working unchanged.
    */
-  private async loadHubMembers(): Promise<void> {
-    try {
-      // Fetch users and agents in parallel
-      const [usersRes, agentsRes] = await Promise.all([
-        apiFetch('/api/v1/users?limit=100'),
-        apiFetch('/api/v1/agents?limit=100'),
-      ]);
+  private loadHubMembers(): void {
+    if (this._hubMembersInFlight) {
+      this._hubMembersReloadQueued = true;
+      return;
+    }
+    if (this._hubMembersScheduled) return;
+    this._hubMembersScheduled = true;
+    queueMicrotask(() => {
+      void this._runHubMembersLoad();
+    });
+  }
 
-      if (usersRes.ok) {
-        const userData = (await usersRes.json()) as {
-          users?: Array<{
-            id: string;
-            displayName: string;
-            email?: string;
-            avatarUrl?: string;
-            role?: string;
-            status?: string;
-          }>;
-        };
+  /**
+   * Runs the actual walk, then — if another call arrived while it was in
+   * flight — runs exactly one more before releasing the gate. A call that
+   * arrives during that trailing walk re-sets the same flag rather than
+   * queuing a second one, so three triggers during one walk still produce
+   * only one trailing reload.
+   */
+  private async _runHubMembersLoad(): Promise<void> {
+    this._hubMembersScheduled = false;
+    this._hubMembersInFlight = true;
+    try {
+      do {
+        this._hubMembersReloadQueued = false;
+        await this._fetchHubMembersOnce();
+      } while (this._hubMembersReloadQueued);
+    } finally {
+      this._hubMembersInFlight = false;
+    }
+  }
+
+  /**
+   * One full users+agents walk. Publishes each list only once its own walk
+   * completes, and only on success — a failed walk (any page) leaves that
+   * list exactly as it was, per today's no-blank-on-error behaviour, while
+   * the other list (fetched in parallel, same as before) still updates on
+   * its own success. Mirrors the original method's blanket try/catch: an
+   * unexpected failure anywhere in the assignment below (not just a rejected
+   * walk) leaves both lists exactly as they were rather than throwing out of
+   * this `queueMicrotask`-scheduled call, where nothing would catch it.
+   */
+  private async _fetchHubMembersOnce(): Promise<void> {
+    const [usersResult, agentsResult] = await Promise.allSettled([
+      paginateAll({
+        path: '/api/v1/users',
+        pageSize: HUB_MEMBERS_PAGE_SIZE,
+        parsePage: parseHubUsersPage,
+        label: 'users list',
+      }),
+      paginateAll({
+        path: '/api/v1/agents',
+        pageSize: HUB_MEMBERS_PAGE_SIZE,
+        parsePage: parseHubAgentsPage,
+        label: 'agents list',
+      }),
+    ]);
+
+    try {
+      if (usersResult.status === 'fulfilled') {
         // /api/v1/users carries no presence state. Preserve whatever
         // refreshHubMemberPresence() (or an SSE presence event) already
         // merged in, otherwise the periodic poll would blank out every
@@ -2198,7 +2309,7 @@ export class ScionPageChat extends LitElement {
         for (const h of this.v2HumanMembers) {
           if (h.presenceState) currentPresence.set(h.id, h.presenceState);
         }
-        this.v2HumanMembers = (userData.users || [])
+        this.v2HumanMembers = usersResult.value
           .filter((u) => u.status !== 'disabled')
           .map((u) => ({
             id: u.id,
@@ -2210,26 +2321,11 @@ export class ScionPageChat extends LitElement {
             presenceState: currentPresence.get(u.id) || ('' as const),
           }));
       }
+      // A failed users walk leaves this.v2HumanMembers untouched — non-critical,
+      // sidebar keeps showing what it already had.
 
-      if (agentsRes.ok) {
-        const agentData = (await agentsRes.json()) as {
-          agents?: Array<{
-            id: string;
-            name: string;
-            slug?: string;
-            phase?: string;
-            status?: string;
-            activity?: string;
-            message?: string;
-            detail?: { message?: string };
-            lastSeen?: string;
-            lastActivityEvent?: string;
-            updated?: string;
-            projectId?: string;
-            canAttach?: boolean;
-          }>;
-        };
-        this.v2AgentMembers = (agentData.agents || []).map((a) => ({
+      if (agentsResult.status === 'fulfilled') {
+        this.v2AgentMembers = agentsResult.value.map((a) => ({
           id: a.id,
           kind: 'agent' as const,
           displayName: a.name || a.slug || a.id,
@@ -2246,8 +2342,11 @@ export class ScionPageChat extends LitElement {
         // merge onto — otherwise they are buffered and never notify.
         stateManager.seedAgents(this.v2AgentMembers.map(agentMemberToAgent));
       }
+      // A failed agents walk leaves this.v2AgentMembers untouched, same as users above.
 
-      // Also populate legacy v2Members for thread @-mention support
+      // Also populate legacy v2Members for thread @-mention support — rebuilt
+      // from whatever the current v2HumanMembers/v2AgentMembers are, so a
+      // partial failure above (old list kept) is reflected here too.
       this.v2Members = [
         ...this.v2HumanMembers.map((h) => ({
           id: h.id,
@@ -2264,7 +2363,7 @@ export class ScionPageChat extends LitElement {
         })),
       ];
     } catch {
-      // Non-critical — sidebar will show empty state
+      // Non-critical — sidebar keeps whatever it already had.
     }
   }
 
