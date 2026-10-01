@@ -384,6 +384,52 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(listingCalls.workspace).toBe(1);
   });
 
+  it('unobserves the placeholder if the Files section disappears before ever being revealed', async () => {
+    // Upstream review (GoogleCloudPlatform/scion#2185): if
+    // shouldShowFilesSection() flips to false before the placeholder was
+    // ever revealed (e.g. the last shared dir is removed via a live
+    // update), observeFilesSection() used to return early on `!placeholder`
+    // without unobserving the now-detached element, leaking the reference
+    // in the observer and in observedFilesPlaceholder indefinitely.
+    const observedTargets: Element[] = [];
+    const unobserveCalls: Element[] = [];
+    class FakeIntersectionObserver {
+      constructor(_cb: IntersectionObserverCallback) {
+        // Not fired in this test — the section never reveals.
+      }
+      observe(target: Element): void {
+        observedTargets.push(target);
+      }
+      unobserve(target: Element): void {
+        unobserveCalls.push(target);
+      }
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    }
+    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver);
+
+    const { el } = await createComponent('member', {
+      gitRemote: 'https://example.com/repo.git',
+      sharedDirs: [{ name: SHARED_DIR_A }],
+    });
+    element = el;
+
+    // Not yet revealed: the placeholder exists and is being observed.
+    const placeholder = el.shadowRoot?.querySelector('.files-section-placeholder');
+    expect(placeholder).not.toBeNull();
+    expect(observedTargets).toContain(placeholder);
+    expect(unobserveCalls.length).toBe(0);
+
+    // The only shared dir is removed before the section was ever revealed —
+    // shouldShowFilesSection() goes false and Lit tears the placeholder down.
+    await pushProjectUpdate(el, { sharedDirs: [] });
+
+    expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
+    expect(unobserveCalls).toContain(placeholder);
+  });
+
   // ── Regression coverage: activeFileTab can drift from the rendered tab
   // list (round-1 review, blocking finding 1). Reproduced originally via a
   // live project update that adds a shared dir to a project that had none —

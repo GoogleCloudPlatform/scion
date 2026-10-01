@@ -1098,7 +1098,18 @@ export class ScionPageProjectDetail extends LitElement {
   private observeFilesSection(): void {
     if (this.filesSectionVisible) return;
     const placeholder = this.shadowRoot?.querySelector('.files-section-placeholder');
-    if (!placeholder) return;
+    if (!placeholder) {
+      // shouldShowFilesSection() flipped to false before reveal (e.g. the
+      // last shared dir was removed via a live project update), so Lit tore
+      // down the placeholder without replacing it. Stop watching the
+      // detached element instead of leaving a stale reference that is
+      // never unobserved.
+      if (this.observedFilesPlaceholder) {
+        this.filesSectionObserver?.unobserve(this.observedFilesPlaceholder);
+        this.observedFilesPlaceholder = null;
+      }
+      return;
+    }
 
     if (typeof IntersectionObserver !== 'function') {
       this.revealFilesSection();
