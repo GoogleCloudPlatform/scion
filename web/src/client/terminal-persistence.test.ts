@@ -400,7 +400,7 @@ describe('restore()', () => {
     expect(f.fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('a throw from merge() (e.g. workspace.select) does not reject restore(); the generation fails and no further GET is sent', async () => {
+  it('a throw from merge() (e.g. workspace.select) does not reject restore(); within the retry interval, no further GET is sent', async () => {
     const f = fixture();
     f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA)));
     vi.spyOn(f.workspace, 'select').mockImplementation(() => {
@@ -410,18 +410,95 @@ describe('restore()', () => {
     await expect(f.persistence.restore(false)).resolves.toBeUndefined();
     expect(f.fetchImpl).toHaveBeenCalledTimes(1); // the GET ran; the throw happened while applying it
 
-    // A second restore() call in the same generation must not perform a
+    // A second restore() call within the retry interval must not perform a
     // second GET: the generation is marked 'failed', not left stuck
     // 'loading' with inflightGet already cleared (which would otherwise let
-    // a later bare /terminals visit re-fetch and re-merge indefinitely).
+    // a later bare /terminals visit re-fetch and re-merge immediately,
+    // bypassing the rate limit). Status 'failed' also enables the same
+    // rate-limited background retry a failed GET gets (see the next test):
+    // this test only pins the "not immediately" half of that.
     await f.persistence.restore(false);
     expect(f.fetchImpl).toHaveBeenCalledTimes(1);
 
-    // No PUT on a later change either: saving was never enabled.
+    // No PUT on a later change either, still within the interval: saving
+    // was never enabled.
     vi.useFakeTimers();
     f.setFrontmostKey('some-key');
     await vi.advanceTimersByTimeAsync(2000);
     expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throw from merge() retries after the interval: the retry re-merges (entries are already open, so select() is not called again), enables saving, and warns only once', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const f = fixture({ retryIntervalMs: 10000 });
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA)));
+    const select = vi.spyOn(f.workspace, 'select').mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
+
+    await f.persistence.restore(false);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    // The entry was still created (restoreEntries ran before the throwing
+    // select() call), just not selected.
+    expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA]);
+
+    // After the interval, a restore() call starts a background retry.
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA, 0, 2)));
+    await vi.advanceTimersByTimeAsync(10000);
+    await f.persistence.restore(false);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(2);
+
+    // The retried merge finds agentA already in the registry (alreadyOpen),
+    // so connectId is null and select() is not called again — the second
+    // attempt does not hit the same throw.
+    expect(select).toHaveBeenCalledTimes(1);
+
+    // Saving is enabled: a further change writes back.
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB], agentB, 0, 3)));
+    const keyB = f.coordinator.restoreEntries([agentB], { connectAgentId: null })[0].state.key;
+    f.setFrontmostKey(keyB);
+    await vi.advanceTimersByTimeAsync(1000);
+    const putCalls = f.fetchImpl.mock.calls.filter(([, o]) => o?.method === 'PUT');
+    expect(putCalls).toHaveLength(1);
+    const body = JSON.parse((putCalls[0][1] as ApiFetchOptions).body as string) as {
+      agentIds: string[];
+      frontmostAgentId: string | null;
+    };
+    expect(body).toEqual({ agentIds: [agentA, agentB], frontmostAgentId: agentB });
+
+    // Still exactly one warning for this generation, from the first throw.
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throw from merge() that repeats on the retry still logs only once per generation (design section 3.5.4)', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const f = fixture({ retryIntervalMs: 10000 });
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA)));
+    // Unlike a throw from select() (which only runs when something needs
+    // connecting, so it does not repeat once the entry is already open),
+    // restoreEntries() runs on every merge call regardless of alreadyOpen —
+    // mocking it to always throw simulates a failure that genuinely
+    // repeats on the retry.
+    vi.spyOn(f.coordinator, 'restoreEntries').mockImplementation(() => {
+      throw new Error('boom');
+    });
+
+    await f.persistence.restore(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The retry, once the interval has passed, throws again.
+    f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA, 0, 2)));
+    await vi.advanceTimersByTimeAsync(10000);
+    await f.persistence.restore(false);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(2);
+
+    // Still exactly one warning for this generation, not two.
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('the same generation twice performs one GET', async () => {
@@ -595,6 +672,27 @@ describe('restore()', () => {
     f.setFrontmostKey(keyB);
     await vi.advanceTimersByTimeAsync(1000);
     expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('a GET failure logs once per generation, not again on a failed retry (design section 3.5.4)', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const f = fixture({ retryIntervalMs: 10000 });
+    f.fetchImpl.mockRejectedValueOnce(new Error('network'));
+
+    await f.persistence.restore(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The background retry, triggered by a later restore() call once the
+    // interval has passed, also fails.
+    f.fetchImpl.mockRejectedValueOnce(new Error('network'));
+    await vi.advanceTimersByTimeAsync(10000);
+    await f.persistence.restore(false);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(2);
+
+    // Still exactly one warning for this generation, not two.
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('no write before read: a change while the GET is pending sends nothing; the merge appends it and writes back once', async () => {

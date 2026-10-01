@@ -201,6 +201,18 @@ export class TerminalWorkspacePersistence {
    *  repeated failure (the same body re-sent on every debounce fire) does not
    *  spam the console. Reset on a new generation and on the next success. */
   private putFailureLogged = false;
+  /** Set once a restore failure (a failed GET, or a throw while applying a
+   *  successful one — coordinator.restoreEntries/workspace.select can throw,
+   *  for example on a disposed registry) has been logged for the current
+   *  generation, so a repeated failure on the rate-limited background retry
+   *  (design section 3.5.1, up to once per retryIntervalMs — both failure
+   *  modes leave status 'failed', so both are retried the same way, see
+   *  performRestore's catch block) does not spam the console. Reset on a
+   *  new generation only: unlike putFailureLogged, a failed restore never
+   *  "succeeds and then fails again" within one generation to reset it
+   *  early — once this generation's restore succeeds it is 'merged' for
+   *  good (section 3.4). */
+  private restoreFailureLogged = false;
 
   constructor(deps: TerminalWorkspacePersistenceDeps) {
     this.coordinator = deps.coordinator;
@@ -242,16 +254,16 @@ export class TerminalWorkspacePersistence {
       this.lastAttemptAt = null;
       this.firstAttemptGate = null;
       this.putFailureLogged = false;
+      this.restoreFailureLogged = false;
       this.installNotificationListeners(generation);
     }
 
     if (this.state?.status === 'merged') return;
 
     if (this.state?.status === 'failed') {
-      // Not the first attempt in this generation (that always leaves
-      // status 'loading' or 'merged', never 'failed', without also setting
-      // firstAttemptGate — see below): rate-limited background retry only,
-      // never awaited.
+      // Status 'failed' means an earlier call in this generation already
+      // ran the first attempt (and set firstAttemptGate): later calls only
+      // start a rate-limited background retry here, and never await it.
       const now = Date.now();
       if (
         !this.inflightGet &&
@@ -327,13 +339,13 @@ export class TerminalWorkspacePersistence {
     if (this.disposed || generation !== this.generation || this.coordinator.tornDown) return;
     if (!doc) {
       this.state = { status: 'failed' };
-      // TODO(Phase 2): retry the GET within the generation instead of
-      // disabling saving for the rest of it. Phase 1 has no such retry —
-      // restore() returns early once the status is 'failed' (see its doc
-      // comment) — so say "for this session", not "until a later attempt
-      // succeeds", which would promise a retry that does not exist yet.
-      console.warn(
-        '[Terminal] restoring the saved terminal list failed; saving stays disabled for this session.'
+      // Logged once per generation (design section 3.5.4), not on every
+      // failed background retry (up to once per retryIntervalMs) — a
+      // long-lived generation against a hub that keeps 404ing during a
+      // rolling deploy would otherwise warn every 10s while the user
+      // navigates the viewer.
+      this.logRestoreFailure(
+        '[Terminal] restoring the saved terminal list failed; saving stays disabled until a later attempt succeeds.'
       );
       return;
     }
@@ -342,15 +354,28 @@ export class TerminalWorkspacePersistence {
     } catch (err) {
       // coordinator.restoreEntries/workspace.select can throw (a disposed
       // pane or registry, for example). A throw here must not reject
-      // restore()'s "never rejects" contract or leave this generation stuck
-      // 'loading' with inflightGet already cleared (which would otherwise
-      // let a later bare /terminals visit send a second GET and re-merge).
+      // restore()'s "never rejects" contract, and status 'failed' is exactly
+      // what enables the same rate-limited background retry as a failed GET
+      // (the 'failed' branch above, in restore()): a later call, once
+      // retryIntervalMs has passed, sends a fresh GET and merges again. That
+      // retry typically succeeds even though the first attempt threw,
+      // because the entries this merge already created via restoreEntries
+      // are still in the registry, so the retried merge finds them in
+      // alreadyOpen and does not call select() again. Logged once per
+      // generation, the same as the GET-failure path, not on every retry.
       this.state = { status: 'failed' };
-      console.warn(
-        '[Terminal] failed to apply the restored terminal list; saving stays disabled.',
+      this.logRestoreFailure(
+        '[Terminal] failed to apply the restored terminal list; saving stays disabled until a later attempt succeeds.',
         err
       );
     }
+  }
+
+  private logRestoreFailure(message: string, err?: unknown): void {
+    if (this.restoreFailureLogged) return;
+    this.restoreFailureLogged = true;
+    if (err !== undefined) console.warn(message, err);
+    else console.warn(message);
   }
 
   /**
