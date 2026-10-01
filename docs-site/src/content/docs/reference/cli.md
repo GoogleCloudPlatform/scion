@@ -588,7 +588,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
 - `scion hub projects`: List all projects registered on the Hub.
-    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its broker's capacity as `(agents: count/limit)`, or `(agents: count)` when the broker has no limit. `(not enforced)` is appended when the hub-wide broker quota enforcement switch is off.
+    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its Runtime Broker's capacity as `(agents: count/limit)`, or `(agents: count)` when that Runtime Broker has no limit. `(not enforced)` is appended when the hub-wide switch for Runtime Broker quota enforcement is off.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).

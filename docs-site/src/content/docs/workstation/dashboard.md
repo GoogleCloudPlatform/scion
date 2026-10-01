@@ -101,8 +101,8 @@ Detailed view for individual agents, featuring a high-density tabbed layout and 
 Monitor the infrastructure nodes where your agents are executing.
 - **Status**: See which brokers are online and their current load.
 - **Configuration**: View broker capabilities (Docker, K8s, etc.).
-- **Agent Cap**: The brokers list shows each broker's running-agent count against its effective `max_agents_per_broker` cap (for example, "7 / 30"), with the cap's source (broker setting, entitlement, or hub default) in a tooltip. When an admin has turned off broker quota enforcement, the cap is marked **not enforced**.
-- **Broker Settings**: A broker's detail page has a **Settings** section for per-broker overrides. **Max concurrent agents** can be left on the inherited default or set to a custom value (`0` means unlimited); the page shows the current count, the effective limit, and where it comes from. Editing requires the `quota.update` permission. See [Broker Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings).
+- **Agent Cap**: The **Brokers** page lists each Runtime Broker's running-agent count against its effective `max_agents_per_broker` cap (for example, "7 / 30"), with the cap's source (Runtime Broker setting, entitlement, or hub default) in a tooltip. When an admin has turned off Runtime Broker quota enforcement, the cap is marked **not enforced**.
+- **Runtime Broker Settings**: A Runtime Broker's detail page has a **Settings** section for overrides that apply to that Runtime Broker only. **Max concurrent agents** can be left on the inherited default or set to a custom value (`0` means unlimited); the page shows the current count, the effective limit, and where it comes from. Editing requires the `quota.update` permission. See the [Runtime Broker settings API](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings).
 
 ### Admin Management Suite
 Centralized views for managing the Scion infrastructure and access control (available to administrative users).

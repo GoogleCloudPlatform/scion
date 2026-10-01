@@ -384,7 +384,7 @@ these values in `details.reason`:
 | `raw_observer_unsupported` | `raw` with an observer-only message. |
 | `raw_conversation_unsupported` | `raw` with conversation addressing (conversation ID, channel, thread ID, or surface references). |
 | `raw_scheduling_unsupported` | `raw` on a schedule or scheduled event. |
-| `raw_broker_ingress_unsupported` | `raw` on a broker-inbound route. |
+| `raw_broker_ingress_unsupported` | `raw` on a Message Broker plugin's inbound route (`/api/v1/broker/inbound` or `/api/v1/broker/inbound/routed`). |
 | `raw_managed_backend_unsupported` | `raw` to an agent on a managed backend. |
 | `cross_project_raw_unsupported` | `raw` from an agent in a different project. |
 

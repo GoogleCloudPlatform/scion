@@ -127,7 +127,7 @@ Status codes:
 The stored MIME type is derived from the file's content plus its extension; the `Content-Type` a client declares on the part is ignored. Executable extensions (`.exe`, `.sh`, `.js`, `.ps1`, and their peers) and markup extensions (`.html`, `.svg`, and their peers) are refused whatever the content is.
 
 #### Experiments (`/api/v1/experiments`)
-- `GET /`: Return the resolved hub-wide experiment map, `{"experiments": {"<name>": true|false}}`. Available to any authenticated identity (user, agent, or broker token). The web client fetches it at boot. Admins change values through [`/api/v1/admin/experiments`](#admin-apiv1admin).
+- `GET /`: Return the resolved hub-wide experiment map, `{"experiments": {"<name>": true|false}}`. Available to any authenticated identity (user, agent, or Runtime Broker token). The web client fetches it at boot. Admins change values through [`/api/v1/admin/experiments`](#admin-apiv1admin).
 
 #### Templates (`/api/v1/templates`)
 - `GET /`: List available agent templates. The authorized list validator caps list requests at a maximum limit of **100** templates per page (default is 50). Requests specifying a `limit` query parameter greater than 100 will fail with HTTP 400 Bad Request.
