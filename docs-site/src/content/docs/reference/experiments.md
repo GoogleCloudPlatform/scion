@@ -53,4 +53,4 @@ The map is only served to signed-in users, from `GET /api/v1/experiments`, with 
 
 ## Review cadence
 
-Each registry entry has a `ReviewBy` date. Once it passes, the Experiments tab shows a "review overdue" warning on that row. The owner either extends `ReviewBy` with a reason in a PR, or retires the experiment. There is no CI check that fails a build after the date passes — review is a documented process, not a time bomb.
+Each registry entry has a `ReviewBy` date. Once it passes, the Experiments tab shows a "Review overdue" warning on that row. The owner either extends `ReviewBy` with a reason in a PR, or retires the experiment. There is no CI check that fails a build after the date passes — review is a documented process, not a time bomb.
