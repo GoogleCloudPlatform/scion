@@ -56,13 +56,21 @@ broker logic without hardcoding a single runtime's assumptions.
   optionally satisfy; a runtime that implements neither keeps today's
   defaults.
 - `runtimebroker.lookupAgentTarget` unifies the previously separate target
-  and runtime/manager resolution used by exec, reset-auth, and stop into a
-  single strict pass, so an operation can no longer be dispatched to a
-  different backend than the one that produced its target. Broker-reported
-  per-profile attach capability now gates `scion attach`/`start -a`/
-  `resume -a` before the PTY dial, and a runtime's declined-logs response
-  passes through the hub with a fixed, generic message rather than
-  whatever text the broker supplied.
+  and runtime/manager resolution used by exec, reset-auth, stop, and restart
+  into a single strict pass, so an operation can no longer be dispatched to a
+  different backend than the one that produced its target. The result also
+  still carries the container runtime's own unmerged lifecycle `Phase`
+  (never `agent.Manager`'s merged, potentially stale view) alongside the
+  paired `Runtime` instance, so neither property was traded for the other.
+  Every one of these handlers now classifies a lookup failure the same way:
+  a runtime-listing failure (`ErrAgentListUnavailable`) gets a fixed 503 via
+  `AgentLookupUnavailable`; any other real lookup error (e.g. an ambiguous
+  multi-container match) gets a fixed 500, with the underlying error logged
+  server-side only, never echoed into the response body; a genuine
+  not-found or empty target gets a 404. Broker-reported per-profile attach
+  capability now gates `scion attach`/`start -a`/`resume -a` before the PTY
+  dial, and a runtime's declined-logs response passes through the hub with
+  a fixed, generic message rather than whatever text the broker supplied.
 
 ## Attach-refusal surfacing
 
