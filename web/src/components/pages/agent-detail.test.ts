@@ -321,6 +321,12 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS - 1);
     expect(navClicks).toEqual([]);
 
+    // With the timer still pending, "Redirecting…" is shown alongside the
+    // deleted state.
+    const pendingText =
+      el.shadowRoot?.querySelector('[data-testid="agent-deleted-state"]')?.textContent ?? '';
+    expect(pendingText).toContain('Redirecting');
+
     vi.advanceTimersByTime(1);
     await Promise.resolve();
     expect(navClicks).toEqual([{ path: '/agents' }]);
