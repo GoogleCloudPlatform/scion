@@ -81,6 +81,18 @@ type mockManager struct {
 	// control its return value (including the three agentkeys sentinels)
 	// and capture its arguments, without needing a real AgentManager/tmux.
 	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
+
+	// preflightErr, when set, is returned by Preflight (e.g.
+	// config.ErrTemplateNotFound, for the async-create admission 404 case).
+	preflightErr      error
+	preflightCalls    int
+	lastPreflightOpts api.StartOptions
+
+	// cleanupLaunchCalls/lastCleanupLaunchHandles record CleanupLaunch
+	// invocations so tests can assert on report-first failure cleanup.
+	cleanupLaunchCalls       int
+	lastCleanupLaunchHandles []agent.ResourceHandle
+	cleanupLaunchErr         error
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -88,6 +100,18 @@ func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*ap
 		return nil, m.provisionErr
 	}
 	return &api.ScionConfig{}, nil
+}
+
+func (m *mockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	m.preflightCalls++
+	m.lastPreflightOpts = opts
+	return m.preflightErr
+}
+
+func (m *mockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	m.cleanupLaunchCalls++
+	m.lastCleanupLaunchHandles = handles
+	return m.cleanupLaunchErr
 }
 
 func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -1532,6 +1556,14 @@ func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.Star
 	m.lastOpts = opts
 	m.lastProvisionCtx = ctx
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
+func (m *provisionCapturingManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *provisionCapturingManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
 }
 
 func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {

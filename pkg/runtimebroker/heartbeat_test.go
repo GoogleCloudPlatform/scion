@@ -34,6 +34,21 @@ type mockRuntimeBrokerService struct {
 	heartbeatErr   error
 
 	messageFailureReports []*hubclient.MessageFailuresReport
+
+	// launchReports records every ReportAgentLaunch call, in order.
+	launchReports []*mockLaunchReportCall
+	// launchReportFunc, when set, computes ReportAgentLaunch's answer for
+	// each report; it lets a test script a sequence of Hub answers (claim
+	// applied, a checkpoint 409, a terminal "completed", ...). When nil,
+	// ReportAgentLaunch answers "applied" to everything.
+	launchReportFunc func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+}
+
+// mockLaunchReportCall records one ReportAgentLaunch invocation.
+type mockLaunchReportCall struct {
+	BrokerID string
+	AgentID  string
+	Report   *hubclient.AgentLaunchReport
 }
 
 type mockHeartbeatCall struct {
@@ -94,6 +109,23 @@ func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {
 	return append([]mockHeartbeatCall{}, m.heartbeatCalls...)
 }
 
+func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+	m.mu.Lock()
+	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
+	fn := m.launchReportFunc
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(req)
+	}
+	return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+}
+
+func (m *mockRuntimeBrokerService) getLaunchReports() []*mockLaunchReportCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*mockLaunchReportCall{}, m.launchReports...)
+}
+
 // heartbeatMockManager implements agent.Manager for testing.
 type heartbeatMockManager struct {
 	agents []api.AgentInfo
@@ -102,6 +134,14 @@ type heartbeatMockManager struct {
 
 func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
+}
+
+func (m *heartbeatMockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
 }
 
 func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
