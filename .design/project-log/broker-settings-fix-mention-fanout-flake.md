@@ -81,9 +81,11 @@ if srv.teamsLinkService != nil { srv.teamsLinkService.Close() }
 if srv.brokerAuthService != nil { srv.brokerAuthService.Close() }
 if srv.previewService != nil { srv.previewService.Close() }
 ```
-All five `Close()`/`Stop()` methods are `sync.Once`-guarded (verified by reading each), so calling
-them here is safe even for the few tests (`chat_link_handlers_test.go`) that already close these same
-services themselves via their own `t.Cleanup`.
+All five `Close()`/`Stop()` methods are idempotent: `chatLinkService.Close` and
+`PreviewService.Close` are `sync.Once`-guarded; `BrokerAuthService.Close` -> `NonceCache.Stop` is a
+plain `select`/`close`, idempotent under sequential calls but not concurrency-safe. These calls always
+run sequentially in a `t.Cleanup` closure, so that is safe. (Both call sites now share this logic via
+one `closeTestServerBackground` helper, per round 1 review.)
 
 ## Not fixed here (filed as follow-ups)
 
@@ -122,3 +124,35 @@ Both filed as fork issues on `ptone/scion`: `ptone/scion#2432` (the 17 files) an
 All commands, counts, and the honest characterization of what this does and does not prove:
 `/scion-volumes/scratchpad/projects/broker-settings/reviews/fix-mention-fanout-evidence.md` (scratch,
 not part of this repo).
+
+## Round 1 review (broker-settings-rev-fix-mention-fanout-1): REQUEST CHANGES
+
+Full report: `reviews/broker-settings-rev-fix-mention-fanout-1.md`. The reviewer independently
+measured the leak (base leaks exactly 5 goroutines per server, head leaks 0 with `GOOGLE_CLOUD_PROJECT`
+unset; +10/server gRPC-client goroutines remain on head when it is set — see the F1 disposition below)
+and confirmed all gates green. One Required finding blocked APPROVE; everything else was non-blocking.
+
+| # | Finding | Disposition |
+|---|---|---|
+| R1 (Required) | The comment at `handlers_test.go:78-88` stated the ptone/scion#2418 causal link as fact, undercounted the leak as 4 goroutines (missing `previewService`), and claimed every `Close`/`Stop` is `sync.Once`-guarded, which is false for `NonceCache.Stop` (plain `select`/`close`). | **Fixed.** Rewrote the comment; extracted it onto a new `closeTestServerBackground` helper (also closes O2/N2 below). States only the leak, counts all 5 services, describes `NonceCache.Stop` accurately, and calls ptone/scion#2418 a possible contributor only. |
+| O1 (Optional) | The same "sync.Once for all five" wording also appears in the commit message, PR body, project log, and the ptone/scion#2432 body. | **Fixed** in the PR body (one `gh api -X PATCH` call), this log, and the ptone/scion#2432 body. The original commit message (d513fb7f7) is left as-is per the reviewer's own note that it need not be amended; the round 1 commit and this log now carry the correction. |
+| O2 (Optional) | The same 15-line close block is duplicated in `testServer` and `testServerWithBrokerAuth`. | **Fixed.** Extracted into `closeTestServerBackground(srv *Server)`; both helpers call it. |
+| N1 (Nit) | ptone/scion#2432 and ptone/scion#2433 bodies still said "PR TBD". | **Fixed.** Both now say ptone/scion#2434. |
+| N2 (Nit) | The PR body's claim that the Close calls are "safe even for the handful of tests (`chat_link_handlers_test.go`) that already close these same services themselves" is imprecise — those tests close standalone services they build themselves, not `srv`'s fields. | **Fixed** as a drive-by while editing the same paragraph for O1: the PR body now states accurately that those tests close their own separately-built services, so no service is ever double-closed. |
+| F1 (FYI) | In a GCP-configured sandbox (`GOOGLE_CLOUD_PROJECT` set), `logQueryService`'s Cloud Logging gRPC client leaks ~10 goroutines/server; only `CleanupResources()` closes it. `metricsDashboard` has the same pattern. Not seen in CI. | **Added** as a new "FYI" section in the ptone/scion#2432 body, with the file:line and goroutine breakdown, as a candidate for that same follow-up. Not fixed in this PR — still test-only, still scoped to the 5-goroutine leak this PR's leak count is about. |
+| F2, F3, F4 (FYI) | Cleanup ordering is correct; `previewService` is nil-guarded correctly; the ptone/scion#2418 comment is accurate. | No action needed — informational, confirms existing behavior/text is already correct. |
+
+## Gates re-run after round 1 fixes
+
+- `go vet ./pkg/hub/`: clean.
+- `golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...`: 0 issues.
+- `gofmt -l pkg/hub/handlers_test.go`: clean.
+- `go test -race -run 'TestMentionFanout|TestProcessMentions' -count=1 ./pkg/hub/`: PASS, 58/58,
+  0 FAIL, no DATA RACE (389.6s).
+- Leak measurement (temporary, uncommitted probe calling `testServer`/`testServerWithBrokerAuth` 50x
+  each in subtests, comparing `runtime.NumGoroutine()` before/after, matching the reviewer's method):
+  with `GOOGLE_CLOUD_PROJECT` set (this sandbox's ambient env, `deploy-demo-test`), delta was +1000
+  over 100 servers (10/server) — exactly the separately-tracked, out-of-scope `logQueryService` gRPC
+  leak from F1/round-1, not a regression of this fix. With `GOOGLE_CLOUD_PROJECT` unset (CI-like,
+  matching `.github/workflows/*.yml`), delta was **0** over 100 servers, confirming the fix still
+  eliminates the 5-goroutine leak this PR targets.
