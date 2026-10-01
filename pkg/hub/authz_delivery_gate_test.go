@@ -399,11 +399,72 @@ func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 
 // A role holding a deliver permission, presented with a valid delivery
 // credential, is denied without the association, progeny or skill-default
-// grant for the selected item.
+// grant for the selected item. A hub_delivery principal is always an agent,
+// so the role grant can reach it only through a role binding on agent:<C>
+// itself, or on a group containing C.
 func TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant(t *testing.T) {
-	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
-		"assert a super-admin role holding secret.deliver, with a valid delivery credential bound to the agent, " +
-		"is denied secret.deliver on a secret with no item grant")
+	assertRoleOnlyDenied := func(t *testing.T, f *goldenFixture, h *hubDeliveryIdentity) {
+		t.Helper()
+		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, deliverRoleGrantReason, d.Reason)
+		assert.Empty(t, d.MatchedGrant)
+		require.NotNil(t, d.Provenance)
+		assert.NotEmpty(t, d.Provenance.Grants, "the kernel-matched role binding is kept in Provenance.Grants for audit")
+		foundDeliverGrant := false
+		for _, g := range d.Provenance.Grants {
+			if g.ContainsRequested {
+				foundDeliverGrant = true
+			}
+		}
+		assert.True(t, foundDeliverGrant, "a granting binding must contain secret.deliver: %+v", d.Provenance.Grants)
+	}
+
+	t.Run("agent_binding", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+		agentC := tid("dg-role-no-item-agent")
+		h := newHubDeliveryNoItemGrantIdentity(t, f, agentC)
+		bindDeliverRoleToAgent(t, f.store, agentC)
+
+		assertRoleOnlyDenied(t, f, h)
+	})
+
+	t.Run("group_binding", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+		agentC := tid("dg-role-no-item-group-agent")
+		groupID := tid("dg-role-no-item-group")
+		h := newHubDeliveryNoItemGrantIdentity(t, f, agentC)
+		bindDeliverRoleToAgentGroup(t, f.store, groupID, agentC)
+
+		assertRoleOnlyDenied(t, f, h)
+	})
+}
+
+// TestDeliveryGate_KernelAllowExcludedForEveryKind pins that Step 8b applies
+// to every credential kind, not only the internal delivery credential: a
+// super-admin role holding secret.deliver is excluded even under an
+// ordinary interactive credential, once that kind is itself in
+// deliveryCredentialKinds.
+func TestDeliveryGate_KernelAllowExcludedForEveryKind(t *testing.T) {
+	f := newGoldenFixture(t)
+	admin := NewAuthenticatedUser(f.superAdminID, "superadmin@golden.test", "Super Admin", "admin", "api")
+	withDeliveryCredentialKinds(t, CredentialKindInteractive)
+
+	d := f.authz.Decide(context.Background(), AuthzRequest{
+		Principal:  principalContextForIdentity(admin),
+		Credential: CredentialContext{Kind: CredentialKindInteractive},
+		Resource:   Resource{Type: "secret", ID: f.secretID},
+		Action:     ActionDeliver,
+		Permission: "secret.deliver",
+		Explain:    false,
+	})
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, deliverRoleGrantReason, d.Reason)
+	assert.Empty(t, d.MatchedGrant)
 }
 
 // A delivery credential whose BoundAgentID differs from the principal

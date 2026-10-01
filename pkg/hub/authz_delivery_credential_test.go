@@ -245,3 +245,128 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 		})
 	}
 }
+
+// newHubDeliveryNoItemGrantIdentity builds a hub_delivery identity for the
+// role-does-not-substitute fixture: agent C's ancestry names a user with no
+// opted-in secret, env var or skill injection, so no association, progeny
+// or skill-default grant exists for it on any golden fixture resource. A
+// role binding naming a deliver permission is therefore the only grant the
+// kernel could match for it.
+func newHubDeliveryNoItemGrantIdentity(t *testing.T, f *goldenFixture, agentID string) *hubDeliveryIdentity {
+	t.Helper()
+	newHubDeliveryTestAgent(t, f.store, agentID, f.projectAlpha.ID, tid("hd-no-item-grant-unrelated-owner"))
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentID)
+	require.NoError(t, err)
+	return h
+}
+
+// newDeliverRoleDefinition creates a minimal system-scope custom role
+// naming only secret.deliver. The built-in super-admin role also holds it
+// (through allPermissionIDs), but super-admin is direct-user-only
+// (store/entadapter's directUserOnlyRoles) and cannot be bound to an agent
+// or a group, so a role binding onto agent:<C> or a group needs its own
+// role instead.
+func newDeliverRoleDefinition(t *testing.T, s store.Store) *store.RoleDefinition {
+	t.Helper()
+	rd, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name:        "hd-role-only-deliver-" + tid(t.Name())[:8],
+		Description: "holds secret.deliver only, for the role-does-not-substitute fixture",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"secret.deliver"},
+	})
+	require.NoError(t, err)
+	return rd
+}
+
+// bindDeliverRoleToAgent gives agentID a system-scope role binding,
+// naming only secret.deliver, directly.
+func bindDeliverRoleToAgent(t *testing.T, s store.Store, agentID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd := newDeliverRoleDefinition(t, s)
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalAgent,
+		PrincipalID:      agentID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+}
+
+// bindDeliverRoleToAgentGroup gives agentID the same role indirectly,
+// through membership in a group holding the system-scope role binding
+// (authorizationPrincipals adds GetEffectiveGroupsForAgent to the principal
+// closure, authz.go).
+func bindDeliverRoleToAgentGroup(t *testing.T, s store.Store, groupID, agentID string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Name: "hub delivery role-only group", Slug: "hd-role-only-" + groupID,
+		GroupType: store.GroupTypeExplicit,
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: groupID, MemberType: store.GroupMemberTypeAgent, MemberID: agentID, Role: store.GroupMemberRoleMember,
+	}))
+	rd := newDeliverRoleDefinition(t, s)
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+}
+
+// TestHubDelivery_RoleGrantExcludedNonExplain pins the role-does-not-
+// substitute rule without Explain: a role binding naming secret.deliver is
+// excluded by Step 8b even when the caller never asks for the
+// relationship-candidate provenance.
+func TestHubDelivery_RoleGrantExcludedNonExplain(t *testing.T) {
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	agentC := tid("hd-role-grant-non-explain")
+	h := newHubDeliveryNoItemGrantIdentity(t, f, agentC)
+	bindDeliverRoleToAgent(t, f.store, agentC)
+
+	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", false)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, deliverRoleGrantReason, d.Reason)
+	assert.Empty(t, d.MatchedGrant)
+	assert.Empty(t, d.RoleName)
+	assert.Empty(t, d.BindingID)
+	assert.Empty(t, d.Scope)
+	require.NotNil(t, d.Provenance)
+	assert.NotEmpty(t, d.Provenance.Grants, "the kernel-matched role binding is kept in Provenance.Grants for audit")
+}
+
+// TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding asserts that a
+// role binding does not short-circuit a progeny candidate: with both a role
+// binding naming secret.deliver and a progeny grant, Explain=true shows the
+// progeny candidate accepted at stage 5, the decision does not name the
+// role, and the step-10 gate arm's terminal deny is the reason the request
+// is denied.
+func TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding(t *testing.T) {
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	agentC := tid("hd-progeny-with-role")
+	// Ancestry names the golden secret's owner, so the progeny grant exists
+	// independently of the role binding below.
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	bindDeliverRoleToAgent(t, f.store, agentC)
+
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
+	require.NoError(t, err)
+
+	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+	assert.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.Equal(t, "delivery credential admission is not enabled", d.Reason)
+	assert.Empty(t, d.RoleName, "the decision must not name the excluded role grant")
+	assert.Equal(t, ScopeTypeRelationship, d.Scope, "the decision names the relationship grant, not the role")
+
+	r := relationshipResult(t, d, RelationshipRuleProgeny)
+	assert.True(t, r.Accepted, "progeny candidate must be accepted at stage 5 despite the role binding: %+v", r)
+}

@@ -849,6 +849,22 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	kernelResult := Evaluate(kernelReq)
 
+	// ── Step 8b: delivery_item_grant ──────────────────────────────────
+	// A kernel grant never satisfies a deliver request on its own: the
+	// association, progeny or skill-default grant for the selected item is
+	// required instead. This runs for every credential kind, not only the
+	// internal delivery credential, and it is not a Restriction:
+	// Restriction.Check sees only the permission ID and cannot tell a role
+	// grant from a relationship grant, and the same restrictions are
+	// re-applied to relationship candidates at stage 5, where excluding the
+	// permission outright would also reject the progeny candidate.
+	decision := kernelDecisionToDecision(kernelResult, permissionID)
+	kernelAdmits := kernelResult.Allowed
+	if kernelAdmits && isDeliverRequest(permissionID, request.Action) {
+		excludeKernelGrantForDeliver(&decision)
+		kernelAdmits = false
+	}
+
 	// ── Step 9: Relationship candidates ───────────────────────────────
 	// On a kernel deny, named relationships (owner, ancestor, progeny,
 	// hub-member assign) are evaluated as typed candidates through the
@@ -857,10 +873,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
 	// provenance lists them.
-	decision := kernelDecisionToDecision(kernelResult, permissionID)
-	if !kernelResult.Allowed || request.Explain {
+	if !kernelAdmits || request.Explain {
 		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
-		if !kernelResult.Allowed {
+		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
 				decision = *rel.accepted

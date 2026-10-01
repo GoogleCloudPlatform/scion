@@ -100,6 +100,29 @@ func isDeliverRequest(permissionID string, action Action) bool {
 	return ok
 }
 
+// deliverRoleGrantReason is the deny reason Decide's Step 8b records when a
+// role grant would otherwise admit a deliver request. A role binding, for
+// any credential kind, never substitutes for the association, progeny or
+// skill-default grant required for the selected item.
+const deliverRoleGrantReason = "role grants do not satisfy deliver permissions"
+
+// excludeKernelGrantForDeliver turns a kernel allow for a deliver request
+// into a deny, so Decide's Step 9 evaluates the relationship candidates
+// instead of accepting the role grant. The role binding the kernel matched
+// is kept in Provenance.Grants (so explain still shows it), but every field
+// that would otherwise name it as the granting source is cleared.
+func excludeKernelGrantForDeliver(d *Decision) {
+	d.Allowed = false
+	d.Reason = deliverRoleGrantReason
+	d.MatchedGrant, d.RoleName, d.BindingID, d.Scope = "", "", "", ""
+	if d.Provenance != nil {
+		d.Provenance.StatusRestrictions = append(d.Provenance.StatusRestrictions, RestrictionProvenance{
+			Kind: "delivery_item_grant", Description: deliverRoleGrantReason, Applied: true,
+		})
+		d.Provenance.DenyReasons = append([]string{deliverRoleGrantReason}, d.Provenance.DenyReasons...)
+	}
+}
+
 // deliveryCredentialAdmitted reports whether a deliver request may proceed
 // to grant evaluation for the given credential kind. Non-deliver requests
 // are always admitted by this gate.
