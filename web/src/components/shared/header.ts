@@ -86,6 +86,23 @@ export function slugFromChatPath(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * Detect whether the current device is a Mac (including iPhone/iPad/iPod),
+ * for the palette button's shortcut label and `aria-keyshortcuts`. Prefers
+ * the User-Agent Client Hints API (`navigator.userAgentData`), which is not
+ * subject to User-Agent string reduction, and falls back to the deprecated
+ * `navigator.platform` where Client Hints is unavailable -- notably Safari,
+ * which never implemented it. Guarded for environments with no `navigator`
+ * at all.
+ */
+export function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const uaDataPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  if (uaDataPlatform) return /mac/i.test(uaDataPlatform);
+  return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+}
+
 /** URL for the Scion documentation site, opened by the Help button. */
 const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
 
@@ -879,7 +896,7 @@ export class ScionHeader extends LitElement {
     if (!isFeatureEnabled(NATIVE_CHAT_V2_FLAG)) return nothing;
 
     const isTouch = this.touchPrimary.isTouch;
-    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+    const isMac = isMacPlatform();
     const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
     const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
 
