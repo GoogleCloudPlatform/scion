@@ -167,7 +167,6 @@ func (s *rsWebChatStore) SetThreadPrefs(context.Context, string, string, string,
 func (s *rsWebChatStore) GetThreads(context.Context, string, string, int) ([]WebChatThread, error) {
 	return nil, nil
 }
-func (s *rsWebChatStore) MarkThreadRead(context.Context, string, string, string) error { return nil }
 func (s *rsWebChatStore) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
 	t, ok := s.topics[topicID]
 	if !ok || t.DeletedAt != nil {

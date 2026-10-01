@@ -495,16 +495,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	"/api/v1/chat/threads": {
-		Pattern: "/api/v1/chat/threads", RouteID: "chat.threads.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads/": {
-		Pattern: "/api/v1/chat/threads/", RouteID: "chat.threads.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
 	"/api/v1/chat/spaces": {
 		Pattern: "/api/v1/chat/spaces", RouteID: "chat.spaces.list",
 		Classification: RoutePolicy,

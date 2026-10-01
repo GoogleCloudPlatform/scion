@@ -46,11 +46,7 @@ declare global {
  * Go-side consistency test extracts this set with a regex that only sees
  * literals.
  */
-const DEFAULT_ON_FLAGS = new Set([
-  'web.native_chat',
-  'web.native_chat_v2',
-  'web.terminal_workspace',
-]);
+const DEFAULT_ON_FLAGS = new Set(['web.native_chat', 'web.terminal_workspace']);
 
 /**
  * Snapshot of `window.__SCION_FEATURES__` taken the first time
@@ -163,15 +159,6 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
   if (typeof window === 'undefined') return;
   window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, [name]: enabled };
 }
-
-/**
- * Wave-2 native chat feature flag.
- * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
- * Disable via localStorage (scion:feature:web.native_chat_v2=false) to fall
- * back to the wave-1 UI for rollback. The server's nativeChatEnabled=false
- * (applied via setFeatureFlag) turns native chat off entirely, not just v2.
- */
-export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
 /**
  * Persistent terminal workspace flag (ptone/scion#1662, ptone/scion#2217).
