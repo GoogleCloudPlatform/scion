@@ -369,17 +369,75 @@ func TestSetMemberRoles_Escalation_AdminCannotGrantAnyCustomRoleEvenWithinCeilin
 	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 1, "no bindings beyond the pre-existing member binding were created")
 }
 
+// TestSetMemberRoles_Escalation_AdminWithHubRoleBindingStillRefused is F2
+// (review r1): customRoleAuthorityFromStore's hub role_binding.* fallback
+// applies only when the actor has NO project role of their own — a
+// project-admin who ALSO holds the hub role_binding.* override is refused
+// exactly like a project-admin without it (test (iv) above), because the
+// admin's own project-admin role means the fallback never triggers.
+func TestSetMemberRoles_Escalation_AdminWithHubRoleBindingStillRefused(t *testing.T) {
+	f := setupMMRFixture(t)
+	mmrSeedHubAdmin(t, f.store, f.admin.ID)
+
+	rec := putMemberRoles(t, f.srv, f.admin, f.projectID, "user", f.member.ID,
+		[]string{f.memberRD.ID, f.withinCeiling.ID}, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeRoleAssignmentForbidden, "holding hub role_binding.* must not grant custom-role authority to an actor who already has a project role")
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 1, "no bindings beyond the pre-existing member binding were created")
+}
+
 // ---------------------------------------------------------------------------
-// Escalation (ii): owners cannot grant themselves role_binding authority
-// through a custom role.
+// Escalation (ii) / F1: no custom role containing role_binding.* can be
+// granted through this endpoint by ANY actor — not just an owner. This is a
+// structural refusal (checkNoRoleBindingPermissionInCreatedCustomRoles),
+// independent of CanDelegate and of customRoleAuthorityFromStore, so it
+// fires even for the hub role_binding.* override actor, who otherwise has
+// full custom-role grant authority and whom CanDelegate cannot refuse (the
+// override's own ceiling already includes role_binding.create/delete).
 // ---------------------------------------------------------------------------
 
-func TestSetMemberRoles_Escalation_OwnerCannotGrantRoleBindingPermission(t *testing.T) {
+func TestSetMemberRoles_Escalation_RoleBindingPermissionRefusedForOwner(t *testing.T) {
 	f := setupMMRFixture(t)
 	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID,
 		[]string{f.memberRD.ID, f.roleBindingCustom.ID}, nil)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeTargetRoleProtected, "CanDelegate refuses role_binding.* even for an owner")
+	assert.Contains(t, rec.Body.String(), ErrCodeRoleAssignmentForbidden, "structural guard (F1), not a CanDelegate ceiling check")
+	assert.Contains(t, rec.Body.String(), f.roleBindingCustom.ID, "details.roleDefinitionId names the offending role")
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 1, "only the pre-existing member binding remains")
+}
+
+// TestSetMemberRoles_Escalation_RoleBindingPermissionRefusedForHubOverride is
+// the hub-override half of escalation test (ii) (F1, review r1): a hub-admin
+// actor who holds no project role of their own reaches
+// customRoleAuthorityFromStore's hub role_binding.* override for ordinary
+// custom grants (TestSetMemberRoles_HubOverride_WithinCeilingAllowed proves
+// that), but this structural guard refuses the role_binding.*-bearing custom
+// role anyway, with zero writes.
+func TestSetMemberRoles_Escalation_RoleBindingPermissionRefusedForHubOverride(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	beforeAudit := len(mmrAuditRows(t, f.store, f.projectID))
+	beforeBindings := mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID)
+
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "user", PrincipalID: f.member.ID,
+		Actor:          mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		DesiredRoleIDs: []string{f.memberRD.ID, f.roleBindingCustom.ID},
+	})
+	require.NotNil(t, decision, "the hub role_binding.* override must not bypass the structural guard")
+	assert.Equal(t, ErrCodeRoleAssignmentForbidden, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, f.roleBindingCustom.ID, decision.Details["roleDefinitionId"])
+
+	assert.Len(t, mmrAuditRows(t, f.store, f.projectID), beforeAudit, "zero writes")
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), len(beforeBindings), "nothing added or removed")
 }
 
 // ---------------------------------------------------------------------------

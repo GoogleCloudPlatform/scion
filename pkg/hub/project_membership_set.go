@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -255,12 +256,19 @@ const (
 // (design-d3-addendum.md §2 item 1, §4 item 1).
 //
 // Today (design-d3-addendum.md §3 option (c)): a direct project owner always
-// has authority; otherwise an actor with no project role falls back to the
+// has authority; otherwise an actor with NO project role of their own (the
+// same "actorRole == \"\"" condition that gates the built-in governance
+// override in checkGovernance / reevaluateActorTx) falls back to the
 // existing system-scope hub override (actorHasHubRoleBindingAuthorityTx,
 // which is itself store-generic and safe to call pre-transaction). This
-// deliberately reuses the same two conditions "owner OR hub role_binding.*"
-// that already govern custom-role bind/unbind today (findings.md §1), just
-// decided in one function instead of inline at each call site.
+// deliberately reuses the same two conditions "owner OR (no project role AND
+// hub role_binding.*)" that already govern custom-role bind/unbind today
+// (findings.md §1), just decided in one function instead of inline at each
+// call site. review r1 F2: an actor who already holds a project role (e.g.
+// project-admin) does NOT get the hub fallback just because they separately
+// hold hub role_binding.* — that would let the one actor-authority function
+// disagree with built-in governance about what "hub override" means for the
+// same actor (design-d3-addendum.md Part 0 (iv)).
 //
 // perm is PermRoleBindingCreate or PermRoleBindingDelete, asked separately
 // even though both resolve to the same check today: a later authority model
@@ -279,6 +287,23 @@ func (svc *ProjectMembershipService) customRoleAuthorityFromStore(ctx context.Co
 		return customRoleAuthority{Allowed: true, Via: customRoleAuthorityViaOwner}, nil
 	}
 
+	deniedDecision := customRoleAuthority{
+		Allowed: false,
+		Reason:  "custom role changes require role-binding authority in this project (project owners)",
+	}
+
+	// F2: the hub role_binding.* fallback applies only to an actor with NO
+	// project role of their own. A project-admin (or member) who separately
+	// holds hub role_binding.* is refused here exactly like one who does
+	// not — they must use the hub-admin role-bindings API, not this one.
+	actorRole, err := svc.projectEffectiveRoleFromStore(ctx, s, actorID, projectID)
+	if err != nil {
+		return customRoleAuthority{}, fmt.Errorf("project role lookup for custom role authority: %w", err)
+	}
+	if actorRole != "" {
+		return deniedDecision, nil
+	}
+
 	op := MembershipOpAdd
 	if perm == PermRoleBindingDelete {
 		op = MembershipOpRemove
@@ -291,10 +316,61 @@ func (svc *ProjectMembershipService) customRoleAuthorityFromStore(ctx context.Co
 		return customRoleAuthority{Allowed: true, Via: customRoleAuthorityViaHub}, nil
 	}
 
-	return customRoleAuthority{
-		Allowed: false,
-		Reason:  "custom role changes require role-binding authority in this project (project owners)",
-	}, nil
+	return deniedDecision, nil
+}
+
+// ---------------------------------------------------------------------------
+// Escalation guard (ii) — structural refusal of role_binding.*-bearing
+// custom roles (design.md Part 0 escalation guard (ii); review r1 F1).
+//
+// customRoleAuthorityFromStore above decides WHO may create or remove a
+// custom role binding; this guard decides WHICH custom roles may be created
+// at all, regardless of who is asking. It runs before, and independently of,
+// customRoleAuthorityFromStore and CanDelegate, so it also refuses the hub
+// role_binding.* override actor — the one actor CanDelegate cannot refuse,
+// because that actor's own ceiling already includes role_binding.create/
+// delete (findings.md §2, addendum §2 item 4). Granting a custom role that
+// itself carries role_binding.* would mint a project-scoped delegation grant
+// that the addendum calls out as inert today but live the moment project
+// scope is honored (design-d3-addendum.md §2 item 4) — this endpoint must
+// not be the one that creates those latent grants.
+// ---------------------------------------------------------------------------
+
+// roleBindingPermissionPrefix is the permission namespace this guard refuses
+// in any newly CREATED custom role.
+const roleBindingPermissionPrefix = "role_binding."
+
+// roleContainsRoleBindingPermission reports whether rd carries any
+// role_binding.* permission.
+func roleContainsRoleBindingPermission(rd *store.RoleDefinition) bool {
+	for _, p := range rd.Permissions {
+		if strings.HasPrefix(p, roleBindingPermissionPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkNoRoleBindingPermissionInCreatedCustomRoles refuses any CREATED
+// (never merely kept) custom role whose permissions include a role_binding.*
+// permission, for EVERY actor. Built-in roles are exempt: they are matrix-
+// governed separately and never carry custom permission lists.
+func checkNoRoleBindingPermissionInCreatedCustomRoles(creates []*store.RoleDefinition) *MembershipDecision {
+	for _, d := range creates {
+		if store.IsBuiltInProjectMembershipRole(d.Name) {
+			continue
+		}
+		if roleContainsRoleBindingPermission(d) {
+			return &MembershipDecision{
+				Allowed:    false,
+				DenialCode: ErrCodeRoleAssignmentForbidden,
+				Reason:     "a custom role containing a role_binding.* permission cannot be granted through this endpoint",
+				HTTPStatus: 403,
+				Details:    map[string]interface{}{"roleDefinitionId": d.ID, "roleName": d.Name},
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -614,6 +690,15 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		return &SetMemberRolesResult{Before: current0, After: current0, Created: false, Changed: false}, nil
 	}
 
+	// Escalation guard (ii), structural and actor-independent (F1): refuse
+	// any created custom role carrying a role_binding.* permission before
+	// anything else — including before actor authority is even determined,
+	// so the hub role_binding.* override actor is refused exactly like
+	// everyone else.
+	if d := checkNoRoleBindingPermissionInCreatedCustomRoles(plan0.Create); d != nil {
+		return nil, d
+	}
+
 	// Principal eligibility applies only to NEW bindings (plan0.Create):
 	// keeping a custom role an ineligible principal already holds is
 	// allowed (design-d3-addendum.md D1 / §4 item 6).
@@ -734,6 +819,16 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 
 		plan1 := planRoleSet(current1, currentDefs1, desiredDefs)
 
+		// F1: re-check the structural role_binding.* guard under lock, from
+		// the same desiredDefs resolved pre-transaction (design.md Part 0
+		// residual-risk note: a role definition's permissions are not
+		// re-fetched here, matching the accepted residual risk that a hub
+		// admin could edit a bound role definition's permissions between
+		// phases — out of scope for P1).
+		if d := checkNoRoleBindingPermissionInCreatedCustomRoles(plan1.Create); d != nil {
+			return asGovernanceDenial(*d)
+		}
+
 		customAuthTx := make(map[string]customRoleAuthority, 2)
 		if plan1.hasCustomCreate() {
 			auth, aErr := svc.customRoleAuthorityFromStore(ctx, tx, req.Actor.ID(), req.ProjectID, PermRoleBindingCreate)
@@ -756,37 +851,18 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 
-		// Apply all deletes first, then all creates (D4 partial unique
-		// index ordering, design.md §3.2 Phase T step 5).
-		for _, b := range plan1.Remove {
-			if err := svc.txDeleteRoleBinding(ctx, tx, b.ID); err != nil {
-				return fmt.Errorf("delete binding %s: %w", b.ID, err)
-			}
+		// Apply the plan: every direct role-binding mutation for this request
+		// goes through applyRolePlanTx (project_membership_service.go), the
+		// one purpose-named step the authzop mutation catalog classifies for
+		// this engine (review r1 F3).
+		created, err := svc.applyRolePlanTx(ctx, tx, plan1, req.PrincipalType, req.PrincipalID, req.ProjectID, req.Actor.ID(), req.NotBefore, req.ExpiresAt)
+		if err != nil {
+			return err
 		}
 
 		var builtInNewBindingID string
-		created := make(map[string]*store.RoleBinding, len(plan1.Create))
-		for _, d := range plan1.Create {
-			nb := &store.RoleBinding{
-				RoleDefinitionID: d.ID,
-				PrincipalType:    req.PrincipalType,
-				PrincipalID:      req.PrincipalID,
-				ScopeType:        store.RoleScopeProject,
-				ScopeID:          req.ProjectID,
-				CreatedBy:        req.Actor.ID(),
-				NotBefore:        req.NotBefore,
-				ExpiresAt:        req.ExpiresAt,
-			}
-			if plan1.BuiltInChange != nil && plan1.BuiltInChange.New.ID == d.ID {
-				nb.NotBefore = plan1.BuiltInChange.Old.NotBefore
-				nb.ExpiresAt = plan1.BuiltInChange.Old.ExpiresAt
-			}
-			cb, cErr := svc.txCreateRoleBinding(ctx, tx, nb)
-			if cErr != nil {
-				return fmt.Errorf("create binding for role %s: %w", d.ID, cErr)
-			}
-			created[d.ID] = cb
-			if plan1.BuiltInChange != nil && plan1.BuiltInChange.New.ID == d.ID {
+		if plan1.BuiltInChange != nil {
+			if cb := created[plan1.BuiltInChange.New.ID]; cb != nil {
 				builtInNewBindingID = cb.ID
 			}
 		}
