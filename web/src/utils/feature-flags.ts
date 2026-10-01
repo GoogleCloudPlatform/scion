@@ -167,8 +167,9 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
 /**
  * Wave-2 native chat feature flag.
  * Default ON (W9) — added to DEFAULT_ON_FLAGS for general availability.
- * Disable via the server (`setFeatureFlag`) or localStorage:
- * scion:feature:web.native_chat_v2=false to fall back to wave-1 UI for rollback.
+ * Disable via localStorage (scion:feature:web.native_chat_v2=false) to fall
+ * back to the wave-1 UI for rollback. The server's nativeChatEnabled=false
+ * (applied via setFeatureFlag) turns native chat off entirely, not just v2.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
 
