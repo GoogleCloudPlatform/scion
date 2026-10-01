@@ -377,3 +377,5 @@ reports complete only when fit is sent, as the server does. Mutation check:
 with the threshold set back to 500, the 100-agent and page-size tests fail.
 vitest: project-detail-agent-window and agent-list-window, 76/76 pass; tsc
 clean; eslint reports no errors on changed lines.
+
+2026-10-01 (fit threshold, review follow-up): the 100-agent test's label commit matched no agents, so its lifecycle refresh ran in the small state. The fixture agents now carry env=prod, so the label commit keeps the window paged, and the test asserts the paged state after the phase clear, label commit, lifecycle refresh and label clear, with exact counts for each. Added a test for a runtime page-size change while paged (fit=100, limit=100). Corrected the handler comment about which sorted requests omit fit. vitest 77/77; reverting the threshold to 500 fails 3 tests.

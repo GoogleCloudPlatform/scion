@@ -205,6 +205,7 @@ interface Internals {
   setPhaseFilter(phase: string): void;
   handleAgentAction(id: string, action: string): Promise<void>;
   backgroundRefresh(trigger: string): void;
+  onPagerSizeChange(size: number): void;
   committedLabel: string;
   pagerPageSize: number;
   agents: Agent[];
@@ -330,7 +331,7 @@ function createRealisticFetchHandler(opts: {
         }
 
         // The server only reports a complete set when fit was sent; a sorted
-        // request without fit (a paged view-state change) is always a page.
+        // request without fit (the window's own page fetches) is always a page.
         const fitParam = u.searchParams.get('fit');
         if (fitParam !== null && sorted.length <= Number(fitParam)) {
           return Promise.resolve(
@@ -505,7 +506,11 @@ describe('project-detail — agent list window', () => {
       if (pageSize !== undefined) {
         localStorage.setItem('scion-pagesize-project-agents', String(pageSize));
       }
-      const agents = Array.from({ length: count }, (_, i) => makeAgent(i));
+      // Every agent carries env=prod, so committing that label keeps the
+      // candidate set above the threshold and the window stays paged.
+      const agents = Array.from({ length: count }, (_, i) =>
+        makeAgent(i, { labels: { env: 'prod' } })
+      );
       const requests: AgentsRequest[] = [];
       vi.stubGlobal(
         'fetch',
@@ -558,8 +563,11 @@ describe('project-detail — agent list window', () => {
       await settle();
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).toContain('phase=running');
+      n = requests.length;
       internals(el).setPhaseFilter('');
       await settle();
+      expect(requests.length - n).toBe(1);
+      expect(internals(el).agentWindow.state).toBe('paged');
 
       // Label typing is free; the commit is one request.
       const input = labelInput(el)!;
@@ -572,17 +580,24 @@ describe('project-detail — agent list window', () => {
       input.dispatchEvent(new Event('sl-change'));
       await settle();
       expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('label=env%3Dprod');
+      expect(internals(el).agentWindow.state).toBe('paged');
 
       n = requests.length;
       await internals(el).handleAgentAction('a-1', 'stop');
       await settle();
       expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
+      expect(internals(el).agentWindow.state).toBe('paged');
 
       // Clear the label so the grid load is unfiltered.
+      n = requests.length;
       input.value = '';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
       await settle();
+      expect(requests.length - n).toBe(1);
+      expect(internals(el).agentWindow.state).toBe('paged');
 
       const toggle = viewToggle(el)!;
       n = requests.length;
@@ -613,6 +628,20 @@ describe('project-detail — agent list window', () => {
       expect(paged.requests.length).toBe(1);
       expect(paged.requests[0].url).toContain('fit=100');
       expect(internals(paged.el).agentWindow.state).toBe('paged');
+    });
+
+    it('a page-size change while paged sends fit raised to the new page size, never below limit', async () => {
+      const { el, requests } = await mountList('p-fit-ps-change', 100);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      const n = requests.length;
+      internals(el).onPagerSizeChange(100);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(requests.length - n).toBe(1);
+      const url = requests[requests.length - 1].url;
+      expect(url).toContain('limit=100');
+      expect(url).toContain('fit=100');
+      expect(internals(el).agentWindow.state).toBe('small');
     });
   });
 
