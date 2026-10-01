@@ -1109,6 +1109,9 @@ export class ScionFileBrowser extends LitElement {
     if (isNaN(date.getTime())) {
       return dateString;
     }
+    // Purely defensive: per ECMA-402, format() only throws RangeError for a
+    // non-finite time value, which the isNaN check above already excludes —
+    // this catch is unreachable, kept in case that invariant ever changes.
     try {
       return FILE_DATE_FORMATTER.format(date);
     } catch {
