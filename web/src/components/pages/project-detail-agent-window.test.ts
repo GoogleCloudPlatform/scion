@@ -693,7 +693,7 @@ describe('project-detail — agent list window', () => {
   describe('label 400 keeps previous data', () => {
     it('a non-OK label-commit response keeps the previously loaded agents', async () => {
       const projectId = 'p-label-400';
-      localStorage.setItem('scion-view-project-agents', 'grid'); // not P1-eligible: exercises the legacy-path N2 behavior directly
+      localStorage.setItem('scion-view-project-agents', 'grid'); // not sorted-eligible: exercises the legacy path directly
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
       let failNext = false;
