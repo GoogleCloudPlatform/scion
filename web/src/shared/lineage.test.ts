@@ -581,7 +581,7 @@ describe('cycle promotion pins the lowest id, not merely the first member met wh
   });
 });
 
-describe('detectPureRemoval (#2481)', () => {
+describe('detectPureRemoval', () => {
   const r1 = agent('r1', 'root-1', ['user-1']);
   const k1 = agent('k1', 'kid-1', ['user-1', 'r1']);
   const g1 = agent('g1', 'grandkid-1', ['user-1', 'r1', 'k1']);
@@ -631,7 +631,7 @@ describe('detectPureRemoval (#2481)', () => {
   });
 });
 
-describe('computeStableLayout (#2481)', () => {
+describe('computeStableLayout', () => {
   /** Node positions keyed by agent id, for comparing before/after a layout call. */
   function posById(layout: ForestLayout): Record<string, { px: number; py: number }> {
     const out: Record<string, { px: number; py: number }> = {};
@@ -1398,12 +1398,13 @@ describe('computeStableLayout (#2481)', () => {
      * guaranteed to keep its *exact* pixel: a widened unit to its left can
      * push it along `packAxis` to make room. What must still hold is the
      * acceptance criterion in substance — this is a uniform, order-preserving
-     * shift, not a reshuffle — so this checks
-     * that every unaffected agent's `packAxis` position never *decreases*
-     * from its old one, and that the relative order of unaffected agents
-     * (sorted by their old `packAxis` position) is preserved in the new
-     * layout. A hand-written test separately pins the exact pixels for a
-     * specific widening shape.
+     * shift, not a reshuffle — so this checks that every unaffected agent's
+     * `packAxis` position never *decreases* from its old one, and that the
+     * relative order of unaffected agents (sorted by their old `packAxis`
+     * position) is preserved in the new layout. Content positioned before
+     * every touched tree/group must keep its exact pixel; everything else
+     * must only move forward, in order. A hand-written test separately pins
+     * the exact pixels for a specific widening shape.
      */
     function assertUnaffectedOrderPreserved(
       before: Agent[],
@@ -1559,7 +1560,7 @@ describe('computeStableLayout (#2481)', () => {
     }, 20000);
   });
 
-  describe('filterKey distinguishes a filter change from a delete (#2481)', () => {
+  describe('filterKey distinguishes a filter change from a delete', () => {
     const before = [
       agent('r1', 'root-1', ['user-1']),
       agent('a1', 'child-a', ['user-1', 'r1']),

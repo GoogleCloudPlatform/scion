@@ -603,31 +603,11 @@ function packShiftEdge(
  * subset of the same data" (a filter change — a fresh, re-fit layout, same as
  * before this function existed).
  *
- * Two removal shapes:
- * - Clean (no `orphanedIds`): every removed id was a leaf, so the remaining
- *   tree needs no re-rooting and the previous layout is still valid as-is —
- *   the removed nodes/edges are dropped in place and nothing else is
- *   recomputed, so nothing else can move. A user left with no roots is
- *   dropped; one that keeps some is recentred over them (its old midpoint can
- *   drift once a sibling root is gone).
- * - Re-rooting (`orphanedIds` non-empty): some old tree(s) must reflow. Every
- *   "placement unit" — a user's whole group when `showUsers` (keyed by
- *   `userKey`), else everything descended from one *old* root tree (keyed by
- *   `oldTreeKeysOf`, so pieces promoted from the same old tree are placed
- *   together instead of competing for the same spot) — untouched by the
- *   removal is frozen at its exact previous pixels, same as the clean case.
- *   Each *affected* unit is laid out on its own — `buildLineageForest` +
- *   `pruneCollapsed` + `layoutForest[WithUsers]` on just its surviving
- *   members, the same pipeline `freshLayout` below uses for everything, so
- *   collapse state and user grouping can't drift — then anchored at its old
- *   footprint. If it no longer fits there (it widened), it stays anchored
- *   anyway, and everything from that footprint's old right edge onward —
- *   frozen content, and any later affected unit — shifts right by exactly
- *   the overflow: a uniform, order-preserving translation, the same thing a
- *   fresh layout does when inserting one more slot, not a reshuffle or a
- *   relocation to the far end. A unit with no old footprint at all (every
- *   member was hidden by collapse before) is the one case with nothing to
- *   anchor to, and is appended past whatever has been placed so far.
+ * Two removal shapes, dispatched below on `removal.orphanedIds.size`:
+ * - Clean (no `orphanedIds`): every removed id was a leaf — see
+ *   `stableCleanRemoval`.
+ * - Re-rooting (`orphanedIds` non-empty): some old tree(s) must reflow — see
+ *   `stableReRootingRemoval`.
  */
 export function computeStableLayout(
   agents: Agent[],
@@ -743,11 +723,10 @@ function stableReRootingRemoval(
   previous: { agents: readonly Agent[]; layout: ForestLayout },
   removal: PureRemoval
 ): ForestLayout {
-  // A "unit" is a user's whole group when showUsers, else everything that
-  // descended from one *old* root tree — grouping by the old tree (not the
-  // new root an agent ends up under) is what keeps multiple pieces promoted
-  // from the same tree together as one placement decision instead of
-  // competing for the same old footprint and shoving each other off-screen.
+  // Grouping by the *old* tree (not the new root an agent ends up under) is
+  // what keeps multiple pieces promoted from the same tree together as one
+  // placement decision instead of competing for the same old footprint and
+  // shoving each other off-screen.
   const oldForest = buildLineageForest(previous.agents);
   const oldTreeOf = oldTreeKeysOf(oldForest);
   const unitOf = currentUnitsOf(buildLineageForest(agents), showUsers, oldTreeOf);
