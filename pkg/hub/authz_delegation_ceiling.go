@@ -588,7 +588,15 @@ func (a *AuthzService) evaluateUserDelegatorAuthority(
 		if err != nil {
 			return false, "", err
 		}
-		perms = append(perms, systemPerms...)
+		// perms is returned directly from the request-scoped cache
+		// (getCachedEffectivePermissions), so it must not be appended to
+		// in place: doing so can write into the cached slice's backing
+		// array and corrupt the cache entry for later lookups. Build a
+		// new slice instead.
+		combined := make([]string, 0, len(perms)+len(systemPerms))
+		combined = append(combined, perms...)
+		combined = append(combined, systemPerms...)
+		perms = combined
 	}
 	for _, p := range perms {
 		if p == permissionID {
