@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -237,6 +238,11 @@ var runGitCloneWorkspace = gitCloneWorkspace
 // This is the exact logic `sciontool init -- <cmd>` runs; it is exported so
 // other subcommands can reuse it instead of forking a copy.
 func RunInit(args []string, opts InitRunOptions) int {
+	// initStart times sciontool init's own startup sequence, for start-time
+	// attribution (dispatch -> pod ready -> init -> harness). See the
+	// elapsed_ms log lines below.
+	initStart := time.Now()
+
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	procreap.StartReaper()
@@ -427,7 +433,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// first also prevents provisioner-created files (e.g. .agents/) from
 	// causing isWorkspaceEmpty to return false and skipping the clone.
 	// See: https://github.com/ptone/scion/issues/739
-	if err := runGitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
+	cloneStepStart := time.Now()
+	cloneErr := runGitCloneWorkspace(targetUID, targetGID, agentHome)
+	slog.Info("sciontool init: clone step complete", "elapsed_ms", time.Since(cloneStepStart).Milliseconds(), "ok", cloneErr == nil)
+	if err := cloneErr; err != nil {
 		log.Error("Git clone failed: %v", err)
 
 		// Update local agent-info.json to error state so local status readers
@@ -453,7 +462,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	// Run pre-start hooks (after setup, before child process)
 	log.Info("Running pre-start hooks...")
-	if err := lifecycleManager.RunPreStart(); err != nil {
+	preStartStart := time.Now()
+	preStartErr := lifecycleManager.RunPreStart()
+	slog.Info("sciontool init: pre-start hooks complete", "elapsed_ms", time.Since(preStartStart).Milliseconds(), "ok", preStartErr == nil)
+	if err := preStartErr; err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
 		if harnessReq.Required || projectHookStaged {
 			// On restart, check for an existing env overlay from a previous
@@ -564,7 +576,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("Starting %d sidecar service(s)...", len(specs))
 				svcManager = services.New(gracePeriod)
 				svcCtx := context.Background()
-				if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop); err != nil {
+				servicesStart := time.Now()
+				svcErr := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop)
+				slog.Info("sciontool init: sidecar services started", "elapsed_ms", time.Since(servicesStart).Milliseconds(),
+					"count", len(specs), "ok", svcErr == nil)
+				if err := svcErr; err != nil {
 					log.Error("Failed to start services: %v", err)
 					// Continue — service failure shouldn't block harness
 				}
@@ -667,7 +683,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	if secretKeysRaw := os.Getenv("SCION_SECRET_KEYS"); secretKeysRaw != "" {
 		keys := splitSecretKeys(secretKeysRaw)
 		if len(keys) > 0 && hubClient != nil && hubClient.IsConfigured() {
+			secretFetchStart := time.Now()
 			secretOverrides = runFetchSecretOverrides(hubClient, keys)
+			slog.Info("sciontool init: secret fetch complete", "elapsed_ms", time.Since(secretFetchStart).Milliseconds(), "count", len(keys))
 		} else if len(keys) > 0 {
 			log.Error("SCION_SECRET_KEYS is set but hub client is not configured — cannot fetch secrets")
 		}
@@ -709,6 +727,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		err  error
 	}, 1)
 
+	slog.Info("sciontool init: launching harness", "elapsed_ms", time.Since(initStart).Milliseconds())
 	go func() {
 		code, err := sup.Run(ctx, childArgs)
 		exitChan <- struct {
@@ -755,6 +774,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			startedAtStr := time.Now().UTC().Format(time.RFC3339)
 			zeroCount := 0
 			s := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+			// startup_ms (elapsed since sciontool init started) rides in
+			// Metadata rather than a new StatusUpdate field: it is
+			// observability only, read by the hub purely for a log line,
+			// never persisted to a column (see updateAgentStatus).
+			startupMs := strconv.FormatInt(time.Since(initStart).Milliseconds(), 10)
 			if err := hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 				Phase:             state.PhaseRunning,
 				Activity:          state.ActivityWorking,
@@ -763,6 +787,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				StartedAt:         startedAtStr,
 				CurrentTurns:      &zeroCount,
 				CurrentModelCalls: &zeroCount,
+				Metadata:          map[string]string{"startup_ms": startupMs},
 			}); err != nil {
 				log.Error("Failed to report running status to Hub: %v", err)
 			} else {

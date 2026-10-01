@@ -542,6 +542,7 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 }
 
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
+	buildRequestStart := time.Now()
 	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
 
 	// Build the remote create request
@@ -1010,6 +1011,15 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	resolvedSkillsCount := 0
+	if req.PreResolvedSkills != nil {
+		resolvedSkillsCount = len(req.PreResolvedSkills.Resolved)
+	}
+	d.log.Info("buildCreateRequest complete",
+		"agent_id", agent.ID, "caller", callerName,
+		"elapsed_ms", time.Since(buildRequestStart).Milliseconds(),
+		"resolvedSecretsCount", len(req.ResolvedSecrets),
+		"resolvedSkillsCount", resolvedSkillsCount)
 	return req, nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -75,6 +76,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		status.ExitReason = "" // silently drop invalid values
 	}
 
+	// Observability only: sciontool init reports elapsed-since-process-start
+	// via Metadata["startup_ms"] on its first running status report. Log the
+	// parsed value only — never the rest of the Metadata map — so start-time
+	// attribution does not depend on persisting a new column.
+	if raw, ok := status.Metadata["startup_ms"]; ok {
+		if ms, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+			s.agentLifecycleLog.Info("agent reported startup timing", "agent_id", id, "startup_ms", ms)
+		}
+	}
+
 	// Guard against phase regressions and auto-correct phase from activity.
 	if status.Phase != "" || status.Activity != "" {
 		agent, err := s.store.GetAgent(ctx, id)
@@ -82,6 +93,20 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 			writeErrorFromErr(w, err, "")
 			return
 		}
+
+		// Observability only: the harness's SessionStart hook reports exactly
+		// this phase/activity/message combination (see ReportState's one call
+		// site for EventSessionStart in pkg/sciontool/hooks/handlers/hub.go),
+		// distinct from sciontool's own post-launch "Agent started" report.
+		// Logging since_create_ms here, every time, rather than tracking a
+		// persisted "first report" flag — testers take the earliest such line
+		// per agent as the dispatch-to-harness-ready number.
+		if status.Phase == string(state.PhaseRunning) && status.Activity == string(state.ActivityWorking) &&
+			status.Message == "Session started" && !agent.Created.IsZero() {
+			s.agentLifecycleLog.Info("harness ready: SessionStart status received",
+				"agent_id", id, "since_create_ms", time.Since(agent.Created).Milliseconds())
+		}
+
 		oldPhase := agent.Phase
 		guardAgentPhaseTransition(agent, &status)
 		// Reconcile the max_agents_per_broker reservation against the phase

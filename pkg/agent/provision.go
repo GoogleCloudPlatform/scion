@@ -1271,7 +1271,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				UserID:    ResolveUserIDFromContext(ctx),
 			}
 
+			skillFetchStart := time.Now()
 			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
+			slog.Info("provision: skill fetch complete", "agent", agentName,
+				"elapsed_ms", time.Since(skillFetchStart).Milliseconds(),
+				"requested", len(finalScionCfg.Skills), "ok", err == nil)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
@@ -1745,6 +1749,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	util.Debugf("provision: total ProvisionAgent completed in %s", time.Since(provisionStart))
+	slog.Info("provision: agent provisioning complete", "agent", agentName,
+		"elapsed_ms", time.Since(provisionStart).Milliseconds())
 	return agentHome, agentWorkspace, finalScionCfg, nil
 }
 

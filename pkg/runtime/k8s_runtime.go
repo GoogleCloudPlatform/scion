@@ -444,6 +444,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	config.Annotations = ensureAnnotations(config.Annotations)
 	config.Annotations["scion.namespace"] = namespace
 
+	// preCreateStart times the pre-create API calls below (secret/SPC
+	// cleanup and creation, PVC creation) as one aggregate, for start-time
+	// attribution. It does not change what any of these calls do.
+	preCreateStart := time.Now()
+
 	// Pre-clean stale resources from a previous agent with the same name.
 	// This handles cases where the agent was force-deleted from the hub
 	// or the pod was evicted/GC'd by K8s without proper cleanup.
@@ -505,6 +510,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
+		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
+
 	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
 	//
 	// When backend=nfs with a bound PV claim, acquire the per-project lock
@@ -565,12 +573,15 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 
 	runtimeLog.Info("Creating pod", "agent", config.Name, "namespace", namespace, "image", config.Image, "phase", "pod-create")
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
+	podCreateStart := time.Now()
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		// Clean up orphaned secrets on pod creation failure
 		r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		return "", fmt.Errorf("failed to create pod: %w", err)
 	}
+	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
+		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
 	// Wait for Ready
 	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
@@ -593,19 +604,24 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		destHome := util.GetHomeDir(config.UnixUsername)
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
+		homeSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
 		}
+		syncMs := time.Since(homeSyncStart).Milliseconds()
 		// Fix ownership: tar extraction runs as root via K8s exec, so synced
 		// files are owned by root. chown them to the scion user so the
 		// privilege-dropped harness process can access its home directory.
 		chownCmd := fmt.Sprintf("chown -R %s:%s %s", config.UnixUsername, config.UnixUsername, destHome)
+		chownStart := time.Now()
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
+		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
+			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	}
 
 	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
@@ -626,17 +642,22 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	if config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsProvisioned) {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
+		workspaceSyncStart := time.Now()
 		err = r.syncWithRetry(ctx, func() error {
 			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
 		}
+		syncMs := time.Since(workspaceSyncStart).Milliseconds()
 		// Fix workspace ownership for the scion user
 		chownCmd := fmt.Sprintf("chown -R %s:%s /workspace", config.UnixUsername, config.UnixUsername)
+		chownStart := time.Now()
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
+		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
+			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
 	} else if config.WorkspaceBackendName == "nfs" && nfsProvisioned {
 		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
 			"agent", config.Name, "phase", "workspace-sync-skip")
@@ -646,9 +667,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// so it's safe to launch sciontool init → tmux → harness. The gate loop
 	// in the pod command polls for this marker file (see buildPod for details).
 	runtimeLog.Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
+	gateStart := time.Now()
 	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
+	runtimeLog.Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
+		"elapsed_ms", time.Since(gateStart).Milliseconds())
 
 	runtimeLog.Info("Agent started successfully", "agent", createdPod.Name, "namespace", namespace, "phase", "complete")
 	fmt.Printf("Agent '%s' started successfully.\n", createdPod.Name)
@@ -1990,7 +2014,91 @@ func classifyTerminalWaitingReason(podName, initContainerName, reason, message s
 	}
 }
 
+// podTimingUnavailable marks a podLifecycleTimings field as not computable,
+// e.g. because the pod lacks the corresponding condition or container state
+// yet. Callers omit the log attribute rather than reporting a misleading 0.
+const podTimingUnavailable int64 = -1
+
+// podLifecycleTimings holds elapsed durations, in milliseconds, from a pod's
+// CreationTimestamp to each lifecycle milestone. Computed from pod status
+// fields already fetched by waitForPodReady's existing Get call — no extra
+// API calls. Any field left at podTimingUnavailable means the corresponding
+// condition or container state was missing (e.g. not yet reported) when the
+// pod snapshot was taken.
+type podLifecycleTimings struct {
+	scheduledMs        int64
+	initializedMs      int64
+	containersReadyMs  int64
+	containerStartedMs int64
+}
+
+// computePodLifecycleTimings derives podLifecycleTimings for containerName
+// from pod's conditions and container statuses, relative to pod's
+// CreationTimestamp. It is pure and side-effect free so it can be unit
+// tested without a real (or fake) Kubernetes API server.
+func computePodLifecycleTimings(pod *corev1.Pod, containerName string) podLifecycleTimings {
+	t := podLifecycleTimings{
+		scheduledMs:        podTimingUnavailable,
+		initializedMs:      podTimingUnavailable,
+		containersReadyMs:  podTimingUnavailable,
+		containerStartedMs: podTimingUnavailable,
+	}
+	if pod == nil {
+		return t
+	}
+	created := pod.CreationTimestamp.Time
+	if created.IsZero() {
+		return t
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Status != corev1.ConditionTrue || cond.LastTransitionTime.IsZero() {
+			continue
+		}
+		switch cond.Type {
+		case corev1.PodScheduled:
+			t.scheduledMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+		case corev1.PodInitialized:
+			t.initializedMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+		case corev1.ContainersReady:
+			t.containersReadyMs = cond.LastTransitionTime.Sub(created).Milliseconds()
+		}
+	}
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != containerName {
+			continue
+		}
+		if cs.State.Running != nil && !cs.State.Running.StartedAt.IsZero() {
+			t.containerStartedMs = cs.State.Running.StartedAt.Sub(created).Milliseconds()
+		}
+	}
+
+	return t
+}
+
+// logPodLifecycleTimings emits one Info log line with wait_ready_ms (the
+// total time spent in waitForPodReady) plus any lifecycle milestones that
+// computePodLifecycleTimings could determine, omitting unavailable ones.
+func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecycleTimings) {
+	attrs := []any{"pod", podName, "namespace", namespace, "phase", "wait-schedule", "wait_ready_ms", waitMs}
+	if t.scheduledMs != podTimingUnavailable {
+		attrs = append(attrs, "scheduled_ms", t.scheduledMs)
+	}
+	if t.initializedMs != podTimingUnavailable {
+		attrs = append(attrs, "initialized_ms", t.initializedMs)
+	}
+	if t.containersReadyMs != podTimingUnavailable {
+		attrs = append(attrs, "containers_ready_ms", t.containersReadyMs)
+	}
+	if t.containerStartedMs != podTimingUnavailable {
+		attrs = append(attrs, "container_started_ms", t.containerStartedMs)
+	}
+	runtimeLog.Info("Pod ready", attrs...)
+}
+
 func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
+	waitStart := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
 	defer cancel()
 
@@ -2103,6 +2211,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			if pod.Status.Phase == corev1.PodRunning {
 				// Also ensure container is actually running
 				if containerStatus != nil && containerStatus.State.Running != nil {
+					logPodLifecycleTimings(namespace, podName, time.Since(waitStart).Milliseconds(),
+						computePodLifecycleTimings(pod, agentContainerName))
 					return nil
 				}
 			}
@@ -2116,6 +2226,20 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	}
 }
 
+// countingReader wraps an io.Reader and counts the bytes read through it.
+// Used to measure the size of the tar stream sent to a pod during sync
+// without needing to buffer it.
+type countingReader struct {
+	r     io.Reader
+	count int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.count += int64(n)
+	return n, err
+}
+
 func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
 	// Guard against fake/test clientsets where Config is nil (no real API
 	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
@@ -2127,6 +2251,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	if r.Client == nil || r.Client.Config == nil {
 		return fmt.Errorf("K8s REST config not available (test environment)")
 	}
+	syncStart := time.Now()
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
 	tarCmd := exec.CommandContext(ctx, "tar", "-cz", "-C", sourcePath, ".")
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
@@ -2134,6 +2259,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	if err != nil {
 		return err
 	}
+	counted := &countingReader{r: stdout}
 
 	if err := tarCmd.Start(); err != nil {
 		return err
@@ -2173,7 +2299,7 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	var stderr bytes.Buffer
 	// We stream to os.Stdout to see if there is any output from tar that helps debugging
 	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  stdout,
+		Stdin:  counted,
 		Stdout: os.Stdout,
 		Stderr: &stderr,
 	})
@@ -2196,6 +2322,8 @@ func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, s
 	}
 
 	fmt.Printf("  Sync to %s complete.\n", destPath)
+	runtimeLog.Info("Sync to pod complete", "pod", podName, "dest", destPath,
+		"elapsed_ms", time.Since(syncStart).Milliseconds(), "bytes", counted.count)
 	return nil
 }
 
@@ -2829,6 +2957,16 @@ func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string
 // execInPod runs a command in the pod's "agent" container as root (the default
 // K8s exec user). This is used for administrative tasks like chown after syncing files.
 func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName string, cmd []string) (string, error) {
+	execStart := time.Now()
+	// cmdName identifies the exec for logging without ever including its
+	// arguments: call sites pass fixed command verbs (sh, touch) but never
+	// secret or credential values, and this keeps it that way even if a
+	// future call site's arguments did carry something sensitive.
+	cmdName := ""
+	if len(cmd) > 0 {
+		cmdName = cmd[0]
+	}
+
 	// Guard against fake/test clientsets where Config is nil (no real API server).
 	if r.Client.Config == nil {
 		return "", fmt.Errorf("K8s REST config not available (test environment)")
@@ -2860,8 +2998,12 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 		Stderr: &stderr,
 	})
 	if err != nil {
+		runtimeLog.Debug("exec in pod failed", "pod", podName, "cmd", cmdName,
+			"elapsed_ms", time.Since(execStart).Milliseconds(), "error", err)
 		return stdout.String(), fmt.Errorf("exec failed: %w (stderr: %s)", err, stderr.String())
 	}
+	runtimeLog.Debug("exec in pod complete", "pod", podName, "cmd", cmdName,
+		"elapsed_ms", time.Since(execStart).Milliseconds())
 	return stdout.String(), nil
 }
 
