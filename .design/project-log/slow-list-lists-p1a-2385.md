@@ -494,3 +494,94 @@ New head, addendum and full disposition:
   67) passed again, byte-identical to the committed `state.ts`.
 - Full suite: see the gs report addendum for the exact count at this
   round's head SHA.
+
+## Round 9 review (REQUEST CHANGES; B1, N1, N2, nit1-3 all closed)
+
+Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9.md`;
+repro: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9-min.test.ts`;
+fuzz: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-9-fuzz.test.ts`.
+New head, addendum and full disposition:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+
+**Correction (round 9):** round 8's `CompactedDelta` was exact for
+`activity` but not for `detail`/promoted fields — `fields` kept the most
+recent raw `detail` object, and `applyCompactedDelta` passed it back
+through `mergeAgentDelta`, which promoted it a second time, *after* a
+later delta's own top-level field had already been folded in correctly.
+A stale `detail.message` could therefore overwrite a fresher plain
+`message`. This affected all three paths using `CompactedDelta` at the
+time (buffer→created, known-ID epoch, unknown-ID epoch) and was a genuine
+regression from `4cdb0b54`, which replayed raw deltas one at a time and so
+never promoted out of order.
+
+- **B1 (required):** `mergeAgentDelta` gained a `skipPromote` option;
+  `applyCompactedDelta` calls it with promotion off, since `fields` is
+  already correctly promoted per delta as it was folded in
+  (`foldCompactedDelta`). Verified against the reviewer's minimal repro (2
+  cases) and their 20k-case-per-path fuzz: 0 mismatches on every path with
+  the fix, where before it was 1060-2038 depending on path.
+- **N1 (promoted to required this round):** two related exactness gaps in
+  the fold/compose rules, beyond the `detail` one above:
+  - Falsy `_capabilities` (`null` or an explicit `undefined`) could
+    clobber an already-folded truthy value mid-run, even though
+    `mergeAgentDelta` itself always falls back to the prior value when a
+    delta's own capabilities are falsy. Fixed by applying that same
+    fallback inside `foldCompactedDelta` and `composeCompactedDeltas`
+    (`inheritFalsyCapabilities`), not just once at final-apply time.
+  - An explicit `activity: undefined` (an own key, not merely a missing
+    one) unconditionally clears `activity` to `undefined` when applied
+    live — `mergeAgentDelta`'s suppression check only ever fires for a
+    *defined* `working`/`''` incoming value. The compacted representation
+    previously treated "incoming activity is `undefined`" as "no
+    information in this delta" regardless of whether the key was present,
+    losing that distinction. Generalized `CompactedDelta`'s locked variant
+    to `value: string | undefined` (an explicit-undefined delta "unlocks"
+    to `undefined`, exactly like unlocking to any other concrete value)
+    and switched the presence check to `hasOwnProperty` instead of a
+    `!== undefined` comparison. Verified with the reviewer's fuzz run with
+    both null-capabilities and explicit-undefined generation enabled: 0
+    mismatches on every path at full scale (20k cases), where before
+    enabling the fix left hundreds of mismatches per path.
+- **N2 (promoted to required this round):** the same "epoch-recording
+  gated on `changed`" class rev-7's N1 fixed for status/created deltas
+  was still open for `ports`: moved `recordSeedEpochDelta(agentId,
+  {exposedPorts})` above the equality early-return in the `ports` branch.
+- **nit1:** reworded the B2 (created-first prepend ordering) test's
+  comment per the reviewer's exact suggestion — the old wording described
+  the mechanism backwards.
+- **nit2:** fixed a stale "seedAgents, which applies it through
+  mergeAgentDelta" comment — it's `applyCompactedDelta` now.
+- **nit3:** the per-ID memory-bound test asserted key count and
+  non-array-ness, which a list hidden *inside* one field would still
+  pass. Added a `JSON.stringify(entry).length` bound, the property that
+  actually matters.
+
+**Required: committed a deterministic fuzz** (`state-compaction-fuzz.test.ts`,
+new file) covering all four `CompactedDelta` paths (known-ID epoch,
+unknown-ID epoch, buffer→created, buffer+created-inside-epoch+post),
+always generating null capabilities and explicit-undefined keys (not
+gated behind env vars, unlike the reviewer's own probe), comparing full
+agent objects (own keys, explicit-undefined distinguished from absent) to
+an independently-reimplemented sequential oracle. 3000 cases per path, 0
+mismatches. Verified it fails — all 4 tests — against `6519b424`'s
+`state.ts` with this round's test files, before restoring the fix.
+
+### Commands and results
+
+- `npm run typecheck`: pass. `npx eslint src/client/state.ts`: clean.
+  `npx prettier --check` on `state.ts` and all three changed/added test
+  files: pass.
+- `npx vitest run --no-file-parallelism state-coalescing.test.ts
+  state-seed-epoch.test.ts state-completeness-flag.test.ts
+  state-compaction-fuzz.test.ts`: 4 files, 72 tests, all passing (67 from
+  round 8 + 1 new ports N2 test + 4 new compaction-fuzz tests).
+- Fetched the reviewer's min repro and fuzz fresh (not committed) and ran
+  them directly against this round's `state.ts`: min repro 2/2 pass; fuzz
+  (20k/path, `R9_NULLCAPS=1 R9_UNDEF=1`) 0 mismatches on all 4 paths.
+- Regression check: copied `6519b424`'s `state.ts` in over this round's
+  fix (test files unchanged) and reran — the 4 new compaction-fuzz tests
+  and the new ports N2 test (5 total) failed with the predicted
+  divergence; restored this round's `state.ts` and all 5 (plus the full
+  72) passed again, byte-identical to the committed file.
+- Full suite: see the gs report addendum for the exact count at this
+  round's head SHA.

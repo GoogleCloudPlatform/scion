@@ -959,9 +959,12 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     const entry = pending.get('off');
     expect(entry).toBeDefined();
     // A fixed-shape compacted summary, never an array/list that grows with
-    // the number of events applied.
+    // the number of events applied. Checking the key count alone would
+    // still pass a list hidden *inside* one field (e.g. a `history` array);
+    // the serialized size is the property that actually matters here.
     expect(Array.isArray(entry)).toBe(false);
     expect(Object.keys(entry?.fields ?? {}).length).toBeLessThan(10);
+    expect(JSON.stringify(entry).length).toBeLessThan(500);
   });
 });
 

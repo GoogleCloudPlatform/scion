@@ -409,12 +409,10 @@ describe('W3 seed epoch', () => {
     // let "created" drain them — created's own activity must replay FIRST
     // against the REST base at seed time, with the buffered deltas on top,
     // matching the order live application used when created arrived.
-    // (Fails if recordSeedEpochDeltaFirst's ordering were reversed: with
-    // the created activity 'completed' applied *after* the buffered
-    // 'waiting_for_input'/'thinking', a later 'working' would have nothing
-    // sticky left to suppress it, same as live state; applied *before*
-    // them, as it is here, nothing after 'completed' unlocks it from
-    // sticky until the real 'working' delta uses up the unlock itself.)
+    // Live order is created (completed), waiting_for_input, thinking,
+    // working, which gives working. With created replayed *last* instead
+    // (the bug this test catches), completed would be sticky when working
+    // arrives, so the seed would yield completed.
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
@@ -451,5 +449,22 @@ describe('W3 seed epoch', () => {
 
     expect(sm.getAgent('a1')?.activity).toBe('thinking');
     expect(sm.getAgent('a1')?.message).toBe('new');
+  });
+
+  it('a ports delta that is a no-op against live state is still recorded into an open epoch', () => {
+    // Same reasoning as the status/created path above, extended to ports: a
+    // REST row can carry an older exposedPorts than live state even when a
+    // given ports delta was a no-op against that live state.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    const port = { port: 8080, exposedAt: 't', exposedBy: 'u1' };
+    sm.seedAgents([{ id: 'a1', name: 'A1', exposedPorts: [port] } as Agent]);
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.ports', { ports: [{ ...port }] }); // no-op against live state (fresh array, same values)
+
+    sm.seedAgents([{ id: 'a1', name: 'A1', exposedPorts: [] } as Agent], { token });
+
+    expect(sm.getAgent('a1')?.exposedPorts).toEqual([port]);
   });
 });

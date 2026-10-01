@@ -158,8 +158,19 @@ function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
  * equal to sequential application precisely because they reduce to a call
  * here (see `CompactedDelta`'s doc comment for how that reduction stays
  * exact without keeping every raw delta around).
+ *
+ * `skipPromote` is for `applyCompactedDelta` only: a `CompactedDelta`'s
+ * `fields` already has every delta's detail fields promoted, one at a time,
+ * as it was folded in (`foldCompactedDelta`). Promoting again here, from
+ * `fields.detail` (the *last* raw detail object in the run), would
+ * overwrite an already-correct, later top-level field with a stale one.
  */
-function mergeAgentDelta(base: Agent, rawDelta: Partial<Agent>, agentId: string): Agent {
+function mergeAgentDelta(
+  base: Agent,
+  rawDelta: Partial<Agent>,
+  agentId: string,
+  options?: { skipPromote?: boolean }
+): Agent {
   let delta: Partial<Agent> = { ...rawDelta };
 
   // Preserve sticky activities: if the incoming activity is working/empty
@@ -174,7 +185,9 @@ function mergeAgentDelta(base: Agent, rawDelta: Partial<Agent>, agentId: string)
     delete delta.activity;
   }
   // Promote detail fields from SSE detail to top-level agent
-  delta = promoteDetailFields(delta);
+  if (!options?.skipPromote) {
+    delta = promoteDetailFields(delta);
+  }
   // Ensure id is always set
   const updated = { ...base, ...delta, id: agentId } as Agent;
   // Preserve _capabilities from existing state when the delta doesn't
@@ -196,53 +209,89 @@ function mergeAgentDelta(base: Agent, rawDelta: Partial<Agent>, agentId: string)
  * `dirty.unknown` exists for), so an append-only list would grow without
  * bound.
  *
- * `fields` covers every field except `activity`: `mergeAgentDelta` applies
- * those with plain last-value-wins (each delta promoted via
- * `promoteDetailFields` first), which never depends on what `base` turns
- * out to be, so folding them eagerly, in arrival order, is exact.
+ * `fields` covers every field except `activity`, each delta promoted via
+ * `promoteDetailFields` *before* folding (so a later delta's top-level
+ * field — e.g. plain `message` — is never re-overwritten by an earlier
+ * delta's stale `detail.message` when `fields` is replayed through
+ * `mergeAgentDelta` with `skipPromote`, since that would promote `detail`
+ * a second time, out of order). The one exception is `_capabilities`:
+ * `mergeAgentDelta` keeps the base's truthy value when a delta's own is
+ * falsy (`null`/absent), so folding must apply that same rule against the
+ * accumulator's current value, not just overwrite it — see
+ * `foldCompactedDelta`/`composeCompactedDeltas`. Every other field never
+ * depends on what `base` turns out to be, so folding it eagerly, in
+ * arrival order, is exact — including an explicit `undefined` on a field
+ * other than `activity`, which plain object spread already clears to
+ * `undefined` at every step, live or compacted, with no special handling.
  *
  * `activity` is the one field whose resolved value *can* depend on
  * `base.activity`'s stickiness — but only up to the first delta in the run
- * whose own activity is neither `working` nor `''` ("unlocking"):
- * `mergeAgentDelta`'s suppression check only ever fires for an incoming
- * `working`/`''`, and only when the *current* activity is sticky, so once
- * an unlocking delta sets a concrete value, every later step's suppression
+ * that sets it to something other than `working` or `''` ("unlocking"):
+ * that includes an explicit `activity: undefined`, since `mergeAgentDelta`
+ * never suppresses a missing/`undefined` incoming activity either, so it
+ * always clears straight through to `undefined`, independent of the base,
+ * same as any other concrete unlocking value. `mergeAgentDelta`'s
+ * suppression check only ever fires for an incoming `working`/`''`, and
+ * only when the *current* activity is sticky, so once an unlocking delta
+ * sets a value (`undefined` included), every later step's suppression
  * check uses that value (or whatever has replaced it since) — never
  * `base.activity` again. From that point on the result is base-independent
  * and can be resolved immediately. Before the first unlock, `pending` holds
- * the most recent `working`/`''` activity seen so far, or `undefined` if
- * none has arrived yet (in which case `base.activity` must pass through
- * untouched — see `applyCompactedDelta`). After the first unlock, `value`
- * holds the current resolved activity, updated the same way on every
- * subsequent delta, now using `value` itself (not `base.activity`) as the
- * thing a `working`/`''` delta might be suppressed by.
+ * the most recent `working`/`''` activity seen so far, or `undefined` if no
+ * delta has touched `activity` at all yet (in which case `base.activity`
+ * must pass through untouched — see `applyCompactedDelta`). After the
+ * first unlock, `value` holds the current resolved activity (`undefined`
+ * included), updated the same way on every subsequent delta, now using
+ * `value` itself (not `base.activity`) as the thing a `working`/`''` delta
+ * might be suppressed by.
  */
 interface CompactedDelta {
   fields: Partial<Agent>;
-  activity: { locked: false; pending: string | undefined } | { locked: true; value: string };
+  activity:
+    | { locked: false; pending: string | undefined }
+    | { locked: true; value: string | undefined };
 }
 
 function emptyCompactedDelta(): CompactedDelta {
   return { fields: {}, activity: { locked: false, pending: undefined } };
 }
 
+/**
+ * Fold `a`'s accumulated `_capabilities` back in when `b`'s own value is
+ * falsy (absent/`undefined`/`null`) — the same base-fallback
+ * `mergeAgentDelta` applies, extended to the accumulator so a falsy value
+ * partway through a run can't clobber a truthy one already folded in.
+ */
+function inheritFalsyCapabilities(fields: Partial<Agent>, prevFields: Partial<Agent>): void {
+  if (!fields._capabilities && prevFields._capabilities) {
+    fields._capabilities = prevFields._capabilities;
+  }
+}
+
 /** Fold one more raw delta, in arrival order, into a compacted accumulator (§7, §8). */
 function foldCompactedDelta(acc: CompactedDelta, rawDelta: Partial<Agent>): CompactedDelta {
   const promoted = promoteDetailFields(rawDelta);
+  const hasActivity = Object.prototype.hasOwnProperty.call(promoted, 'activity');
   const incoming = promoted.activity as string | undefined;
   const rest: Partial<Agent> = { ...promoted };
   delete rest.activity;
   const fields = { ...acc.fields, ...rest };
+  inheritFalsyCapabilities(fields, acc.fields);
+
   let activity = acc.activity;
-  if (incoming !== undefined) {
-    if (activity.locked) {
-      activity =
-        (incoming === 'working' || incoming === '') && STICKY_ACTIVITIES.has(activity.value)
-          ? activity
-          : { locked: true, value: incoming };
-    } else if (incoming === 'working' || incoming === '') {
-      activity = { locked: false, pending: incoming };
+  if (hasActivity) {
+    if (incoming === 'working' || incoming === '') {
+      if (activity.locked) {
+        const stillSticky = activity.value !== undefined && STICKY_ACTIVITIES.has(activity.value);
+        activity = stillSticky ? activity : { locked: true, value: incoming };
+      } else {
+        activity = { locked: false, pending: incoming };
+      }
     } else {
+      // A concrete non-working/empty activity, or an explicit `undefined`:
+      // mergeAgentDelta never suppresses either (suppression requires the
+      // incoming value to be working/''), so the result is this value,
+      // period, regardless of whatever the base turns out to be.
       activity = { locked: true, value: incoming };
     }
   }
@@ -259,12 +308,15 @@ function foldCompactedDelta(acc: CompactedDelta, rawDelta: Partial<Agent>): Comp
  */
 function composeCompactedDeltas(a: CompactedDelta, b: CompactedDelta): CompactedDelta {
   const fields = { ...a.fields, ...b.fields };
+  inheritFalsyCapabilities(fields, a.fields);
+
   let activity: CompactedDelta['activity'];
   if (b.activity.locked) {
     activity = b.activity;
   } else if (a.activity.locked) {
     const v = a.activity.value;
-    activity = { locked: true, value: STICKY_ACTIVITIES.has(v) ? v : (b.activity.pending ?? v) };
+    const stillSticky = v !== undefined && STICKY_ACTIVITIES.has(v);
+    activity = { locked: true, value: stillSticky ? v : (b.activity.pending ?? v) };
   } else {
     activity = { locked: false, pending: b.activity.pending ?? a.activity.pending };
   }
@@ -277,13 +329,26 @@ function applyCompactedDelta(base: Agent, acc: CompactedDelta, agentId: string):
   if (!acc.activity.locked && acc.activity.pending !== undefined) {
     delta.activity = acc.activity.pending as AgentActivity;
   }
-  const updated = mergeAgentDelta(base, delta, agentId);
+  // `fields` was already promoted per delta as it was folded in (see
+  // CompactedDelta's doc comment) — promoting again here from the last raw
+  // `detail` object would overwrite an already-correct later top-level
+  // field with a stale one.
+  const updated = mergeAgentDelta(base, delta, agentId, { skipPromote: true });
   if (acc.activity.locked) {
     // Resolved independently of `base` (see `CompactedDelta`'s doc comment);
     // `delta` omitted `activity` above, so `mergeAgentDelta` just passed
     // `base.activity` through untouched. Overwrite it with the already-
-    // resolved value instead of letting `base` reassert itself here.
-    updated.activity = acc.activity.value as AgentActivity;
+    // resolved value instead of letting `base` reassert itself here. A
+    // resolved `undefined` (an explicit `activity: undefined` delta
+    // unlocked to it) must still become an *own key* set to `undefined` —
+    // the same shape `{...base, ...delta}` produces live when `delta` has
+    // its own `activity: undefined` — not an absent key: `agentsShallowEqual`
+    // tells those two apart (Gemini #4151811120), so `delete` here would
+    // make an otherwise-identical compacted and live result compare
+    // unequal. `Agent` declares `activity?: AgentActivity`, so
+    // exactOptionalPropertyTypes forbids a direct `=== undefined`
+    // assignment; go through an untyped reference instead.
+    (updated as unknown as Record<string, unknown>).activity = acc.activity.value;
   }
   return updated;
 }
@@ -855,12 +920,16 @@ export class StateManager extends EventTarget {
         return;
       }
       const exposedPorts = portsData.ports ?? [];
+      // Record into any open seed epoch regardless of whether this changes
+      // live state: a REST row a later seedAgents replays against can carry
+      // an older exposedPorts than live state even when this particular
+      // delta was a no-op against it.
+      this.recordSeedEpochDelta(agentId, { exposedPorts });
       const updated = { ...existing, exposedPorts } as Agent;
       if (agentsShallowEqual(existing, updated)) {
         return;
       }
       this.state.agents.set(agentId, updated);
-      this.recordSeedEpochDelta(agentId, { exposedPorts });
       this.dirty.upserted.add(agentId);
       this.scheduleFlush();
       return;
@@ -886,7 +955,7 @@ export class StateManager extends EventTarget {
       this.recordUnknownDirty(agentId, delta);
       // Also record it into any open seed epoch. A REST snapshot seeded
       // mid-epoch for this same ID must not clobber this delta — see
-      // seedAgents, which applies it through mergeAgentDelta once the
+      // seedAgents, which applies it through applyCompactedDelta once the
       // snapshot gives it a base to merge against.
       this.recordSeedEpochDelta(agentId, delta);
       this.scheduleFlush();
