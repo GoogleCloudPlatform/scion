@@ -30,6 +30,12 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
+import {
+  buildLineageForest,
+  layoutForest,
+  layoutForestWithUsers,
+  type PositionedEdge,
+} from '../../shared/lineage.js';
 
 // happy-dom's localStorage is not functional in this setup; the component
 // reads/writes the show-users preference from it, so provide a minimal stub.
@@ -434,84 +440,359 @@ describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => 
   });
 });
 
-describe('hover/relatedIds highlighting (#2388 review Gemini G1)', () => {
+describe('hover/relatedIds highlighting', () => {
   let el: ScionAgentTreeView;
 
-  // r1 (root) -> m1 -> l1 (m1's descendant); s1 is m1's *sibling* (another
-  // child of r1), not related to m1. orphan's parent id ('ghost') does not
-  // exist in the set — the missing-parent case: the ancestor walk must stop
-  // cleanly there instead of throwing or treating it as related.
-  function fixture(): Agent[] {
-    return [
+  /** The `.node-wrapper` an agent's hover handlers are bound to. */
+  function wrapperOf(agentId: string): Element {
+    const link = el.shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"]`);
+    expect(link).not.toBeNull();
+    const wrapper = link!.closest('.node-wrapper');
+    expect(wrapper).not.toBeNull();
+    return wrapper!;
+  }
+
+  /**
+   * Dispatches the real pointerenter the node-wrapper's handler listens for
+   * (agent-tree-view.ts, renderNode's `.node-wrapper`), instead of writing
+   * the private `hoverId` state through a cast.
+   *
+   * No `bubbles`/`composed` init: pointerenter/pointerleave don't bubble
+   * natively, and the dispatch target is already inside the shadow root, so
+   * the component's own listener fires regardless. `.canvas` has its own
+   * `pointerleave` handler that also clears `hoverId` — forcing `bubbles:
+   * true` on a leave event would reach it too and mask a broken
+   * node-wrapper handler (confirmed by mutation testing: it hid a no-op
+   * node-wrapper pointerleave until this was fixed).
+   */
+  function hoverAgent(agentId: string): void {
+    wrapperOf(agentId).dispatchEvent(new PointerEvent('pointerenter'));
+  }
+
+  /** Dispatches the real pointerleave the node-wrapper's handler listens for. */
+  function leaveAgent(agentId: string): void {
+    wrapperOf(agentId).dispatchEvent(new PointerEvent('pointerleave'));
+  }
+
+  /**
+   * Asserts the node exists before reading its class: a renamed href/class,
+   * or a node that silently failed to render, must fail loudly here instead
+   * of reading back a vacuous "not dim".
+   */
+  function isDim(agentId: string): boolean {
+    const link = el.shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"]`);
+    expect(link).not.toBeNull();
+    return link!.classList.contains('dim');
+  }
+
+  /**
+   * Identifies one specific edge's rendered <path>, rather than only
+   * counting lit/dim edges in aggregate, by independently computing that
+   * edge's endpoints with lineage.ts's own pure layout functions — the same
+   * ones the component calls — and asking the component's own (private)
+   * `edgePath` to turn them into the exact "d" string, rather than
+   * duplicating that formula here: a cosmetic change to the curve shape
+   * only breaks this helper if the rendered path's "d" actually differs.
+   * Two edges sharing a parent share the same start point, so matching on
+   * the *full* path — not just its "M x y" prefix — is what disambiguates
+   * siblings. Valid only for the vertical, no-users, nothing-collapsed
+   * fixtures used below: `layoutForest` doesn't account for showUsers,
+   * collapse or horizontal orientation.
+   */
+  function edgeClasses(agents: Agent[], parentId: string, childId: string): string[] {
+    const layout = layoutForest(buildLineageForest(agents));
+    const edge = layout.edges.find((e) => e.parentId === parentId && e.childId === childId);
+    expect(edge, `no computed edge ${parentId}->${childId}`).toBeTruthy();
+    const d = (el as unknown as { edgePath(e: PositionedEdge): string }).edgePath(edge!);
+    const path = Array.from(el.shadowRoot!.querySelectorAll('svg path.edge')).find(
+      (p) => p.getAttribute('d') === d
+    );
+    expect(path, `no rendered edge ${parentId}->${childId} (d="${d}")`).toBeTruthy();
+    return Array.from(path!.classList);
+  }
+
+  /**
+   * Identifies one specific user node, rather than matching the incidental
+   * `title` display text, by independently computing its exact rendered
+   * position with lineage.ts's own pure layout functions and matching the
+   * DOM node's `style` attribute to it — the same technique edgeClasses
+   * uses for edges. Valid only for the vertical, nothing-collapsed fixtures
+   * used below: `layoutForestWithUsers` doesn't account for collapse or
+   * horizontal orientation. Call this again after any re-render rather than
+   * holding on to the returned element, because Lit may replace it.
+   */
+  function findUserNode(agents: Agent[], userId: string): Element {
+    const layout = layoutForestWithUsers(buildLineageForest(agents));
+    const user = layout.users.find((u) => u.id === userId);
+    expect(user, `no computed user node for ${userId}`).toBeTruthy();
+    const style = `left: ${user!.px}px; top: ${user!.py}px`;
+    const node = Array.from(el.shadowRoot!.querySelectorAll('.node.user')).find(
+      (n) => n.getAttribute('style') === style
+    );
+    expect(node, `no rendered user node for ${userId}`).toBeTruthy();
+    return node!;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  describe('ancestors and descendants, multiple levels deep', () => {
+    // a -> b -> c -> d, plus an unrelated root z. At least 3 levels, so a
+    // one-step ancestor walk or a one-level BFS (instead of relatedIds'
+    // actual multi-level walk/BFS) still gets caught — a 1-level fixture
+    // can't tell the two apart.
+    const fixture: Agent[] = [
+      agent('a', 'a', ['user-1']),
+      agent('b', 'b', ['user-1', 'a']),
+      agent('c', 'c', ['user-1', 'a', 'b']),
+      agent('d', 'd', ['user-1', 'a', 'b', 'c']),
+      agent('z', 'z', ['user-2']),
+    ];
+
+    beforeEach(async () => {
+      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el.agents = fixture;
+      document.body.appendChild(el);
+      await el.updateComplete;
+    });
+
+    it('hovering a middle node (b) reaches both of its descendant levels (c and d)', async () => {
+      hoverAgent('b');
+      await el.updateComplete;
+
+      expect(isDim('a')).toBe(false); // ancestor
+      expect(isDim('b')).toBe(false); // hovered
+      expect(isDim('c')).toBe(false); // child
+      expect(isDim('d')).toBe(false); // grandchild — a 1-level BFS would miss this
+      expect(isDim('z')).toBe(true); // unrelated
+
+      expect(edgeClasses(fixture, 'b', 'c')).toContain('lit');
+      expect(edgeClasses(fixture, 'c', 'd')).toContain('lit');
+    });
+
+    it('hovering a deep node (c) reaches both of its ancestor levels (b and a)', async () => {
+      hoverAgent('c');
+      await el.updateComplete;
+
+      expect(isDim('a')).toBe(false); // grandparent — a 1-step ancestor walk would miss this
+      expect(isDim('b')).toBe(false); // parent
+      expect(isDim('c')).toBe(false); // hovered
+      expect(isDim('d')).toBe(false); // child
+      expect(isDim('z')).toBe(true); // unrelated
+
+      expect(edgeClasses(fixture, 'a', 'b')).toContain('lit');
+      expect(edgeClasses(fixture, 'b', 'c')).toContain('lit');
+    });
+  });
+
+  describe('cyclic ancestry does not infinite-loop the hover walk', () => {
+    // x and y form a 2-cycle (x's parent is y, y's parent is x); k is also a
+    // child of x; z is unrelated. buildLineageForest promotes x as the
+    // cycle's root (lowest id; see lineage.test.ts's cyclic-ancestry tests),
+    // so the rendered tree is x -> {k, y}. Hovering any cycle member must
+    // terminate: relatedIds' ancestor walk breaks via
+    // `related.has(parent.id)`, which a regression could drop, freezing the
+    // tab on this same kind of malformed (but handled) input.
+    const fixture: Agent[] = [
+      agent('x', 'x', ['user-1', 'y']),
+      agent('y', 'y', ['user-1', 'x']),
+      agent('k', 'k', ['user-1', 'x']),
+      agent('z', 'z', ['user-2']),
+    ];
+
+    beforeEach(async () => {
+      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el.agents = fixture;
+      document.body.appendChild(el);
+      await el.updateComplete;
+    });
+
+    it('hovering a cycle member relates the whole cycle and terminates', async () => {
+      // Bound relatedIds' ancestor walk instead of relying on a test
+      // timeout: vitest's testTimeout cannot interrupt a *synchronous*
+      // infinite loop (removing the cycle guard would freeze this worker,
+      // not fail a test). Spy on getAgentById — relatedIds' own id lookup —
+      // and return a copy of its real map whose `get` throws once a call
+      // budget is exceeded, so a regressed guard fails this test cleanly
+      // instead of hanging it.
+      type AgentByIdHost = { getAgentById(a: Agent[]): Map<string, Agent> };
+      const real = (Object.getPrototypeOf(el) as AgentByIdHost).getAgentById;
+      let calls = 0;
+      vi.spyOn(el as unknown as AgentByIdHost, 'getAgentById').mockImplementation(function (
+        this: unknown,
+        a: Agent[]
+      ) {
+        const m = real.call(this, a);
+        const bounded = new Map(m);
+        bounded.get = (k: string) => {
+          if (++calls > 1000) throw new Error('relatedIds ancestor walk did not terminate');
+          return m.get(k);
+        };
+        return bounded;
+      });
+
+      hoverAgent('x');
+      await el.updateComplete;
+
+      expect(isDim('x')).toBe(false);
+      expect(isDim('y')).toBe(false);
+      expect(isDim('k')).toBe(false);
+      expect(isDim('z')).toBe(true);
+
+      expect(edgeClasses(fixture, 'x', 'y')).toContain('lit');
+      expect(edgeClasses(fixture, 'x', 'k')).toContain('lit');
+    });
+  });
+
+  describe('single-level highlighting, sibling, missing parent, pointerleave, and no hover', () => {
+    // r1 (root) -> m1 -> l1 (m1's descendant); s1 is m1's *sibling* (another
+    // child of r1), not related to m1. orphan's parent id ('ghost') does not
+    // exist in the set — the missing-parent case: the ancestor walk must
+    // stop cleanly there instead of throwing or treating it as related.
+    const fixture: Agent[] = [
       agent('r1', 'root', ['user-1']),
       agent('m1', 'mid', ['user-1', 'r1']),
       agent('l1', 'leaf', ['user-1', 'r1', 'm1']),
       agent('s1', 'sibling', ['user-1', 'r1']),
       agent('orphan', 'orphan', ['user-1', 'ghost']),
     ];
-  }
 
-  function isDim(agentId: string): boolean {
-    const link = el.shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"]`);
-    return !!link && link.classList.contains('dim');
-  }
+    beforeEach(async () => {
+      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el.agents = fixture;
+      document.body.appendChild(el);
+      await el.updateComplete;
+    });
 
-  /** Counts edges by class, without needing to identify which edge is which. */
-  function edgeClassCounts(): { lit: number; dim: number; neither: number } {
-    const counts = { lit: 0, dim: 0, neither: 0 };
-    for (const p of el.shadowRoot!.querySelectorAll('svg path.edge')) {
-      if (p.classList.contains('lit')) counts.lit++;
-      else if (p.classList.contains('dim')) counts.dim++;
-      else counts.neither++;
-    }
-    return counts;
-  }
+    it('lights the hovered node, its ancestor and its descendant; dims the sibling and the unrelated orphan', async () => {
+      hoverAgent('m1');
+      await el.updateComplete;
 
-  beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
-    el.agents = fixture();
-    document.body.appendChild(el);
-    await el.updateComplete;
+      expect(isDim('m1')).toBe(false);
+      expect(isDim('r1')).toBe(false);
+      expect(isDim('l1')).toBe(false);
+      expect(isDim('s1')).toBe(true); // sibling: neither ancestor nor descendant
+      expect(isDim('orphan')).toBe(true); // unrelated
+
+      expect(edgeClasses(fixture, 'r1', 'm1')).toContain('lit');
+      expect(edgeClasses(fixture, 'm1', 'l1')).toContain('lit');
+      expect(edgeClasses(fixture, 'r1', 's1')).toContain('dim'); // not just "not lit"
+    });
+
+    it('stops cleanly at a missing parent: hovering the orphan relates only itself', async () => {
+      hoverAgent('orphan');
+      await el.updateComplete;
+
+      expect(isDim('orphan')).toBe(false); // the hovered node is never dimmed
+      // The orphan's parent ('ghost') doesn't exist, so the ancestor walk
+      // stops immediately; nothing points to the orphan as a parent, so the
+      // descendant BFS finds nothing either. Everything else is unrelated.
+      expect(isDim('r1')).toBe(true);
+      expect(isDim('m1')).toBe(true);
+      expect(isDim('l1')).toBe(true);
+      expect(isDim('s1')).toBe(true);
+      // Nothing but the orphan is related, so every edge among the other
+      // nodes is dimmed.
+      for (const [parentId, childId] of [
+        ['r1', 'm1'],
+        ['m1', 'l1'],
+        ['r1', 's1'],
+      ] as const) {
+        expect(edgeClasses(fixture, parentId, childId)).toContain('dim');
+      }
+    });
+
+    it('dims nothing when no node is hovered', () => {
+      expect(isDim('r1')).toBe(false);
+      expect(isDim('m1')).toBe(false);
+      expect(isDim('orphan')).toBe(false);
+      for (const [parentId, childId] of [
+        ['r1', 'm1'],
+        ['m1', 'l1'],
+        ['r1', 's1'],
+      ] as const) {
+        const classes = edgeClasses(fixture, parentId, childId);
+        expect(classes).not.toContain('lit');
+        expect(classes).not.toContain('dim');
+      }
+    });
+
+    it('undims everything again after the pointer leaves the hovered node', async () => {
+      hoverAgent('m1');
+      await el.updateComplete;
+      expect(isDim('s1')).toBe(true); // sanity: the hover above took effect
+      expect(isDim('orphan')).toBe(true);
+
+      leaveAgent('m1');
+      await el.updateComplete;
+
+      expect(isDim('s1')).toBe(false);
+      expect(isDim('m1')).toBe(false);
+      expect(isDim('r1')).toBe(false);
+      expect(isDim('l1')).toBe(false);
+      expect(isDim('orphan')).toBe(false);
+    });
   });
 
-  afterEach(() => {
-    el.remove();
-    document.body.innerHTML = '';
-  });
+  describe('user-hover branch', () => {
+    // Two separate root users, one root agent each, so there is exactly one
+    // rendered user node per user.
+    const fixture: Agent[] = [
+      { ...agent('p1', 'p1', ['user-1']), createdBy: 'alice' } as Agent,
+      { ...agent('p2', 'p2', ['user-2']), createdBy: 'bob' } as Agent,
+    ];
 
-  it('lights the hovered node, its ancestors and its descendants; dims everything else', async () => {
-    (el as unknown as { hoverId: string | null }).hoverId = 'm1';
-    await el.updateComplete;
+    beforeEach(async () => {
+      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el.agents = fixture;
+      document.body.appendChild(el);
+      await el.updateComplete;
+      // showUsers defaults from localStorage (false here) in
+      // connectedCallback, which already ran by the time the element is in
+      // the DOM; set it after, as the layout-cache describe block above does.
+      (el as unknown as { showUsers: boolean }).showUsers = true;
+      await el.updateComplete;
+    });
 
-    expect(isDim('m1')).toBe(false); // hovered
-    expect(isDim('r1')).toBe(false); // ancestor
-    expect(isDim('l1')).toBe(false); // descendant
-    expect(isDim('s1')).toBe(true); // sibling: neither ancestor nor descendant
-    expect(isDim('orphan')).toBe(true); // unrelated
+    it('hovering a user node lights every agent whose lineage starts with that user, dims the rest, and dims the other user node', async () => {
+      expect(findUserNode(fixture, 'user-1').classList.contains('dim')).toBe(false); // no hover yet
+      expect(findUserNode(fixture, 'user-2').classList.contains('dim')).toBe(false);
 
-    // r1->m1 and m1->l1 have both endpoints related (lit); r1->s1 doesn't.
-    expect(edgeClassCounts()).toEqual({ lit: 2, dim: 1, neither: 0 });
-  });
+      findUserNode(fixture, 'user-1').dispatchEvent(new PointerEvent('pointerenter'));
+      await el.updateComplete;
 
-  it('stops cleanly at a missing parent: hovering the orphan relates only itself', async () => {
-    (el as unknown as { hoverId: string | null }).hoverId = 'orphan';
-    await el.updateComplete;
+      expect(isDim('p1')).toBe(false); // alice's agent
+      expect(isDim('p2')).toBe(true); // bob's agent
+      // The user branch's most direct observable: the user nodes themselves.
+      // Called again after the hover rather than reusing the elements found
+      // above, because Lit may have replaced them across the re-render.
+      expect(findUserNode(fixture, 'user-1').classList.contains('dim')).toBe(false);
+      expect(findUserNode(fixture, 'user-2').classList.contains('dim')).toBe(true);
+    });
 
-    expect(isDim('orphan')).toBe(false); // the hovered node is never dimmed
-    // The orphan's parent ('ghost') doesn't exist, so the ancestor walk
-    // stops immediately; nothing points to the orphan as a parent, so the
-    // descendant BFS finds nothing either. Everything else is unrelated.
-    expect(isDim('r1')).toBe(true);
-    expect(isDim('m1')).toBe(true);
-    expect(isDim('l1')).toBe(true);
-    expect(isDim('s1')).toBe(true);
-    expect(edgeClassCounts()).toEqual({ lit: 0, dim: 3, neither: 0 });
-  });
+    it('hovering an agent also lights its own root user node, leaving other users dim', async () => {
+      // relatedIds adds userKey(rootUser) on an *agent* hover (not just the
+      // user-hover branch above), so p1's root user node should light up too.
+      hoverAgent('p1');
+      await el.updateComplete;
 
-  it('dims nothing when no node is hovered', () => {
-    expect(isDim('r1')).toBe(false);
-    expect(isDim('m1')).toBe(false);
-    expect(isDim('orphan')).toBe(false);
-    expect(edgeClassCounts()).toEqual({ lit: 0, dim: 0, neither: 3 });
+      expect(findUserNode(fixture, 'user-1').classList.contains('dim')).toBe(false); // p1's root user
+      expect(findUserNode(fixture, 'user-2').classList.contains('dim')).toBe(true);
+    });
+
+    it('leaving a hovered user node clears the highlight it set', async () => {
+      findUserNode(fixture, 'user-1').dispatchEvent(new PointerEvent('pointerenter'));
+      await el.updateComplete;
+      expect(isDim('p2')).toBe(true); // sanity: the hover above took effect
+
+      findUserNode(fixture, 'user-1').dispatchEvent(new PointerEvent('pointerleave'));
+      await el.updateComplete;
+
+      expect(isDim('p2')).toBe(false);
+      expect(findUserNode(fixture, 'user-2').classList.contains('dim')).toBe(false);
+    });
   });
 });
