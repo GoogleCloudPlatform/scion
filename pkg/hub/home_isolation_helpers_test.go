@@ -22,11 +22,11 @@ import (
 // isolateTestHome points $HOME at a freshly created temporary directory for
 // the lifetime of the test binary. pkg/hub tests resolve the scion config
 // root (~/.scion/projects, the remote-templates cache, etc.) through $HOME
-// (most code calls os.UserHomeDir(), but some, e.g. hubsync's
-// readAgentTokenFile, reads os.Getenv("HOME") directly). On Linux and macOS
-// both read the same $HOME, so overriding it here keeps scion state
-// (~/.scion/...) off the real developer/agent HOME. os.UserHomeDir() uses
-// %USERPROFILE% on Windows instead, so this isolation is Linux/macOS scoped.
+// (most code calls os.UserHomeDir(), but some reads os.Getenv("HOME")
+// directly). On Linux and macOS both read the same $HOME, so overriding it
+// here keeps scion state (~/.scion/...) off the real developer/agent HOME.
+// os.UserHomeDir() uses %USERPROFILE% on Windows instead, so this isolation
+// is Linux/macOS scoped.
 //
 // This does not reach package init code in dependencies that runs before
 // TestMain (e.g. rclone's fs/config creating its own config dir) — that is
