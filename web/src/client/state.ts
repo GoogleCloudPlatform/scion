@@ -87,10 +87,9 @@ function agentDetailEqual(a: AgentDetail | undefined, b: AgentDetail | undefined
 }
 
 /**
- * Value comparison for `ExposedPort[]` (round 1 review N4): a ports SSE
- * event always builds a fresh array (`portsData.ports ?? []`), so comparing
- * by reference never matched, and every ports event dirtied and replaced
- * the agent object even when the port list was byte-for-byte identical.
+ * Value comparison for `ExposedPort[]`: a ports SSE event always builds a
+ * fresh array (`portsData.ports ?? []`), so comparing by reference never
+ * matches, even when the port list is byte-for-byte identical.
  */
 function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | undefined): boolean {
   if (a === b) return true;
@@ -100,10 +99,9 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
     const ai = a[i];
     const bi = b[i];
     // Arrays from JSON never have holes, so ai/bi are only undefined here
-    // past a shorter length, already ruled out above. Handled explicitly
-    // anyway (round 2 review nit-1): a hole in only one array is a
-    // difference, not a reason to stop comparing the rest; a hole in both
-    // is equal at this index and comparison continues.
+    // past a shorter length, already ruled out above. Handled explicitly: a
+    // hole in only one array is a difference, not a reason to stop
+    // comparing the rest; a hole in both is equal at this index.
     if (ai === undefined && bi === undefined) continue;
     if (ai === undefined || bi === undefined) return false;
     if (!shallowObjectEqual(ai, bi)) return false;
@@ -256,13 +254,12 @@ export class StateManager extends EventTarget {
   private sawDisconnectThisGeneration = false;
 
   /**
-   * The scope generation that is actually live, or `null` if none is
-   * (round 1 review B1). `state.connected` alone is not enough: `setScope`
-   * → `SSEClient.connect()` → `disconnect()` (sse-client.ts:326-346) closes
-   * the old connection without dispatching `disconnected`, so
-   * `state.connected` stays `true` from the previous scope's connection
-   * until the new one's `connected` fires. `sseConnected` must not resolve
-   * during that gap.
+   * The scope generation that is actually live, or `null` if none is.
+   * `state.connected` alone is not enough: `setScope` → `SSEClient.connect()`
+   * → `disconnect()` (sse-client.ts:326-346) closes the old connection
+   * without dispatching `disconnected`, so `state.connected` stays `true`
+   * from the previous scope's connection until the new one's `connected`
+   * fires. `sseConnected` must not resolve during that gap.
    */
   private connectedGeneration: number | null = null;
 
@@ -430,20 +427,11 @@ export class StateManager extends EventTarget {
     this.completeFlag = null;
     this.generation++;
     this.sawDisconnectThisGeneration = false;
-    // B1 (round 1 review, revised round 2): `sseClient.connect()` below
-    // tears the previous connection down without a `disconnected` event, so
-    // `connectedGeneration` (which `sseConnected` reads) must be reset by
-    // hand — otherwise a stale generation could still read as connected.
-    // Deliberately NOT touching `state.connected`/`isConnected` here: round
-    // 1 also reset that, but it is a visible behaviour change for the one
-    // existing reader, chat-thread.ts:1536 (`this._sawSseConnect =
-    // stateManager.isConnected`), which seeds its reconnect catch-up from
-    // it. Making `isConnected` go stale-false across this gap made that
-    // page swallow its own first post-navigation `connected` as "nothing to
-    // catch up on", silently dropping chat messages sent in the window
-    // between `setScope` and the new connection opening. `sseConnected`
-    // never reads `state.connected` (see its own JSDoc), so nothing here
-    // needs it reset. Round 2 review (B1).
+    // `sseClient.connect()` below tears the previous connection down
+    // without a `disconnected` event, so `connectedGeneration` must be
+    // reset by hand. `state.connected`/`isConnected` is deliberately left
+    // alone: chat-thread.ts:1536 seeds its reconnect catch-up from it, and
+    // `sseConnected` never reads it (see its own JSDoc).
     this.connectedGeneration = null;
     this.rejectStaleSseConnectWaiters();
 
@@ -692,13 +680,12 @@ export class StateManager extends EventTarget {
 
     const existing = this.state.agents.get(agentId);
     if (!existing && eventType !== 'created') {
-      // N1 (round 1 review): a status delta racing a delete for the same ID
-      // (the hub can publish both concurrently) must not resurrect a
-      // tombstoned ID as "unknown". Drop it outright: no buffer, no
-      // dirty.unknown, no flush. Without this, one `agents-changed` could
-      // report the same ID in both `deleted` and `unknown`, and a P1c member
-      // index reading `unknown` as "something new happened off-page" would
-      // count a phantom agent.
+      // A status delta racing a delete for the same ID (the hub can publish
+      // both concurrently) must not resurrect a tombstoned ID as "unknown".
+      // Drop it outright: no buffer, no dirty.unknown, no flush. Without
+      // this, one `agents-changed` could report the same ID in both
+      // `deleted` and `unknown`, and a P1c member index reading `unknown`
+      // as "something new happened off-page" would count a phantom agent.
       if (this.state.deletedAgentIds.has(agentId)) {
         return;
       }
@@ -709,10 +696,10 @@ export class StateManager extends EventTarget {
       const delta = data as Partial<Agent>;
       this.bufferAgentDelta(agentId, delta);
       this.recordUnknownDirty(agentId, delta);
-      // B2 (round 1 review): also record it into any open seed epoch. A
-      // REST snapshot seeded mid-epoch for this same ID must not clobber
-      // this delta — see seedAgents, which applies it through
-      // mergeAgentDelta once the snapshot gives it a base to merge against.
+      // Also record it into any open seed epoch. A REST snapshot seeded
+      // mid-epoch for this same ID must not clobber this delta — see
+      // seedAgents, which applies it through mergeAgentDelta once the
+      // snapshot gives it a base to merge against.
       this.recordSeedEpochDelta(agentId, delta);
       this.scheduleFlush();
       return;
@@ -743,11 +730,10 @@ export class StateManager extends EventTarget {
       this.recordSeedEpochDelta(agentId, finalizedDelta);
       this.dirty.upserted.add(agentId);
       this.dirty.unknown.delete(agentId);
-      // FYI (round 1 review): a `created` for an ID whose `deleted` arrived
-      // earlier in the same flush window must not report it as still
-      // deleted — the create is fresher. IDs are UUIDs, so a real reuse is
-      // not reachable in practice; this only matters within one coalescing
-      // window.
+      // A `created` for an ID whose `deleted` arrived earlier in the same
+      // flush window must not report it as still deleted — the create is
+      // fresher. IDs are UUIDs, so a real reuse is not reachable in
+      // practice; this only matters within one coalescing window.
       this.dirty.deleted.delete(agentId);
     }
     if (eventType === 'created') {
@@ -766,10 +752,10 @@ export class StateManager extends EventTarget {
    * Merge a delta into a base `Agent`: sticky-activity preservation, detail
    * field promotion, and capability preservation when the delta omits them
    * (§7). Shared by `handleAgentEvent`'s created/known-agent path and by
-   * `seedAgents`' seed-epoch reapplication (B2, round 1 review), so the two
-   * cannot drift out of sync. Returns both the merged `Agent` and the
-   * finalized delta (post sticky/detail processing) so callers can record
-   * the same thing that was actually applied — e.g. into a seed epoch.
+   * `seedAgents`' seed-epoch reapplication, so the two cannot drift out of
+   * sync. Returns both the merged `Agent` and the finalized delta (post
+   * sticky/detail processing) so callers can record the same thing that
+   * was actually applied — e.g. into a seed epoch.
    */
   private mergeAgentDelta(
     base: Agent,
@@ -855,13 +841,12 @@ export class StateManager extends EventTarget {
    * Record a delta into every open seed epoch (§7, §8), merged last-wins
    * per field with anything already recorded for this ID in that epoch.
    *
-   * Called from two places (round 2 review nit-2): the known-agent/created
-   * merge path, with the *finalized* delta (post sticky-activity/detail
-   * processing, as `mergeAgentDelta` returns it); and the unknown-ID
-   * buffering branch, with the *raw*, unprocessed delta (B2, round 1
-   * review) — there is no base to merge against yet for that one, so
-   * `seedAgents` runs it through `mergeAgentDelta` itself once the REST
-   * snapshot provides a base.
+   * Called from two places: the known-agent/created merge path, with the
+   * *finalized* delta (post sticky-activity/detail processing, as
+   * `mergeAgentDelta` returns it); and the unknown-ID buffering branch,
+   * with the *raw*, unprocessed delta — there is no base to merge against
+   * yet for that one, so `seedAgents` runs it through `mergeAgentDelta`
+   * itself once the REST snapshot provides a base.
    */
   private recordSeedEpochDelta(agentId: string, delta: Partial<Agent>): void {
     if (this.seedEpochs.size === 0) return;
@@ -1002,9 +987,9 @@ export class StateManager extends EventTarget {
    * while the ID was already known (a straight re-merge, idempotent since
    * detail promotion just recomputes the same fields and sticky-activity
    * re-checks the same invariant) **and** a delta recorded while the ID was
-   * still unknown to `state.agents` (B2, round 1 review): that delta never
-   * had a base to merge against before, and this snapshot is the first one
-   * it gets, the same relationship a `created` event has to its own
+   * still unknown to `state.agents`: that delta never had a base to merge
+   * against before, and this snapshot is the first one it gets, the same
+   * relationship a `created` event has to its own
    * buffered `pendingAgentDeltas` entry. Once applied, the ID's
    * `pendingAgentDeltas` entry (if any) is cleared, so a `created` event
    * that still arrives later does not re-apply the same delta a second
@@ -1012,9 +997,9 @@ export class StateManager extends EventTarget {
    * already ended) makes this call a complete no-op: the snapshot may
    * belong to a scope state no longer holds.
    *
-   * A token is single-use: this call ends the epoch itself (N2, round 1
-   * review) once every agent is seeded, so a caller's own `endSeedEpoch`
-   * afterward (per the §8 pseudocode) is a harmless no-op. Do not call
+   * A token is single-use: this call ends the epoch itself once every
+   * agent is seeded, so a caller's own `endSeedEpoch` afterward (per the
+   * §8 pseudocode) is a harmless no-op. Do not call
    * `seedAgents` more than once with the same token expecting the epoch to
    * still be open.
    *
@@ -1063,10 +1048,10 @@ export class StateManager extends EventTarget {
    * about to seed (§7, §8). Returns a token to pass to `seedAgents` and
    * `endSeedEpoch`.
    *
-   * `seedAgents` ends the epoch itself once called with this token (N2,
-   * round 1 review). But a drain that aborts or fails before calling
-   * `seedAgents` at all (a picker change, a fetch error) never reaches
-   * that — callers MUST call `endSeedEpoch(token)` in a `finally` (or
+   * `seedAgents` ends the epoch itself once called with this token. But a
+   * drain that aborts or fails before calling `seedAgents` at all (a
+   * picker change, a fetch error) never reaches that — callers MUST call
+   * `endSeedEpoch(token)` in a `finally` (or
    * equivalent) on every path, not only the success path, or the epoch
    * leaks: every later delta for the rest of the page lifetime keeps
    * getting recorded into it for nothing.
@@ -1094,7 +1079,7 @@ export class StateManager extends EventTarget {
    * `compact` means only membership (and whatever fields the compact
    * projection carries) is known — not full `Agent` objects. A consumer
    * that reads full fields from state must check `isAgentSetComplete('full')`
-   * specifically before doing so (R10, nit-2 round 1 review).
+   * specifically before doing so (R10).
    */
   markAgentSetComplete(view: 'full' | 'compact'): void {
     if (view === 'full') {
@@ -1110,7 +1095,7 @@ export class StateManager extends EventTarget {
    *
    * A `true` result for `'compact'` does not promise full `Agent` fields —
    * a consumer that reads full fields from state must call this with
-   * `'full'` specifically (R10, nit-2 round 1 review).
+   * `'full'` specifically (R10).
    */
   isAgentSetComplete(need: 'full' | 'compact'): boolean {
     if (this.completeFlag === null) return false;
@@ -1173,7 +1158,7 @@ export class StateManager extends EventTarget {
     }
   }
 
-  /** Reject every pending waiter outright, regardless of generation (N3, round 1 review). */
+  /** Reject every pending waiter outright, regardless of generation. */
   private rejectAllSseConnectWaiters(reason: string): void {
     const waiters = this.sseConnectWaiters;
     this.sseConnectWaiters = [];
@@ -1268,7 +1253,7 @@ export class StateManager extends EventTarget {
     this.sseClient.disconnect();
     this.state.connected = false;
     this.connectedGeneration = null;
-    // N3 (round 1 review): a hard teardown is not a generation change, so
+    // A hard teardown is not a generation change, so
     // rejectStaleSseConnectWaiters would never fire for it — any caller
     // still awaiting sseConnected would otherwise hang forever.
     this.rejectAllSseConnectWaiters('disconnected');

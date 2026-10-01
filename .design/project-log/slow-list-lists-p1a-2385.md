@@ -163,6 +163,29 @@ closed by the round-2 reviewer. Round 2 found:
   droppable by a first-drain seed): no code change, noted in the gs report
   for P1c.
 
+## Round 3 review (APPROVE, with findings to close)
+
+All round-1 and round-2 findings verified closed by the round-3 reviewer
+(including mutation-testing the round-2 N1 fuzz fix). One residual
+non-blocking finding and one nit remained:
+
+- **N1** (round 2's `unknown`-set fuzz check only exercised the opening
+  ~5% of the 10k-event run, since all 24 fixed IDs get permanently
+  tombstoned early): fixed by alternating `setScope` every ~500 events in
+  the fuzz (resetting the test's own shadow bookkeeping the same way
+  production resets `state.agents`/`deletedAgentIds`, and asserting no
+  stale flush fires across the switch), plus a floor assertion
+  (`flushesWithNonEmptyUnknown >= 200`; measured 698/2080 with the fix).
+- **nit-1**: trimmed the `setScope` comment to its two durable sentences,
+  and removed every "(round N review X)" attribution tag from `state.ts`
+  (code comments only — test names that reference a round/finding ID are
+  left as useful traceability, not cleaned up, since the instruction was
+  scoped to `state.ts`).
+- **FYI** (a redundant `deleted` for an already-gone/never-known ID still
+  reports it in `agents-changed.deleted`): noted in the gs report for P1c
+  — consumers should treat `deleted` as idempotent/safe-as-superset, not
+  assume every entry corresponds to a real transition.
+
 ## Deviations from the brief
 
 - `seedAgents`'s existing (pre-P1a) callers use the single-argument form with

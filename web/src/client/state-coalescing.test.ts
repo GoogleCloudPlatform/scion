@@ -27,7 +27,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { StateManager, type AgentsChangedDetail } from './state.js';
+import { StateManager, type AgentsChangedDetail, type ViewScope } from './state.js';
 import type { Agent, AgentDetail, ExposedPort } from '../shared/types.js';
 
 /** Feed a subject/data pair through the SSE update path. */
@@ -320,10 +320,12 @@ describe('W2 coalescing fuzz (10k random events)', () => {
 
     let prevSnapshot = new Map<string, Agent>(sm.getAgents().map((a) => [a.id, a]));
     let flushCount = 0;
-    // Mirrors state.deletedAgentIds: permanent for the test's lifetime,
+    let flushesWithNonEmptyUnknown = 0;
+    // Mirrors state.deletedAgentIds: permanent within one scope (cleared
+    // below on each periodic setScope, mirroring setScope's own clear),
     // used (like production's N1 check) to decide whether a status/ports
     // delta for an absent ID would be buffered as unknown at all.
-    const deletedIdsShadow = new Set<string>();
+    let deletedIdsShadow = new Set<string>();
 
     const verifyFlush = (batchEvents: FuzzEvent[]): void => {
       const before = prevSnapshot;
@@ -394,6 +396,9 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       // not just "every real change is covered".
       expect(new Set(detail.upserted)).toEqual(expectedUpserted);
       expect(new Set(detail.unknown.keys())).toEqual(expectedUnknown);
+      if (expectedUnknown.size > 0) {
+        flushesWithNonEmptyUnknown++;
+      }
       for (const id of removedThisWindow) {
         expect(detail.deleted).toContain(id); // deleted ⊇ IDs actually removed
       }
@@ -414,6 +419,19 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       prevSnapshot = after;
     };
 
+    // N1 (round 3 review): tombstones are permanent within one scope, so
+    // with a fixed 24-ID pool every ID is deleted at least once within the
+    // first ~5% of a 10k-event run, and the exact-unknown check (b) above
+    // goes untested for the rest. Alternating the scope every ~500 events
+    // clears deletedAgentIds (and state.agents) the same way a real
+    // navigation would, giving the fuzz repeated fresh windows instead of
+    // one. It also extends the dedicated setScope-discard test below to
+    // the fuzz's own in-flight dirty sets.
+    const scopes: ViewScope[] = [{ type: 'dashboard' }, { type: 'project', projectId: 'p-fuzz' }];
+    let scopeIndex = 0;
+    let eventsSinceScopeChange = 0;
+    const SCOPE_RESET_INTERVAL = 500;
+
     let i = 0;
     while (i < events.length) {
       const batchSize = 1 + Math.floor(batchPick() * 8);
@@ -423,15 +441,44 @@ describe('W2 coalescing fuzz (10k random events)', () => {
         batchEvents.push(ev);
         applyEvent(sm, ev);
       }
+      eventsSinceScopeChange += batchEvents.length;
       // Only flush if something was actually dirtied by this batch — an
       // all-no-op batch (e.g. every event targeting a just-tombstoned ID)
       // schedules nothing.
       if (rafCallbacks.length > 0) {
         verifyFlush(batchEvents);
       }
+
+      if (eventsSinceScopeChange >= SCOPE_RESET_INTERVAL) {
+        eventsSinceScopeChange = 0;
+        scopeIndex = (scopeIndex + 1) % scopes.length;
+        const changedBefore = changedSpy.mock.calls.length;
+        const updatedBefore = updatedSpy.mock.calls.length;
+
+        sm.setScope(scopes[scopeIndex] as ViewScope); // actual scope change
+
+        // setScope clears state.agents and deletedAgentIds; the fuzz's own
+        // shadow bookkeeping must follow, or every subsequent window's
+        // expected sets would be computed against stale state.
+        prevSnapshot = new Map();
+        deletedIdsShadow = new Set<string>();
+
+        // Assert no stale flush fires for the discarded dirty set, however
+        // something might still try to trigger it.
+        vi.advanceTimersByTime(1000);
+        const leftover = rafCallbacks.shift();
+        leftover?.(0);
+        rafCallbacks.length = 0;
+        expect(changedSpy).toHaveBeenCalledTimes(changedBefore);
+        expect(updatedSpy).toHaveBeenCalledTimes(updatedBefore);
+      }
     }
 
     expect(flushCount).toBeGreaterThan(50); // sanity: genuinely interleaved, not one giant flush
+    // Floor (round 3 review N1): the exact-unknown check in (b) must stay
+    // exercised throughout the run, not just in an opening window before
+    // every one of a small fixed ID pool gets permanently tombstoned.
+    expect(flushesWithNonEmptyUnknown).toBeGreaterThanOrEqual(200);
   }, 30_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
 
   it('B3 (round 1 review): setScope discards a pending dirty set — no stale agents-changed fires in the new generation', () => {
