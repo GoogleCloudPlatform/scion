@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -39,11 +38,15 @@ import (
 func TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination(t *testing.T) {
 	f := sortedListSetup(t)
 
-	const total = 11
-	const pageLimit = 3 // small on purpose, to force several pages
+	// Matches the design's own N1 plan size: 450 agents at limit=200, as
+	// cmd/project_health.go's walk does (r1 review N3; bulk insert via
+	// store.Store.WithTx makes this cheap, and legacy mode's per-page cost
+	// is independent of total candidate count, unlike sorted mode).
+	const total = 450
+	const pageLimit = 200
+	agents := f.createAgentsBulk(t, total, "walk", string(state.PhaseStopped), nil)
 	want := make(map[string]bool, total)
-	for i := 0; i < total; i++ {
-		a := f.createAgent(t, fmt.Sprintf("walk-%d", i), string(state.PhaseStopped), nil)
+	for _, a := range agents {
 		want[a.ID] = true
 	}
 

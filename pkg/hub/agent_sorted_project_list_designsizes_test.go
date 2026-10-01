@@ -231,3 +231,53 @@ func TestListProjectAgentsSorted_UnderCeiling_RealRowsAtCeiling(t *testing.T) {
 	require.NotNil(t, resp.Stats)
 	assert.Equal(t, authorizedListMaxCandidates, resp.Stats.Total)
 }
+
+// TestListProjectAgentsSorted_CandidateCeiling_LabelNarrowsBelowCeiling is
+// N1: the direct proof that the ceiling COUNT runs on the label-filtered
+// candidate set, not the raw per-project row count. A project with 2,001
+// agents, only 5 of which match the request's label filter, must succeed.
+func TestListProjectAgentsSorted_CandidateCeiling_LabelNarrowsBelowCeiling(t *testing.T) {
+	f := sortedListSetup(t)
+	const total = authorizedListMaxCandidates + 1
+	const keep = 5
+	err := f.store.WithTx(context.Background(), func(tx store.Store) error {
+		for i := 0; i < total; i++ {
+			labels := map[string]string{"team": "other"}
+			if i < keep {
+				labels = map[string]string{"team": "keep"}
+			}
+			a := &store.Agent{
+				ID: tid(fmt.Sprintf("sl-labelnarrow-%d", i)), Slug: fmt.Sprintf("labelnarrow-%d", i), Name: fmt.Sprintf("labelnarrow-%d", i),
+				ProjectID: f.project.ID, Phase: string(state.PhaseStopped),
+				CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Labels: labels,
+			}
+			if err := tx.CreateAgent(context.Background(), a); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500&label=team=keep"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+	assert.Equal(t, keep, resp.TotalCount)
+	require.NotNil(t, resp.Complete)
+	assert.True(t, *resp.Complete)
+}
+
+// TestListProjectAgentsSorted_LegacyUnaffectedAbove2001 is N1: a legacy
+// (no sort) request on a project with more than the sorted-mode ceiling's
+// worth of agents is unaffected -- it just truncates to 500 as it always
+// has, with no 422.
+func TestListProjectAgentsSorted_LegacyUnaffectedAbove2001(t *testing.T) {
+	f := sortedListSetup(t)
+	f.createAgentsBulk(t, authorizedListMaxCandidates+1, "legacy-unaffected", string(state.PhaseStopped), nil)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath(""), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+	assert.Len(t, resp.Agents, 500)
+	assert.NotEmpty(t, resp.NextCursor)
+}

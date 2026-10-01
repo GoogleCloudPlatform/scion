@@ -308,10 +308,11 @@ func (c *countingAgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (
 // pool above authorizedListMaxCandidates gets the 422 refusal, with exactly
 // one decision (the agent.list gate) and zero read-pass/capability
 // decisions; ListAgentMembers is not called with results scanned into the
-// read pass. The candidate pool is faked (via countingAgentStore) rather
-// than materialized as 2001 real rows, because sequential single-row
-// SQLite inserts at that volume are prohibitively slow in this sandbox
-// (recorded as a deviation in the P1b report).
+// read pass. The candidate pool is faked (via countingAgentStore) here,
+// specifically to assert the call counts (countAgentsCalls/membersCalls/
+// getByIDsCalls) a real 2001-row pool can't observe as directly;
+// TestListProjectAgentsSorted_CandidateCeiling_RealRows (designsizes_test.go)
+// covers the same gate with a real, materialized 2001-row pool.
 func TestListProjectAgentsSorted_CandidateCeiling(t *testing.T) {
 	f := sortedListSetup(t)
 	counting := &countingAgentStore{Store: f.store, fakeCandidateSize: authorizedListMaxCandidates + 1}
@@ -512,11 +513,10 @@ func TestListProjectAgentsSorted_StatsIgnoredInLegacyMode(t *testing.T) {
 // TestListProjectAgentsSorted_DecisionCounts_Complete pins the section 6.4
 // formula for a complete fit response: 5 + n + 7R (gate + one read decision
 // per candidate + 7 remaining-action decisions per readable item), which is
-// <= today's 5 + 8n and equal when R == n. n is kept small (not the design's
-// 100/500) because this sandbox's sequential SQLite inserts make large-N
-// fixture setup impractically slow; the formula's coefficients, which are
-// what this test actually exercises, do not depend on n's magnitude
-// (documented deviation in the P1b report).
+// <= today's 5 + 8n and equal when R == n. n is kept small here as a quick
+// unit-style check of the formula's shape;
+// TestListProjectAgentsSorted_DecisionCounts_DesignSizes (designsizes_test.go)
+// re-asserts the same formula at the design's own sizes (25-1200).
 func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 6
@@ -540,21 +540,14 @@ func TestListProjectAgentsSorted_DecisionCounts_Complete(t *testing.T) {
 	assert.Len(t, emitter.records, want, "decision count must equal 5 + 8n when every candidate is readable")
 }
 
-// TestListProjectAgentsSorted_DecisionCounts_PartiallyReadable is S6's
-// R < n case (design: "n = 500 with R = 200 ... 5 + 500 + 1,400 = 1,905").
-// Here a plain project member can read every project agent by default
-// (agent.read has no owner-only restriction in this fixture), so instead we
-// use an access constraint-free approach: create agents owned by a
-// *different* project the member cannot see via ownership, which is not
-// applicable on the project endpoint (project membership alone grants
-// read). Given the project endpoint grants read to any project member for
-// every agent in that project (no per-agent visibility narrowing without an
-// access constraint), R < n is only reachable via an access-constraint
-// fixture; that machinery is exercised by the existing authz suites and is
-// out of scope to duplicate here. This test instead pins the achievable
-// half of the same formula family: the *paged* cost bound, 5 + n + 7P,
-// which does not depend on R at all (design 5.3, "completeness does not
-// depend on R").
+// TestListProjectAgentsSorted_DecisionCounts_Paged pins the *paged* cost
+// bound, 5 + n + 7P, which does not depend on R at all (design 5.3,
+// "completeness does not depend on R"). The R < n sub-cases themselves
+// (n=1200/R=400 paged=1380, n=500/R=200 complete=1905) are in
+// designsizes_test.go, using grantProjectListOnly plus per-agent ownership
+// -- a minimal project-scoped role granting only agent.list, combined with
+// the owner relationship grant, reaches R < n for one caller in one project
+// with no access constraint needed.
 func TestListProjectAgentsSorted_DecisionCounts_Paged(t *testing.T) {
 	f := sortedListSetup(t)
 	const n = 8
@@ -584,27 +577,11 @@ func TestListProjectAgentsSorted_DecisionCounts_Paged(t *testing.T) {
 // memberResource(m) must equal agentResource(full), and the page's merged
 // capabilities must deep-equal ComputeCapabilitiesBatch's output over the
 // same resource.
-func TestListProjectAgentsSorted_MemberProjectionEquality(t *testing.T) {
-	f := sortedListSetup(t)
-	a := f.createAgent(t, "eq-1", string(state.PhaseStopped), map[string]string{"k": "v"})
-
-	member := store.AgentMember{
-		ID: a.ID, OwnerID: a.OwnerID, ProjectID: a.ProjectID,
-		Labels: a.Labels, Ancestry: a.Ancestry,
-		Phase: a.Phase, Created: a.Created, Updated: a.Updated, LastActivityEvent: a.LastActivityEvent,
-	}
-	assert.True(t, resourceEqual(memberResource(member), agentResource(a)),
-		"memberResource(m) must equal agentResource(full) when nothing raced")
-
-	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	resp := mustDecodeListAgentsResponse(t, rec.Body)
-	require.Len(t, resp.Agents, 1)
-	// Every registered agent action must appear in ResourceActions order
-	// with no duplicates, and the read pass' result (ActionRead) must agree
-	// with whichever of read/write actions the full HTTP response granted.
-	assert.Contains(t, resp.Agents[0].Cap.Actions, "read", "the owner can read its own project's agent")
-}
+// TestListProjectAgentsSorted_MemberProjectionEquality (the reflection-filled,
+// real-round-trip version the non-waivable S6 gate requires) lives in
+// agent_sorted_project_list_reflection_test.go, per r1 review B2. The old
+// hand-built-member version that lived here could not fail on a new
+// agentResource input and has been replaced, not merely supplemented.
 
 // TestMergeCapabilities_EquivalentToSingleBatchPass is the pure-logic half
 // of the S6 deep-equality gate: splitting ResourceActions["agent"] into a
@@ -775,13 +752,15 @@ func (d *deletingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 // (buildAgentUpdate, entadapter/agent_store.go — "Line 20" in the design's
 // r8 changelog), so this race cannot be produced by writing through the
 // normal store API; the test instead fabricates the mismatch at the
-// GetAgentsByIDs boundary itself, exercising the handler's defensive check
-// directly regardless of whether today's write paths can reach it.
+// full-row-load boundary itself (ListAgents, which listProjectAgentsSorted
+// uses to honor IncludeDeleted -- r1 review B4), exercising the handler's
+// explicit ProjectID check directly, regardless of whether today's write
+// paths can reach it.
 func TestListProjectAgentsSorted_Race_ProjectMismatch(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-project", string(state.PhaseStopped), nil)
 
-	raced := &reprojectingGetByIDsStore{Store: f.store, agentID: a.ID, newProjectID: tid("sl-other-project")}
+	raced := &reprojectingListAgentsStore{Store: f.store, agentID: a.ID, newProjectID: tid("sl-other-project")}
 	f.srv.store = raced
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
@@ -790,21 +769,21 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch(t *testing.T) {
 	assert.Empty(t, resp.Agents, "a row that moved to another project between the two reads must be dropped")
 }
 
-type reprojectingGetByIDsStore struct {
+type reprojectingListAgentsStore struct {
 	store.Store
 	agentID      string
 	newProjectID string
 }
 
-func (r *reprojectingGetByIDsStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
-	rows, err := r.Store.GetAgentsByIDs(ctx, ids)
+func (r *reprojectingListAgentsStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	result, err := r.Store.ListAgents(ctx, filter, opts)
 	if err != nil {
 		return nil, err
 	}
-	if a, ok := rows[r.agentID]; ok {
-		cp := *a
-		cp.ProjectID = r.newProjectID
-		rows[r.agentID] = &cp
+	for i := range result.Items {
+		if result.Items[i].ID == r.agentID {
+			result.Items[i].ProjectID = r.newProjectID
+		}
 	}
-	return rows, nil
+	return result, nil
 }

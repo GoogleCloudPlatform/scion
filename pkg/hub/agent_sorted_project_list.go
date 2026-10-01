@@ -15,14 +15,24 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
+
+// maxSortedLimit is the sorted-mode page size ceiling (design lists-graph.md
+// 4.1: "limit 1..500, Unchanged"). The legacy path gets this for free from
+// the store's own clamp (entadapter/agent_store.go's maxAgentListLimit);
+// sorted mode slices in Go, so it must clamp for itself or an unbounded
+// limit lets a caller multiply the per-page decision cost (7 actions per
+// page item) past the A15 bound with no race at all (r1 review B3).
+const maxSortedLimit = 500
 
 // P1b (ptone/scion#2383) implements sorted mode on the project agents
 // endpoint only: sort=updated (both directions), fit/complete, stats=1, the
@@ -80,6 +90,13 @@ type sortedProjectListParams struct {
 // fit/cursor exclusion. It writes the 400 response itself on failure so
 // callers can just check the returned ok.
 func parseSortedProjectListParams(w http.ResponseWriter, query url.Values, limit int) (sortedProjectListParams, bool) {
+	// Clamp first, before the fit>=limit check below, so clamping never
+	// turns a request that would have been valid at the clamped value into
+	// a 400 (r1 review B3; design 4.1's limit range is unchanged semantics,
+	// i.e. a silent clamp, not an error, matching the legacy store path).
+	if limit > maxSortedLimit {
+		limit = maxSortedLimit
+	}
 	p := sortedProjectListParams{sort: query.Get("sort"), limit: limit}
 
 	p.dir = query.Get("dir")
@@ -92,11 +109,13 @@ func parseSortedProjectListParams(w http.ResponseWriter, query url.Values, limit
 	}
 
 	// P1b implements sort=updated only on the project endpoint; sort=created
-	// is P2 (design 11 P1b/P2). Both remain valid *values* of the sort
-	// parameter per the final contract (4.1), so a request for "created"
-	// gets the same "not yet available" shape as an unrecognized value would
-	// under the final contract's "any other value returns 400" rule, rather
-	// than a confusing partial 200.
+	// is P2 (design 11 P1b/P2). "created" is a valid *value* of the sort
+	// parameter under the final contract (4.1), but P1b has no way to serve
+	// it yet, so it gets the same 400 "invalid sort" an unrecognized value
+	// would, rather than a confusing partial 200. (r1 review nit2: this is
+	// the actual message/code -- there is no separate "not yet available"
+	// response shape for sort, unlike the agent-JWT 400 above, which does
+	// have one.)
 	if p.sort != agentsort.Updated {
 		BadRequest(w, "invalid sort")
 		return p, false
@@ -135,93 +154,88 @@ func memberResource(m store.AgentMember) Resource {
 	return agentResource(m.ToAgent())
 }
 
-// resourceEqual is a deep equality over the fields of Resource that
-// authorization actually reads for an agent, normalizing a nil and an empty
-// Labels map or Ancestry slice as equal (design 5.3 step 5a, r8 NB-2): a
+// resourceEqual is a whole-Resource deep equality (design 5.3 step 5a:
+// "comparing whole Resources rather than a field list tracks any future
+// input automatically"; security sign-off r7 N4: "5a compares WHOLE
+// Resources not a field list"). It normalizes a nil and an empty Labels map
+// or Ancestry slice as equal first (design 5.3 step 5a, r8 NB-2): a
 // difference in how the narrow member decoder and the full-row decoder
 // represent "no labels" or "no ancestry" must never by itself trigger a
-// re-decision.
+// re-decision. Deliberately NOT a hand-written field list: a field this
+// function doesn't know about (the gap r1 review B1 found, where a new
+// Resource.ScopeUserID input went uncompared) would let step 5a silently
+// skip a re-decision on a raced row — exactly the TOCTOU this gate exists
+// to close. TestResourceEqual_MutationCoversEveryField asserts every
+// exported Resource field is covered by reflection-filling and mutating it.
 func resourceEqual(a, b Resource) bool {
-	if a.Type != b.Type || a.ID != b.ID || a.OwnerID != b.OwnerID ||
-		a.ParentType != b.ParentType || a.ParentID != b.ParentID ||
-		a.ScopeKind != b.ScopeKind {
-		return false
-	}
-	if !stringMapEqualNormalized(a.Labels, b.Labels) {
-		return false
-	}
-	if !stringSliceEqualNormalized(a.Ancestry, b.Ancestry) {
-		return false
-	}
-	return true
+	return reflect.DeepEqual(normalizeResourceForCompare(a), normalizeResourceForCompare(b))
 }
 
-func stringMapEqualNormalized(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
+// normalizeResourceForCompare returns a copy of r with a nil Labels or
+// Ancestry replaced by an empty (non-nil) value of the same type, so
+// resourceEqual's reflect.DeepEqual treats "no labels"/"no ancestry" the
+// same way regardless of which decoder produced it (r8 NB-2).
+func normalizeResourceForCompare(r Resource) Resource {
+	if r.Labels == nil {
+		r.Labels = map[string]string{}
 	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
+	if r.Ancestry == nil {
+		r.Ancestry = []string{}
 	}
-	return true
+	return r
 }
 
-func stringSliceEqualNormalized(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
+// loadFullRowsForPage fetches the full store.Agent rows for the page items,
+// honoring filter.IncludeDeleted (r1 review B4). GetAgentsByIDs hard-codes
+// agent.DeletedAtIsNil(), so a soft-deleted row would be indistinguishable
+// from "deleted between the two reads" even when the caller asked for it
+// with includeDeleted=true -- while CountAgents, ListAgentMembers and stats
+// already honor it. Using ListAgents with an IDs-only filter instead goes
+// through the same agentFilterPredicates the rest of this request already
+// uses, so IncludeDeleted (and everything else) is applied uniformly.
+func (s *Server) loadFullRowsForPage(ctx context.Context, ids []string, includeDeleted bool) (map[string]*store.Agent, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+	result, err := s.store.ListAgents(ctx, store.AgentFilter{IDs: ids, IncludeDeleted: includeDeleted},
+		store.ListOptions{Limit: len(ids), SkipTotalCount: true})
+	if err != nil {
+		return nil, err
 	}
-	return true
+	out := make(map[string]*store.Agent, len(result.Items))
+	for i := range result.Items {
+		out[result.Items[i].ID] = &result.Items[i]
+	}
+	return out, nil
 }
 
-// agentMatchesMemberFilter re-applies filter's non-phase predicates to a
-// freshly re-read full agent row (design lists-graph.md 5.3 step 5a, r8 F-1
-// and NB-3): if the full row no longer matches the request's own filter —
-// most concretely, its labels changed so a label=value filter no longer
-// holds, or (belt-and-suspenders alongside the explicit ProjectID check the
-// caller performs separately) it no longer belongs to the request's project
-// — the row is dropped at no decision cost. Phase is deliberately not
-// rechecked here: a complete response is unphased, and the paged phase
-// filter is applied to the member snapshot, which carries the same
-// staleness a single read has today.
-func agentMatchesMemberFilter(a *store.Agent, filter store.AgentFilter) bool {
-	if filter.ProjectID != "" && a.ProjectID != filter.ProjectID {
-		return false
+// recheckStillMatchesFilter re-applies memberFilter (the request filter with
+// Phase cleared) to the page's freshly re-read rows by asking the store the
+// same question agentFilterPredicates already answers for the rest of this
+// request, rather than hand-duplicating its logic here (design lists-graph.md
+// 5.3 step 5a, r8 F-1 and NB-3: "the same matcher as the store predicate").
+// A hand-written duplicate would drift as store.AgentFilter grows; asking
+// the store directly cannot (r1 review B5). memberFilter.ProjectID is
+// already the request project, so a row that moved to another project
+// between the two reads is excluded here too (NB-3), with no separate
+// check needed. Phase is deliberately not rechecked: a complete response is
+// unphased, and the paged phase filter is applied to the member snapshot,
+// which carries the same staleness a single read has today.
+func (s *Server) recheckStillMatchesFilter(ctx context.Context, memberFilter store.AgentFilter, candidateIDs []string, sortKey, dir string) (map[string]bool, error) {
+	if len(candidateIDs) == 0 {
+		return nil, nil
 	}
-	if filter.RuntimeBrokerID != "" && a.RuntimeBrokerID != filter.RuntimeBrokerID {
-		return false
+	recheckFilter := memberFilter
+	recheckFilter.IDs = candidateIDs
+	matched, err := s.store.ListAgentMembers(ctx, recheckFilter, sortKey, dir, len(candidateIDs))
+	if err != nil {
+		return nil, err
 	}
-	if filter.RequestedOwnerID != "" && a.OwnerID != filter.RequestedOwnerID {
-		return false
+	out := make(map[string]bool, len(matched))
+	for _, m := range matched {
+		out[m.ID] = true
 	}
-	if filter.AncestorID != "" && !containsString(a.Ancestry, filter.AncestorID) {
-		return false
-	}
-	for k, v := range filter.Labels {
-		if a.Labels[k] != v {
-			return false
-		}
-	}
-	if filter.IDs != nil {
-		if len(filter.IDs) == 0 || !containsString(filter.IDs, a.ID) {
-			return false
-		}
-	}
-	if filter.LineageRootID != "" {
-		if a.ID != filter.LineageRootID && !containsString(a.Ancestry, filter.LineageRootID) {
-			return false
-		}
-	}
-	if !filter.IncludeDeleted && !a.DeletedAt.IsZero() {
-		return false
-	}
-	return true
+	return out, nil
 }
 
 // memberKeyOf returns the agentsort.Row for m under sort.
@@ -401,7 +415,12 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	for i, m := range page {
 		ids[i] = m.ID
 	}
-	fullRows, err := s.store.GetAgentsByIDs(ctx, ids)
+	fullRows, err := s.loadFullRowsForPage(ctx, ids, filter.IncludeDeleted)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	stillMatches, err := s.recheckStillMatchesFilter(ctx, memberFilter, ids, p.sort, p.dir)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -422,10 +441,14 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		if !ok {
 			continue // deleted between the two reads: dropped (design 5.3 step 5a)
 		}
-		if full.ProjectID != projectID { // r8 NB-3, both paths
+		// r8 NB-3: an explicit, single-field check kept alongside the
+		// store-driven recheck below as the design's stated
+		// belt-and-suspenders -- it also still fires if a full row were
+		// ever fetched by a path that does not itself filter by project.
+		if full.ProjectID != projectID {
 			continue
 		}
-		if !agentMatchesMemberFilter(full, filter) { // r8 F-1
+		if !stillMatches[m.ID] { // r8 F-1: no longer matches the request's own (non-phase) filter
 			continue
 		}
 
