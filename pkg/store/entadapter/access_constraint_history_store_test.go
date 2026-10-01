@@ -375,7 +375,7 @@ func constraintHistoryPostgresBackendPID(ctx context.Context, txStore *Composite
 	if err := txStore.client.Driver().Query(ctx, "SELECT pg_backend_pid()", []any{}, rows); err != nil {
 		return 0, fmt.Errorf("query PostgreSQL backend PID: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return 0, fmt.Errorf("query PostgreSQL backend PID: no row returned")
 	}
