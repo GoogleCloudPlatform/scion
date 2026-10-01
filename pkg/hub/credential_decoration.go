@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -227,7 +229,14 @@ var gVerifiedActorFieldNames = credentialmeta.ReservedActorLabelKeys()
 // never echoes the offending value, per the E.1 rule that untrusted
 // issuer-supplied text must never be reflected back into logs or errors
 // unsanitized.
-type ErrInvalidUATMetadata = credentialmeta.ValidationError
+type ErrInvalidUATMetadata struct {
+	Field string
+	Rule  string
+}
+
+func (e *ErrInvalidUATMetadata) Error() string {
+	return fmt.Sprintf("invalid %s: %s", e.Field, e.Rule)
+}
 
 // ValidateCredentialMetadata validates a token's name, purpose, and labels
 // against the bounded schema documented in the E.1 design notes. It is
@@ -236,7 +245,15 @@ type ErrInvalidUATMetadata = credentialmeta.ValidationError
 // added. Existing (pre-E.1) rows are never re-validated: they render through
 // the sanitizing LogValue path instead.
 func ValidateCredentialMetadata(name, purpose string, labels map[string]string) error {
-	return credentialmeta.ValidateIssuance(name, purpose, labels)
+	err := credentialmeta.ValidateIssuance(name, purpose, labels)
+	if err == nil {
+		return nil
+	}
+	var validationErr *credentialmeta.ValidationError
+	if errors.As(err, &validationErr) {
+		return &ErrInvalidUATMetadata{Field: validationErr.Field, Rule: validationErr.Rule}
+	}
+	return err
 }
 
 // appendCredentialMetadataAuditFields adds E.1's audit-safe metadata

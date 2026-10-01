@@ -50,6 +50,11 @@ const (
 
 var kinds = []Kind{KindInteractive, KindUAT, KindAgentJWT, KindFederation, KindBroker, KindDev}
 
+// Kinds returns every canonical credential kind.
+func Kinds() []Kind {
+	return append([]Kind(nil), kinds...)
+}
+
 // BoundaryKind is the canonical descriptive credential-boundary kind.
 type BoundaryKind string
 
@@ -57,6 +62,13 @@ const (
 	BoundaryProject BoundaryKind = "project"
 	BoundaryHub     BoundaryKind = "hub"
 )
+
+var boundaryKinds = []BoundaryKind{BoundaryProject, BoundaryHub}
+
+// BoundaryKinds returns every canonical credential-boundary kind.
+func BoundaryKinds() []BoundaryKind {
+	return append([]BoundaryKind(nil), boundaryKinds...)
+}
 
 // ValidationError identifies a rejected field and rule without retaining the
 // rejected value.

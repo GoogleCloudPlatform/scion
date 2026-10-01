@@ -86,6 +86,37 @@ func TestNewRefRejectsControlOrFormatRunesInEverySerializedString(t *testing.T) 
 	}
 }
 
+func TestNewRefBoundaryPairMatrix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		kind        BoundaryKind
+		projectID   string
+		wantAllowed bool
+	}{
+		{"absent pair", "", "", true},
+		{"project with ID", BoundaryProject, "project-1", true},
+		{"hub without ID", BoundaryHub, "", true},
+		{"project without ID", BoundaryProject, "", false},
+		{"hub with ID", BoundaryHub, "project-1", false},
+		{"absent kind with ID", "", "project-1", false},
+		{"unknown kind", BoundaryKind("unknown"), "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewRef(RefInput{Kind: KindUAT, BoundaryKind: tc.kind, BoundaryProjectID: tc.projectID})
+			if tc.wantAllowed && err != nil {
+				t.Fatalf("NewRef() rejected valid boundary pair: %v", err)
+			}
+			if !tc.wantAllowed && err == nil {
+				t.Fatal("NewRef() accepted inconsistent boundary pair")
+			}
+		})
+	}
+}
+
 func TestValidationErrorTextIsStableAndValueFree(t *testing.T) {
 	t.Parallel()
 
