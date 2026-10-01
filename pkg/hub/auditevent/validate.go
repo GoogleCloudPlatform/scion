@@ -17,8 +17,8 @@ package auditevent
 import (
 	"encoding/hex"
 	"fmt"
-	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -27,7 +27,12 @@ import (
 	"github.com/google/uuid"
 )
 
-var labelKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
+const (
+	credentialMaxNameBytes       = 128
+	credentialMaxLabelCount      = 8
+	credentialMaxLabelKeyBytes   = 32
+	credentialMaxLabelValueBytes = 64
+)
 
 // ValidatePhaseOutcome enforces the common truthful phase/result matrix.
 func ValidatePhaseOutcome(phase Phase, outcome Outcome) error {
@@ -55,6 +60,17 @@ func ValidatePhaseOutcome(phase Phase, outcome Outcome) error {
 // Validate checks the common envelope and its literal catalog schema before
 // an event reaches any sink.
 func Validate(event EnvelopeV1) error {
+	var payload map[string]any
+	if event.Payload != nil {
+		payload = event.Payload.auditPayloadLeaves()
+	}
+	return validateSnapshot(event, payload)
+}
+
+// validateSnapshot validates the envelope against the already-materialized
+// payload leaves. Render uses this entry point so the exact validated map is
+// also the map serialized across the audit boundary.
+func validateSnapshot(event EnvelopeV1, payload map[string]any) error {
 	if event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schema_version must be %d", SchemaVersion)
 	}
@@ -132,7 +148,7 @@ func Validate(event EnvelopeV1) error {
 	if event.Payload == nil {
 		return fmt.Errorf("payload is required")
 	}
-	return validatePayload(entry, event.Payload.auditPayloadLeaves())
+	return validatePayload(entry, payload)
 }
 
 func validateRequest(request *RequestRef, correlationID string) error {
@@ -164,37 +180,172 @@ func validateIdentity(name string, identity *IdentityRef) error {
 	return validateBoundedString(name+".id", identity.ID, 128)
 }
 
+// CredentialValidationError reports a credential metadata rule violation
+// without retaining or echoing the rejected value.
+type CredentialValidationError struct {
+	field string
+	rule  string
+}
+
+func (e *CredentialValidationError) Error() string {
+	return fmt.Sprintf("invalid credential metadata field %s: %s", e.field, e.rule)
+}
+
+func newCredentialValidationError(field, rule string) error {
+	return &CredentialValidationError{field: field, rule: rule}
+}
+
+func validateCredentialString(field, value string, maxBytes int, required, rejectSecret bool) error {
+	if value == "" {
+		if required {
+			return newCredentialValidationError(field, "is required")
+		}
+		return nil
+	}
+	if !utf8.ValidString(value) {
+		return newCredentialValidationError(field, "must be valid UTF-8")
+	}
+	if len(value) > maxBytes {
+		return newCredentialValidationError(field, fmt.Sprintf("must be at most %d bytes", maxBytes))
+	}
+	if hasAuditUnsafeRune(value) {
+		return newCredentialValidationError(field, "must not contain control or formatting characters")
+	}
+	if rejectSecret && credentialMetadataLooksSecret(value) {
+		return newCredentialValidationError(field, "must not resemble a bearer token or credential value")
+	}
+	return nil
+}
+
+func validCredentialLabelKey(value string) bool {
+	if len(value) == 0 || len(value) > credentialMaxLabelKeyBytes {
+		return false
+	}
+	for i, r := range value {
+		switch {
+		case i == 0 && (r < 'a' || r > 'z'):
+			return false
+		case i > 0 && !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-'):
+			return false
+		}
+	}
+	return true
+}
+
+func validCredentialLabelValue(value string) bool {
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case strings.ContainsRune(" _.:/@+=,-", r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var reservedCredentialLabelKeys = map[string]struct{}{
+	"agent": {}, "agent_id": {}, "actor": {}, "principal": {},
+	"principal_id": {}, "principal_kind": {}, "user": {}, "user_id": {},
+	"email": {}, "on_behalf_of": {}, "delegate": {}, "delegator": {},
+	"delegation": {}, "ancestry": {}, "creator": {}, "created_by": {},
+	"owner": {}, "project_id": {}, "broker_id": {}, "credential": {},
+	"credential_id": {}, "token": {}, "token_id": {}, "role": {},
+	"scope": {}, "scopes": {}, "permission": {}, "permissions": {},
+	"verified": {}, "system": {}, "executor": {}, "initiator": {},
+	"actor_binding": {}, "actor_agent_id": {}, "authorizing_user_id": {},
+	"source_grant_id": {}, "delegation_edge_id": {}, "parent_grant_id": {},
+	"exchange_agent_credential_id": {}, "actor_kind": {},
+}
+
+var reservedCredentialLabelPrefixes = []string{"scion.", "hub.", "x-"}
+
+func reservedCredentialLabelKey(value string) bool {
+	lower := strings.ToLower(value)
+	for _, prefix := range reservedCredentialLabelPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	normalized := strings.ReplaceAll(lower, "-", "_")
+	if _, ok := reservedCredentialLabelKeys[normalized]; ok {
+		return true
+	}
+	for reserved := range reservedCredentialLabelKeys {
+		if strings.HasPrefix(normalized, reserved+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialMetadataLooksSecret(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "scion_pat_") || strings.Contains(lower, "bearer ")
+}
+
+func hasAuditUnsafeRune(value string) bool {
+	for _, r := range value {
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateCredential(credential *CredentialRef) error {
 	if credential == nil {
 		return nil
 	}
-	if err := validateBoundedString("credential.kind", credential.Kind, 64); err != nil {
+	if err := validateCredentialString("kind", credential.Kind, 64, true, false); err != nil {
 		return err
 	}
 	fields := []struct {
-		name  string
-		value string
-		limit int
+		name         string
+		value        string
+		limit        int
+		rejectSecret bool
 	}{
-		{"credential.id", credential.ID, 128},
-		{"credential.name", credential.Name, 128},
-		{"credential.boundary_kind", credential.BoundaryKind, 64},
-		{"credential.boundary_project_id", credential.BoundaryProjectID, 128},
+		{"id", credential.ID, 128, false},
+		{"name", credential.Name, credentialMaxNameBytes, true},
+		{"boundary_kind", credential.BoundaryKind, 64, false},
+		{"boundary_project_id", credential.BoundaryProjectID, 128, false},
 	}
 	for _, field := range fields {
-		if err := validateOptionalBoundedString(field.name, field.value, field.limit); err != nil {
+		if err := validateCredentialString(field.name, field.value, field.limit, false, field.rejectSecret); err != nil {
 			return err
 		}
 	}
-	if len(credential.Labels) > 16 {
-		return fmt.Errorf("credential.labels must contain at most 16 entries")
+	if len(credential.Labels) > credentialMaxLabelCount {
+		return newCredentialValidationError("labels", fmt.Sprintf("must contain at most %d entries", credentialMaxLabelCount))
 	}
-	for key, value := range credential.Labels {
-		if !labelKeyPattern.MatchString(key) {
-			return fmt.Errorf("credential label key %q is invalid", key)
+	keys := make([]string, 0, len(credential.Labels))
+	for key := range credential.Labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := credential.Labels[key]
+		if !utf8.ValidString(key) || !utf8.ValidString(value) {
+			return newCredentialValidationError("labels", "label key and value must be valid UTF-8")
 		}
-		if err := validateOptionalBoundedString("credential.labels."+key, value, 128); err != nil {
-			return err
+		if !validCredentialLabelKey(key) {
+			return newCredentialValidationError("labels", fmt.Sprintf("label key must match ^[a-z][a-z0-9_.-]{0,%d}$", credentialMaxLabelKeyBytes-1))
+		}
+		if reservedCredentialLabelKey(key) {
+			return newCredentialValidationError("labels", "label key is reserved")
+		}
+		if len(value) > credentialMaxLabelValueBytes {
+			return newCredentialValidationError("labels", fmt.Sprintf("label value must be at most %d bytes", credentialMaxLabelValueBytes))
+		}
+		if value != strings.TrimSpace(value) {
+			return newCredentialValidationError("labels", "label value must not have leading or trailing whitespace")
+		}
+		if !validCredentialLabelValue(value) {
+			return newCredentialValidationError("labels", "label value contains a disallowed character")
+		}
+		if credentialMetadataLooksSecret(key) || credentialMetadataLooksSecret(value) {
+			return newCredentialValidationError("labels", "must not resemble a bearer token or credential value")
 		}
 	}
 	return nil
@@ -202,70 +353,77 @@ func validateCredential(credential *CredentialRef) error {
 
 func validatePayload(entry CatalogEntry, payload map[string]any) error {
 	allowed := make(map[string]struct{}, len(entry.RequiredPayloadLeaves)+len(entry.OptionalPayloadLeaves))
-	for _, leaf := range entry.RequiredPayloadLeaves {
-		allowed[leaf] = struct{}{}
-		if _, ok := payload[leaf]; !ok {
-			return fmt.Errorf("required payload leaf %q is missing", leaf)
+	for _, schema := range entry.RequiredPayloadLeaves {
+		allowed[schema.Name] = struct{}{}
+		value, ok := payload[schema.Name]
+		if !ok {
+			return fmt.Errorf("required payload leaf %q is missing", schema.Name)
+		}
+		if err := validatePayloadLeaf(schema, value); err != nil {
+			return err
 		}
 	}
-	for _, leaf := range entry.OptionalPayloadLeaves {
-		allowed[leaf] = struct{}{}
+	for _, schema := range entry.OptionalPayloadLeaves {
+		allowed[schema.Name] = struct{}{}
+		if value, ok := payload[schema.Name]; ok {
+			if err := validatePayloadLeaf(schema, value); err != nil {
+				return err
+			}
+		}
 	}
 	for leaf := range payload {
 		if _, ok := allowed[leaf]; !ok {
 			return fmt.Errorf("undeclared payload leaf %q", leaf)
 		}
 	}
+	return nil
+}
 
-	classification, ok := payload["classification"].(string)
-	if !ok || !slices.Contains([]string{"tighten", "relax", "mixed", "no_effect"}, classification) {
-		return fmt.Errorf("payload.classification is invalid")
-	}
-	for _, leaf := range []string{"before_revision", "after_revision"} {
-		if value, ok := payload[leaf]; ok {
-			if _, ok := value.(int64); !ok {
-				return fmt.Errorf("payload.%s must be int64", leaf)
-			}
+func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
+	name := "payload." + schema.Name
+	switch schema.Type {
+	case PayloadString:
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", name)
 		}
-	}
-	for _, leaf := range []string{"preview_id"} {
-		if value, ok := payload[leaf]; ok {
-			text, ok := value.(string)
-			if !ok {
-				return fmt.Errorf("payload.%s must be a string", leaf)
-			}
-			if err := validateBoundedString("payload."+leaf, text, 128); err != nil {
-				return err
-			}
+		if err := validateBoundedString(name, text, schema.MaxBytes); err != nil {
+			return err
 		}
-	}
-	if value, ok := payload["draft_hash"]; ok {
+		if len(schema.AllowedValues) > 0 && !slices.Contains(schema.AllowedValues, text) {
+			return fmt.Errorf("%s is not an allowed value", name)
+		}
+	case PayloadInt64:
+		if _, ok := value.(int64); !ok {
+			return fmt.Errorf("%s must be int64", name)
+		}
+	case PayloadHexString:
 		digest, ok := value.(string)
-		if !ok || len(digest) != 64 {
-			return fmt.Errorf("payload.draft_hash must be a 64-character hexadecimal digest")
+		if !ok || len(digest) != schema.ExactLength {
+			return fmt.Errorf("%s must be a %d-character hexadecimal digest", name, schema.ExactLength)
 		}
 		if _, err := hex.DecodeString(digest); err != nil {
-			return fmt.Errorf("payload.draft_hash must be a 64-character hexadecimal digest")
+			return fmt.Errorf("%s must be a %d-character hexadecimal digest", name, schema.ExactLength)
 		}
-	}
-	if value, ok := payload["impact_counts"]; ok {
+	case PayloadImpactCounts:
 		if _, ok := value.(ImpactCounts); !ok {
-			return fmt.Errorf("payload.impact_counts has an invalid type")
+			return fmt.Errorf("%s has an invalid type", name)
 		}
-	}
-	if value, ok := payload["changed_fields"]; ok {
-		fields, ok := value.([]string)
+	case PayloadStringArray:
+		items, ok := value.([]string)
 		if !ok {
-			return fmt.Errorf("payload.changed_fields must be a string array")
+			return fmt.Errorf("%s must be a string array", name)
 		}
-		if len(fields) > 32 {
-			return fmt.Errorf("payload.changed_fields must contain at most 32 items")
+		if len(items) > schema.MaxItems {
+			return fmt.Errorf("%s must contain at most %d items", name, schema.MaxItems)
 		}
-		for i, field := range fields {
-			if err := validateBoundedString(fmt.Sprintf("payload.changed_fields[%d]", i), field, 256); err != nil {
+		for i, item := range items {
+			if err := validateBoundedString(fmt.Sprintf("%s[%d]", name, i), item, schema.ItemMaxBytes); err != nil {
 				return err
 			}
 		}
+	default:
+		return fmt.Errorf("%s has undeclared catalog type %q", name, schema.Type)
 	}
 	return nil
 }
@@ -279,7 +437,7 @@ func validateBoundedString(name, value string, maxBytes int) error {
 
 func validateUUID(name, value string) error {
 	parsed, err := uuid.Parse(value)
-	if err != nil || parsed.String() != value {
+	if err != nil || parsed == uuid.Nil || parsed.String() != value {
 		return fmt.Errorf("%s must be a canonical UUID", name)
 	}
 	return nil

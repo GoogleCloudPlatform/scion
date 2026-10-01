@@ -28,6 +28,31 @@ const (
 	DestinationHistory       Destination = "history"
 )
 
+// PayloadValueType identifies the concrete Go value shape admitted for a
+// payload leaf. Validation is driven exclusively by the leaf declarations in
+// the action's catalog entry.
+type PayloadValueType string
+
+const (
+	PayloadString       PayloadValueType = "string"
+	PayloadInt64        PayloadValueType = "int64"
+	PayloadHexString    PayloadValueType = "hex_string"
+	PayloadImpactCounts PayloadValueType = "impact_counts"
+	PayloadStringArray  PayloadValueType = "string_array"
+)
+
+// PayloadLeafSchema is the complete machine-readable contract for one
+// payload leaf. Zero bounds mean that the corresponding bound is not used.
+type PayloadLeafSchema struct {
+	Name          string
+	Type          PayloadValueType
+	MaxBytes      int
+	ExactLength   int
+	MaxItems      int
+	ItemMaxBytes  int
+	AllowedValues []string
+}
+
 // CatalogEntry is the machine-readable schema for one action.
 type CatalogEntry struct {
 	Family                 string
@@ -35,8 +60,8 @@ type CatalogEntry struct {
 	AllowedPairs           []PhaseOutcome
 	ResourceKind           string
 	RequiredEnvelopeLeaves []string
-	RequiredPayloadLeaves  []string
-	OptionalPayloadLeaves  []string
+	RequiredPayloadLeaves  []PayloadLeafSchema
+	OptionalPayloadLeaves  []PayloadLeafSchema
 	Destinations           []Destination
 }
 
@@ -46,9 +71,21 @@ var catalog = []CatalogEntry{{
 	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 	ResourceKind:           "access_constraint",
 	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource", "resource.project_id"},
-	RequiredPayloadLeaves:  []string{"classification"},
-	OptionalPayloadLeaves:  []string{"before_revision", "after_revision", "preview_id", "draft_hash", "impact_counts", "changed_fields"},
-	Destinations:           []Destination{DestinationStructuredLog, DestinationHistory},
+	RequiredPayloadLeaves: []PayloadLeafSchema{{
+		Name:          "classification",
+		Type:          PayloadString,
+		MaxBytes:      9,
+		AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+	}},
+	OptionalPayloadLeaves: []PayloadLeafSchema{
+		{Name: "before_revision", Type: PayloadInt64},
+		{Name: "after_revision", Type: PayloadInt64},
+		{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+		{Name: "impact_counts", Type: PayloadImpactCounts},
+		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+	},
+	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
 }}
 
 // Catalog returns a defensive snapshot of the schemas implemented in this
@@ -59,11 +96,20 @@ func Catalog() []CatalogEntry {
 		result[i] = entry
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
-		result[i].RequiredPayloadLeaves = append([]string(nil), entry.RequiredPayloadLeaves...)
-		result[i].OptionalPayloadLeaves = append([]string(nil), entry.OptionalPayloadLeaves...)
+		result[i].RequiredPayloadLeaves = clonePayloadLeafSchemas(entry.RequiredPayloadLeaves)
+		result[i].OptionalPayloadLeaves = clonePayloadLeafSchemas(entry.OptionalPayloadLeaves)
 		result[i].Destinations = append([]Destination(nil), entry.Destinations...)
 	}
 	return result
+}
+
+func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {
+	clones := make([]PayloadLeafSchema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = schema
+		clones[i].AllowedValues = append([]string(nil), schema.AllowedValues...)
+	}
+	return clones
 }
 
 func catalogEntry(family, action string) (CatalogEntry, bool) {

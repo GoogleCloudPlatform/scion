@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,7 +191,9 @@ func TestValidationRejectsBoundsAndInvalidEnums(t *testing.T) {
 		{"empty resource id", func(e *EnvelopeV1) { e.Resource.ID = "" }},
 		{"empty project id", func(e *EnvelopeV1) { e.Resource.ProjectID = "" }},
 		{"bad event id", func(e *EnvelopeV1) { e.EventID = "not-a-uuid" }},
+		{"nil event id", func(e *EnvelopeV1) { e.EventID = uuid.Nil.String() }},
 		{"noncanonical event id", func(e *EnvelopeV1) { e.EventID = strings.ReplaceAll(e.EventID, "-", "") }},
+		{"nil causation id", func(e *EnvelopeV1) { e.CausationID = uuid.Nil.String() }},
 		{"non utc timestamp", func(e *EnvelopeV1) { e.OccurredAt = e.OccurredAt.In(time.FixedZone("offset", 3600)) }},
 		{"wrong severity", func(e *EnvelopeV1) { e.Severity = SeverityWarning }},
 		{"oversized changed fields", func(e *EnvelopeV1) {
@@ -212,6 +215,83 @@ func TestValidationRejectsBoundsAndInvalidEnums(t *testing.T) {
 	}
 }
 
+func TestCredentialValidationRejectsUnsafeMetadataWithoutEchoingValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		credential CredentialRef
+		canary     string
+	}{
+		{
+			name:       "secret-shaped name",
+			credential: CredentialRef{Kind: "user_access_token", Name: "scion_pat_name-canary"},
+			canary:     "scion_pat_name-canary",
+		},
+		{
+			name:       "invalid label key",
+			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"InvalidKeyCanary": "safe"}},
+			canary:     "InvalidKeyCanary",
+		},
+		{
+			name:       "reserved label key",
+			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"principal": "safe"}},
+			canary:     "principal",
+		},
+		{
+			name:       "secret-shaped label key",
+			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"scion_pat_key-canary": "safe"}},
+			canary:     "scion_pat_key-canary",
+		},
+		{
+			name:       "secret-shaped label value",
+			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": "Bearer value-canary"}},
+			canary:     "Bearer value-canary",
+		},
+		{
+			name:       "disallowed label value character",
+			credential: CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": "value$canary"}},
+			canary:     "value$canary",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := validCreateEvent(t)
+			event.Credential = &tc.credential
+			err := Validate(event)
+			require.Error(t, err)
+			var validationErr *CredentialValidationError
+			assert.ErrorAs(t, err, &validationErr)
+			assert.NotContains(t, err.Error(), tc.canary)
+		})
+	}
+}
+
+func TestCredentialValidationUsesCanonicalMetadataBounds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		credential CredentialRef
+	}{
+		{"label count", CredentialRef{Kind: "user_access_token", Labels: map[string]string{
+			"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": "7", "h": "8", "i": "9",
+		}}},
+		{"label key length", CredentialRef{Kind: "user_access_token", Labels: map[string]string{strings.Repeat("a", 33): "safe"}}},
+		{"label value length", CredentialRef{Kind: "user_access_token", Labels: map[string]string{"purpose": strings.Repeat("a", 65)}}},
+		{"name format character", CredentialRef{Kind: "user_access_token", Name: "safe\u200bname"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := validCreateEvent(t)
+			event.Credential = &tc.credential
+			assert.Error(t, Validate(event))
+		})
+	}
+}
+
 type testPayloadWithUndeclaredLeaf struct{}
 
 func (testPayloadWithUndeclaredLeaf) auditPayloadLeaves() map[string]any {
@@ -219,6 +299,35 @@ func (testPayloadWithUndeclaredLeaf) auditPayloadLeaves() map[string]any {
 		"classification": "tighten",
 		"secret_value":   "canary-secret",
 	}
+}
+
+type changingTestPayload struct {
+	calls int
+}
+
+func (p *changingTestPayload) auditPayloadLeaves() map[string]any {
+	p.calls++
+	if p.calls == 1 {
+		return map[string]any{"classification": "tighten"}
+	}
+	return map[string]any{
+		"classification": "tighten",
+		"secret_value":   "snapshot-canary",
+	}
+}
+
+func TestRenderValidatesAndSerializesOnePayloadSnapshot(t *testing.T) {
+	t.Parallel()
+
+	event := validCreateEvent(t)
+	payload := &changingTestPayload{}
+	event.Payload = payload
+
+	rendered, err := Render(event)
+	require.NoError(t, err)
+	assert.Equal(t, 1, payload.calls)
+	assert.NotContains(t, string(rendered), "snapshot-canary")
+	assert.JSONEq(t, `{"classification":"tighten"}`, extractPayloadJSON(t, rendered))
 }
 
 func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
@@ -230,9 +339,21 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 		AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 		ResourceKind:           "access_constraint",
 		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource", "resource.project_id"},
-		RequiredPayloadLeaves:  []string{"classification"},
-		OptionalPayloadLeaves:  []string{"before_revision", "after_revision", "preview_id", "draft_hash", "impact_counts", "changed_fields"},
-		Destinations:           []Destination{DestinationStructuredLog, DestinationHistory},
+		RequiredPayloadLeaves: []PayloadLeafSchema{{
+			Name:          "classification",
+			Type:          PayloadString,
+			MaxBytes:      9,
+			AllowedValues: []string{"tighten", "relax", "mixed", "no_effect"},
+		}},
+		OptionalPayloadLeaves: []PayloadLeafSchema{
+			{Name: "before_revision", Type: PayloadInt64},
+			{Name: "after_revision", Type: PayloadInt64},
+			{Name: "preview_id", Type: PayloadString, MaxBytes: 128},
+			{Name: "draft_hash", Type: PayloadHexString, ExactLength: 64},
+			{Name: "impact_counts", Type: PayloadImpactCounts},
+			{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
+		},
+		Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
 	}}, Catalog())
 }
 
@@ -246,6 +367,73 @@ func TestRenderIsStableAndOmitsUnknownOptionalFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, second)
 	assert.Equal(t, `{"schema_version":1,"event_id":"`+event.EventID+`","occurred_at":"2026-10-01T12:34:56.123456789Z","family":"access_boundary","action":"create","phase":"commit","outcome":"succeeded","severity":"info","correlation_id":"corr-1","principal":{"kind":"user","id":"user-1"},"resource":{"kind":"access_constraint","id":"constraint-1","project_id":"project-1"},"payload":{"classification":"tighten"}}`, string(first))
+}
+
+func TestCaptureSinkConcurrentEmitAndRecords(t *testing.T) {
+	t.Parallel()
+
+	const (
+		emitters       = 8
+		recordsPerEmit = 25
+		readers        = 4
+		readsPerReader = 50
+	)
+
+	event := validCreateEvent(t)
+	expected, err := Render(event)
+	require.NoError(t, err)
+	sink := NewCaptureSink()
+	start := make(chan struct{})
+	errs := make(chan error, emitters*recordsPerEmit)
+	var workers sync.WaitGroup
+
+	for range emitters {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range recordsPerEmit {
+				if err := sink.Emit(context.Background(), event); err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	for range readers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range readsPerReader {
+				_ = sink.Records()
+			}
+		}()
+	}
+
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	records := sink.Records()
+	require.Len(t, records, emitters*recordsPerEmit)
+	for _, record := range records {
+		assert.JSONEq(t, string(expected), string(record))
+	}
+
+	records[0][0] = '!'
+	assert.Equal(t, expected, sink.Records()[0])
+}
+
+func extractPayloadJSON(t *testing.T, record []byte) string {
+	t.Helper()
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	require.NoError(t, json.Unmarshal(record, &envelope))
+	return string(envelope.Payload)
 }
 
 func validCreateEvent(t *testing.T) EnvelopeV1 {

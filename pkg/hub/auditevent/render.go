@@ -42,7 +42,11 @@ type serializedEnvelopeV1 struct {
 // Render validates and serializes an envelope with stable field names and no
 // undeclared payload leaves.
 func Render(event EnvelopeV1) ([]byte, error) {
-	if err := Validate(event); err != nil {
+	var payload map[string]any
+	if event.Payload != nil {
+		payload = event.Payload.auditPayloadLeaves()
+	}
+	if err := validateSnapshot(event, payload); err != nil {
 		return nil, fmt.Errorf("validate audit event: %w", err)
 	}
 	encoded, err := json.Marshal(serializedEnvelopeV1{
@@ -62,7 +66,7 @@ func Render(event EnvelopeV1) ([]byte, error) {
 		Executor:      event.Executor,
 		Credential:    event.Credential,
 		Resource:      event.Resource,
-		Payload:       event.Payload.auditPayloadLeaves(),
+		Payload:       payload,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal audit event: %w", err)

@@ -32,6 +32,27 @@ Added the first approved #2378 audit-contract slice in `pkg/hub/auditevent` with
 
 Both passed before the initial durable push.
 
+## Review round 1 fixes
+
+Resolved every Required finding from the review of `7808067c08cbe1a1e53f93c8f4530771e184f366`:
+
+- Credential metadata now enforces the existing server-derived credential-decoration contract at the audit boundary: 8 labels, 32-byte keys, 64-byte values, the canonical key/value character rules, reserved attribution keys, control/format rejection, and case-insensitive `scion_pat_`/`Bearer ` canaries. Failures use `CredentialValidationError` and never echo rejected names, keys, or values.
+- Each catalog entry now declares the complete payload leaf type, requiredness, byte/item bounds, exact-format length, and closed-enum values. Payload validation dispatches only on those declarations; the former global field-name schema switch is gone, and the catalog snapshot covers every constraint.
+- Validation rejects the nil UUID for both `event_id` and `causation_id`.
+- `Render` materializes payload leaves once and validates and serializes that same snapshot. A stateful regression payload proves a changed second result cannot cross the boundary.
+- The capture sink regression runs bounded concurrent emitters and readers under the race detector, checks the exact final count and record content, and proves returned byte slices are defensive copies.
+
+Focused evidence after the fixes:
+
+- `go test -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -race -p 2 ./pkg/hub/auditevent` — PASS.
+- `go vet ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -cover -p 2 ./pkg/hub/auditevent` — PASS, 84.9% statement coverage.
+- `test -z "$(gofmt -l pkg/hub/auditevent/*.go)"` — PASS.
+- `make fmt-check` — PASS.
+- `GOGC=40 golangci-lint run --concurrency=1 ./pkg/hub/auditevent/...` — PASS (`0 issues`).
+- `git diff --check` — PASS.
+
 ## #2404 / #2405 interface facts
 
 - `BuildAccessBoundaryCreate` returns one envelope whose `EventID`, `OccurredAt`, correlation, resource, identity, and typed `AccessBoundaryPayload` can feed the purpose-specific history row. The same envelope should be dispatched to the structured sink only after the shared mutation/history transaction commits.
