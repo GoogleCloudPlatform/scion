@@ -358,6 +358,38 @@ error responses. The UI maps these codes to user-visible explanations.
 
 ---
 
+## Raw Message Restrictions
+
+Raw delivery (the `raw` flag, or the deprecated `scion message --raw`) sends
+literal keystrokes to an agent's terminal with no envelope. It is supported for
+exactly one shape: a plain direct message to a single agent in the **same
+project** whose runtime is not a managed backend. Prefer `scion keys` for
+keystroke delivery.
+
+The Hub rejects every other raw combination before any side effect
+(no conversation resolution, persistence, wake, or dispatch). `raw` combined
+with `plain` returns `400` (`invalid_request`). All other unsupported
+combinations return `422` with error code `unsupported_capability` and one of
+these values in `details.reason`:
+
+| Reason | Rejected combination |
+|------|---------|
+| `raw_plain_conflict` | `raw` with `plain` (`400`). |
+| `raw_broadcast_unsupported` | `raw` with a broadcast. |
+| `raw_group_unsupported` | `raw` with a group recipient or `group_id` metadata. |
+| `raw_mentions_unsupported` | `raw` with explicit mentions. |
+| `raw_attachment_unsupported` | `raw` with attachments. |
+| `raw_wake_unsupported` | `raw` with `wake`. |
+| `raw_interrupt_unsupported` | `raw` with `interrupt` (or urgent). |
+| `raw_observer_unsupported` | `raw` with an observer-only message. |
+| `raw_conversation_unsupported` | `raw` with conversation addressing (conversation ID, channel, thread ID, or surface references). |
+| `raw_scheduling_unsupported` | `raw` on a schedule or scheduled event. |
+| `raw_broker_ingress_unsupported` | `raw` on a broker-inbound route. |
+| `raw_managed_backend_unsupported` | `raw` to an agent on a managed backend. |
+| `cross_project_raw_unsupported` | `raw` from an agent in a different project. |
+
+---
+
 ## API Reference: Project Messaging Policy
 
 ### Endpoints

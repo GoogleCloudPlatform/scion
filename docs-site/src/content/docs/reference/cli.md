@@ -149,7 +149,7 @@ Sends a message to a running agent or user.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
     - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
     - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter.
+    - `--raw`: *(Deprecated — use `scion keys` instead.)* Send literal bytes via tmux send-keys with no trailing Enter. Only a plain message to a single agent in the same project is accepted; combining `--raw` with `--plain`, broadcast, groups, attachments, `--interrupt`, `--wake`, or conversation addressing is rejected (see [Raw Message Restrictions](/scion/reference/messaging-authorization/#raw-message-restrictions)).
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
