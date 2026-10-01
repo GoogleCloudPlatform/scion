@@ -16,10 +16,10 @@
  * lib.mjs -- pure, Playwright-free functions from large-project-bench.mjs,
  * split out so they can be unit-tested directly (see lib.test.mjs).
  *
- * bench-rev-2 R1's root cause (the standalone-graph network matcher never
- * firing) is exactly the kind of bug a two-line unit test against the real
- * URLs each page fetches would have caught; these functions did not exist
- * as independently-callable, testable units until this split.
+ * A bug like the standalone-graph network matcher never firing is exactly
+ * the kind of thing a two-line unit test against the real URLs each page
+ * fetches catches; splitting these out makes them independently-callable,
+ * testable units rather than only reachable through a full browser run.
  */
 
 import * as crypto from 'node:crypto';
@@ -56,7 +56,7 @@ export function summarizeLongTasks(entries) {
   return { count: entries.length, totalMs: total, maxMs: max };
 }
 
-// ---- network-outcome classification (bench-rev-1 B2, bench-rev-2 R1/NB6) --
+// ---- network-outcome classification ----------------------------------------
 //
 // The hub's default WriteTimeout is 60s (pkg/config/hub_config.go:851,
 // pkg/hub/web.go:2913). A handler that has not started writing its response
@@ -72,10 +72,9 @@ export function summarizeLongTasks(entries) {
  * apiMatcherFor returns a predicate matching the specific request each
  * scenario's data load depends on, per project-detail.ts / agent-graph.ts.
  *
- * bench-rev-2 R1: the standalone-graph page
- * (web/src/components/pages/agent-graph.ts:115) calls
- * `apiFetch('/api/v1/agents')` with NO query string at all -- it fetches
- * every agent and filters client-side -- so a matcher requiring
+ * The standalone-graph page (web/src/components/pages/agent-graph.ts:115)
+ * calls `apiFetch('/api/v1/agents')` with NO query string at all -- it
+ * fetches every agent and filters client-side -- so a matcher requiring
  * `projectId=<id>` in the URL, as an earlier version of this function did,
  * can never fire for it. Match on the parsed pathname instead, with any or
  * no query string.
@@ -109,10 +108,10 @@ export function apiMatcherFor(scenarioKey, projectId) {
  * "populated" | "load-failed(<reason>)" | "loaded-not-rendered" |
  * "still-loading".
  *
- * bench-rev-2 NB6: a 2xx response that nonetheless never reaches the
- * expected rendered count is a *render* failure, not a *load* failure --
- * distinct from "still-loading" (no response observed at all within the
- * timeout, i.e. genuinely still in flight or the matcher never fired).
+ * A 2xx response that nonetheless never reaches the expected rendered
+ * count is a *render* failure, not a *load* failure -- distinct from
+ * "still-loading" (no response observed at all within the timeout, i.e.
+ * genuinely still in flight or the matcher never fired).
  */
 export function classifyOutcome(populatedOk, netState) {
   if (populatedOk) return 'populated';
@@ -125,11 +124,11 @@ export function classifyOutcome(populatedOk, netState) {
 }
 
 /**
- * summarizeScenario computes bench-rev-1 B3's required spread stats --
- * median/min/max/stddev, not just a median -- over SUCCESSFUL ("populated")
- * runs only, and reports success/failure counts and an outcome tally
- * separately so a reader can see at a glance whether a scenario's numbers
- * are "5/5 populated" or "1/5 populated, 4 load-failed".
+ * summarizeScenario computes spread stats -- median/min/max/stddev, not
+ * just a median -- over SUCCESSFUL ("populated") runs only, and reports
+ * success/failure counts and an outcome tally separately so a reader can
+ * see at a glance whether a scenario's numbers are "5/5 populated" or
+ * "1/5 populated, 4 load-failed".
  */
 export function summarizeScenario(scenario, results) {
   const populatedRuns = results.filter((r) => r.outcome === 'populated');
@@ -157,10 +156,10 @@ export function summarizeScenario(scenario, results) {
     successCount: populatedRuns.length,
     failureCount: results.length - populatedRuns.length,
     outcomeCounts,
-    // bench-rev-2 NB3: cold (first, fresh-context) vs warm (subsequent,
-    // shared-context) runs reported separately, since a cold run's
-    // navToPopulatedMs is measurably slower and averaging it into one
-    // median without saying so is misleading.
+    // Cold (first, fresh-context) vs warm (subsequent, shared-context)
+    // runs reported separately, since a cold run's navToPopulatedMs is
+    // measurably slower and averaging it into one median without saying
+    // so is misleading.
     coldRunCount: coldRuns.length,
     warmRunCount: warmRuns.length,
     medianNavToPopulatedMsCold: median(coldPopulated.map((r) => r.navToPopulatedMs)),
@@ -222,11 +221,11 @@ export function generateTestLoginToken(secret, subject = 'perf-bench') {
 // field -- only "phase"/"activity"/etc. Use "phase" with a value from
 // pkg/agent/state.Phase.
 //
-// bench-rev-1 B1: deliberately excludes "suspended" as a *target* --
-// updateAgentStatus's Guard 0 (pkg/hub/handlers_agent_lifecycle.go) silently
-// drops any phase/activity update sent to an agent that is *currently*
-// suspended, and still returns 200. Agents that are already suspended are
-// also skipped as *sources* by the caller, for the same reason.
+// Deliberately excludes "suspended" as a *target* -- updateAgentStatus's
+// Guard 0 (pkg/hub/handlers_agent_lifecycle.go) silently drops any
+// phase/activity update sent to an agent that is *currently* suspended,
+// and still returns 200. Agents that are already suspended are also
+// skipped as *sources* by the caller, for the same reason.
 //
 // Also excludes "running": web/src/shared/types.ts's getAgentDisplayStatus()
 // renders a running agent's *activity* instead of the literal phase string
@@ -241,12 +240,12 @@ export const BURST_TARGET_ROTATION = ['stopped', 'error', 'stopping'];
  * the UI actually renders -- the restore-wait check below, in particular --
  * must use this, not the raw phase, or it can never match for such agents.
  *
- * bench-rev-3 RR1(b): the original restore-wait compared against the literal
- * pre-burst phase even when that agent's displayed label would be its
- * activity, so the check could never succeed for those agents -- not a
- * harness bug in the sense of miscounting, but it burned the full settle
- * timeout every run waiting on a check that could not pass, and it is the
- * wrong predicate to gate on.
+ * Comparing the restore-wait against the literal pre-burst phase, when
+ * that agent's displayed label is actually its activity, would mean the
+ * check could never succeed for those agents -- not a harness bug in the
+ * sense of miscounting, but it would burn the full settle timeout every
+ * run waiting on a check that could not pass, since that is the wrong
+ * predicate to gate on.
  */
 export function displayStatusLabel(phase, activity) {
   if (phase === 'running' && activity) return activity;
@@ -261,18 +260,17 @@ export function displayStatusLabel(phase, activity) {
  * agent was targeted with on the previous run it took part in, or null on
  * its first run).
  *
- * bench-rev-2 R2 introduced a `runIndex`-offset rotation, documented as
- * guaranteeing consecutive runs never request the same phase twice in a
- * row for the same agent. bench-rev-3 RR1(a) found that guarantee false:
- * the caller always passes the *pre-burst* phase as `currentPhase` (the
- * same value on every run, since it is restored between runs), not the
- * previous run's target, so the single `!== currentPhase` bump does not
- * prevent `pick(idx, r)` and `pick(idx, r+1)` from coinciding whenever the
- * pre-burst phase is itself in the rotation (12 of 15 agents in the
- * 25-agent seed) -- 13 of 60 consecutive-run pairs repeated in practice.
- * Excluding both `currentPhase` and the actual `previousRunTarget` closes
- * this: with a 3-entry rotation, excluding at most 2 distinct values always
- * leaves at least one candidate.
+ * A `runIndex`-offset rotation alone is not sufficient to guarantee
+ * consecutive runs never request the same phase twice in a row for the
+ * same agent: the caller always passes the *pre-burst* phase as
+ * `currentPhase` (the same value on every run, since it is restored
+ * between runs), not the previous run's target, so excluding only
+ * `currentPhase` does not prevent `pick(idx, r)` and `pick(idx, r+1)` from
+ * coinciding whenever the pre-burst phase is itself in the rotation (12 of
+ * 15 agents in the 25-agent seed) -- 13 of 60 consecutive-run pairs
+ * repeated in practice. Excluding both `currentPhase` and the actual
+ * `previousRunTarget` closes this: with a 3-entry rotation, excluding at
+ * most 2 distinct values always leaves at least one candidate.
  */
 export function pickBurstTarget(idx, runIndex, currentPhase, previousRunTarget) {
   const n = BURST_TARGET_ROTATION.length;
@@ -298,9 +296,9 @@ export function pickBurstTarget(idx, runIndex, currentPhase, previousRunTarget) 
  * cannot have a later matching poll result attributed to THIS run's own
  * POST -- it could be a stale badge left over from a restore that silently
  * failed to reach the DOM -- so the caller excludes them from that run's
- * settle tracking entirely (bench-rev-3 RR1, extracted as a pure function
- * for bench-rev-4 N12: this guard previously only existed inline in
- * large-project-bench.mjs and had no unit test of its own).
+ * settle tracking entirely. Extracted as a pure function so this guard is
+ * directly unit-testable, rather than only existing inline in
+ * large-project-bench.mjs.
  *
  * Case-insensitive, matching the comparison large-project-bench.mjs's badge
  * reads and `pickBurstTarget`'s rotation both use.
@@ -321,32 +319,29 @@ export function computePreStaleIds(ids, preFireLabels, targetPhase) {
  * summarizeBurstScenario reduces one scenario's per-run burst results
  * (`runBurstOnce`'s return values, one per run) into the scenario-level
  * statistics large-project-bench.mjs's report publishes. Extracted as a
- * pure function (bench-rev-4 N12: the invalid-run exclusion previously only
- * existed inline in `runBurstScenario` and had no unit test of its own) so
- * it is directly testable with synthetic run objects, no fake hub or DOM
- * required.
+ * pure function so the invalid-run exclusion is directly testable with
+ * synthetic run objects, no fake hub or DOM required.
  *
- * bench-rev-3 RR1(b): a run marked `invalid` (fired while the previous
- * run's restore was not yet confirmed in the DOM) is excluded from every
- * statistic below except `invalidRunCount` itself and `results` -- it is
- * reported for transparency, but describing it as "settled" or folding its
- * median into the scenario's would describe a run known not to have started
- * from the expected pre-burst state.
+ * A run marked `invalid` (fired while the previous run's restore was not
+ * yet confirmed in the DOM) is excluded from every statistic below except
+ * `invalidRunCount` itself and `results` -- it is reported for
+ * transparency, but describing it as "settled" or folding its median into
+ * the scenario's would describe a run known not to have started from the
+ * expected pre-burst state.
  *
- * bench-rev-4 R4: `medianSettleMs` is the median OF THE PER-RUN MEDIANS
- * (one sample per valid run -- `n` of them, given by `validRunCount` below),
- * NOT a median over every individual agent's settle time; it is a median of
- * medians, a coarser but more outlier-resistant statistic.
+ * `medianSettleMs` is the median OF THE PER-RUN MEDIANS (one sample per
+ * valid run -- `n` of them, given by `validRunCount` below), NOT a median
+ * over every individual agent's settle time; it is a median of medians, a
+ * coarser but more outlier-resistant statistic.
  *
- * bench-rev-5 W3: the scenario-level min/max are named `perAgentMinSettleMs`/
- * `perAgentMaxSettleMs` -- NOT `minSettleMs`/`maxSettleMs` -- specifically
- * because an earlier version used those names for what was actually the
- * range of the five per-run medians (e.g. "51-227ms"), then bench-rev-4 R4
- * redefined the SAME field names to mean the true per-agent range across
- * all valid runs (e.g. "11-373ms" for that same data) without a rename.
- * Anyone comparing a new report's `minSettleMs` against an old raw file's
- * `minSettleMs` field-by-field would silently compare two different
- * statistics. A field name must not change what it means; `runMedianMinMs`/
+ * The scenario-level min/max are named `perAgentMinSettleMs`/
+ * `perAgentMaxSettleMs` -- deliberately NOT `minSettleMs`/`maxSettleMs` --
+ * to avoid a field name silently changing what it means: those generic
+ * names could easily be reused for the range of the five per-run medians
+ * (e.g. "51-227ms") in one report and the true per-agent range across all
+ * valid runs (e.g. "11-373ms" for the same data) in another, which would
+ * make comparing a `minSettleMs` field across two reports compare two
+ * different statistics without any visible warning. `runMedianMinMs`/
  * `runMedianMaxMs` are provided alongside for the (coarser, matching
  * `medianSettleMs`'s own granularity) range-of-medians statistic, so both
  * are available under names that only ever mean one thing.
@@ -356,8 +351,8 @@ export function summarizeBurstScenario(results) {
   const medianSettleValues = validResults.map((r) => r.medianSettleMs).filter((v) => v != null);
   const perRunMins = validResults.map((r) => r.minSettleMs).filter((v) => v != null);
   const perRunMaxes = validResults.map((r) => r.maxSettleMs).filter((v) => v != null);
-  // bench-rev-4 N5: surfaced so a reader (and the console summary) can see
-  // "fully settled, but N agents pre-stale-excluded" rather than only a
+  // Surfaced so a reader (and the console summary) can see "fully settled,
+  // but N agents pre-stale-excluded" rather than only a
   // trackedCount < requestedCount buried inside each run's own object.
   const preStaleExcludedTotal = results.reduce((sum, r) => sum + (r.preStaleExcludedCount || 0), 0);
 
@@ -370,22 +365,21 @@ export function summarizeBurstScenario(results) {
     // n for medianSettleMs/stddevSettleMs: one sample per valid run.
     medianOfRunMediansN: medianSettleValues.length,
     medianSettleMs: median(medianSettleValues),
-    // bench-rev-5 W3: true per-agent range across all valid runs (the min
-    // of each run's own min and the max of each run's own max).
+    // True per-agent range across all valid runs (the min of each run's
+    // own min and the max of each run's own max).
     perAgentMinSettleMs: perRunMins.length ? Math.min(...perRunMins) : null,
     perAgentMaxSettleMs: perRunMaxes.length ? Math.max(...perRunMaxes) : null,
-    // bench-rev-5 W3: the coarser range-of-the-5-per-run-medians statistic,
-    // at the same granularity as medianSettleMs itself -- this is what an
-    // earlier version's "minSettleMs"/"maxSettleMs" actually computed.
+    // The coarser range-of-the-per-run-medians statistic, at the same
+    // granularity as medianSettleMs itself.
     runMedianMinMs: medianSettleValues.length ? Math.min(...medianSettleValues) : null,
     runMedianMaxMs: medianSettleValues.length ? Math.max(...medianSettleValues) : null,
     stddevSettleMs: stddev(medianSettleValues),
-    // bench-rev-5 N-g: `timedOut` is `settledCount < trackedCount`, which is
-    // vacuously false when `trackedCount` is 0 (every target excluded as
-    // pre-stale) -- a run with nothing to track would otherwise count as
-    // "fully settled" despite confirming nothing. Require `trackedCount > 0`
-    // too, so an all-pre-stale run is excluded from this count instead of
-    // silently inflating it.
+    // `timedOut` is `settledCount < trackedCount`, which is vacuously false
+    // when `trackedCount` is 0 (every target excluded as pre-stale) -- a
+    // run with nothing to track would otherwise count as "fully settled"
+    // despite confirming nothing. Require `trackedCount > 0` too, so an
+    // all-pre-stale run is excluded from this count instead of silently
+    // inflating it.
     fullySettledRunCount: validResults.filter((r) => !r.timedOut && r.trackedCount > 0).length,
     fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
   };

@@ -43,7 +43,7 @@ module.exports = {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
-        // bench-rev-1 Nit5: e2e-perf/*.mjs (the perf/2393 harness's browser
+        // e2e-perf/*.mjs (the large-project performance harness's browser
         // benchmark) isn't part of the tsconfig.json TS program the root
         // parserOptions.project requires, so it needs the plain ESLint
         // parser and non-type-checked rules rather than inheriting the

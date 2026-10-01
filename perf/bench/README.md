@@ -3,12 +3,11 @@
 Reproducible harness for measuring agent-list/graph performance at 25, 100,
 and 500 agents in a single project: a local SQLite hub, seeded directly
 (bypassing HTTP) with realistic data, and Go/Playwright benchmark tools that
-separate API time, browser rendering, and live-update (SSE) responsiveness,
-per the root tracker's completion criteria.
+separate API time, browser rendering, and live-update (SSE) responsiveness.
 
 This harness makes **no changes to hub or web source**. It is pure tooling,
-so it can (and must, per the task ordering) capture a BASELINE against
-unmodified `origin/main` before any of #2367's other workstreams land.
+so it captures a BASELINE against unmodified `origin/main` before any of
+#2367's other workstreams land.
 
 Do **not** point any of this at the live hub
 (`community.projects.scion-ai.dev`). Everything here runs against a hub
@@ -52,44 +51,39 @@ npm run build                     # produces web/dist/client, used via --web-ass
 cd ..
 ```
 
-**Do not add `-buildvcs=false` to the `apibench`/`seed` build commands**
-(bench-rev-3 RR3). `apibench`'s report records its own build commit via
+**Do not add `-buildvcs=false` to the `apibench`/`seed` build commands.**
+`apibench`'s report records its own build commit via
 `runtime/debug.ReadBuildInfo()`'s `vcs.revision`/`vcs.modified` build
 settings -- `go build`'s default auto-stamping, which requires building
 *without* that flag. If your checkout cannot be VCS-stamped at all (e.g. no
 `.git`, or `go build` prints a VCS-status error), the tool degrades to an
 explicit `harnessCommitSource` explaining why rather than guessing -- it
 does not fall back to reading git state from the caller's current working
-directory, which is the bug RR3 fixed (an earlier version ran
-`git rev-parse HEAD` in the invoking shell's cwd and silently recorded
-whatever OTHER checkout happened to be there).
+directory, which would silently record whatever OTHER checkout happened to
+be there instead.
 
 **Also build from a regular clone/checkout, not any form of `git worktree`
-checkout** (bench-rev-4 R3/N2, corrected by bench-rev-5 W1). This applies
-to `./cmd/scion` (the hub binary under test) as much as to
-`apibench`/`seed`. Go's VCS auto-stamping only recognizes a `.git`
-*directory*; a worktree's `.git` is a file pointing back at another
+checkout.** This applies to `./cmd/scion` (the hub binary under test) as
+much as to `apibench`/`seed`. Go's VCS auto-stamping only recognizes a
+`.git` *directory*; a worktree's `.git` is a file pointing back at another
 checkout's metadata. There are two different failure modes, not one, and
 the second is worse:
 
 - A worktree **outside** any other git checkout gets **no VCS stamp at
-  all** -- confirmed by bench-rev-4's reproduction (a plain repo and a
-  shallow clone both stamped correctly; this form of worktree did not).
-  This is why every bench-rev-3 `browser-*-burstonly.json` recapture's
-  `hubScionVersion` read `"unknown"` despite the hub being built from a
-  known, pinned commit (`73ebd022`).
+  all** -- a plain repo and a shallow clone both stamp correctly; this form
+  of worktree does not. A hub built this way reports `hubScionVersion` as
+  `"unknown"` even when it was built from a known, pinned commit.
 - A worktree **nested inside another checkout** -- including a gitignored
   one, such as **this very repo's own `.claude/worktrees/<name>`**
   (`.claude/` is in `.gitignore`, so this is plausibly the common case on
   a fleet that creates worktrees there, not an edge case) -- gets silently
   stamped with the commit of the **enclosing** checkout instead, and can
   report `vcs.modified=false` ("clean") even though the nested worktree's
-  own tree is completely different. bench-rev-5 reproduced this on a
-  throwaway nested-worktree repo: the stamped revision was the enclosing
-  checkout's `HEAD`, not the worktree's own. **This is the exact failure
-  class RR3 fixed** for `git rev-parse HEAD` in the caller's cwd -- a
-  confidently wrong commit reported as fact, not an absent one -- just
-  moved to a different mechanism.
+  own tree is completely different: the stamped revision is the enclosing
+  checkout's `HEAD`, not the worktree's own. This is the same class of
+  failure as trusting `git rev-parse HEAD` run in the caller's cwd -- a
+  confidently wrong commit reported as fact, not an absent one -- just via
+  a different mechanism.
 
 Neither Go nor this harness can detect either case after the fact from
 inside the running binary: once a revision and a modified flag are
@@ -99,26 +93,25 @@ from a wrong one. If you need the build identity recorded reliably:
 1. Build from a plain `git clone`/checkout (not any `git worktree`). For
    the **hub binary specifically** (`./cmd/scion`), you can alternatively
    stamp its version explicitly via
-   `-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`
-   (bench-rev-6 N6-3(a): this `-ldflags` option is NOT available to
-   `apibench`/`seed` -- `harnessBuildInfo` reads only Go's own
-   `vcs.revision` build setting, never `pkg/version.Commit`, so an
-   `-ldflags`-stamped `apibench`/`seed` binary gets no benefit from this;
-   those two must be built from a plain clone).
+   `-ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=$(git rev-parse HEAD)"`.
+   This `-ldflags` option is NOT available to `apibench`/`seed` --
+   `harnessBuildInfo` reads only Go's own `vcs.revision` build setting,
+   never `pkg/version.Commit`, so an `-ldflags`-stamped `apibench`/`seed`
+   binary gets no benefit from this; those two must be built from a plain
+   clone.
 2. **Independently verify** before trusting a capture:
    `go version -m /tmp/apibench-bin | grep vcs.revision` and compare it
    against `git rev-parse HEAD` run in the checkout you actually intended
    to build from. A mismatch means you built from a worktree -- nested or
-   not -- and the stamp does not mean what it looks like it means.
-   **bench-rev-6 N6-3(b):** this specific check does NOT work for a hub
-   binary built with the `-ldflags` option above from inside a worktree --
-   `go version -m` only ever shows Go's own auto-stamp (the wrong,
-   enclosing-checkout commit, or nothing), never the `-ldflags` value,
-   which only shows up at runtime via `pkg/version.Short()`. For an
-   `-ldflags`-stamped hub, verify its `GET /health` `scionVersion` field
-   against `git rev-parse HEAD` instead -- the auto-stamp check only
-   applies to binaries relying on Go's own VCS stamping (`apibench`,
-   `seed`, and a hub built without `-ldflags`). **bench-rev-6 N6-3(c):** a
+   not -- and the stamp does not mean what it looks like it means. This
+   specific check does NOT work for a hub binary built with the `-ldflags`
+   option above from inside a worktree -- `go version -m` only ever shows
+   Go's own auto-stamp (the wrong, enclosing-checkout commit, or nothing),
+   never the `-ldflags` value, which only shows up at runtime via
+   `pkg/version.Short()`. For an `-ldflags`-stamped hub, verify its
+   `GET /health` `scionVersion` field against `git rev-parse HEAD` instead
+   -- the auto-stamp check only applies to binaries relying on Go's own VCS
+   stamping (`apibench`, `seed`, and a hub built without `-ldflags`). A
    match is necessary but not sufficient in one edge case -- if a nested
    worktree's own `HEAD` happens to equal the enclosing checkout's `HEAD`
    (e.g. right after creating the worktree, before committing anything new
@@ -156,14 +149,14 @@ process to hold it in its environment at all), and it wrote into the real
 `~/.scion/{hub-id,storage,attachments,harness-configs}` shared with every
 other agent on this host.
 
-`env -i` alone is **not sufficient** (bench-rev-2 R3): it clears process
-environment variables, but Application Default Credentials are discovered
-via the GCE metadata server (`169.254.169.254`), not the environment, so a
-hub launched with only `env -i` still logs `GCP token generator configured`
-/ `GCP service account minting configured` / `Policy Troubleshooter checker
+`env -i` alone is **not sufficient**: it clears process environment
+variables, but Application Default Credentials are discovered via the GCE
+metadata server (`169.254.169.254`), not the environment, so a hub launched
+with only `env -i` still logs `GCP token generator configured` / `GCP
+service account minting configured` / `Policy Troubleshooter checker
 configured` and holds live connections to the metadata server and Google
-APIs -- confirmed via `ss -tnp` during bench-rev-2's review. A throwaway
-bench hub must not be able to mint tokens for a real service account.
+APIs -- confirmed via `ss -tnp`. A throwaway bench hub must not be able to
+mint tokens for a real service account.
 
 Use a scrubbed launch for every hub subprocess this harness starts, run
 from **outside** any project/repo directory (e.g. `cd /tmp/scion-bench`
@@ -210,7 +203,7 @@ against the real instance metadata service.
    only rows are the hub's own listening socket on 127.0.0.1 plus any
    loopback client connections -- **no row with a non-loopback remote
    address**.
-   **bench-rev-3 RR2: do not drop the `-a`.** `lsof -p <pid> -i` (no `-a`)
+   **Do not drop the `-a`.** `lsof -p <pid> -i` (no `-a`)
    ORs its selectors instead of ANDing them: it is "every internet socket on
    the host, **plus** every file descriptor PID holds", not "PID's internet
    sockets". On a shared host this prints dozens of rows belonging to other
@@ -255,9 +248,9 @@ owner/member bearer tokens and project ID, which every other tool reads.
 re-seeding an already-seeded file is not supported (it fails partway
 through, after already mutating hub bootstrap state, with an "already
 exists" error on the owner/member user). The check normalizes a `file:`-DSN
-or `?query`-suffixed `--db` value before looking at the filesystem
-(bench-rev-2 R4), so there is no DSN-form bypass. There is no override
-flag -- use a fresh path or remove the file first.
+or `?query`-suffixed `--db` value before looking at the filesystem, so
+there is no DSN-form bypass. There is no override flag -- use a fresh path
+or remove the file first.
 
 See `perf/bench/seed/synthetic.go` for the exact distributions and the
 rationale comments next to each one.
@@ -296,10 +289,9 @@ Notes on flags, learned the hard way while building this:
 Both the standalone Hub API server and the combined hub+web server cap how
 long a handler may run before its connection is forcibly closed with an
 empty reply to the client. Line numbers below are as of `73ebd022`, the
-commit this harness's BASELINE measurements were captured against
-(bench-rev-4 F1: they have since shifted on upstream `main` after this
-branch's rebase onto it, which does not affect the baseline -- re-check
-them against whatever commit you are actually measuring):
+commit this harness's BASELINE measurements were captured against; they may
+have shifted on upstream `main` since, which does not affect the baseline --
+re-check them against whatever commit you are actually measuring:
 
 - `pkg/config/hub_config.go:851` -- `HubServerConfig.WriteTimeout`, default
   `60 * time.Second`, wired into the standalone Hub API's `http.Server` at
@@ -310,9 +302,9 @@ them against whatever commit you are actually measuring):
 At 500 agents, some fraction of `project-agents-list`/`project-list`/
 `project-graph-embedded` requests take long enough to cross this ceiling
 (see `measurements.md` for how often, which varies run to run with host
-load -- bench-rev-2's review found the api-side client can occasionally
-still receive a slow-but-complete response past 60s, so this is a real but
-not deterministic cliff). Above it, the client gets a connection reset with
+load -- the api-side client can occasionally still receive a
+slow-but-complete response past 60s, so this is a real but not
+deterministic cliff). Above it, the client gets a connection reset with
 no body, `project-detail.ts`'s `loadData()` `Promise.all` rejects, and the
 page falls to its error/empty state -- which renders almost no agent cards.
 **A naive "did the expected element count ever appear" check cannot tell
@@ -321,11 +313,11 @@ watches the actual network outcome of the load-bearing API request
 (`page.on('response'/'requestfailed')`) to classify each run as `populated`
 / `load-failed(<reason>)` / `loaded-not-rendered` / `still-loading`
 instead, and records exactly when that outcome was observed
-(`networkObservedAtMs`, bench-rev-2 NB5).
+(`networkObservedAtMs`).
 
-**bench-rev-3 RR5: "60 seconds" is the configured server write deadline, not
-the client-observed threshold.** The v3 browser capture's own
-`networkObservedAtMs` data at 500 agents:
+**"60 seconds" is the configured server write deadline, not the
+client-observed threshold.** A browser capture's own `networkObservedAtMs`
+data at 500 agents:
 
 | View / run | Outcome | `networkObservedAtMs` |
 | --- | --- | ---: |
@@ -342,17 +334,13 @@ are read and a timed-out write fails at handler-completion time, which can
 land well after the deadline itself if the handler is still running -- but
 a 120s *success* means the server-side clock (whatever it is actually
 measuring from) started well after this capture's navigation, or something
-else is also in play. **That is the open question `measurements.md`'s N9
-section discusses**; do not describe a specific wall-clock number as "the
-60s cliff" without citing the `networkObservedAtMs` timing that round's
-capture actually recorded, since it has not landed near 60s in any capture
-so far.
+else is also in play. **That is an open question discussed in
+`measurements.md`**; do not describe a specific wall-clock number as "the
+60s cliff" without citing the `networkObservedAtMs` timing an actual
+capture recorded, since it has not landed near 60s in any capture so far.
 
 See `measurements.md`'s baseline section for the full per-run data at 500
-agents on unmodified main, and bench-rev-1/bench-rev-2/bench-rev-3's
-reviews for how this was found and corrected (raw evidence at
-`gs://scion-xproject-exchange/slow-list/raw/bench-rev-1/`,
-`.../raw/bench-rev-2/`, and `.../raw/bench-rev-3/`).
+agents on unmodified main.
 
 ## API benchmark
 
@@ -374,8 +362,7 @@ seeded member:
   what the standalone graph page actually fetches
   (`web/src/components/pages/agent-graph.ts:115`). An earlier version of
   this tool instead measured the `projectId=`-scoped variant below and
-  mislabeled it as "what the standalone graph page loads", which it is not
-  (bench-rev-2 R1, related/non-blocking).
+  mislabeled it as "what the standalone graph page loads", which it is not.
 - `global-agents-list-scoped`: `GET /api/v1/agents?projectId={id}` -- not
   fetched by any page today; kept as a reference point for how much a
   server-side project filter would save over the unscoped fetch above.
@@ -390,29 +377,25 @@ counts -- some 500-agent requests exceed 60s (see "A real product finding"
 above; how often varies with host load, it is not "regularly" on every run).
 
 `MachineInfo` in the report includes `/proc/loadavg` and `/proc/uptime`,
-sampled once at the start and again at the end of the run (bench-rev-2 NB9:
-a 500-agent run takes long enough for load to swing within one report) --
-see "Choosing regression budgets" below for why this is recorded, and for
-what it is not sufficient for. The report also records the effective
-`--runs`/`--warmup`/`--timeout-seconds`/`--want-perf-trace` settings
-(bench-rev-2 NB4); `harnessCommit` (the binary's own build-time VCS
-revision -- bench-rev-2 NB4, bench-rev-3 RR3 fixed how this is obtained,
-see "One-time setup" above), `harnessCommitDirty` (bench-rev-4 N9: `*bool`,
-nil when the commit itself is unknown, so "clean" and "dirty state
-unknown" are never indistinguishable), and `harnessCommitSource`; and
-`hubScionVersion` (read from the hub's own `GET /health`, bench-rev-3 RR3)
--- so a report file is self-describing on both sides (harness AND hub)
-without having to match either to a commit by timestamp. There is
-deliberately no `hubVersion` field (bench-rev-4 R3): `/health`'s `version`
-is a hard-coded placeholder in hub source
-(`pkg/hub/handlers_health.go:86`), constant regardless of which hub commit
-is actually running, and a field that always reads the same value no
-matter what is measured would be worse than no field at all.
+sampled once at the start and again at the end of the run (a 500-agent run
+takes long enough for load to swing within one report) -- see "Choosing
+regression budgets" below for why this is recorded, and for what it is not
+sufficient for. The report also records the effective
+`--runs`/`--warmup`/`--timeout-seconds`/`--want-perf-trace` settings;
+`harnessCommit` (the binary's own build-time VCS revision, see "One-time
+setup" above for how this is obtained), `harnessCommitDirty` (`*bool`, nil
+when the commit itself is unknown, so "clean" and "dirty state unknown"
+are never indistinguishable), and `harnessCommitSource`; and
+`hubScionVersion` (read from the hub's own `GET /health`) -- so a report
+file is self-describing on both sides (harness AND hub) without having to
+match either to a commit by timestamp. There is deliberately no
+`hubVersion` field: `/health`'s `version` is a hard-coded placeholder in
+hub source (`pkg/hub/handlers_health.go:86`), constant regardless of which
+hub commit is actually running, and a field that always reads the same
+value no matter what is measured would be worse than no field at all.
 
 **`harnessCommitDirty`/the `.mjs` script's own dirty check count untracked
-files as dirty** (bench-rev-4 N10, verified and actually written down by
-bench-rev-5 W4 -- an earlier version claimed this was "documented" and
-changed nothing). This is intentional, not an oversight: Go's own VCS
+files as dirty.** This is intentional, not an oversight: Go's own VCS
 auto-stamping determines `vcs.modified` the same way, via plain `git status
 --porcelain` with no `--untracked-files=no` (see the Go toolchain's
 `cmd/go/internal/vcs/vcs.go`), confirmed empirically too (a tree with
@@ -423,12 +406,12 @@ changes; that is consistent with what the Go-side stamp on the hub binary
 itself would also report, not a bug to route around.
 
 **Always pass `--notes`** describing conditions the report fields do not
-capture on their own (bench-rev-3 O7): how many other hub instances were
-co-resident during this run (every capture to date has run 25/100/500
-concurrently -- `MachineInfo.LoadAvg*` reflects the whole host, not this
-hub alone), and the per-size timeout values in effect if they were raised
-above the defaults shown in `EffectiveSettings`. A blank `notes` field in a
-raw report is a gap for whoever reads it later, not a neutral default.
+capture on their own: how many other hub instances were co-resident during
+this run (every capture to date has run 25/100/500 concurrently --
+`MachineInfo.LoadAvg*` reflects the whole host, not this hub alone), and
+the per-size timeout values in effect if they were raised above the
+defaults shown in `EffectiveSettings`. A blank `notes` field in a raw
+report is a gap for whoever reads it later, not a neutral default.
 
 When run against a hub built from the `perf/2392-agent-list-instrumentation`
 branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
@@ -472,34 +455,32 @@ Runs four scenarios -- `project-grid`, `project-list`,
 `project-graph-embedded` (all three via `/projects/{id}`, matching the
 original investigation's view-toggle table), and `standalone-graph`
 (`/agents/graph?project={id}`) -- each `--runs` times: **run 0 uses a
-fresh ("cold") browser context; runs 1..N-1 share one ("warm") context**
-(bench-rev-2 NB3), reported separately
+fresh ("cold") browser context; runs 1..N-1 share one ("warm") context**,
+reported separately
 (`medianNavToPopulatedMsCold`/`...Warm`, `coldRunCount`/`warmRunCount`) as
-well as combined. **bench-rev-3 O3:** cold is necessarily `n=1` per
-scenario per capture, and the v3 data does not show a consistent cold
-penalty -- at 25 agents both graph views were *faster* cold, and at 500
-agents the grid was faster cold too. Report the split because a reader may
-care about it, not because this harness has established that one is
-reliably slower.
+well as combined. Cold is necessarily `n=1` per scenario per capture, and
+the data collected so far does not show a consistent cold penalty -- at 25
+agents both graph views were *faster* cold, and at 500 agents the grid was
+faster cold too. Report the split because a reader may care about it, not
+because this harness has established that one is reliably slower.
 
 Every run is classified `populated` / `load-failed(<reason>)` /
 `loaded-not-rendered` / `still-loading` (see "A real product finding"
-above; `loaded-not-rendered` -- bench-rev-2 NB6 -- is a 2xx response that
-still never reaches the expected rendered count, a render failure distinct
-from "nothing observed at all"). Only `populated` runs contribute to the
-reported median/min/max/stddev for navigation time, DOM element count
-(recursively counted through every open shadow root, since this Lit app
-keeps almost all of its structure there), and long-task totals from a
-`PerformanceObserver` injected before navigation. `successCount`/
-`failureCount` and a per-outcome tally are reported alongside, so "5/5
-populated" and "1/5 populated, 4 load-failed" are never conflated into the
-same median. Each run also records when the load-bearing request's network
-outcome was observed, in elapsed ms from navigation start
-(`networkObservedAtMs`, bench-rev-2 NB5), so a WriteTimeout attribution is a
-measurement, not an inference from a run's total wall-clock time. The
-report is written incrementally (after every scenario and every burst run),
-so a Chromium crash mid-benchmark loses at most the in-flight run, not the
-whole report.
+above; `loaded-not-rendered` is a 2xx response that still never reaches the
+expected rendered count, a render failure distinct from "nothing observed
+at all"). Only `populated` runs contribute to the reported median/min/max/
+stddev for navigation time, DOM element count (recursively counted through
+every open shadow root, since this Lit app keeps almost all of its
+structure there), and long-task totals from a `PerformanceObserver`
+injected before navigation. `successCount`/`failureCount` and a
+per-outcome tally are reported alongside, so "5/5 populated" and "1/5
+populated, 4 load-failed" are never conflated into the same median. Each
+run also records when the load-bearing request's network outcome was
+observed, in elapsed ms from navigation start (`networkObservedAtMs`), so
+a WriteTimeout attribution is a measurement, not an inference from a run's
+total wall-clock time. The report is written incrementally (after every
+scenario and every burst run), so a Chromium crash mid-benchmark loses at
+most the in-flight run, not the whole report.
 
 For the two graph scenarios, a populated run also performs a short
 pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
@@ -508,15 +489,15 @@ attributable to it (`graphInteraction`) -- this was previously listed as a
 #2393 acceptance gap "not attempted here for lack of time"; no source
 change was needed, so it is implemented now.
 
-**bench-rev-3 O2: `graphInteraction.interactionMs` is mostly fixed harness
-overhead, not UI latency.** The sequence contains roughly 750ms of fixed
+**`graphInteraction.interactionMs` is mostly fixed harness overhead, not
+UI latency.** The sequence contains roughly 750ms of fixed
 `waitForTimeout` calls (five 50ms hover pauses, a 100ms post-zoom pause, a
 100ms post-drag-start pause, a 300ms settle pause) plus the wall-clock cost
 of around 30 Playwright round-trips (two 10-step drags and five hovers)
 that scale with Playwright/CDP overhead, not agent count. **Read the
 long-task delta (`graphInteraction.longTasks`), not `interactionMs`,** as
 the measurement of actual UI cost -- it is the field that scales with agent
-count in the v3 data (near-zero at 25 agents, up to ~733ms at 500 for
+count (near-zero at 25 agents, up to ~733ms at 500 for
 `standalone-graph`) and the one `measurements.md` bases its conclusions on.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
@@ -529,33 +510,31 @@ to `--burst-count` (default 15) agents that are **not** currently
 seeded owner while checking every POST's status, polls each *accepted*
 agent's own rendered `<scion-status-badge>` until it shows the new value --
 ground truth for "the live update reached the DOM" -- then **restores
-every updated agent to its pre-burst phase AND activity** (bench-rev-2
-NB1) and waits, up to a bound, to confirm the restore in the DOM.
-**bench-rev-4 N4:** this does NOT block the next run -- the wait is bounded
-and the next run starts regardless, but if the restore was not fully
-confirmed in that window, the next run is marked `invalid` rather than
-treated as having started from a known-good state. See point 3 below for
-the exact mechanism.
+every updated agent to its pre-burst phase AND activity** and waits, up to
+a bound, to confirm the restore in the DOM. This does NOT block the next
+run -- the wait is bounded and the next run starts regardless, but if the
+restore was not fully confirmed in that window, the next run is marked
+`invalid` rather than treated as having started from a known-good state.
+See point 3 below for the exact mechanism.
 
 Settle time is measured **per agent, independently, starting the instant
-THAT agent's own POST resolves** (bench-rev-3 RR4; bench-rev-2's NB2 fix
-anchored on each agent's own POST completion but still only started
-*observing* after every agent's POST had returned, which could inflate a
-fast agent's recorded settle by the spread between POST completions --
-0.24-1.40s in the v3 capture, the same magnitude as the reported medians).
-Server-side application is confirmed independently via a follow-up GET per
-agent, so "the server never applied this update" and "the UI did not
-settle" are reported as distinct, non-overlapping counts.
+THAT agent's own POST resolves** -- anchoring on each agent's own POST
+completion but only beginning to *observe* after every agent's POST had
+returned would inflate a fast agent's recorded settle by the spread
+between POST completions -- 0.24-1.40s observed in one capture, the same
+magnitude as the reported medians. Server-side application is confirmed
+independently via a follow-up GET per agent, so "the server never applied
+this update" and "the UI did not settle" are reported as distinct,
+non-overlapping counts.
 
-**bench-rev-3 RR1: three independent guards against a lost SSE update being
-miscounted as settled**, since bench-rev-2's R2 fix (offsetting
-`pickBurstTarget`'s rotation by run index) turned out not to close this on
-its own -- the function's "never repeats" guarantee did not hold against
-the real caller, which always passes the constant pre-burst phase as
-`currentPhase`, not the previous run's own target (see `pickBurstTarget`'s
-doc comment in `lib.mjs` for the exact mechanism and `lib.test.mjs` for a
-test that holds `currentPhase` fixed, as the real caller does, and is
-confirmed to fail against the old idx-only implementation):
+**Three independent guards protect against a lost SSE update being
+miscounted as settled**, because offsetting `pickBurstTarget`'s rotation by
+run index alone is not enough -- the function's "never repeats" guarantee
+does not hold against the real caller, which always passes the constant
+pre-burst phase as `currentPhase`, not the previous run's own target (see
+`pickBurstTarget`'s doc comment in `lib.mjs` for the exact mechanism and
+`lib.test.mjs` for a test that holds `currentPhase` fixed, as the real
+caller does, and fails against an index-only implementation):
 
 1. `pickBurstTarget` now excludes both the agent's current phase AND the
    actual phase it was targeted with on its own previous run (tracked per
@@ -565,75 +544,64 @@ confirmed to fail against the old idx-only implementation):
    excluded from that run's settle tracking (`preStaleExcludedCount`) --
    this closes the hole regardless of whether (1) or the restore-wait is
    itself correct.
-3. The restore-wait's RESULT now actually has an effect on the next run
-   (bench-rev-5 N-d, corrected by bench-rev-6 N6-2: described precisely,
-   not as "gates", to avoid implying it blocks -- see the "bench-rev-4 N4"
-   paragraph above this numbered list for the exact
-   bounded-wait-then-proceed behavior). If the previous run's restore
-   was not fully confirmed in the DOM within the bound
-   (`restoreFullyConfirmed` is false), the next run is marked `invalid` and
-   excluded from the scenario's settle statistics (`invalidRunCount`),
-   rather than merely recording the gap and silently proceeding as if
-   nothing had happened -- which is what an earlier version did. The
-   restore-wait's expected value is computed
-   the way the UI actually renders it (`displayStatusLabel` in `lib.mjs`:
-   activity instead of phase for a `running` agent with non-empty
-   activity) -- comparing against the literal phase, as an earlier version
-   did, could never match for those agents no matter how long it waited.
+3. The restore-wait's RESULT has an effect on the next run (described
+   precisely here, not as "gates", to avoid implying it blocks -- see the
+   bounded-wait-then-proceed behavior described above this numbered list).
+   If the previous run's restore was not fully confirmed in the DOM within
+   the bound (`restoreFullyConfirmed` is false), the next run is marked
+   `invalid` and excluded from the scenario's settle statistics
+   (`invalidRunCount`), rather than merely recording the gap and silently
+   proceeding as if nothing had happened. The restore-wait's expected
+   value is computed the way the UI actually renders it
+   (`displayStatusLabel` in `lib.mjs`: activity instead of phase for a
+   `running` agent with non-empty activity) -- comparing against the
+   literal phase could never match for those agents no matter how long it
+   waited.
 
 The pre-stale exclusion (guard 2) and the invalid-run exclusion (guard 3)
 are implemented as pure functions in `lib.mjs` (`computePreStaleIds`,
-`summarizeBurstScenario`) with their own `lib.test.mjs` coverage
-(bench-rev-4 N12) -- not only inline in `large-project-bench.mjs`, covered
-only by review-time simulation against a fake hub and DOM.
+`summarizeBurstScenario`) with their own `lib.test.mjs` coverage -- not
+only inline in `large-project-bench.mjs`, where they would only be
+exercised indirectly against a fake hub and DOM.
 
-**bench-rev-4 R4: what the reported statistics mean, precisely.**
-`medianSettleMs` is the median OF THE PER-RUN MEDIANS (one sample per
-valid run -- a median of medians, not a median over every individual
-agent's settle time). **bench-rev-5 W3:** the true per-agent range across
-all valid runs (the min of each run's own min and the max of each run's
-own max) is reported as `perAgentMinSettleMs`/`perAgentMaxSettleMs` --
-NOT as `minSettleMs`/`maxSettleMs`, because an earlier version used those
-names first for the range of the five per-run medians and then,
-without a rename, redefined them to mean the true per-agent range --
-exactly the kind of silently-redefined field name this tool's own
-`burstSentMs` fix (below) was supposed to have taught us to avoid. The
-range of the five per-run medians itself (the OLD meaning) is still
-available, under its own name: `runMedianMinMs`/`runMedianMaxMs`.
+**What the reported statistics mean, precisely.** `medianSettleMs` is the
+median OF THE PER-RUN MEDIANS (one sample per valid run -- a median of
+medians, not a median over every individual agent's settle time). The true
+per-agent range across all valid runs (the min of each run's own min and
+the max of each run's own max) is reported as
+`perAgentMinSettleMs`/`perAgentMaxSettleMs` -- deliberately NOT named
+`minSettleMs`/`maxSettleMs`, to avoid the kind of silently-redefined field
+name that the `postFanOutMs`/`burstWallClockMs` split below exists to
+prevent. The range of the five per-run medians itself is available
+separately, under its own name: `runMedianMinMs`/`runMedianMaxMs`.
 
-**bench-rev-5 N-c, precision fixed by bench-rev-6 N6-4:** each poll has a
-SAMPLING INTERVAL, not a "floor" -- the first poll happens immediately
-after the POST resolves, so values well under 170ms are common. The raw
-reports keep no per-agent samples, only per-run minimums, so the
-verifiable claim is narrower than "many individual samples": per-run
-minimums as low as 11-12ms were observed (25 and 100 agents) -- an earlier
-version of this sentence claimed "many individual per-agent samples read
-11-20ms", which the raw data cannot actually support. What is true: each
-sample can LAG the true DOM update by up to one poll
-interval -- a 100ms sleep plus a deep shadow-DOM badge read, which runs
-14ms alone but ~68ms median (p90 98ms) with `--burst-count` concurrent
-pollers sharing one page, per bench-rev-4's own measurement. Differences
-smaller than that combined interval (roughly 170-200ms) cannot be used to
-rank hub speed, even though individual samples will themselves often read
-below it. `postFanOutMs` (POST-only completion spread) and
-`burstWallClockMs` (the whole per-agent POST-plus-poll sequence) are
-reported separately -- bench-rev-4 N8: an earlier version's single
-`burstSentMs` field silently changed from meaning the former to meaning the
-latter when bench-rev-3 RR4 moved polling inside the same per-agent
-`Promise.all`. **bench-rev-5 N-f:** `postFanOutMs` only reflects agents
-whose POST was accepted; a rejected POST records no `postCompletedAt` and
-is excluded from that spread, so a run with any rejection reports a
-narrower `postFanOutMs` than the full POST attempt actually took.
+**Each poll has a SAMPLING INTERVAL, not a "floor".** The first poll
+happens immediately after the POST resolves, so values well under 170ms
+are common. The raw reports keep no per-agent samples, only per-run
+minimums: per-run minimums as low as 11-12ms were observed (25 and 100
+agents). What is true: each sample can LAG the true DOM update by up to
+one poll interval -- a 100ms sleep plus a deep shadow-DOM badge read,
+which runs 14ms alone but ~68ms median (p90 98ms) with `--burst-count`
+concurrent pollers sharing one page. Differences smaller than that
+combined interval (roughly 170-200ms) cannot be used to rank hub speed,
+even though individual samples will themselves often read below it.
+`postFanOutMs` (POST-only completion spread) and `burstWallClockMs` (the
+whole per-agent POST-plus-poll sequence) are reported separately as two
+distinctly-named fields, rather than overloading one name for both
+meanings now that polling happens inside the same per-agent `Promise.all`.
+`postFanOutMs` only reflects agents whose POST was accepted; a rejected
+POST records no `postCompletedAt` and is excluded from that spread, so a
+run with any rejection reports a narrower `postFanOutMs` than the full
+POST attempt actually took.
 
-**Settle times are environment-sensitive** (bench-rev-4 R4; ratio corrected
-by bench-rev-5 W2): a lower-load, single-hub reproduction measured about 4x
-lower settle times at 25 agents (39ms vs 164ms) but only about 2x lower at
-500 agents (320ms vs 619ms) than a three-co-resident-hub capture under
-higher load -- "roughly 4x" is not a single ratio that holds across agent
-counts. The browser benchmark's report now records `os.loadavg()` at the
-start and end of the run (bench-rev-4 N11), matching `apibench`'s
-convention, so a reader can tell environment noise from an actual
-difference.
+**Settle times are environment-sensitive:** a lower-load, single-hub
+reproduction measured about 4x lower settle times at 25 agents (39ms vs
+164ms) but only about 2x lower at 500 agents (320ms vs 619ms) than a
+three-co-resident-hub capture under higher load -- "roughly 4x" is not a
+single ratio that holds across agent counts. The browser benchmark's
+report records `os.loadavg()` at the start and end of the run, matching
+`apibench`'s convention, so a reader can tell environment noise from an
+actual difference.
 
 Raise `--populate-timeout-ms`/`--nav-timeout-ms` (default 120000/120000) for
 large agent counts; at 500 agents on unmodified `main`, some views exceed
@@ -657,12 +625,11 @@ baseline section).
   returns 200. An earlier version of this script both targeted `suspended`
   as a burst destination and never checked POST status, which made about 4
   of every 15 targeted agents permanently un-updatable after the first run
-  against a given database -- what looked like "SSE settle flakiness"
-  (originally reported as 6/15 and 12/15 in `measurements.md`'s superseded
-  numbers) was entirely this, not SSE. The burst scenario now skips
-  currently-suspended agents as sources, never targets `suspended`, checks
-  every POST's status, and restores state (including waiting for the
-  restore -- see above) afterward.
+  against a given database -- what looked like "SSE settle flakiness" was
+  entirely this, not SSE. The burst scenario now skips currently-suspended
+  agents as sources, never targets `suspended`, checks every POST's
+  status, and restores state (including waiting for the restore -- see
+  above) afterward.
 - The burst scenario also deliberately never targets phase `"running"`:
   `getAgentDisplayStatus` (`web/src/shared/types.ts`) renders a running
   agent's *activity* instead of the literal phase whenever activity is
@@ -686,14 +653,11 @@ baseline section).
 Not implemented by this harness, and deliberately not guessed at: this
 container (`scion-community-broker-01`) is a shared host with 16 CPUs and a
 load average observed to swing from roughly 47 to 450 depending on what
-else is running. Repeated apibench reruns during review, under otherwise
-identical isolated conditions, varied by more than 2x run to run purely
-from this -- host-load noise, not anything this harness's own changes
-caused (an earlier draft of `measurements.md` incorrectly credited
-environment isolation for a faster recapture; see that file's "What changed
-since the v2 capture" section for the correction). Environment noise on
-this scale would swamp any regression budget chosen from data captured
-here.
+else is running. Repeated apibench reruns under otherwise identical
+isolated conditions varied by more than 2x run to run purely from this --
+host-load noise, not anything this harness's own changes caused.
+Environment noise on this scale would swamp any regression budget chosen
+from data captured here.
 
 This data is also heavy-tailed (occasional samples several multiples of the
 typical value), so a budget built from mean + k*stddev over a small number

@@ -53,8 +53,7 @@ type SeedMetadata struct {
 // trials against a seeded project.
 type APIBenchReport struct {
 	GeneratedAt time.Time `json:"generatedAt"`
-	// HarnessCommit is the harness's own build-time VCS revision
-	// (bench-rev-2 NB4; bench-rev-3 RR3 fixed the source of this value).
+	// HarnessCommit is the harness's own build-time VCS revision.
 	// It comes from `runtime/debug.ReadBuildInfo()`'s `vcs.revision` build
 	// setting -- i.e. the commit the *running binary* was built from -- not
 	// from running `git rev-parse HEAD` in the process's current working
@@ -67,40 +66,41 @@ type APIBenchReport struct {
 	// HarnessCommitDirty is nil when HarnessCommit itself is unknown (no
 	// VCS stamp at all -- see HarnessCommitSource), and otherwise points to
 	// whether the build-time working tree had uncommitted changes
-	// (`vcs.modified`). bench-rev-4 N9: this was a bare `omitempty bool`,
-	// which made "the tree was clean" and "dirty state is unknown" both
-	// serialize as a missing field -- indistinguishable to a reader. A
-	// pointer makes "known clean" (`false`), "known dirty" (`true`), and
-	// "unknown" (absent) three different, correctly distinguishable states.
+	// (`vcs.modified`). A bare `omitempty bool` would make "the tree was
+	// clean" and "dirty state is unknown" both serialize as a missing field
+	// -- indistinguishable to a reader. A pointer makes "known clean"
+	// (`false`), "known dirty" (`true`), and "unknown" (absent) three
+	// different, correctly distinguishable states.
 	HarnessCommitDirty *bool `json:"harnessCommitDirty,omitempty"`
-	// HarnessCommitSource explains how HarnessCommit was obtained, or why it
-	// is empty (bench-rev-3 RR3: "record empty with an explicit source
-	// rather than guessing"). Normally "go build VCS stamp"; see
-	// perf/bench/README.md for why `-buildvcs=false` must NOT be passed, and
-	// why the tools must be built from a regular clone rather than any form
-	// of `git worktree` checkout. bench-rev-5 W1: a worktree OUTSIDE any
-	// other checkout gets no stamp at all (source is "unavailable: ...");
-	// a worktree NESTED inside another checkout -- including this repo's
-	// own gitignored `.claude/worktrees/<name>` -- is silently stamped with
-	// the ENCLOSING checkout's commit instead and can report clean, which
-	// this field alone cannot distinguish from a correct stamp. See the
-	// README for the independent `go version -m` verification step.
+	// HarnessCommitSource explains how HarnessCommit was obtained, or why
+	// it is empty -- recorded explicitly rather than left for the reader to
+	// guess. Normally "go build VCS stamp"; see perf/bench/README.md for
+	// why `-buildvcs=false` must NOT be passed, and why the tools must be
+	// built from a regular clone rather than any form of `git worktree`
+	// checkout. A worktree OUTSIDE any other checkout gets no stamp at all
+	// (source is "unavailable: ..."); a worktree NESTED inside another
+	// checkout -- including this repo's own gitignored
+	// `.claude/worktrees/<name>` -- is silently stamped with the ENCLOSING
+	// checkout's commit instead and can report clean, which this field
+	// alone cannot distinguish from a correct stamp. See the README for the
+	// independent `go version -m` verification step.
 	HarnessCommitSource string `json:"harnessCommitSource"`
 	// HubScionVersion identifies the hub binary under test, read from its
 	// own unauthenticated GET /health (pkg/hub/handlers_health.go's
-	// `scionVersion` field, `pkg/version.Short()`) -- bench-rev-3 RR3's "NB4
-	// also covered the hub build" follow-up. Empty if /health could not be
-	// reached or parsed, and "unknown" if the hub binary itself was not
-	// built with version info or a VCS stamp (see perf/bench/README.md).
+	// `scionVersion` field, `pkg/version.Short()`) -- covering build
+	// provenance for the hub side as well as the harness's own. Empty if
+	// /health could not be reached or parsed, and "unknown" if the hub
+	// binary itself was not built with version info or a VCS stamp (see
+	// perf/bench/README.md).
 	//
-	// bench-rev-4 R3: there is deliberately no HubVersion field. An earlier
-	// version recorded /health's `version` field under that name, which
-	// looks like real provenance but is actually pkg/hub's hard-coded
-	// `"0.1.0"` placeholder (`handlers_health.go:86`, marked
-	// `// TODO: Get from build info`) -- constant regardless of which hub
-	// commit is actually running. A field that always reads the same value
-	// no matter what is measured is worse than no field, the same lesson
-	// RR3 already applied to the harness's own commit field.
+	// There is deliberately no HubVersion field. Recording /health's
+	// `version` field under that name would look like real provenance but
+	// is actually pkg/hub's hard-coded `"0.1.0"` placeholder
+	// (`handlers_health.go:86`, marked `// TODO: Get from build info`) --
+	// constant regardless of which hub commit is actually running. A field
+	// that always reads the same value no matter what is measured is worse
+	// than no field, the same reasoning applied to the harness's own commit
+	// field above.
 	HubScionVersion   string            `json:"hubScionVersion,omitempty"`
 	HubBaseURL        string            `json:"hubBaseUrl"`
 	EffectiveSettings EffectiveSettings `json:"effectiveSettings"`
@@ -110,7 +110,7 @@ type APIBenchReport struct {
 }
 
 // EffectiveSettings records the resolved CLI flags a report was produced
-// with (bench-rev-2 NB4), so a reader does not have to guess defaults.
+// with, so a reader does not have to guess defaults.
 type EffectiveSettings struct {
 	Runs           int  `json:"runs"`
 	Warmup         int  `json:"warmup"`
@@ -120,9 +120,9 @@ type EffectiveSettings struct {
 
 // Attempt records one HTTP request attempt, success or failure. A failure
 // -- a client timeout, a connection error, or a non-2xx status -- is a
-// measurement result, not a tool error (bench-rev-1 N1/N2): it is recorded
-// here and excluded from ScenarioStats' median/min/max/stddev, never
-// silently dropped or averaged in as if it were a timed success.
+// measurement result, not a tool error: it is recorded here and excluded
+// from ScenarioStats' median/min/max/stddev, never silently dropped or
+// averaged in as if it were a timed success.
 type Attempt struct {
 	Index int `json:"index"`
 	// Status is 0 for a request that never got a response at all (client
@@ -139,8 +139,8 @@ type Attempt struct {
 	// PerfTrace is set only when the hub was started with the #2392
 	// instrumentation build and SCION_HUB_PERF_TRACE=1, the request carried
 	// the opt-in X-Scion-Perf-Trace header, AND the response actually
-	// included trace headers (bench-rev-1 N3: not merely because
-	// --want-perf-trace was passed).
+	// included trace headers -- not merely because --want-perf-trace was
+	// passed.
 	PerfTrace map[string]string `json:"perfTrace,omitempty"`
 }
 
@@ -156,11 +156,11 @@ type ScenarioStats struct {
 	SuccessCount int `json:"successCount"`
 	FailureCount int `json:"failureCount"`
 
-	// Median/Min/Max/StdDev are computed over successful attempts only
-	// (bench-rev-1 B3): a run that timed out or errored contributes to
-	// SuccessCount/FailureCount and appears in Attempts, but never pulls
-	// these numbers toward itself the way including a ~300s timeout
-	// duration in a median would.
+	// Median/Min/Max/StdDev are computed over successful attempts only: a
+	// run that timed out or errored contributes to SuccessCount/
+	// FailureCount and appears in Attempts, but never pulls these numbers
+	// toward itself the way including a ~300s timeout duration in a median
+	// would.
 	MedianTTFBMs  float64 `json:"medianTtfbMs"`
 	MedianTotalMs float64 `json:"medianTotalMs"`
 	MinTotalMs    float64 `json:"minTotalMs"`
@@ -176,10 +176,10 @@ type ScenarioStats struct {
 // across runs/machines, per the brief's "note machine and CPU conditions".
 //
 // LoadAvg*/UptimeSeconds are read automatically from /proc (Linux only, zero
-// elsewhere) per bench-rev-1 N8: "budgets cannot be chosen from this host"
-// -- a shared, variably-loaded container -- and a reviewer or future reader
-// comparing runs needs the load figure alongside the latency numbers to
-// tell environment noise from a real regression.
+// elsewhere): budgets cannot be chosen from this host -- a shared,
+// variably-loaded container -- and a future reader comparing runs needs
+// the load figure alongside the latency numbers to tell environment noise
+// from a real regression.
 type MachineInfo struct {
 	GOOS      string `json:"goos"`
 	GOARCH    string `json:"goarch"`
@@ -193,11 +193,11 @@ type MachineInfo struct {
 	LoadAvg15     float64 `json:"loadAvg15,omitempty"`
 	UptimeSeconds float64 `json:"uptimeSeconds,omitempty"`
 
-	// *AtEnd are sampled again after the run completes (bench-rev-2 NB9): a
-	// 500-agent run can take many minutes, long enough for load to swing
-	// sharply within a single report. A report whose start/end load differ
-	// a lot flags itself as having run through a noise spike rather than
-	// steady-state conditions.
+	// *AtEnd are sampled again after the run completes: a 500-agent run can
+	// take many minutes, long enough for load to swing sharply within a
+	// single report. A report whose start/end load differ a lot flags
+	// itself as having run through a noise spike rather than steady-state
+	// conditions.
 	LoadAvg1AtEnd  float64 `json:"loadAvg1AtEnd,omitempty"`
 	LoadAvg5AtEnd  float64 `json:"loadAvg5AtEnd,omitempty"`
 	LoadAvg15AtEnd float64 `json:"loadAvg15AtEnd,omitempty"`

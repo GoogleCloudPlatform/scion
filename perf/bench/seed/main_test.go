@@ -16,7 +16,7 @@ import (
 )
 
 // TestDeriveSharedSigningKeyMatchesHub is the parity check
-// deriveSharedSigningKey's doc comment promises (bench-rev-1 B4). It does
+// deriveSharedSigningKey's doc comment promises. It does
 // not compare deriveSharedSigningKey's output against a copy-pasted
 // expected byte string (which would drift silently along with any future
 // copy-paste of pkg/hub/server.go's unexported version) -- it seeds a real
@@ -78,7 +78,7 @@ func TestDeriveSharedSigningKeyMatchesHub(t *testing.T) {
 // TestPickWeightedPhaseIsDeterministicForAFixedSeed confirms that two
 // independent rand.Source(42) sequences produce identical pickWeightedPhase
 // draws, which is what makes perf/bench/seed's --rand-seed flag meaningful
-// for reproducibility (bench-rev-1 B4).
+// for reproducibility.
 func TestPickWeightedPhaseIsDeterministicForAFixedSeed(t *testing.T) {
 	draw := func() []string {
 		rng := rand.New(rand.NewSource(42))
@@ -125,9 +125,9 @@ func TestPickWeightedPhaseDistributionRoughlyMatchesWeights(t *testing.T) {
 	}
 }
 
-// TestRunSeedsNonAdminProjectMember is the B4-required check that the
-// principal every bench tool authenticates as is genuinely a project
-// member, not the project owner and not any kind of admin.
+// TestRunSeedsNonAdminProjectMember checks that the principal every bench
+// tool authenticates as is genuinely a project member, not the project
+// owner and not any kind of admin.
 func TestRunSeedsNonAdminProjectMember(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hub.db")
@@ -193,10 +193,11 @@ func TestRunSeedsNonAdminProjectMember(t *testing.T) {
 	}
 }
 
-// TestCheckDBNotExists covers bench-rev-1 B6's refusal behavior directly
+// TestCheckDBNotExists covers checkDBNotExists's refusal behavior directly
 // (extracted into its own function specifically so it is unit-testable
-// without spawning the compiled binary), including bench-rev-2 R4's "file:"
-// DSN / "?query" bypass.
+// without spawning the compiled binary), including the "file:" DSN /
+// "?query" normalization that keeps the existence check from being
+// bypassed by DSN-form variants of an existing path.
 func TestCheckDBNotExists(t *testing.T) {
 	dir := t.TempDir()
 
@@ -226,7 +227,7 @@ func TestCheckDBNotExists(t *testing.T) {
 		}
 	})
 
-	t.Run("non-empty file is refused for a file: DSN with no query (R4)", func(t *testing.T) {
+	t.Run("non-empty file is refused for a file: DSN with no query", func(t *testing.T) {
 		p := filepath.Join(dir, "nonempty-filedsn.db")
 		if err := os.WriteFile(p, []byte("not really sqlite but non-empty"), 0o600); err != nil {
 			t.Fatal(err)
@@ -236,7 +237,7 @@ func TestCheckDBNotExists(t *testing.T) {
 		}
 	})
 
-	t.Run("non-empty file is refused for a file: DSN with a query suffix (R4)", func(t *testing.T) {
+	t.Run("non-empty file is refused for a file: DSN with a query suffix", func(t *testing.T) {
 		p := filepath.Join(dir, "nonempty-filedsn-query.db")
 		if err := os.WriteFile(p, []byte("not really sqlite but non-empty"), 0o600); err != nil {
 			t.Fatal(err)
@@ -254,18 +255,14 @@ func TestCheckDBNotExists(t *testing.T) {
 	})
 }
 
-// TestValidateDBPathArg covers bench-rev-3 O1, bench-rev-4 N1 and
-// bench-rev-5 N-a: a growing list of specific DSN forms whose string
+// TestValidateDBPathArg covers a list of specific DSN forms whose string
 // content lets `--db`'s literal value resolve to a DIFFERENT filesystem
 // path than what `checkDBNotExists` just confirmed doesn't exist under
 // that same literal value ("file://localhost/<path>", "#fragment",
-// "%XX"-escapes, a bare leading "//" authority). bench-rev-5 N-a: an
-// earlier version of this function's doc comment claimed rejecting
-// "#"/"%" "closes every such form" -- it did not (the bare "//" form,
-// without "file:", was not caught at all) -- so this is deliberately NOT
-// claimed to be an exhaustive enumeration here either; main()'s
-// `filepath.Clean` canonicalization is the actual defense-in-depth for
-// whatever slash-count variant this list has not thought to add yet.
+// "%XX"-escapes, a bare leading "//" authority). This is deliberately NOT
+// claimed to be an exhaustive enumeration; main()'s `filepath.Clean`
+// canonicalization is the actual defense-in-depth for whatever
+// slash-count variant this list has not thought to add yet.
 func TestValidateDBPathArg(t *testing.T) {
 	valid := []string{
 		"/tmp/hub.db",
@@ -287,12 +284,12 @@ func TestValidateDBPathArg(t *testing.T) {
 		"file://localhost/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?cache=shared",
 		"/tmp/hub.db?mode=rw",
-		"/tmp/hub.db#frag",       // N1: URI fragment, silently dropped by the DSN parser
-		"/tmp/%76ictim.db",       // N1: percent-encoding, silently decoded by the DSN parser
+		"/tmp/hub.db#frag",       // URI fragment, silently dropped by the DSN parser
+		"/tmp/%76ictim.db",       // percent-encoding, silently decoded by the DSN parser
 		"/tmp/hub.db#cache=rw",   // fragment form disguised as a query-like suffix
 		"/tmp/100%done/hub.db",   // "%" anywhere, not just a valid escape sequence
-		"//localhost/tmp/hub.db", // N-a: same bypass class as file://localhost/, no "file:" prefix
-		"//tmp/hub.db",           // N-a: leading "//" on its own, no "localhost" segment needed
+		"//localhost/tmp/hub.db", // same bypass class as file://localhost/, no "file:" prefix
+		"//tmp/hub.db",           // leading "//" on its own, no "localhost" segment needed
 	}
 	for _, p := range rejected {
 		if err := validateDBPathArg(p); err == nil {
@@ -301,20 +298,19 @@ func TestValidateDBPathArg(t *testing.T) {
 	}
 }
 
-// TestResolveDBPathArg covers bench-rev-5 N-a's two distinct slash-count
-// variants, through `resolveDBPathArg` specifically -- the function
-// `main()` actually calls -- rather than through `filepath.Clean` and
-// `checkDBNotExists` directly.
+// TestResolveDBPathArg covers two distinct slash-count variants, through
+// `resolveDBPathArg` specifically -- the function `main()` actually calls
+// -- rather than through `filepath.Clean` and `checkDBNotExists` directly.
 //
-// bench-rev-6 N6-1: an earlier version of this test called `filepath.Clean`
-// directly, so it exercised Go's standard library, not this package's own
-// logic; deleting `main()`'s call to `filepath.Clean` entirely left this
-// test passing (reviewer-confirmed mutation). `resolveDBPathArg` is the
-// package-local function that owns "validate, then canonicalize, in that
-// order" -- `main()` has nothing left to get wrong beyond calling it -- so
-// a test against `resolveDBPathArg` is a test of the actual implementation
-// `main()` delegates to, the same relationship `validateDBPathArg` and
-// `checkDBNotExists` already have with their own tests above.
+// Calling `filepath.Clean` directly in a test would exercise Go's standard
+// library, not this package's own logic, and would not detect `main()`'s
+// call to `filepath.Clean` being removed entirely. `resolveDBPathArg` is
+// the package-local function that owns "validate, then canonicalize, in
+// that order" -- `main()` has nothing left to get wrong beyond calling it
+// -- so a test against `resolveDBPathArg` is a test of the actual
+// implementation `main()` delegates to, the same relationship
+// `validateDBPathArg` and `checkDBNotExists` already have with their own
+// tests above.
 func TestResolveDBPathArg(t *testing.T) {
 	t.Run("rejects what validateDBPathArg rejects, before ever cleaning", func(t *testing.T) {
 		for _, bad := range []string{"//localhost/tmp/x.db", "file:/tmp/x.db", "/tmp/x.db?q=1"} {
@@ -343,8 +339,8 @@ func TestResolveDBPathArg(t *testing.T) {
 	})
 }
 
-// TestFilepathCleanClosesSlashCountBypass reproduces bench-rev-5 N-a's two
-// distinct slash-count variants end-to-end, at the `filepath.Clean` +
+// TestFilepathCleanClosesSlashCountBypass reproduces two distinct
+// slash-count variants end-to-end, at the `filepath.Clean` +
 // `checkDBNotExists` layer specifically (as defense-in-depth independent
 // of `validateDBPathArg`'s leading-"//" rejection, which already rejects
 // both inputs below before `resolveDBPathArg` would ever reach `Clean` --

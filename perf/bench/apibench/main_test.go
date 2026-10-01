@@ -127,10 +127,10 @@ func TestRedactSeedStripsCredentials(t *testing.T) {
 	}
 }
 
-// bench-rev-3 RR3: harnessBuildInfo must read the BINARY's own VCS stamp,
-// not `git rev-parse HEAD` in the caller's cwd -- there is no way to assert
+// harnessBuildInfo must read the BINARY's own VCS stamp, not
+// `git rev-parse HEAD` in the caller's cwd -- there is no way to assert
 // the exact commit from inside `go test` (it depends on the checkout this
-// suite happens to run from), but RR3's actual, checkable requirement is
+// suite happens to run from), but the actual, checkable requirement is
 // "record empty with an explicit source rather than guessing": the source
 // string must never be empty, and must never claim a VCS stamp while
 // leaving the commit blank.
@@ -150,17 +150,17 @@ func TestHarnessBuildInfoNeverGuesses(t *testing.T) {
 		if commit != "" {
 			t.Fatalf("harnessBuildInfo: commit %q set without claiming a VCS-stamp source (got %q)", commit, source)
 		}
-		// bench-rev-4 N9: dirty must be nil (unknown), not false, when the
-		// commit itself is unknown -- a bare `false` would be indistinguishable
-		// from "known clean".
+		// dirty must be nil (unknown), not false, when the commit itself is
+		// unknown -- a bare `false` would be indistinguishable from "known
+		// clean".
 		if dirty != nil {
 			t.Fatalf("harnessBuildInfo: dirty = %v, want nil when commit is unknown (source %q)", *dirty, source)
 		}
 	}
 }
 
-// bench-rev-4 R3: fetchHubVersion no longer returns the hub's hard-coded
-// `/health.version` placeholder -- see its doc comment and hubHealth.Version's.
+// fetchHubVersion does not return the hub's hard-coded `/health.version`
+// placeholder -- see its doc comment and hubHealth's.
 func TestFetchHubVersionParsesHealthResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {

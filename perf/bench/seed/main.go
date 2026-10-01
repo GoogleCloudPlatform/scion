@@ -2,17 +2,16 @@
 // non-admin project-member principal, and N synthetic agents with a
 // realistic mix of appliedConfig sizes, statuses, and ancestry.
 //
-// Refuses to run against an existing, non-empty --db by default
-// (bench-rev-1 B6): re-seeding the same file is not supported (it fails
-// partway through with "already exists" errors after having already
-// mutated hub bootstrap state), so this fails fast up front instead. The
-// check normalizes --db the same way openSQLiteForBench does (stripping a
-// "file:" prefix and "?query" suffix) before checking the filesystem
-// (bench-rev-2 R4: a "file:" DSN form bypassed an earlier, unnormalized
-// version of this check entirely). There is no override flag -- an earlier
-// version offered --force-existing, but every documented use of it still
-// fails partway through anyway (bench-rev-2 NB7), so it added a path to a
-// known-broken outcome rather than a real capability. Use a fresh path.
+// Refuses to run against an existing, non-empty --db by default:
+// re-seeding the same file is not supported (it fails partway through with
+// "already exists" errors after having already mutated hub bootstrap
+// state), so this fails fast up front instead. The check normalizes --db
+// the same way openSQLiteForBench does (stripping a "file:" prefix and
+// "?query" suffix) before checking the filesystem, so a "file:" DSN form
+// cannot bypass the check. There is no override flag -- every documented
+// use of a hypothetical --force-existing would still fail partway through
+// anyway, so it would only add a path to a known-broken outcome rather
+// than a real capability. Use a fresh path.
 //
 // It is the first stage of the perf/2393-large-project-bench harness
 // (ptone/scion#2393, #2374, #2367): every other bench tool consumes the
@@ -126,13 +125,14 @@ func main() {
 // openSQLiteForBench accepts, so a stat-based existence check inspects the
 // same filesystem path the DSN actually resolves to.
 //
-// bench-rev-2 R4: an earlier version of checkDBNotExists called os.Stat on
-// the raw --db value. Since openSQLiteForBench accepts (and this tool's own
-// callers may pass) a "file:" DSN with a "?cache=shared"-style suffix, e.g.
+// Calling os.Stat directly on a raw --db value would not work: since
+// openSQLiteForBench accepts (and this tool's own callers may pass) a
+// "file:" DSN with a "?cache=shared"-style suffix, e.g.
 // "file:/tmp/hub.db?cache=shared", os.Stat on that literal string looks for
 // a path starting with the 5 characters "file:" and containing a literal
-// "?", which essentially never exists -- so the guard always passed,
-// regardless of whether the real underlying file existed and had data.
+// "?", which essentially never exists -- so an unnormalized check would
+// always pass, regardless of whether the real underlying file existed and
+// had data.
 func normalizeDBPathForStat(dbPath string) string {
 	p := strings.TrimPrefix(dbPath, "file:")
 	if i := strings.IndexByte(p, '?'); i >= 0 {
@@ -142,56 +142,47 @@ func normalizeDBPathForStat(dbPath string) string {
 }
 
 // validateDBPathArg rejects any --db value this tool did not expect a
-// caller to supply: a "file:" DSN prefix, or any character with special
-// meaning to the URI parsing `openSQLiteForBench`'s DSN eventually goes
-// through ("?", "#", "%"), none of which this tool needs the caller to
-// supply.
+// caller to supply: a "file:" DSN prefix, a leading "//", or any character
+// with special meaning to the URI parsing `openSQLiteForBench`'s DSN
+// eventually goes through ("?", "#", "%"), none of which this tool needs
+// the caller to supply.
 //
-// bench-rev-3 O1: normalizeDBPathForStat's bare `TrimPrefix(dbPath,
-// "file:")` correctly handles "file:/abs/path" and
-// "file:/abs/path?cache=shared", but NOT the "file://localhost/<path>" URI
-// form (a valid, if unusual, sqlite3 DSN authority): trimming only the
-// "file:" prefix leaves "//localhost/<path>", which os.Stat never finds on
-// this host, so checkDBNotExists's existence guard silently passed even
-// against an existing, non-empty database. Fixed by rejecting any
-// "file:"-prefixed or "?"-containing --db value outright.
+// This guards against several ways a --db value can resolve to a
+// DIFFERENT filesystem path than the one `checkDBNotExists` stats, letting
+// an existing, non-empty database slip past the existence guard:
 //
-// bench-rev-4 N1: that fix was still incomplete. `openSQLiteForBench`
-// builds `"file:" + dbPath + "?cache=shared"` by string concatenation (to
-// exactly match `cmd/server_foreground.go`'s production DSN construction --
-// deliberately NOT changed here, since the whole point of this function is
-// to agree with the real `scion server start` subprocess on how a path is
-// opened) and hands the result to Go's `net/url`-based sqlite DSN parser,
-// which gives "#" and "%" their own URI meaning: a trailing `#frag` is
-// parsed as a fragment and silently dropped from the path, and `%XX`
-// sequences are percent-decoded. Both let `--db victim.db%2e` (or similar)
-// resolve to a DIFFERENT filesystem path than the literal string
-// `checkDBNotExists` just confirmed doesn't exist, bypassing the guard the
-// same way the "file://localhost/" form did -- reproduced: both forms
-// passed `checkDBNotExists` and then opened an EXISTING, non-empty
-// database, reaching Migrate and bootstrap before failing at "create owner
-// user: already exists" (no data-corruption was observed in that
-// reproduction, but the guard's entire job is to fail before that point,
-// not to rely on failing safely after it). Rejecting "#" and "%" outright,
-// like "?", closes both -- but NOT, on their own, every DSN-vs-filesystem
-// disagreement; see bench-rev-5 N-a below.
+//   - normalizeDBPathForStat's bare `TrimPrefix(dbPath, "file:")` handles
+//     "file:/abs/path" and "file:/abs/path?cache=shared", but NOT the
+//     "file://localhost/<path>" URI form (a valid, if unusual, sqlite3 DSN
+//     authority): trimming only the "file:" prefix leaves
+//     "//localhost/<path>", which os.Stat never finds on this host.
+//     Rejecting any "file:"-prefixed --db value outright closes this.
+//   - `openSQLiteForBench` builds `"file:" + dbPath + "?cache=shared"` by
+//     string concatenation (to exactly match
+//     `cmd/server_foreground.go`'s production DSN construction --
+//     deliberately NOT changed here, since the whole point of this
+//     function is to agree with the real `scion server start` subprocess
+//     on how a path is opened) and hands the result to Go's
+//     `net/url`-based sqlite DSN parser, which gives "#" and "%" their own
+//     URI meaning: a trailing `#frag` is parsed as a fragment and silently
+//     dropped from the path, and `%XX` sequences are percent-decoded. Both
+//     let `--db victim.db%2e` (or similar) resolve to a path different
+//     from the literal string `checkDBNotExists` confirmed doesn't exist.
+//     Rejecting "#" and "%" outright, like "?", closes both.
+//   - `--db //localhost/<path-to-an-existing-db>` has none of
+//     "file:"/"?"/"#"/"%", but is the same bypass class without the
+//     "file:" prefix: os.Stat never finds a literal "//localhost/<path>"
+//     (reports "does not exist"), while the "file:" DSN's URI parsing
+//     treats "localhost" as an empty host and resolves to the real,
+//     possibly EXISTING, "<path>". Rejecting a leading "//" closes this.
 //
-// bench-rev-5 N-a: `--db //localhost/<path-to-an-existing-db>` has none of
-// "file:"/"?"/"#"/"%", so the checks above correctly let it through, but it
-// is the exact same bypass class without the "file:" prefix: os.Stat never
-// finds a literal "//localhost/<path>" (reports "does not exist"), while
-// the "file:" DSN's URI parsing treats "localhost" as an empty host and
-// resolves to the real, possibly EXISTING, "<path>" -- reproduced
-// identically to the forms above (reaches Migrate/bootstrap, fails at
-// "already exists", no observed data corruption but the guard's job is to
-// fail before that point). Earlier comments on this function claimed
-// rejecting "#"/"%" "closes every such form" -- it did not, and this is
-// not an exhaustive enumeration of DSN-vs-filesystem disagreements either;
-// `resolveDBPathArg` below additionally canonicalizes the path with
-// `filepath.Clean` before using it for anything, which is what actually
-// closes this specific class, not a character blocklist. Rejecting a
-// leading "//" here as well costs nothing and makes the intent explicit at
-// the validation layer, not just the canonicalization layer.
+// This is not an exhaustive enumeration of every possible DSN-vs-filesystem
+// disagreement; `resolveDBPathArg` below additionally canonicalizes the
+// path with `filepath.Clean` before using it for anything, which closes
+// the slash-count class on its own, independent of this character
+// blocklist. Rejecting a leading "//" here as well costs nothing and makes
+// the intent explicit at the validation layer, not just the
+// canonicalization layer.
 func validateDBPathArg(dbPath string) error {
 	if strings.HasPrefix(dbPath, "file:") {
 		return fmt.Errorf(
@@ -222,28 +213,26 @@ func validateDBPathArg(dbPath string) error {
 // and the actual DSN open (run -> openSQLiteForBench) -- the same value
 // passed to both, never two independently-computed ones.
 //
-// bench-rev-6 N6-1: an earlier version had main() call `filepath.Clean`
-// inline and a test that called `filepath.Clean` and `checkDBNotExists`
-// directly, which could not tell the difference between "main() applies
-// this canonicalization" and "main() does not" -- reviewer-confirmed by
-// deleting main()'s `filepath.Clean` call and finding the test suite still
-// passed. Extracting this function means main() and its test call the
-// exact same code path, so removing the canonicalization step from main()
-// now breaks the test too.
+// This is extracted into its own function specifically so main() and its
+// test call the exact same code path for canonicalization: a test that
+// instead called `filepath.Clean` and `checkDBNotExists` directly could
+// not tell the difference between "main() applies this canonicalization"
+// and "main() does not", since it would not exercise main()'s own call
+// sequence. Routing both through resolveDBPathArg means removing the
+// canonicalization step from main() breaks the test too.
 //
 // filepath.Clean collapses any number of consecutive slashes ANYWHERE in
 // the path to exactly one, so the existence check and the DSN parser agree
-// for slash-count variants specifically (bench-rev-5 N-a: a leading "//"
-// can otherwise be reinterpreted as a URI authority by the DSN parsing
-// this tool's sqlite DSN goes through, resolving to a DIFFERENT filesystem
-// path than a plain existence check sees). It does not, on its own,
-// guarantee agreement for every possible DSN-vs-filesystem disagreement --
-// the other URI-special characters ("?", "#", "%", a "file:" prefix) are
-// validateDBPathArg's job, above, not Clean's. For every ordinary
-// single-slash or relative path (the only kind this tool's docs ever
-// recommended), Clean is a no-op, so normal usage and
-// `openSQLiteForBench`'s deliberately-unchanged production-matching
-// construction are unaffected.
+// for slash-count variants specifically: a leading "//" can otherwise be
+// reinterpreted as a URI authority by the DSN parsing this tool's sqlite
+// DSN goes through, resolving to a DIFFERENT filesystem path than a plain
+// existence check sees. It does not, on its own, guarantee agreement for
+// every possible DSN-vs-filesystem disagreement -- the other URI-special
+// characters ("?", "#", "%", a "file:" prefix) are validateDBPathArg's job,
+// above, not Clean's. For every ordinary single-slash or relative path
+// (the only kind this tool's docs ever recommended), Clean is a no-op, so
+// normal usage and `openSQLiteForBench`'s deliberately-unchanged
+// production-matching construction are unaffected.
 func resolveDBPathArg(raw string) (string, error) {
 	if err := validateDBPathArg(raw); err != nil {
 		return "", err
@@ -252,14 +241,13 @@ func resolveDBPathArg(raw string) (string, error) {
 }
 
 // checkDBNotExists refuses an already-existing, non-empty dbPath.
-// Extracted from main() so it is directly unit-testable (bench-rev-1 B6):
-// re-seeding an existing file is not supported (run() fails partway
-// through, after already mutating hub bootstrap state, with an "already
-// exists" error on the owner/member user), so this fails fast before
-// opening the database at all. No override flag: an earlier version had
-// --force-existing, but every documented use of it still ends in that same
-// failure, so it only offered a path to a known-broken outcome
-// (bench-rev-2 NB7) -- removed rather than kept as a trap.
+// Extracted from main() so it is directly unit-testable: re-seeding an
+// existing file is not supported (run() fails partway through, after
+// already mutating hub bootstrap state, with an "already exists" error on
+// the owner/member user), so this fails fast before opening the database
+// at all. No override flag: a hypothetical --force-existing would still
+// end in that same failure for every documented use, so it would only
+// offer a path to a known-broken outcome rather than a real capability.
 func checkDBNotExists(dbPath string) error {
 	statPath := normalizeDBPathForStat(dbPath)
 	fi, statErr := os.Stat(statPath)

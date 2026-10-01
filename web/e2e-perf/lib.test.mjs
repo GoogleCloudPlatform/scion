@@ -31,10 +31,10 @@ import {
   BURST_TARGET_ROTATION,
 } from './lib.mjs';
 
-// ---- apiMatcherFor: the bench-rev-2 R1 regression test ---------------------
+// ---- apiMatcherFor: a regression test against the real page URLs ----------
 // Match against the REAL URLs each page actually fetches, not an assumed
-// shape -- this is exactly the test that would have caught R1 before it
-// shipped.
+// shape -- this is exactly the kind of test that catches a matcher drifting
+// out of sync with what a page actually requests.
 
 test('apiMatcherFor(standalone-graph) matches agent-graph.ts real unscoped fetch', () => {
   const matches = apiMatcherFor('standalone-graph', 'proj-123');
@@ -89,7 +89,7 @@ test('classifyOutcome: non-2xx status -> load-failed(http:...)', () => {
   assert.equal(classifyOutcome(false, { status: 403, failed: null }), 'load-failed(http:403)');
 });
 
-test('classifyOutcome: 2xx observed but not populated -> loaded-not-rendered (NB6)', () => {
+test('classifyOutcome: 2xx observed but not populated -> loaded-not-rendered', () => {
   assert.equal(classifyOutcome(false, { status: 200, failed: null }), 'loaded-not-rendered');
 });
 
@@ -174,17 +174,18 @@ test('summarizeScenario excludes non-populated runs from median/min/max and spli
   });
 });
 
-// ---- pickBurstTarget (bench-rev-2 R2, bench-rev-3 RR1) -----------------------
+// ---- pickBurstTarget ---------------------------------------------------------
 //
-// bench-rev-3 RR1(c): the real caller (runBurstOnce in large-project-bench.mjs)
-// always passes the agent's PRE-BURST phase as `currentPhase` -- the SAME
-// value on every run, since it is restored between runs -- never the
-// previous run's own target. bench-rev-2's original test fed the previous
-// *target* back in as `currentPhase`, a model the real caller never
-// follows, so reverting pickBurstTarget to the old idx-only rotation still
-// passed it (21/21). The tests below hold `currentPhase` fixed across runs,
-// as the real caller does, and track `previousRunTarget` as its own,
-// separate argument -- the only shape that can actually catch RR1(a).
+// The real caller (runBurstOnce in large-project-bench.mjs) always passes
+// the agent's PRE-BURST phase as `currentPhase` -- the SAME value on every
+// run, since it is restored between runs -- never the previous run's own
+// target. A test that instead fed the previous *target* back in as
+// `currentPhase` would follow a model the real caller never does, and
+// would pass even against a simpler idx-only rotation that does not
+// actually prevent repeats. The tests below hold `currentPhase` fixed
+// across runs, as the real caller does, and track `previousRunTarget` as
+// its own, separate argument -- the only shape that actually exercises the
+// repeat-prevention logic the real caller depends on.
 
 test('pickBurstTarget never returns the current phase', () => {
   for (let idx = 0; idx < 20; idx++) {
@@ -217,20 +218,18 @@ test('pickBurstTarget: holding currentPhase fixed (as the real caller does), con
   }
 });
 
-// bench-rev-4 N3: an earlier version of this file had a "mutation check"
-// test here that ran a hand-copied `idxOnlyPickBurstTarget` function
-// against ITSELF and asserted that copy repeats -- it never called the
-// real, exported `pickBurstTarget`, so it was tautological: it could never
-// fail because of anything this file's actual code did. The real
-// regression protection is the test above ("holding currentPhase fixed...")
-// -- bench-rev-3 confirmed by temporarily reverting the real
-// `pickBurstTarget` to the bench-rev-2 idx-only form and bench-rev-4
-// independently reconfirmed it by replaying the exact round-3 false-settle
-// sequence through the real `runBurstOnce`/`runBurstScenario`: the test
-// above fails against both the bench-rev-2 and the original idx-only
-// implementations. That mutation check lives in review evidence, not here,
-// specifically so this suite does not carry a test that asserts something
-// about a copy of the code instead of the code.
+// A "mutation check" test that runs a hand-copied `idxOnlyPickBurstTarget`
+// function against ITSELF and asserts that copy repeats would never call
+// the real, exported `pickBurstTarget`, so it would be tautological: it
+// could never fail because of anything this file's actual code did. The
+// real regression protection is the test above ("holding currentPhase
+// fixed...") -- confirmed by temporarily reverting the real
+// `pickBurstTarget` to a simpler idx-only form and replaying a known
+// false-settle sequence through the real `runBurstOnce`/`runBurstScenario`:
+// the test above fails against both an idx-only rotation and the original
+// implementation it replaced. This suite intentionally does not carry a
+// test that asserts something about a copy of the code instead of the
+// code.
 
 test('pickBurstTarget still returns a valid candidate when currentPhase equals previousRunTarget', () => {
   for (let idx = 0; idx < 10; idx++) {
@@ -256,7 +255,7 @@ test('BURST_TARGET_ROTATION never includes suspended or running', () => {
   assert.equal(lower.includes('running'), false);
 });
 
-// ---- displayStatusLabel (bench-rev-3 RR1(b)) ---------------------------------
+// ---- displayStatusLabel -------------------------------------------------------
 // Mirrors web/src/shared/types.ts's getAgentDisplayStatus exactly -- the
 // restore-wait check must use this, not the literal phase, to have any
 // chance of matching a running-with-activity agent's rendered badge.
@@ -274,10 +273,10 @@ test('displayStatusLabel returns the literal phase for any non-running phase, re
   assert.equal(displayStatusLabel('error', ''), 'error');
 });
 
-// ---- computePreStaleIds (bench-rev-3 RR1 guard 2, bench-rev-4 N12) -----------
+// ---- computePreStaleIds -------------------------------------------------------
 // Extracted from large-project-bench.mjs's runBurstOnce so the pre-fire
-// staleness guard has its own direct test, not only review-time simulation
-// against a fake hub and DOM.
+// staleness guard has its own direct test, rather than only being
+// exercised indirectly against a fake hub and DOM.
 
 test('computePreStaleIds excludes an agent whose badge already shows its target', () => {
   const preFireLabels = new Map([
@@ -319,10 +318,10 @@ test('computePreStaleIds returns an empty set when nothing is stale', () => {
   assert.equal(result.size, 0);
 });
 
-// ---- summarizeBurstScenario (bench-rev-3 RR1(b), bench-rev-4 R4/N12) ---------
+// ---- summarizeBurstScenario -----------------------------------------------
 // Extracted from runBurstScenario's aggregation so the invalid-run
-// exclusion -- the guard that actually stopped bench-rev-3's round-3
-// false-settle sequence in bench-rev-4's replay -- has its own direct test.
+// exclusion -- the guard that stops a known false-settle sequence from
+// contaminating the scenario's statistics -- has its own direct test.
 
 function makeRun({
   invalid = false,
@@ -334,8 +333,8 @@ function makeRun({
   preStaleExcludedCount = 0,
   // Default to a representative non-zero tracked count (a full 15-agent
   // burst with nothing pre-stale-excluded) so existing tests that don't
-  // care about trackedCount aren't silently affected by the bench-rev-5
-  // N-g `trackedCount > 0` guard on fullySettledRunCount.
+  // care about trackedCount aren't silently affected by the
+  // `trackedCount > 0` guard on fullySettledRunCount.
   trackedCount = 15,
 } = {}) {
   return {
@@ -368,16 +367,14 @@ test('summarizeBurstScenario excludes invalid runs from medianSettleMs/min/max/s
   assert.equal(s.perAgentMaxSettleMs, 220); // true per-agent max across valid runs only
 });
 
-test('summarizeBurstScenario: perAgentMin/MaxSettleMs are the true per-agent range; runMedianMin/MaxMs are the separate range-of-medians statistic (bench-rev-5 W3)', () => {
-  // bench-rev-4 R4: an earlier version's "minSettleMs"/"maxSettleMs" (now
-  // renamed perAgentMin/MaxSettleMs, bench-rev-5 W3) computed
-  // minMax(medianSettleValues), which for these three runs would give
-  // [100, 110] (the range of the medians) -- very different from the true
-  // per-agent range, which must reach down to each run's own min (10) and
-  // up to each run's own max (900). Both statistics are now available,
-  // under names that each only ever mean one thing: perAgentMin/MaxSettleMs
-  // for the true per-agent range, runMedianMin/MaxMs for the range of the
-  // five per-run medians (what the old, ambiguous field name computed).
+test('summarizeBurstScenario: perAgentMin/MaxSettleMs are the true per-agent range; runMedianMin/MaxMs are the separate range-of-medians statistic', () => {
+  // A field computing minMax(medianSettleValues) would, for these three
+  // runs, give [100, 110] (the range of the medians) -- very different
+  // from the true per-agent range, which must reach down to each run's own
+  // min (10) and up to each run's own max (900). Both statistics are
+  // available, under names that each only ever mean one thing:
+  // perAgentMin/MaxSettleMs for the true per-agent range, runMedianMin/
+  // MaxMs for the range of the five per-run medians.
   const results = [
     makeRun({ medianSettleMs: 100, minSettleMs: 10, maxSettleMs: 300 }),
     makeRun({ medianSettleMs: 105, minSettleMs: 20, maxSettleMs: 900 }),
@@ -403,7 +400,7 @@ test('summarizeBurstScenario: fullySettledRunCount only counts valid, non-timed-
   assert.equal(s.validRunCount, 2);
 });
 
-test('summarizeBurstScenario: a run with every target pre-stale-excluded (trackedCount 0) does not count as fully settled (bench-rev-5 N-g)', () => {
+test('summarizeBurstScenario: a run with every target pre-stale-excluded (trackedCount 0) does not count as fully settled', () => {
   // timedOut is `settledCount < trackedCount`, which is vacuously false
   // when trackedCount is 0 -- a run that tracked and confirmed NOTHING
   // must not be indistinguishable from a run that tracked and confirmed

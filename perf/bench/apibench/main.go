@@ -23,10 +23,9 @@
 //     what the standalone graph page actually fetches
 //     (web/src/components/pages/agent-graph.ts:115 calls
 //     apiFetch('/api/v1/agents') with no parameters and filters
-//     client-side). bench-rev-2 R1 (related, non-blocking): an earlier
-//     version of this tool instead measured the `projectId=`-scoped
-//     variant below and mislabeled it as "what the standalone graph page
-//     loads", which it is not.
+//     client-side). An earlier version of this tool instead measured the
+//     `projectId=`-scoped variant below and mislabeled it as "what the
+//     standalone graph page loads", which it is not.
 //   - "global-agents-list-scoped": GET /api/v1/agents?projectId={id} -- not
 //     fetched by any page today, kept as a reference point for how much a
 //     server-side project filter would save over the unscoped fetch above,
@@ -39,8 +38,8 @@
 // A per-attempt failure (client timeout, connection error, or a non-2xx
 // status) is recorded, not fatal: the run continues and the report is still
 // written, with success/failure counts and median/min/max/stddev computed
-// over successful attempts only (bench-rev-1 B3/N1/N2). At agent counts
-// near or above the hub's default 60s WriteTimeout
+// over successful attempts only. At agent counts near or above the hub's
+// default 60s WriteTimeout
 // (pkg/config/hub_config.go's HubServerConfig.WriteTimeout /
 // pkg/hub/web.go's WebServer.Start), some attempts failing is itself part
 // of the measurement, not noise to discard.
@@ -77,36 +76,34 @@ import (
 // harnessBuildInfo reports the harness's own build provenance via Go's VCS
 // stamping, i.e. the commit the *running binary* was actually built from.
 //
-// bench-rev-3 RR3: the previous implementation ran `git rev-parse HEAD` in
-// the process's current working directory, which records whatever git
-// checkout the OPERATOR happens to be standing in when invoking the
-// already-built binary, not the commit it was built from. Built from this
-// harness and run from a different repo checkout (demonstrated: an upstream
-// `main` checkout), it silently reported that OTHER checkout's HEAD --
-// exactly the kind of wrong-but-plausible-looking value RR3 called "worse
-// than not having the field".
+// This deliberately avoids running `git rev-parse HEAD` in the process's
+// current working directory, which would record whatever git checkout the
+// OPERATOR happens to be standing in when invoking the already-built
+// binary, not the commit it was built from -- run from a different repo
+// checkout than the one it was built from, that approach would silently
+// report the OTHER checkout's HEAD, a wrong-but-plausible-looking value
+// that is worse than not having the field at all.
 //
 // `runtime/debug.ReadBuildInfo()`'s `vcs.revision`/`vcs.modified` settings
 // are populated by `go build`'s default VCS auto-stamping and travel with
 // the binary itself, so this is correct regardless of the caller's cwd. It
 // requires building WITHOUT `-buildvcs=false` -- see perf/bench/README.md.
 //
-// bench-rev-4 N2: it ALSO requires building from a regular clone/checkout,
-// not a `git worktree add` checkout -- but bench-rev-5 W1 found the actual
-// failure mode is worse than bench-rev-4 described, not merely absent:
+// It ALSO requires building from a regular clone/checkout, not a
+// `git worktree add` checkout. There are two distinct failure modes, not
+// one, and the second is worse than simply absent:
 //
 //   - A worktree OUTSIDE any other git checkout gets NO VCS stamp at all
-//     (confirmed by bench-rev-4's reproduction: plain repo and shallow
-//     clone both stamped; this form of worktree did not).
+//     (a plain repo and a shallow clone both stamp correctly; this form
+//     of worktree does not).
 //   - A worktree NESTED INSIDE another checkout -- including a gitignored
 //     one, such as this repo's own `.claude/worktrees/<name>` (`.claude/`
 //     is in `.gitignore`) -- gets stamped with the commit of the
 //     ENCLOSING checkout instead, and can report `vcs.modified=false`
 //     ("clean") even though the nested worktree's own tree differs
-//     entirely (bench-rev-5 reproduced this on a throwaway nested-worktree
-//     repo: stamped revision was the enclosing checkout's HEAD, not the
-//     worktree's). This is the SAME wrong-but-plausible-looking failure
-//     RR3 fixed for `git rev-parse HEAD` in the caller's cwd -- a
+//     entirely: the stamped revision is the enclosing checkout's HEAD, not
+//     the worktree's own. This is the SAME class of wrong-but-plausible
+//     failure as trusting `git rev-parse HEAD` in the caller's cwd -- a
 //     confidently wrong commit, not an absent one -- and it is plausibly
 //     the common case on a fleet that creates worktrees under `.claude/`.
 //
@@ -145,28 +142,25 @@ func harnessBuildInfo() (commit string, dirty *bool, source string) {
 // hubHealth deliberately has no field for pkg/hub/handlers_health.go:86's
 // `HealthResponse.Version` -- a hard-coded `"0.1.0"` literal marked
 // `// TODO: Get from build info` in hub source, constant regardless of
-// which hub commit is actually running (bench-rev-4 R3). A field that
-// looks like provenance but is actually a constant is worse than no field
-// at all, the same lesson RR3 already applied to the harness's own commit
-// field. bench-rev-5 N-b: an earlier version decoded it anyway "so
-// json.Decode does not need a second type", which is not a real
-// constraint -- encoding/json silently ignores unknown response fields, so
-// omitting it here costs nothing and removes dead code.
+// which hub commit is actually running. A field that looks like provenance
+// but is actually a constant is worse than no field at all, the same
+// reasoning applied to the harness's own commit field above.
+// encoding/json silently ignores unknown response fields, so omitting it
+// here costs nothing and avoids decoding a field this tool never uses.
 type hubHealth struct {
 	ScionVersion string `json:"scionVersion"`
 }
 
-// fetchHubVersion identifies the hub binary under test (bench-rev-3 RR3:
-// NB4's provenance request also covered the hub build, not just the
-// harness's). Best-effort: returns zero values on any error rather than
-// failing the run, since /health is a nice-to-have, not load-bearing.
+// fetchHubVersion identifies the hub binary under test, covering build
+// provenance for the hub side as well as the harness's own. Best-effort:
+// returns zero values on any error rather than failing the run, since
+// /health is a nice-to-have, not load-bearing.
 //
-// bench-rev-4 R3: this now returns ONLY scionVersion (from
-// `pkg/version.Short()`, which reflects a real `-ldflags`-injected version
-// or the hub binary's OWN VCS stamp when built correctly -- see
-// perf/bench/README.md's build instructions). The hub's `/health.version`
-// field is deliberately not surfaced as report data; see hubHealth.Version's
-// doc comment.
+// This returns ONLY scionVersion (from `pkg/version.Short()`, which
+// reflects a real `-ldflags`-injected version or the hub binary's OWN VCS
+// stamp when built correctly -- see perf/bench/README.md's build
+// instructions). The hub's `/health.version` field is deliberately not
+// surfaced as report data; see hubHealth's doc comment.
 func fetchHubVersion(client *http.Client, hubURL string) (scionVersion string) {
 	resp, err := client.Get(strings.TrimRight(hubURL, "/") + "/health")
 	if err != nil {
@@ -189,7 +183,7 @@ func main() {
 	hubURL := flag.String("hub", "http://127.0.0.1:19810", "hub base URL")
 	seedPath := flag.String("seed", "", "path to seed metadata JSON produced by perf/bench/seed (required)")
 	runs := flag.Int("runs", 5, "number of timed trials per scenario (median/spread reported over these)")
-	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (bench-rev-2 NB8: warmup results are discarded, not recorded in the report, and a warmup failure is not fatal)")
+	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (warmup results are discarded, not recorded in the report, and a warmup failure is not fatal)")
 	outPath := flag.String("out", "", "path to write the JSON report (required)")
 	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (only meaningful on a #2392-instrumented hub build)")
 	notes := flag.String("notes", "", "free-form note about machine/CPU conditions for this run, copied into the report")
@@ -227,23 +221,23 @@ func main() {
 	hubScionVersion := fetchHubVersion(client, *hubURL)
 	report := benchout.APIBenchReport{
 		GeneratedAt: time.Now().UTC(),
-		// bench-rev-2 NB4, bench-rev-3 RR3: record the harness's own build
-		// commit (from the binary's VCS stamp, not the caller's cwd) and the
-		// hub build under test, so a report can be matched back to the
-		// exact code on both sides without relying on wall-clock proximity.
-		// bench-rev-4 N9: HarnessCommitDirty is now *bool (nil when the
-		// commit itself is unknown) so "clean" and "dirty state unknown"
-		// are never indistinguishable the way a bare `omitempty` bool was.
+		// Record the harness's own build commit (from the binary's VCS
+		// stamp, not the caller's cwd) and the hub build under test, so a
+		// report can be matched back to the exact code on both sides
+		// without relying on wall-clock proximity. HarnessCommitDirty is
+		// *bool (nil when the commit itself is unknown) so "clean" and
+		// "dirty state unknown" are never indistinguishable the way a bare
+		// `omitempty` bool would be.
 		HarnessCommit:       harnessCommit,
 		HarnessCommitDirty:  harnessDirty,
 		HarnessCommitSource: harnessCommitSource,
-		// bench-rev-4 R3: HubVersion was dropped (it only ever held the
-		// hub's hard-coded "0.1.0" /health placeholder -- see
-		// fetchHubVersion's doc comment). HubScionVersion is kept; it
-		// reflects pkg/version.Short() on the HUB side, which is real
-		// provenance when the hub binary is built correctly (see
-		// perf/bench/README.md), and is "unknown" otherwise -- never a
-		// placeholder presented as if it were real.
+		// There is no HubVersion field: it would only ever hold the hub's
+		// hard-coded "0.1.0" /health placeholder -- see fetchHubVersion's
+		// doc comment. HubScionVersion is kept; it reflects
+		// pkg/version.Short() on the HUB side, which is real provenance
+		// when the hub binary is built correctly (see perf/bench/README.md),
+		// and is "unknown" otherwise -- never a placeholder presented as if
+		// it were real.
 		HubScionVersion: hubScionVersion,
 		HubBaseURL:      *hubURL,
 		EffectiveSettings: benchout.EffectiveSettings{
@@ -252,10 +246,10 @@ func main() {
 			TimeoutSeconds: *timeoutSeconds,
 			WantPerfTrace:  *wantPerfTrace,
 		},
-		// bench-rev-1 N6: the seed metadata embeds long-lived bearer tokens
-		// and the session secret. redactSeed strips them before anything
-		// gets written to disk, so a report file can never leak a working
-		// credential even if an uploader forgets to redact by hand.
+		// The seed metadata embeds long-lived bearer tokens and the session
+		// secret. redactSeed strips them before anything gets written to
+		// disk, so a report file can never leak a working credential even
+		// if an uploader forgets to redact by hand.
 		Seed: redactSeed(seed),
 		Machine: benchout.MachineInfo{
 			GOOS:      runtime.GOOS,
@@ -265,13 +259,13 @@ func main() {
 			Notes:     *notes,
 		},
 	}
-	// bench-rev-1 N8: record load/uptime automatically, since budgets
-	// cannot be chosen from a shared, variably-loaded host -- see
-	// perf/bench/README.md's "Choosing regression budgets" section for what
-	// this is and is not sufficient for. bench-rev-2 NB9: a 500-agent run
-	// takes many minutes, so load is sampled again at the end -- a report
-	// whose start/end load differ sharply flags itself as having run
-	// through a noise spike rather than steady-state conditions.
+	// Record load/uptime automatically, since budgets cannot be chosen from
+	// a shared, variably-loaded host -- see perf/bench/README.md's
+	// "Choosing regression budgets" section for what this is and is not
+	// sufficient for. A 500-agent run takes many minutes, so load is
+	// sampled again at the end -- a report whose start/end load differ
+	// sharply flags itself as having run through a noise spike rather than
+	// steady-state conditions.
 	report.Machine.LoadAvg1, report.Machine.LoadAvg5, report.Machine.LoadAvg15 = readLoadAvg()
 	report.Machine.UptimeSeconds = readUptimeSeconds()
 	if h, err := os.Hostname(); err == nil {
@@ -294,12 +288,12 @@ func main() {
 			// A failure is a real measurement (e.g. the WriteTimeout cliff
 			// documented in perf/bench/README.md), not a tool bug -- still
 			// write the report and exit non-zero only to flag it for CI/log
-			// scanning, never by discarding the data (bench-rev-1 N1).
+			// scanning, never by discarding the data.
 			exitCode = 1
 		}
 	}
 
-	// bench-rev-2 NB9: sample again at the end, not just the start.
+	// Sample again at the end, not just the start.
 	report.Machine.LoadAvg1AtEnd, report.Machine.LoadAvg5AtEnd, report.Machine.LoadAvg15AtEnd = readLoadAvg()
 
 	data, err := json.MarshalIndent(report, "", "  ")
@@ -347,8 +341,8 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 		start := time.Now()
 		resp, err := client.Do(req)
 		if err != nil {
-			// bench-rev-1 N1: a timeout or connection error is a result,
-			// not a tool crash -- record it and let the caller continue.
+			// A timeout or connection error is a result, not a tool crash
+			// -- record it and let the caller continue.
 			a.Error = err.Error()
 			a.TotalMs = msf(time.Since(start))
 			return a
@@ -365,8 +359,8 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 		}
 		a.Bytes = n
 
-		// bench-rev-1 N2: a non-2xx status is a failed attempt, not a timed
-		// success -- the caller must not average it in with real successes.
+		// A non-2xx status is a failed attempt, not a timed success -- the
+		// caller must not average it in with real successes.
 		a.Success = a.Status >= 200 && a.Status < 300
 		if !a.Success {
 			a.Error = fmt.Sprintf("non-2xx status %d", a.Status)
@@ -379,9 +373,9 @@ func runScenario(client *http.Client, hubURL, name, endpoint, token string, agen
 					trace[k] = v
 				}
 			}
-			// bench-rev-1 N3: only report trace data as available when it
-			// actually came back, not merely because --want-perf-trace was
-			// passed (e.g. hitting an unmodified-main hub with the flag on).
+			// Only report trace data as available when it actually came
+			// back, not merely because --want-perf-trace was passed (e.g.
+			// hitting an unmodified-main hub with the flag on).
 			if len(trace) > 0 {
 				a.PerfTrace = trace
 			}

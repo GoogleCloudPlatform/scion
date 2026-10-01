@@ -46,58 +46,42 @@
  * --web-assets-dir <built web/dist/client>, against the same --db and
  * --session-secret perf/bench/seed used (see the harness README).
  *
- * bench-rev-2 fixes (see gs://scion-xproject-exchange/slow-list/reviews/
- * bench-rev-2.md) on top of bench-rev-1's:
- * - R1: the network matcher now matches on parsed pathname so it actually
- *   fires for the standalone graph's unscoped `/api/v1/agents` fetch (it
- *   previously required a `projectId=` query param that page never sends).
- * - R2: consecutive burst runs target a rotation offset by run index, and
- *   each run's restore is polled, up to a bound, to confirm it actually
- *   reached the DOM (bench-rev-6 N6-2: this bound does NOT block the next
- *   run -- see bench-rev-3 RR1(b) below for the actual mark-invalid
- *   behavior that replaced the simpler description here) -- a prior run's
- *   stale, not-yet-restored badge could otherwise be miscounted as the
- *   next run's settle.
- * - NB1: restores both phase and activity, not phase alone.
- * - NB2: settle time is measured per agent from that agent's own POST
- *   completion, not from a shared burst-start timestamp (which folded in
- *   POST latency as if it were SSE latency).
- * - NB3: the first run of each scenario uses a fresh ("cold") browser
- *   context; subsequent runs share one ("warm") context. Reported
- *   separately.
- * - NB4: the report records the harness's git commit and effective
- *   timeouts.
- * - NB5: network failures/non-2xx responses record when they happened
- *   (elapsed ms from navigation start), so WriteTimeout attribution is
- *   measured, not inferred from wall-clock totals alone.
- * - NB6: a 2xx response that never renders is now `loaded-not-rendered`,
- *   distinct from `still-loading` (no response observed at all).
- * - Graph interaction timing (pan/zoom/hover) is now measured for both
- *   graph scenarios, not deferred.
- *
- * bench-rev-3 fixes (see gs://scion-xproject-exchange/slow-list/reviews/
- * bench-rev-3.md) on top of bench-rev-2's:
- * - RR1: bench-rev-2's R2 fix did not actually close the false-settle hole
- *   it was meant to close (pickBurstTarget's "never repeats" guarantee was
- *   false against the real caller, and the restore-wait recorded its
- *   result but never gated anything). This version (a) excludes BOTH the
- *   pre-burst phase and the agent's actual previous-run target from
- *   pickBurstTarget's candidates, (b) reads every target's badge
- *   immediately before posting and excludes any agent already showing its
- *   about-to-be-requested target from this run's settle tracking, and (c)
- *   marks a run invalid, excluded from the scenario's settle statistics,
- *   whenever the PREVIOUS run's restore was not fully confirmed in the DOM.
- *   The restore-wait's expected value is now computed the way the UI
- *   renders it (displayStatusLabel), not the literal pre-burst phase.
- * - RR3: harnessCommit now comes from the binary's own build-time VCS
- *   stamp, not `git rev-parse HEAD` in the caller's cwd (which silently
- *   recorded the WRONG commit whenever the two differ); the report also
- *   records a dirty-tree flag and the hub's own version/build
- *   (GET /health).
- * - RR4: per-agent settle time is now observed by a polling loop dedicated
- *   to that agent, started the instant THAT agent's own POST resolves --
- *   not after every agent's POST has resolved (bench-rev-2's NB2 fix still
- *   had this gap, inflating settle by up to the POST-completion spread).
+ * Notable behavior of this harness:
+ * - The network matcher matches on parsed pathname, so it fires correctly
+ *   for the standalone graph's unscoped `/api/v1/agents` fetch (that page
+ *   never sends a `projectId=` query param).
+ * - `pickBurstTarget` excludes both the agent's pre-burst phase and its
+ *   actual previous-run target, each target's badge is read immediately
+ *   before posting so any agent already showing its about-to-be-requested
+ *   value is excluded from that run's settle tracking, and a run is marked
+ *   invalid -- excluded from the scenario's settle statistics -- whenever
+ *   the previous run's restore was not fully confirmed in the DOM before
+ *   this run started. This bound does not block the next run; see
+ *   runBurstOnce for the mark-invalid mechanism. Without these guards, a
+ *   prior run's stale, not-yet-restored badge could be miscounted as the
+ *   next run's settle. The restore-wait's expected value is computed the
+ *   way the UI renders it (`displayStatusLabel`), not the literal
+ *   pre-burst phase.
+ * - Restores both phase and activity, not phase alone.
+ * - Settle time is measured per agent from that agent's own POST
+ *   completion, observed by a polling loop dedicated to that agent and
+ *   started the instant that agent's own POST resolves -- not from a
+ *   shared burst-start timestamp or only after every agent's POST has
+ *   resolved, either of which would inflate settle time by folding in POST
+ *   latency or the spread between POST completions.
+ * - The first run of each scenario uses a fresh ("cold") browser context;
+ *   subsequent runs share one ("warm") context. Reported separately.
+ * - The report records the harness's git commit (from the binary's own
+ *   build-time VCS stamp, not `git rev-parse HEAD` in the caller's cwd,
+ *   which could silently record the wrong commit), a dirty-tree flag, the
+ *   hub's own version (`GET /health`), and effective timeouts.
+ * - Network failures/non-2xx responses record when they happened (elapsed
+ *   ms from navigation start), so WriteTimeout attribution is measured,
+ *   not inferred from wall-clock totals alone.
+ * - A 2xx response that never renders is `loaded-not-rendered`, distinct
+ *   from `still-loading` (no response observed at all).
+ * - Graph interaction timing (pan/zoom/hover) is measured for both graph
+ *   scenarios.
  */
 
 import { chromium } from '@playwright/test';
@@ -160,23 +144,21 @@ const burstCount = parseInt(args['burst-count'] || '15', 10);
 const burstRuns = parseInt(args['burst-runs'] || String(runs), 10);
 const settleTimeoutMs = parseInt(args['settle-timeout-ms'] || '30000', 10);
 const notes = args.notes || '';
-// bench-rev-3: lets a targeted re-measurement (e.g. re-running only the SSE
-// burst after an RR1/RR4-style burst-logic fix) skip the four view
-// scenarios, which can take most of a run's wall-clock time at 500 agents
-// and whose numbers the fix did not change.
+// Lets a targeted re-measurement (e.g. re-running only the SSE burst after
+// a burst-logic-only change) skip the four view scenarios, which can take
+// most of a run's wall-clock time at 500 agents and whose numbers such a
+// change would not affect.
 const burstOnly = Boolean(args['burst-only']);
 
 const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
 
-// bench-rev-2 NB4: record enough provenance that a report can be matched
-// back to the exact harness version and settings that produced it, without
-// relying on wall-clock proximity to a commit (which bench-rev-2 had to ask
-// about directly for the round-1 data).
+// Records enough provenance that a report can be matched back to the exact
+// harness version and settings that produced it, without relying on
+// wall-clock proximity to a commit.
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-// bench-rev-3 RR3: `stdio: ['ignore', 'pipe', 'ignore']` suppresses git's
+// `stdio: ['ignore', 'pipe', 'ignore']` suppresses git's
 // `fatal: not a git repository` going straight to the console when this is
-// run outside a checkout (RR3's FYI) -- the caller already handles a null
-// return.
+// run outside a checkout -- the caller already handles a null return.
 function gitHeadSha() {
   try {
     return execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -189,28 +171,25 @@ function gitHeadSha() {
   }
 }
 
-// bench-rev-3 RR3: a dirty working tree means the running script may not
-// exactly match harnessCommit's committed tree -- recorded alongside it
-// rather than silently assumed clean. `repoRoot` is resolved from
-// import.meta.url (this file's own location), not the caller's cwd, so
-// this is correct regardless of where the script is invoked from.
+// A dirty working tree means the running script may not exactly match
+// harnessCommit's committed tree -- recorded alongside it rather than
+// silently assumed clean. `repoRoot` is resolved from import.meta.url
+// (this file's own location), not the caller's cwd, so this is correct
+// regardless of where the script is invoked from.
 //
-// bench-rev-4 N10 / bench-rev-5 W4: this counts UNTRACKED files as dirty
-// (plain `git status --porcelain`, no `--untracked-files=no`), so a stray
-// untracked file anywhere in the repo marks the harness dirty even with
-// zero tracked changes. bench-rev-4 claimed this was "documented" without
-// changing or writing anything; bench-rev-5 caught that gap. Verified
-// (not just asserted) before fixing anything: Go's OWN VCS auto-stamping
-// -- the thing `harnessCommit`/`harnessCommitDirty` on the Go side, and
-// the hub's own `hubScionVersion`, are both built on -- determines
-// `vcs.modified` via exactly `git status --porcelain` with no
-// `--untracked-files=no` either (see the Go toolchain's own
-// `cmd/go/internal/vcs/vcs.go`, the `git status --porcelain` call used for
-// dirty detection; confirmed empirically too: a tree with every tracked
-// file committed and exactly one new untracked file present still
-// VCS-stamps `vcs.modified=true`). So this function already matches Go's
-// real semantics exactly. Switching to `--untracked-files=no`, suggested
-// as one possible fix, would make the JS and Go sides of this harness
+// This counts UNTRACKED files as dirty (plain `git status --porcelain`, no
+// `--untracked-files=no`), so a stray untracked file anywhere in the repo
+// marks the harness dirty even with zero tracked changes. This is
+// intentional, not an oversight: Go's OWN VCS auto-stamping -- the thing
+// `harnessCommit`/`harnessCommitDirty` on the Go side, and the hub's own
+// `hubScionVersion`, are both built on -- determines `vcs.modified` via
+// exactly `git status --porcelain` with no `--untracked-files=no` either
+// (see the Go toolchain's own `cmd/go/internal/vcs/vcs.go`, the `git
+// status --porcelain` call used for dirty detection; confirmed empirically
+// too: a tree with every tracked file committed and exactly one new
+// untracked file present still VCS-stamps `vcs.modified=true`). So this
+// function already matches Go's real semantics exactly. Switching to
+// `--untracked-files=no` would make the JS and Go sides of this harness
 // DISAGREE about what "dirty" means, not agree more closely -- kept as-is
 // instead. See perf/bench/README.md and measurements.md's section 3 for
 // the same reasoning stated for a reader of the published numbers.
@@ -227,21 +206,19 @@ function gitIsDirty() {
   }
 }
 
-// bench-rev-3 RR3: "NB4 also covered the hub build." Identifies the hub
-// binary under test via its own unauthenticated GET /health
-// (pkg/hub/handlers_health.go), mirroring apibench's fetchHubVersion.
-// Best-effort: never throws, returns null on any failure.
+// Identifies the hub binary under test via its own unauthenticated GET
+// /health (pkg/hub/handlers_health.go), mirroring apibench's
+// fetchHubVersion. Best-effort: never throws, returns null on any failure.
 //
-// bench-rev-4 R3: returns ONLY scionVersion. /health's `version` field is a
-// hard-coded `"0.1.0"` literal in hub source
-// (pkg/hub/handlers_health.go:86, marked `// TODO: Get from build info`),
-// constant regardless of which hub commit is actually running -- recording
-// it under a name like `hubVersion` looks like real provenance but carries
-// none, the same lesson RR3 already applied to the harness's own commit
-// field. `scionVersion` (`pkg/version.Short()`) is real provenance when the
-// hub binary is built correctly (a regular clone, not a `git worktree`; see
-// README) and "unknown" otherwise -- never a placeholder presented as if it
-// were real.
+// Returns ONLY scionVersion. /health's `version` field is a hard-coded
+// `"0.1.0"` literal in hub source (pkg/hub/handlers_health.go:86, marked
+// `// TODO: Get from build info`), constant regardless of which hub commit
+// is actually running -- recording it under a name like `hubVersion` would
+// look like real provenance but carry none, the same reasoning applied to
+// the harness's own commit field above. `scionVersion`
+// (`pkg/version.Short()`) is real provenance when the hub binary is built
+// correctly (a regular clone, not a `git worktree`; see README) and
+// "unknown" otherwise -- never a placeholder presented as if it were real.
 async function fetchHubScionVersion(baseURL) {
   try {
     const res = await fetch(`${baseURL.replace(/\/$/, '')}/health`);
@@ -253,9 +230,9 @@ async function fetchHubScionVersion(baseURL) {
   }
 }
 
-// Incremental output (bench-rev-1 N5): written after every scenario and
-// every burst run, so a Chromium crash mid-benchmark loses at most the
-// in-flight run, not the whole report.
+// Incremental output: written after every scenario and every burst run, so
+// a Chromium crash mid-benchmark loses at most the in-flight run, not the
+// whole report.
 function writeReportSoFar(report) {
   fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
 }
@@ -355,10 +332,10 @@ async function countSelectorDeep(page, selector) {
   }, selector);
 }
 
-// bench-rev-2 NB6/R1-adjacent: returns bounding boxes (in viewport
-// coordinates) for up to `limit` matched elements, piercing shadow roots,
-// so the graph-interaction step below can hover/drag over real node
-// positions instead of guessing coordinates.
+// Returns bounding boxes (in viewport coordinates) for up to `limit`
+// matched elements, piercing shadow roots, so the graph-interaction step
+// below can hover/drag over real node positions instead of guessing
+// coordinates.
 async function elementRectsDeep(page, selector, limit) {
   return page.evaluate(
     ({ sel, lim }) => {
@@ -452,13 +429,12 @@ const scenarios = [
   },
   {
     key: 'standalone-graph',
-    // bench-rev-2 R1 (related, non-blocking): this view fetches the
-    // *unscoped* `/api/v1/agents` (web/src/components/pages/
-    // agent-graph.ts:115), not a project-filtered request -- the `project`
-    // query param only drives client-side filtering (`:135`). The URL
-    // itself is correct (it is what a user would navigate to); it is
-    // apiMatcherFor (lib.mjs) that had to change to match the real,
-    // unscoped request this page sends.
+    // This view fetches the *unscoped* `/api/v1/agents`
+    // (web/src/components/pages/agent-graph.ts:115), not a
+    // project-filtered request -- the `project` query param only drives
+    // client-side filtering (`:135`). The URL itself is correct (it is
+    // what a user would navigate to); apiMatcherFor (lib.mjs) matches the
+    // real, unscoped request this page sends.
     url: `/agents/graph?project=${encodeURIComponent(seed.projectId)}`,
     viewMode: null,
     selector: '.node-wrapper',
@@ -594,20 +570,17 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
     graphInteraction,
     networkStatus: netWatch.state.status,
     networkFailed: netWatch.state.failed,
-    // bench-rev-2 NB5: when the load-bearing request's outcome was
-    // observed, in elapsed ms from navigation start -- so a WriteTimeout
-    // attribution is a measurement, not an inference from the run's total
-    // wall-clock time.
+    // When the load-bearing request's outcome was observed, in elapsed ms
+    // from navigation start -- so a WriteTimeout attribution is a
+    // measurement, not an inference from the run's total wall-clock time.
     networkObservedAtMs: netWatch.state.atMs,
     consoleErrorCount: consoleErrors.length,
     consoleErrorsSample: consoleErrors.slice(0, 5),
   };
 }
 
-// bench-rev-2 NB3: run 0 uses a fresh ("cold") context; runs 1..N-1 share
-// one ("warm") context. The README's previous reason for deferring this
-// ("not done here for time") was not a real constraint -- it is a few
-// lines, implemented here.
+// Run 0 uses a fresh ("cold") context; runs 1..N-1 share one ("warm")
+// context.
 async function runScenario(browser, scenario, expectedCount) {
   const runsOut = [];
 
@@ -707,19 +680,19 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     console.warn(`  warning: only ${targets.length}/${burstCount} non-suspended agents available`);
   }
 
-  // bench-rev-2 NB1: capture activity too, so the restore below can put
-  // agents back exactly as they were, not just their phase.
+  // Capture activity too, so the restore below can put agents back exactly
+  // as they were, not just their phase.
   const preBurst = new Map(
     targets.map((a) => [a.id, { phase: a.phase, activity: a.activity || '' }])
   );
-  // bench-rev-3 RR1(a): pickBurstTarget must exclude BOTH the agent's
-  // current (pre-burst) phase AND the phase it was targeted with on its
-  // previous run -- the pre-burst phase alone is constant across runs (it
-  // is restored every time), so excluding only it does not stop run r and
-  // run r+1 from requesting the same target. targetHistory persists across
-  // calls for the lifetime of one scenario (one Map per runBurstScenario
-  // call) so "previous run's target" means exactly that, not "previous
-  // idx-only rotation slot".
+  // pickBurstTarget must exclude BOTH the agent's current (pre-burst)
+  // phase AND the phase it was targeted with on its previous run -- the
+  // pre-burst phase alone is constant across runs (it is restored every
+  // time), so excluding only it does not stop run r and run r+1 from
+  // requesting the same target. targetHistory persists across calls for
+  // the lifetime of one scenario (one Map per runBurstScenario call) so
+  // "previous run's target" means exactly that, not "previous idx-only
+  // rotation slot".
   const targetPhase = new Map();
   targets.forEach((a, idx) => {
     const previousRunTarget = targetHistory.get(a.id) ?? null;
@@ -728,9 +701,9 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     targetHistory.set(a.id, phase);
   });
 
-  // bench-rev-3 RR1: make staleness impossible to miscount, independent of
-  // whether the rotation or the restore-gating below are themselves
-  // correct. Read every target's badge BEFORE posting anything; any agent
+  // Make staleness impossible to miscount, independent of whether the
+  // rotation or the restore-gating below are themselves correct. Read
+  // every target's badge BEFORE posting anything; any agent
   // whose badge already shows the phase we are about to request cannot
   // have that match attributed to THIS run's POST (it could be a restore
   // that silently failed to reach the DOM, or any other stale state), so
@@ -751,29 +724,28 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     );
   }
 
-  // bench-rev-3 RR4: poll each agent's badge independently, starting as
-  // soon as THAT agent's own POST resolves -- not after Promise.all over
-  // every agent's POST, which the earlier (bench-rev-2 NB2) fix still did.
-  // An agent whose POST resolved early was previously only *first checked*
-  // once the slowest of the other 14 POSTs had also returned, inflating
-  // its recorded settle time by up to the spread between POST completions
-  // (0.24-1.40s in the v3 capture -- the same magnitude as the reported
-  // medians). Anchoring AND observing per agent removes that inflation
-  // entirely, rather than merely measuring around it.
+  // Poll each agent's badge independently, starting as soon as THAT
+  // agent's own POST resolves -- not after Promise.all over every agent's
+  // POST. An agent whose POST resolved early would otherwise only be
+  // *first checked* once the slowest of the other 14 POSTs had also
+  // returned, inflating its recorded settle time by up to the spread
+  // between POST completions (0.24-1.40s observed in one capture -- the
+  // same magnitude as the reported medians). Anchoring AND observing per
+  // agent removes that inflation entirely, rather than merely measuring
+  // around it.
   //
-  // bench-rev-4 R4, corrected by bench-rev-5 N-c: this is a SAMPLING
-  // INTERVAL, not a floor -- the first poll happens immediately after the
-  // POST resolves, so values well under 170ms are common (v3 per-agent
-  // minimums of 11-12ms; a bench-rev-5 smoke run saw a 5ms minimum), and
-  // "floor" wrongly implies they can't occur. What is true: each sample can
+  // This is a SAMPLING INTERVAL, not a floor -- the first poll happens
+  // immediately after the POST resolves, so values well under 170ms are
+  // common (per-agent minimums of 11-12ms have been observed), and "floor"
+  // would wrongly imply they can't occur. What is true: each sample can
   // LAG the true DOM update by up to one poll interval -- `page.
-  // waitForTimeout(100)` plus a deep shadow-DOM badge read, which
-  // bench-rev-4's probe measured at ~14ms with one poller but ~68ms median
-  // (p90 98ms) with `--burst-count` (default 15) concurrent pollers sharing
-  // one page. Differences smaller than that combined interval (roughly
-  // 170-200ms) cannot be used to rank hub speed, even though many
-  // individual samples will themselves read well below it; see
-  // measurements.md section 3 for this caveat applied to actual numbers.
+  // waitForTimeout(100)` plus a deep shadow-DOM badge read, which measures
+  // at ~14ms with one poller but ~68ms median (p90 98ms) with
+  // `--burst-count` (default 15) concurrent pollers sharing one page.
+  // Differences smaller than that combined interval (roughly 170-200ms)
+  // cannot be used to rank hub speed, even though many individual samples
+  // will themselves read well below it; see measurements.md section 3 for
+  // this caveat applied to actual numbers.
   const burstStartedAt = Date.now();
   const perAgent = await Promise.all(
     targets.map(async (a) => {
@@ -812,12 +784,11 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
       };
     })
   );
-  // bench-rev-4 N8: `burstSentMs` used to mean "time to POST every agent's
-  // update" (the fan-out only); since bench-rev-3 RR4 moved polling inside
-  // the same per-agent `Promise.all`, that single number silently started
-  // covering the whole per-agent POST-plus-poll sequence instead (883-1330ms
-  // at 25 agents in the v3/v4 data, not the few-hundred-ms POST fan-out the
-  // name implied). Recorded as two separate, correctly-named fields instead:
+  // A single combined field would conflate two different things once
+  // polling happens inside the same per-agent `Promise.all` as the POST:
+  // "time to POST every agent's update" (the fan-out only, a few hundred
+  // ms) versus the whole per-agent POST-plus-poll sequence (883-1330ms at
+  // 25 agents). Recorded as two separate, correctly-named fields instead:
   // `postFanOutMs` (POST-only spread, comparable across captures) and
   // `burstWallClockMs` (the whole run including polling, for context only).
   const postCompletedAts = perAgent.map((r) => r.postCompletedAt).filter((v) => v != null);
@@ -843,10 +814,9 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     )
   ).filter(Boolean).length;
 
-  // Restore every targeted agent to its pre-burst phase AND activity
-  // (bench-rev-2 NB1), then -- bench-rev-2 R2, corrected by bench-rev-3
-  // RR1(b) -- WAIT for the restore to be confirmed in the DOM before
-  // returning. The expected label must match what the UI actually renders
+  // Restore every targeted agent to its pre-burst phase AND activity, then
+  // WAIT for the restore to be confirmed in the DOM before returning. The
+  // expected label must match what the UI actually renders
   // (web/src/shared/types.ts's getAgentDisplayStatus): a `running` agent
   // with a non-empty activity displays its activity, not its literal
   // phase, so comparing against the literal phase could never succeed for
@@ -876,15 +846,14 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
 
   return {
     runIndex,
-    // bench-rev-3 RR1(b), corrected by bench-rev-6 N6-2: the restore-wait
-    // is bounded, not blocking; the next run starts regardless. What
-    // actually has an effect is this run's OWN restoreFullyConfirmed
-    // result -- see runBurstScenario, which passes it as the NEXT run's
-    // invalidateDueToPriorRestore. A run fired while the previous run's
-    // restore was not confirmed in the DOM within that bound cannot be
-    // trusted to have started from the expected pre-burst state, so it is
-    // marked invalid rather than silently mixed into the scenario's settle
-    // statistics.
+    // The restore-wait is bounded, not blocking; the next run starts
+    // regardless. What actually has an effect is this run's OWN
+    // restoreFullyConfirmed result -- see runBurstScenario, which passes
+    // it as the NEXT run's invalidateDueToPriorRestore. A run fired while
+    // the previous run's restore was not confirmed in the DOM within that
+    // bound cannot be trusted to have started from the expected pre-burst
+    // state, so it is marked invalid rather than silently mixed into the
+    // scenario's settle statistics.
     invalid: invalidateDueToPriorRestore === true,
     invalidReason: invalidateDueToPriorRestore
       ? 'previous run restore was not fully confirmed in the DOM before this run started'
@@ -900,10 +869,10 @@ async function runBurstOnce(page, runIndex, targetHistory, invalidateDueToPriorR
     settledCount: settled.length,
     serverAppliedCount,
     timedOut: settled.length < tracked.length,
-    // bench-rev-2 NB2, corrected by bench-rev-3 RR4: per-agent settle time
-    // (this agent's own badge update minus this SAME agent's own POST
-    // completion, observed by a polling loop dedicated to that agent, not
-    // started only after every other agent's POST also returned).
+    // Per-agent settle time (this agent's own badge update minus this SAME
+    // agent's own POST completion, observed by a polling loop dedicated to
+    // that agent, not started only after every other agent's POST also
+    // returned).
     medianSettleMs: median(perAgentSettleMs),
     minSettleMs: settleMM.min,
     maxSettleMs: settleMM.max,
@@ -939,9 +908,9 @@ async function runBurstScenario(browser) {
     };
   }
 
-  // bench-rev-3 RR1: targetHistory persists per-agent-id across every run
-  // in this scenario (pickBurstTarget needs the REAL previous target, not
-  // just an idx-derived guess); priorRestoreConfirmed gates the NEXT run.
+  // targetHistory persists per-agent-id across every run in this scenario
+  // (pickBurstTarget needs the REAL previous target, not just an
+  // idx-derived guess); priorRestoreConfirmed gates the NEXT run.
   const targetHistory = new Map();
   let priorRestoreConfirmed = true;
   const results = [];
@@ -982,12 +951,11 @@ async function main() {
   });
 
   const hubScionVersion = await fetchHubScionVersion(hubBase);
-  // bench-rev-4 N11: record load average at start/end, matching apibench's
-  // convention (bench-rev-1 N8, bench-rev-2 NB9) -- R4 found this capture's
-  // settle numbers are environment-sensitive (bench-rev-4's own lower-load
-  // single-hub run measured roughly 4x lower settle times at the same agent
-  // counts), and a report with no load figure gives a reader no way to tell
-  // environment noise from a real difference.
+  // Record load average at start/end, matching apibench's convention --
+  // settle numbers are environment-sensitive (a lower-load single-hub run
+  // measured roughly 4x lower settle times at the same agent counts), and
+  // a report with no load figure gives a reader no way to tell environment
+  // noise from a real difference.
   const [loadAvg1, loadAvg5, loadAvg15] = os.loadavg();
   const report = {
     generatedAt: new Date().toISOString(),
@@ -1032,13 +1000,13 @@ async function main() {
     if (report.liveUpdateBurst.skipped) {
       console.log(`  skipped: ${report.liveUpdateBurst.skipReason}`);
     } else {
-      // bench-rev-4 N5: fullySettledRunCount/fullyRestoredRunCount are
-      // counted over valid runs only (see summarizeBurstScenario), so they
-      // are reported against validRunCount, not runsAttempted -- dividing
-      // by runsAttempted made any invalid run read like a settle failure
-      // even when every valid run settled 15/15. Invalid and pre-stale
-      // counts are both surfaced explicitly rather than only affecting the
-      // denominator silently.
+      // fullySettledRunCount/fullyRestoredRunCount are counted over valid
+      // runs only (see summarizeBurstScenario), so they are reported
+      // against validRunCount, not runsAttempted -- dividing by
+      // runsAttempted would make any invalid run read like a settle
+      // failure even when every valid run settled 15/15. Invalid and
+      // pre-stale counts are both surfaced explicitly rather than only
+      // affecting the denominator silently.
       const b = report.liveUpdateBurst;
       console.log(
         `  median settle time: ${b.medianSettleMs}ms ` +

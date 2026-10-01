@@ -11,10 +11,9 @@ import (
 // visibly distinguishable from a genuine zero load average by checking
 // MachineInfo.GOOS in the report.
 //
-// bench-rev-1 N8: recorded automatically because "budgets cannot be chosen
-// from this host" -- a shared, variably-loaded container -- and a reviewer
-// or future reader needs the load figure alongside the latency numbers to
-// tell noise from signal.
+// Recorded automatically because budgets cannot be chosen from this host --
+// a shared, variably-loaded container -- and a future reader needs the
+// load figure alongside the latency numbers to tell noise from signal.
 func readLoadAvg() (load1, load5, load15 float64) {
 	data, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
