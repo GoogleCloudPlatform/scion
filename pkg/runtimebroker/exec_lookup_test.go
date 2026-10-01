@@ -175,10 +175,10 @@ func TestResetAuth_TwoAuxMatches_DispatchesToMatchingManager(t *testing.T) {
 // A single lookup call, used for both the target and the manager, cannot
 // produce that split: with only one List attempt on the aux runtime (the
 // one made inside lookupAgentTarget), the transient failure is the one that
-// counts. No match is found anywhere (the default never matches, and the
-// aux runtime's own List failed), so the lookup fails closed with
-// ErrAgentListUnavailable, exec maps that to its existing 404, and neither
-// runtime's Exec is ever called.
+// counts. When an auxiliary list call fails, the lookup is classified
+// ErrAgentListUnavailable and the handler returns 503 without dispatching —
+// neither runtime's Exec is ever called, and the raw listing error never
+// reaches the response body.
 //
 // projectID is empty here so neither lookup's backward-compatibility
 // fallback stage (which retries every runtime a second time) masks the aux
@@ -219,8 +219,11 @@ func TestExecCommand_AuxListErrorThenMatch_DoesNotDispatchToDefaultRuntime(t *te
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/exec", strings.NewReader(`{"command":["echo","hi"]}`))
 	srv.execCommand(w, req, "dev", "")
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status=%d body=%s, want 404 (fail closed on the aux runtime's List error)", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want exactly 503 (ErrAgentListUnavailable on the aux runtime's List error)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "simulated transient list failure") {
+		t.Fatalf("body=%s must not contain the raw aux List error text", w.Body.String())
 	}
 	if got := defaultExec.calls(); len(got) != 0 {
 		t.Fatalf("default runtime Exec calls = %v, want none — must never act on the wrong runtime", got)

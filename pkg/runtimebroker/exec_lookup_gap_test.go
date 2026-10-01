@@ -81,9 +81,10 @@ func transientListFailAuxRuntime(name string, rec *execRecorder) *runtime.MockRu
 }
 
 // Mirror of TestExecCommand_AuxListErrorThenMatch_DoesNotDispatchToDefaultRuntime
-// for reset-auth: a transient List failure on the aux runtime holding the
-// agent must fail closed (404) and must not write a token to, or signal,
-// any runtime.
+// for reset-auth: when an auxiliary list call fails, the lookup is
+// classified ErrAgentListUnavailable and the handler returns 503 without
+// dispatching — it must not write a token to, or signal, any runtime, and
+// the raw listing error never reaches the response body.
 func TestResetAuth_AuxListErrorThenMatch_DoesNotDispatchToAnyRuntime(t *testing.T) {
 	defaultExec, auxExec := &execRecorder{}, &execRecorder{}
 	srv := newPlainDockerBrokerExec(t, defaultExec)
@@ -93,8 +94,11 @@ func TestResetAuth_AuxListErrorThenMatch_DoesNotDispatchToAnyRuntime(t *testing.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/reset-auth", strings.NewReader(`{"token":"t0k3n"}`))
 	srv.resetAuth(w, req, "dev", "")
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status=%d body=%s, want 404 (fail closed on the aux runtime's List error)", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want exactly 503 (ErrAgentListUnavailable on the aux runtime's List error)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "simulated transient list failure") {
+		t.Fatalf("body=%s must not contain the raw aux List error text", w.Body.String())
 	}
 	if got := defaultExec.calls(); len(got) != 0 {
 		t.Fatalf("default runtime exec calls = %v, want none", got)
