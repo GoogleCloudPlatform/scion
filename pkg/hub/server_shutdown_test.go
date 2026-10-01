@@ -93,6 +93,18 @@ func TestServer_ShutdownTwice_NoPanic(t *testing.T) {
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("first Shutdown() returned error: %v", err)
 	}
+
+	// Confirm the first Shutdown() actually drove teardown through
+	// CleanupResources() (closing previewService among other things), rather
+	// than just exercising the started-path's pre-existing no-panic
+	// behavior. Before the fix, a started server's Shutdown() never closed
+	// previewService.
+	select {
+	case <-srv.previewService.stopCleanup:
+	default:
+		t.Fatal("Shutdown() did not close previewService (cleanupNonces goroutine still running)")
+	}
+
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("second Shutdown() returned error: %v", err)
 	}
@@ -115,6 +127,16 @@ func TestServer_ShutdownThenCleanupResources_NoPanic(t *testing.T) {
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown() returned error: %v", err)
 	}
+
+	// Confirm Shutdown() drove teardown through CleanupResources() (closing
+	// previewService among other things). Before the fix, a started
+	// server's Shutdown() never closed previewService.
+	select {
+	case <-srv.previewService.stopCleanup:
+	default:
+		t.Fatal("Shutdown() did not close previewService (cleanupNonces goroutine still running)")
+	}
+
 	if err := srv.CleanupResources(context.Background()); err != nil {
 		t.Fatalf("CleanupResources() returned error: %v", err)
 	}
