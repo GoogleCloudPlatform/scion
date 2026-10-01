@@ -17,12 +17,12 @@
 /**
  * W3 (design doc §9): seed epochs.
  *
- * §7/§8 (perf/2385-sse-coalesce, P1a): `beginSeedEpoch()` records the
- * per-ID merged deltas applied while a REST fetch is in flight, so
- * `seedAgents(list, {token, partial})` can re-apply them after setting the
- * REST objects — a stale REST snapshot must not clobber a fresher SSE
- * update that landed mid-fetch. `partial: true` merges instead of
- * replacing, so a compact seed cannot strip fields a fuller seed already
+ * §7/§8 (perf/2385-sse-coalesce, P1a): `beginSeedEpoch()` records a
+ * compacted, O(1)-per-ID summary of the deltas applied while a REST fetch
+ * is in flight, so `seedAgents(list, {token, partial})` can re-apply them
+ * after setting the REST objects — a stale REST snapshot must not clobber a
+ * fresher SSE update that landed mid-fetch. `partial: true` merges instead
+ * of replacing, so a compact seed cannot strip fields a fuller seed already
  * recorded. Tombstoned IDs (a `deleted` event) are never resurrected by any
  * seed. A scope change invalidates open tokens outright.
  */
@@ -56,7 +56,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Every sticky activity, one non-sticky value, and "no activity field at all" (`undefined`). */
+/** Two sticky activities, `working`, one other non-sticky value, and "no activity field at all" (`undefined`). */
 const ACTIVITIES: ReadonlyArray<string | undefined> = [
   'working',
   'thinking',
@@ -213,7 +213,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.phase).toBe('running');
   });
 
-  it('B2 (round 1 review): a delta for an ID not yet in state during an epoch survives the seed (the normal first-drain case)', () => {
+  it('a delta for an ID not yet in state during an epoch survives the seed (the normal first-drain case)', () => {
     // setScope clears state.agents, so every SSE delta that arrives during
     // the drain that follows is for an ID not yet known — this is the
     // common case W3's original "SSE delta during a drain" test did not
@@ -263,7 +263,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.activity).toBe('waiting_for_input');
   });
 
-  it('N2 (round 2 review): a partial (compact-drain) seed with a recorded epoch delta keeps full fields and applies the delta', () => {
+  it('a partial (compact-drain) seed with a recorded epoch delta keeps full fields and applies the delta', () => {
     // §8's compact drain calls seedAgents(result.agents, {token, partial:
     // true}) — a combination not otherwise exercised together.
     const sm = new StateManager();
@@ -288,7 +288,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.labels).toEqual({ env: 'prod' });
   });
 
-  it('N2 (round 1 review): seedAgents ends the epoch itself — a second call with the same token is a no-op', () => {
+  it('seedAgents ends the epoch itself — a second call with the same token is a no-op', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
@@ -303,7 +303,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a2')).toBeUndefined();
   });
 
-  it('N1 (round 1 review): a status delta for a tombstoned ID is dropped, not buffered — a later seed with that epoch does not see it', () => {
+  it('a status delta for a tombstoned ID is dropped, not buffered — a later seed with that epoch does not see it', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
@@ -402,5 +402,54 @@ describe('W3 seed epoch', () => {
       }
     }
     expect(checked).toBe(ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran, nothing skipped
+  });
+
+  it('a created event drained during an epoch is recorded before its buffered deltas, not after', () => {
+    // Buffer two deltas for an unknown ID, open an epoch throughout, then
+    // let "created" drain them — created's own activity must replay FIRST
+    // against the REST base at seed time, with the buffered deltas on top,
+    // matching the order live application used when created arrived.
+    // (Fails if recordSeedEpochDeltaFirst's ordering were reversed: with
+    // the created activity 'completed' applied *after* the buffered
+    // 'waiting_for_input'/'thinking', a later 'working' would have nothing
+    // sticky left to suppress it, same as live state; applied *before*
+    // them, as it is here, nothing after 'completed' unlocks it from
+    // sticky until the real 'working' delta uses up the unlock itself.)
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.u.status', { activity: 'waiting_for_input' });
+    emit(sm, 'agent.u.status', { activity: 'thinking' });
+    emit(sm, 'agent.u.created', { name: 'U', activity: 'completed' });
+    emit(sm, 'agent.u.status', { activity: 'working' });
+
+    expect(sm.getAgent('u')?.activity).toBe('working'); // live state
+
+    sm.seedAgents([{ id: 'u', name: 'U', activity: 'thinking' } as Agent], { token });
+
+    expect(sm.getAgent('u')?.activity).toBe('working');
+  });
+
+  it('a delta that is a no-op against live state is still recorded into an open epoch', () => {
+    // The REST row an epoch guards can be older than what the client
+    // already had *before* the epoch even opened (replica lag, a stale
+    // cache). Skipping epoch-recording for a delta just because it was a
+    // no-op against the newer live state would silently drop it from a
+    // later seed-time replay against that older, stale REST row.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.seedAgents([{ id: 'a1', name: 'A1', activity: 'thinking', message: 'new' } as Agent]);
+
+    const token = sm.beginSeedEpoch();
+    emit(sm, 'agent.a1.status', { activity: 'thinking', message: 'new' }); // no-op against live state
+
+    sm.seedAgents(
+      [{ id: 'a1', name: 'A1', activity: 'waiting_for_input', message: 'old' } as Agent],
+      { token }
+    );
+
+    expect(sm.getAgent('a1')?.activity).toBe('thinking');
+    expect(sm.getAgent('a1')?.message).toBe('new');
   });
 });

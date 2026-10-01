@@ -143,8 +143,7 @@ function fuzzEventToDelta(ev: FuzzEvent): Partial<Agent> {
 
 /**
  * Mirrors `promoteDetailFields` in state.ts (not exported, so duplicated
- * here for this independent reducer — see that function's doc comment for
- * why promoting before accumulating a buffered/recorded delta matters).
+ * for this independent reducer).
  */
 function promoteDetailFieldsRef(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail as AgentDetail | undefined;
@@ -304,7 +303,7 @@ function applyEvent(sm: StateManager, ev: FuzzEvent): void {
   }
 }
 
-/** Every sticky activity, one non-sticky value, and "no activity field at all" (`undefined`). */
+/** Two sticky activities, `working`, one other non-sticky value, and "no activity field at all" (`undefined`). */
 const STICKY_PROBE_ACTIVITIES: ReadonlyArray<string | undefined> = [
   'working',
   'thinking',
@@ -402,7 +401,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     }
   }, 30_000); // two 10k-event passes with checkpoints; the default 5s test timeout is too tight here
 
-  it('B3 (round 1 review): 10k-event fuzz with interleaved rAF/timeout flush points, verified at every flush', () => {
+  it('10k-event fuzz with interleaved rAF/timeout flush points, verified at every flush', () => {
     // The previous version of this test applied all 10,000 events and then
     // flushed once, which made "at most one notify per flush" trivially
     // true (there was only one flush) and never exercised the rAF path or
@@ -587,7 +586,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(flushesWithNonEmptyUnknown).toBeGreaterThanOrEqual(200);
   }, 30_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
 
-  it('B3 (round 1 review): setScope discards a pending dirty set — no stale agents-changed fires in the new generation', () => {
+  it('setScope discards a pending dirty set — no stale agents-changed fires in the new generation', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
@@ -692,7 +691,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(after?.detail && 'currentTurns' in after.detail).toBe(true);
   });
 
-  it('N4 (round 1 review): a byte-identical ports replay (fresh array, same values) is a true no-op', () => {
+  it('a byte-identical ports replay (fresh array, same values) is a true no-op', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
@@ -731,7 +730,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     ]);
   });
 
-  it('FYI (round 1 review): a created event after a delete in the same flush is upserted, not left in deleted', () => {
+  it('a created event after a delete in the same flush is upserted, not left in deleted', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
@@ -752,7 +751,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
   });
 });
 
-describe('W2 N1 (round 1 review): tombstoned IDs are dropped outright, never buffered as unknown', () => {
+describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', () => {
   it('a status delta after a delete is dropped: no buffer, no dirty.unknown, no flush', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
@@ -937,6 +936,33 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     }
     expect(checked).toBe(STICKY_PROBE_ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran
   });
+
+  it('a long-lived unknown ID does not grow pendingAgentDeltas without bound', () => {
+    // A sliding TTL (refreshed on every touch) only bounds how long an
+    // entry lives, not how big it gets. An off-page agent is, by design,
+    // unknown to state.agents while its status events keep arriving — if
+    // each one appended to a per-ID list, an agent active for the life of
+    // the tab would retain every status payload it ever sent.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    for (let i = 0; i < 5_000; i++) {
+      emit(sm, 'agent.off.status', {
+        activity: i % 2 ? 'working' : 'thinking',
+        message: `m${i}`,
+      });
+      vi.advanceTimersByTime(1_000); // refreshes the sliding TTL on every event, as production does
+    }
+
+    const pending = (
+      sm as unknown as { pendingAgentDeltas: Map<string, { fields: object; activity: unknown }> }
+    ).pendingAgentDeltas;
+    const entry = pending.get('off');
+    expect(entry).toBeDefined();
+    // A fixed-shape compacted summary, never an array/list that grows with
+    // the number of events applied.
+    expect(Array.isArray(entry)).toBe(false);
+    expect(Object.keys(entry?.fields ?? {}).length).toBeLessThan(10);
+  });
 });
 
 describe('W2 resync edges (§7 N4, pinned against sse-client.ts)', () => {
@@ -1045,7 +1071,7 @@ describe('W2 sseConnected(generation)', () => {
     expect(resolved).toBe(true);
   });
 
-  it('N2 (round 2 review): connected then disconnected then sseConnected stays pending until the next connected', async () => {
+  it('connected then disconnected then sseConnected stays pending until the next connected', async () => {
     // The other half of the connectedGeneration contract: a drop within the
     // SAME generation (no setScope) must not resolve sseConnected early
     // either, and a call made while disconnected must still wait.
@@ -1090,7 +1116,7 @@ describe('W2 sseConnected(generation)', () => {
     await assertion;
   });
 
-  it('B1 (round 1 review): does not resolve at once for the new generation right after setScope, even though the previous generation was connected', async () => {
+  it('does not resolve at once for the new generation right after setScope, even though the previous generation was connected', async () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     sm.sseClientInstance.dispatchEvent(new CustomEvent('connected')); // gen N connects
@@ -1116,7 +1142,7 @@ describe('W2 sseConnected(generation)', () => {
     expect(resolved).toBe(true);
   });
 
-  it('B1 (round 2 review): isConnected is left alone by setScope — chat-thread.ts:1536 reads it to seed its reconnect catch-up', () => {
+  it('isConnected is left alone by setScope — chat-thread.ts:1536 reads it to seed its reconnect catch-up', () => {
     // Round 1 also reset `state.connected` in setScope, as a "consider" fix
     // alongside connectedGeneration. That is a silent behaviour change for
     // chat-thread.ts, the one reader of `stateManager.isConnected`: it seeds
@@ -1138,7 +1164,7 @@ describe('W2 sseConnected(generation)', () => {
     expect(sm.isConnected).toBe(true);
   });
 
-  it('N3 (round 1 review): disconnect() rejects every pending waiter instead of leaving it hanging', async () => {
+  it('disconnect() rejects every pending waiter instead of leaving it hanging', async () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     const gen = sm.scopeGeneration;

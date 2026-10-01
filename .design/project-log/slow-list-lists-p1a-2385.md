@@ -399,3 +399,98 @@ New head, addendum and full disposition:
   `state.ts`.
 - Full suite: see the gs report addendum for the exact count at this round's
   head SHA.
+
+## Round 8 review (REQUEST CHANGES; B1, B2, N1, nit1-5 all closed)
+
+Full review: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-8.md`;
+probe: `gs://scion-xproject-exchange/slow-list/reviews/lists-p1a-rev-8-probe.test.ts`.
+New head, addendum and full disposition:
+`gs://scion-xproject-exchange/slow-list/reports/lists-p1a-gemini-2189.md`.
+
+- **B1 (required):** the round-7 fix (raw deltas as an ordered list, replayed
+  one at a time) made `pendingAgentDeltas` unbounded per ID: a sliding TTL
+  only bounds *how long* an entry survives, not how big it gets, and an
+  off-page agent is unknown to `state.agents` — hence unexpired — for as
+  long as it keeps emitting, by design (that is what `dirty.unknown` is
+  for). Reviewer measured 5000 retained deltas for one ID after 5000 events
+  at 1/s. Ruling: option (a), exact compaction, so memory per ID is O(1)
+  and replay still equals sequential application. Every field except
+  `activity` is base-independent and folds eagerly (last-value-wins, each
+  delta promoted first) with no loss. `activity` can depend on an unknown
+  base's stickiness, but only up to the first delta whose own activity is
+  neither `working` nor `''` ("unlocking") — past that point `activity`'s
+  value is base-independent too and can be resolved immediately. This
+  reduces to a single `CompactedDelta` object per ID
+  (`{fields, activity: {locked, pending|value}}`), replacing the raw list,
+  with `foldCompactedDelta` (fold one more delta in), `composeCompactedDeltas`
+  (compose two runs — used to insert a delta *before* an already-compacted
+  one) and `applyCompactedDelta` (apply to a real base, through
+  `mergeAgentDelta`, bypassing its sticky check only for an already-resolved
+  locked value). `applyDeltaStep`'s pseudo-base concept from round 6 does
+  not return; `mergeAgentDelta` itself is unchanged. Epoch lists get the
+  same treatment for correctness (any multi-delta run needs `CompactedDelta`
+  to stay equal to sequential application), noted in the doc comment that
+  their memory isn't a concern either way since an epoch lives one drain.
+  Verified: reviewer's probe B (`pendingAgentDeltas.get(id).length`) now
+  returns `undefined` — it's an object, not an array — after 5000 events;
+  probes C (625 cases) and D (3125 cases) stay at 0 mismatches.
+- **B2 (required):** no committed test covered `recordSeedEpochDeltaFirst`'s
+  ordering (created's own delta must apply *before* the already-recorded
+  buffered deltas). Added a reduced form of the reviewer's probe D: buffer
+  two deltas, send `created` with its own activity, send one more delta,
+  then seed and compare against live state. Verified it fails when the
+  compose order is swapped (`composeCompactedDeltas(prev, createdOnly)`
+  instead of `(createdOnly, prev)`), the equivalent of the reviewer's
+  push-instead-of-unshift mutant for this round's data structure.
+- **N1 (required... promoted from the prior round's non-blocking note):**
+  epoch-recording was still gated on `changed`, so a delta that happened to
+  be a no-op against *live* state (but not against an older REST row) was
+  silently never recorded, which is itself a stale-REST-wins bug when the
+  REST snapshot predates the client's own pre-epoch state (replica lag, a
+  cache). Fixed by recording into open epochs unconditionally in
+  `handleAgentEvent`'s known-agent/created path (ports' own no-op gate is
+  unchanged — out of this round's cited scope). Added the reviewer's probe
+  G as a committed test; it now matches sequential application exactly.
+- **nit1:** fixed the stale "see that function's doc comment for why
+  promoting before accumulating..." reference in the test oracle —
+  `promoteDetailFields` doesn't say that anymore, and nothing accumulates
+  that way. Trimmed to a plain "mirrors promoteDetailFields" note.
+- **nit2:** dropped the remaining "(round N review)"/finding-ID prefixes
+  from test names across both state test files (left over from rounds 1-2,
+  previously treated as an exception for traceability — the reviewer
+  pointed out that exception doesn't survive landing upstream either) and
+  from a few of this round's own new `state.ts` comments.
+- **nit3:** `state-seed-epoch.test.ts`'s header updated from "records the
+  per-ID merged deltas" to describe the actual (now compacted, not merged
+  or raw-list) representation.
+- **nit4:** trimmed round-by-round design history out of `state.ts`'s
+  comments; `CompactedDelta`'s own doc comment is the one place carrying
+  the "why compaction is exact" reasoning, with call sites pointing at it
+  in a line or two instead of repeating it.
+- **nit5:** corrected the test helper doc that mislabeled the activity set
+  (it said "one non-sticky value" when `working` is also non-sticky, and
+  omitted that two of the five values are sticky).
+
+### Commands and results
+
+- `npm run typecheck`: pass. `npx eslint src/client/state.ts`: clean.
+  `npx prettier --check` on `state.ts` and both changed test files: pass.
+- `npx vitest run --no-file-parallelism state-coalescing.test.ts
+  state-seed-epoch.test.ts state-completeness-flag.test.ts`: 3 files, 67
+  tests, all passing (64 from round 7 + 3 new: the memory-bound test, the
+  created-inside-epoch ordering test, and the no-op-still-recorded test).
+- Fetched both the round-7 and round-8 reviewer probes fresh (not
+  committed) and ran them directly: round-7 probe 0 mismatches, live
+  sticky-REST-base repro `working`; round-8 probe B shows an `undefined`
+  `.length` (an object, not an array) after 5000 events, C 0/625, D 0/3125,
+  G now matches sequential exactly.
+- Regression check: swapped in the `4cdb0b5420` `state.ts` (test files
+  unchanged) and reran the 3 new tests — the memory-bound and no-op-
+  recording tests failed with the predicted divergence; the ordering test
+  passed (expected — round 7's `unshift`-based ordering was already
+  correct, this test guards against a future regression, not round 7
+  itself) and was separately confirmed to fail under a targeted mutant
+  (swapping the compose order). Restored the fix and all 3 (plus the full
+  67) passed again, byte-identical to the committed `state.ts`.
+- Full suite: see the gs report addendum for the exact count at this
+  round's head SHA.
