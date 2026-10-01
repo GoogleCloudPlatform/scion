@@ -53,6 +53,20 @@ type PayloadLeafSchema struct {
 	AllowedValues []string
 }
 
+// ResourceProjectIDRule declares how project_id relates to a resource scope.
+type ResourceProjectIDRule string
+
+const (
+	ResourceProjectIDOmitted  ResourceProjectIDRule = "omitted"
+	ResourceProjectIDRequired ResourceProjectIDRule = "required"
+)
+
+// ResourceScopeSchema declares the project-ID contract for one resource scope.
+type ResourceScopeSchema struct {
+	Scope     ResourceScope
+	ProjectID ResourceProjectIDRule
+}
+
 // CatalogEntry is the machine-readable schema for one action.
 type CatalogEntry struct {
 	Family                 string
@@ -60,6 +74,7 @@ type CatalogEntry struct {
 	AllowedPairs           []PhaseOutcome
 	ResourceKind           string
 	RequiredEnvelopeLeaves []string
+	ResourceScopes         []ResourceScopeSchema
 	RequiredPayloadLeaves  []PayloadLeafSchema
 	OptionalPayloadLeaves  []PayloadLeafSchema
 	Destinations           []Destination
@@ -70,7 +85,11 @@ var catalog = []CatalogEntry{{
 	Action:                 "create",
 	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 	ResourceKind:           "access_constraint",
-	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource", "resource.project_id"},
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes: []ResourceScopeSchema{
+		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+		{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+	},
 	RequiredPayloadLeaves: []PayloadLeafSchema{{
 		Name:          "classification",
 		Type:          PayloadString,
@@ -96,6 +115,7 @@ func Catalog() []CatalogEntry {
 		result[i] = entry
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
+		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
 		result[i].RequiredPayloadLeaves = clonePayloadLeafSchemas(entry.RequiredPayloadLeaves)
 		result[i].OptionalPayloadLeaves = clonePayloadLeafSchemas(entry.OptionalPayloadLeaves)
 		result[i].Destinations = append([]Destination(nil), entry.Destinations...)

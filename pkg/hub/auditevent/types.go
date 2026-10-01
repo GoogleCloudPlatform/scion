@@ -112,11 +112,22 @@ type RequestRef struct {
 	Surface string `json:"surface,omitempty"`
 }
 
+// ResourceScope identifies whether an audited resource belongs to the system
+// or to one project. It is validation metadata and is not serialized as a
+// second resource schema.
+type ResourceScope string
+
+const (
+	ResourceScopeSystem  ResourceScope = "system"
+	ResourceScopeProject ResourceScope = "project"
+)
+
 // ResourceRef identifies the object affected by an operation.
 type ResourceRef struct {
-	Kind      string `json:"kind"`
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id,omitempty"`
+	Kind      string        `json:"kind"`
+	ID        string        `json:"id"`
+	Scope     ResourceScope `json:"-"`
+	ProjectID string        `json:"project_id,omitempty"`
 }
 
 // EnvelopeV1 is the common in-memory audit envelope. Payload construction is

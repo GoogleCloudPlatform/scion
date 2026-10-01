@@ -147,8 +147,27 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 	if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {
 		return err
 	}
-	if slices.Contains(entry.RequiredEnvelopeLeaves, "resource.project_id") && event.Resource.ProjectID == "" {
-		return invalid("resource.project_id", "is required by the catalog")
+	var scopeSchema *ResourceScopeSchema
+	for i := range entry.ResourceScopes {
+		if entry.ResourceScopes[i].Scope == event.Resource.Scope {
+			scopeSchema = &entry.ResourceScopes[i]
+			break
+		}
+	}
+	if scopeSchema == nil {
+		return invalid("resource.scope", "must be declared by the catalog")
+	}
+	switch scopeSchema.ProjectID {
+	case ResourceProjectIDOmitted:
+		if event.Resource.ProjectID != "" {
+			return invalid("resource.project_id", "must be omitted for the resource scope")
+		}
+	case ResourceProjectIDRequired:
+		if event.Resource.ProjectID == "" {
+			return invalid("resource.project_id", "is required for the resource scope")
+		}
+	default:
+		return invalid("resource.project_id", "has an undeclared catalog rule")
 	}
 	if err := validateOptionalBoundedString("resource.project_id", event.Resource.ProjectID, 128); err != nil {
 		return err

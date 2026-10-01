@@ -146,6 +146,7 @@ func TestAccessBoundaryCreateBuildRenderAndCapture(t *testing.T) {
 		Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
 		Credential:     &credential,
 		ConstraintID:   "constraint-1",
+		Scope:          ResourceScopeProject,
 		ProjectID:      "project-1",
 		BeforeRevision: &before,
 		AfterRevision:  &after,
@@ -206,6 +207,63 @@ func TestAccessBoundaryCreateRequiresOperationContext(t *testing.T) {
 	})
 	var validationErr *ValidationError
 	assert.ErrorAs(t, err, &validationErr)
+}
+
+func TestAccessBoundaryCreateResourceScopeContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		scope     ResourceScope
+		projectID string
+		wantErr   bool
+	}{
+		{name: "system without project", scope: ResourceScopeSystem},
+		{name: "project with project", scope: ResourceScopeProject, projectID: "project-1"},
+		{name: "system with project", scope: ResourceScopeSystem, projectID: "project-canary", wantErr: true},
+		{name: "project without project", scope: ResourceScopeProject, wantErr: true},
+		{name: "missing scope", projectID: "project-canary", wantErr: true},
+		{name: "unknown scope", scope: "scope-canary", projectID: "project-canary", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event, err := buildAccessBoundaryCreate(
+				AuditOperationContext{CorrelationID: "corr-1"},
+				AccessBoundaryCreateInput{
+					Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
+					ConstraintID:   "constraint-1",
+					Scope:          tc.scope,
+					ProjectID:      tc.projectID,
+					Classification: BoundaryTighten,
+				},
+				uuid.MustParse("11111111-1111-4111-8111-111111111111").String(),
+				time.Date(2026, 10, 1, 12, 34, 56, 123456789, time.UTC),
+			)
+			if tc.wantErr {
+				require.Error(t, err)
+				var validationErr *ValidationError
+				require.ErrorAs(t, err, &validationErr)
+				assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, "project-canary")
+				assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, "scope-canary")
+				return
+			}
+
+			rendered, err := Render(event)
+			require.NoError(t, err)
+			var got struct {
+				Resource map[string]any `json:"resource"`
+			}
+			require.NoError(t, json.Unmarshal(rendered, &got))
+			assert.Equal(t, "access_constraint", got.Resource["kind"])
+			assert.Equal(t, "constraint-1", got.Resource["id"])
+			if tc.scope == ResourceScopeSystem {
+				assert.NotContains(t, got.Resource, "project_id")
+			} else {
+				assert.Equal(t, "project-1", got.Resource["project_id"])
+			}
+		})
+	}
 }
 
 func TestValidationRejectsCatalogAndPayloadViolations(t *testing.T) {
@@ -532,7 +590,7 @@ func TestRenderSnapshotDoesNotRetainEnvelopeOrPayloadAliases(t *testing.T) {
 	credential := mustCredentialRef(t, CredentialRefInput{Kind: CredentialUAT, Labels: labels})
 	request := &RequestRef{Method: "POST", Route: "/safe", Surface: "api"}
 	principal := &IdentityRef{Kind: IdentityUser, ID: "user-1"}
-	resource := &ResourceRef{Kind: "access_constraint", ID: "constraint-1", ProjectID: "project-1"}
+	resource := &ResourceRef{Kind: "access_constraint", ID: "constraint-1", Scope: ResourceScopeProject, ProjectID: "project-1"}
 	changedFields := []string{"permissions"}
 	leaves := map[string]any{
 		"classification": "tighten",
@@ -584,6 +642,7 @@ func TestRenderIsRaceSafeAgainstMutationOfBuilderInputAliases(t *testing.T) {
 			Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
 			Credential:     &credential,
 			ConstraintID:   "constraint-1",
+			Scope:          ResourceScopeProject,
 			ProjectID:      "project-1",
 			Classification: BoundaryTighten,
 			ChangedFields:  changedFields,
@@ -639,7 +698,11 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 		Action:                 "create",
 		AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 		ResourceKind:           "access_constraint",
-		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource", "resource.project_id"},
+		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+		ResourceScopes: []ResourceScopeSchema{
+			{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+			{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+		},
 		RequiredPayloadLeaves: []PayloadLeafSchema{{
 			Name:          "classification",
 			Type:          PayloadString,
@@ -768,6 +831,7 @@ func validCreateEvent(t *testing.T) EnvelopeV1 {
 		AccessBoundaryCreateInput{
 			Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
 			ConstraintID:   "constraint-1",
+			Scope:          ResourceScopeProject,
 			ProjectID:      "project-1",
 			Classification: BoundaryTighten,
 		},

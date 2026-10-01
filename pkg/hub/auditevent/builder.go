@@ -31,6 +31,7 @@ type AccessBoundaryCreateInput struct {
 	Credential     *CredentialRef
 	CausationID    string
 	ConstraintID   string
+	Scope          ResourceScope
 	ProjectID      string
 	BeforeRevision *int64
 	AfterRevision  *int64
@@ -73,6 +74,7 @@ func buildAccessBoundaryCreate(operation AuditOperationContext, input AccessBoun
 		Resource: &ResourceRef{
 			Kind:      "access_constraint",
 			ID:        input.ConstraintID,
+			Scope:     input.Scope,
 			ProjectID: input.ProjectID,
 		},
 		Payload: AccessBoundaryPayload{
