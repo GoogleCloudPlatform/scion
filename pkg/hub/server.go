@@ -37,6 +37,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4/jwt"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -1209,6 +1210,13 @@ type Server struct {
 
 	// ghResolutionStore is the DB-backed GitHub skill resolution cache (nil when entClient is nil).
 	ghResolutionStore *GitHubResolutionStore
+
+	// ghResolveFlight coalesces concurrent resolveGitHubSkill calls that
+	// share a cache key (see resolveGitHubSkill), so a burst of creates
+	// hitting a cold or just-expired entry for the same ref makes one
+	// mint+commits+contents+Put sequence instead of one per caller. Zero
+	// value is ready to use.
+	ghResolveFlight singleflight.Group
 
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for

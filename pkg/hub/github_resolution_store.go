@@ -85,7 +85,54 @@ func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitH
 	}, true, nil
 }
 
+// GetStale returns a cache entry for cacheKey even though its TTL has
+// expired, provided it is within maxStaleAge of its last successful
+// resolution. lastTTL is the TTL that was used to compute the row's
+// ExpiresAt when it was last written — the schema has no separate
+// "last resolved at" column, so the last resolution time is derived as
+// ExpiresAt - lastTTL instead. Callers must only use this for branch refs
+// (a known, fixed TTL); a commit-SHA entry's TTL differs and, being
+// immutable, has no use for staleness in the first place.
+//
+// Returns (nil, false, nil) when the row does not exist or is older than
+// maxStaleAge, and (nil, false, error) on a DB error.
+func (s *GitHubResolutionStore) GetStale(ctx context.Context, cacheKey string, lastTTL, maxStaleAge time.Duration) (*GitHubCacheEntry, bool, error) {
+	row, err := s.client.GitHubResolutionCache.
+		Query().
+		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	lastResolvedAt := row.ExpiresAt.Add(-lastTTL)
+	if time.Since(lastResolvedAt) >= maxStaleAge {
+		return nil, false, nil
+	}
+
+	return &GitHubCacheEntry{
+		CommitSHA:   row.CommitSha,
+		FileEntries: row.FileEntries,
+		BundleHash:  row.BundleHash,
+		TokenScope:  row.TokenScope,
+		ExpiresAt:   row.ExpiresAt,
+		OriginalURI: row.OriginalURI,
+	}, true, nil
+}
+
 // Put upserts a cache entry. If an entry with the same cache_key exists, it is updated.
+//
+// OnConflictColumns names cache_key (the table's unique index, see the
+// GitHubResolutionCache schema) as the conflict target explicitly. Without
+// it, ent emits "INSERT ... ON CONFLICT DO UPDATE SET ..." with no inference
+// specification: Postgres rejects that unconditionally ("ON CONFLICT DO
+// UPDATE requires inference specification or constraint name"), so every
+// write failed there and the cache was never populated. SQLite 3.35+ accepts
+// the same statement by inferring the lone eligible unique index, which is
+// why this went unnoticed in SQLite-only tests.
 func (s *GitHubResolutionStore) Put(ctx context.Context, cacheKey string, entry GitHubCacheEntry) error {
 	return s.client.GitHubResolutionCache.
 		Create().
@@ -96,7 +143,7 @@ func (s *GitHubResolutionStore) Put(ctx context.Context, cacheKey string, entry 
 		SetBundleHash(entry.BundleHash).
 		SetTokenScope(entry.TokenScope).
 		SetExpiresAt(entry.ExpiresAt).
-		OnConflict().
+		OnConflictColumns(githubresolutioncache.FieldCacheKey).
 		UpdateNewValues().
 		Exec(ctx)
 }

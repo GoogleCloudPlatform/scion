@@ -1738,13 +1738,24 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 	return installID, mintedToken, nil
 }
 
+// hubGitHubRefreshTimeout bounds a background cache refresh kicked off by a
+// stale hit (see resolveGitHubSkill), once detached from the request that
+// triggered it. Generous enough for a commit lookup plus a contents listing
+// — the Hub never downloads file bytes itself — without hanging forever if
+// upstream is unresponsive.
+const hubGitHubRefreshTimeout = 2 * time.Minute
+
 // resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
 // This method is called by handleSkillsResolve for gh:// URIs. It:
-// 1. Parses the gh:// URI
-// 2. Determines the token scope (GitHub App installation ID or "public")
-// 3. Checks the DB-backed resolution cache
-// 4. On cache miss, calls GitHub API to resolve commit SHA and file list
-// 5. Stores the result in the cache and returns it
+//  1. Parses the gh:// URI
+//  2. Determines the token scope (GitHub App installation ID or "public")
+//  3. Checks the DB-backed resolution cache
+//  4. On a fresh hit, returns it directly; on a stale hit (branch ref, past
+//     TTL but within agent.MaxResolutionStaleAge), returns the stale value and
+//     refreshes in the background
+//  5. Otherwise calls the GitHub API to resolve commit SHA and file list,
+//     coalescing concurrent callers for the same cache key into one call
+//  6. Stores the result in the cache and returns it
 //
 // refSHAMemo is a per-request memo map keyed by "(owner)/(repo)@(ref):(tokenScope)"
 // that is shared across all URIs in one handleSkillsResolve call. It prevents
@@ -1773,6 +1784,9 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	if ghRef.Ref == "" {
 		ghRef.Ref = "HEAD"
 	}
+	// Commit-SHA refs are immutable, so staleness (4, below) has no meaning
+	// for them: they are only ever served fresh or re-resolved.
+	isBranchRef := !isFullCommitSHA(ghRef.Ref)
 
 	// 2. Determine token scope
 	installID, token, err := s.resolveGitHubToken(ctx, projectID)
@@ -1793,10 +1807,80 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
 				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
 			return buildResolvedSkillResponse(ghRef, entry), nil
+		} else if isBranchRef {
+			stale, ok, staleErr := s.ghResolutionStore.GetStale(ctx, cacheKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+			if staleErr != nil {
+				slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
+					"uri", rawURI, "error", staleErr)
+			} else if ok {
+				slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
+					"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+				go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, isBranchRef)
+				return buildResolvedSkillResponse(ghRef, stale), nil
+			}
 		}
 	}
 
-	// 5. Cache miss: call GitHub API
+	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses
+	// for this exact cache key into a single mint+commits+contents+Put
+	// sequence, so a burst hitting a cold or just-expired-past-staleness
+	// entry for the same ref does not send one request per caller to GitHub.
+	v, err, _ := s.ghResolveFlight.Do(cacheKey, func() (interface{}, error) {
+		// Re-check: a concurrent flight for this exact key may have already
+		// landed while this call waited to become the flight leader.
+		if s.ghResolutionStore != nil {
+			if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
+				return buildResolvedSkillResponse(ghRef, entry), nil
+			}
+		}
+		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*ResolvedSkillResponse), nil
+}
+
+// refreshGitHubSkillInBackground re-resolves ghRef and updates the cache on
+// behalf of a caller that was already served a stale value (see
+// resolveGitHubSkill, step 4). It runs detached from any specific request —
+// the stale caller has already returned — on a bounded timeout, and shares
+// ghResolveFlight's key with the synchronous miss path so a burst of stale
+// hits for the same ref collapses into one refresh.
+func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *agent.GitHubSkillRef, token string, isBranchRef bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), hubGitHubRefreshTimeout)
+	defer cancel()
+
+	_, err, _ := s.ghResolveFlight.Do(cacheKey, func() (interface{}, error) {
+		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
+			return buildResolvedSkillResponse(ghRef, entry), nil
+		}
+		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, "", isBranchRef, nil)
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "github_resolution_cache: background refresh failed",
+			"uri", rawURI, "error", err)
+	}
+}
+
+// fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
+// then directory contents), stores the result in the resolution cache under
+// cacheKey, and returns the response. installID is recorded on the cache
+// entry's TokenScope; pass "" from a background refresh, which only ever
+// updates a row that a synchronous call already created (and so already set
+// TokenScope correctly) or creates one no synchronous caller is waiting on.
+//
+// Called from within s.ghResolveFlight.Do, so concurrent callers sharing
+// cacheKey share one execution — refSHAMemo is only touched by whichever
+// caller's goroutine actually becomes the flight leader.
+func (s *Server) fetchAndCacheGitHubSkill(
+	ctx context.Context,
+	cacheKey, rawURI string,
+	ghRef *agent.GitHubSkillRef,
+	token, installID string,
+	isBranchRef bool,
+	refSHAMemo map[string]string,
+) (*ResolvedSkillResponse, error) {
 	apiBase := githubAPIBase
 	if s.config.GitHubAppConfig.APIBaseURL != "" {
 		apiBase = s.config.GitHubAppConfig.APIBaseURL
@@ -1837,18 +1921,18 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		return nil, fmt.Errorf("no files found at %s in %s/%s", ghRef.SkillPath, ghRef.Owner, ghRef.Repo)
 	}
 
-	// 6. Compute bundle hash
+	// Compute bundle hash
 	bundleHash := computeBundleHash(fileEntries)
 
-	// 7. Determine TTL based on ref type
+	// Determine TTL based on ref type
 	var ttl time.Duration
-	if isFullCommitSHA(ghRef.Ref) {
-		ttl = agent.DefaultSHAResolutionCacheTTL
-	} else {
+	if isBranchRef {
 		ttl = agent.DefaultResolutionCacheTTL
+	} else {
+		ttl = agent.DefaultSHAResolutionCacheTTL
 	}
 
-	// 8. Store in cache
+	// Store in cache
 	entry := GitHubCacheEntry{
 		CommitSHA:   commitSHA,
 		FileEntries: fileEntries,

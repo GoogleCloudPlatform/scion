@@ -17,16 +17,25 @@
 package hub
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -321,4 +330,285 @@ func TestSkillsResolve_GHRefDedup(t *testing.T) {
 	contentsCalls := gh.calls.Load() - gh.commitCalls.Load()
 	assert.Equal(t, int64(n), contentsCalls,
 		"each URI must still trigger its own contents lookup: expected %d, got %d", n, contentsCalls)
+}
+
+// TestResolveGitHubSkill_ConcurrentMissesCoalesce is the acceptance test for
+// hub-side single-flight: N concurrent resolutions of the same ref against a
+// cold cache must make exactly one commit lookup and one contents lookup, not
+// N of each. Synchronization is via channels, not sleeps: the commits handler
+// blocks until every caller has had a chance to start, proving the flight
+// genuinely coalesced concurrent callers rather than just serializing them.
+func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "coalesce-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		commitSHA = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var commitCalls, contentsCalls atomic.Int64
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		commitCalls.Add(1)
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(commitSHA))
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		contentsCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	const n = 6
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	resps := make([]*ResolvedSkillResponse, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			resps[i], errs[i] = srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+		}(i)
+	}
+
+	<-entered
+	close(proceed)
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "caller %d", i)
+		require.NotNil(t, resps[i], "caller %d", i)
+	}
+	assert.Equal(t, int64(1), commitCalls.Load(),
+		"%d concurrent resolutions of the same ref must make exactly one commit lookup", n)
+	assert.Equal(t, int64(1), contentsCalls.Load(),
+		"%d concurrent resolutions of the same ref must make exactly one contents lookup", n)
+}
+
+// TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground is the
+// acceptance test for W on the hub cache: a branch-ref entry that is
+// TTL-expired but within agent.MaxResolutionStaleAge must be served
+// immediately from the stale value, with a background refresh that lands
+// without the caller waiting on it.
+func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "stale-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		staleSHA  = "1111111111111111111111111111111111111111"
+		freshSHA  = "2222222222222222222222222222222222222222"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	refreshed := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(freshSHA))
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+		close(refreshed) // the contents call is the last GitHub call a refresh makes
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	ctx := context.Background()
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+		CommitSHA:   staleSHA,
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		BundleHash:  "sha256:stale",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-time.Minute), // just past the branch-ref TTL
+		OriginalURI: uri,
+	}))
+
+	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion,
+		"must serve the stale value immediately, without waiting on a refresh")
+
+	<-refreshed // deterministic wait for the background refresh's final GitHub call
+
+	entry, hit, err := srv.ghResolutionStore.Get(ctx, cacheKey)
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.Equal(t, freshSHA, entry.CommitSHA, "the background refresh must have updated the cache")
+}
+
+// TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously is the
+// acceptance test for the hard staleness bound: an entry whose last
+// successful resolution is older than agent.MaxResolutionStaleAge must not be
+// served stale — it must be re-resolved synchronously instead.
+func TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
+	const (
+		owner      = "acme"
+		repo       = "ancient-repo"
+		skillPath  = "skills/widget"
+		uri        = "gh://" + owner + "/" + repo + "/widget@main"
+		ancientSHA = "3333333333333333333333333333333333333333"
+		freshSHA   = "4444444444444444444444444444444444444444"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(freshSHA))
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	ctx := context.Background()
+	// ExpiresAt - DefaultResolutionCacheTTL is this entry's last successful
+	// resolution time; push it well past MaxResolutionStaleAge.
+	lastResolvedAt := time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour))
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+		CommitSHA:   ancientSHA,
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		BundleHash:  "sha256:ancient",
+		TokenScope:  "public",
+		ExpiresAt:   lastResolvedAt.Add(agent.DefaultResolutionCacheTTL),
+		OriginalURI: uri,
+	}))
+
+	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err)
+	assert.Equal(t, safeShortSHA(freshSHA), resp.ResolvedVersion,
+		"an entry past MaxResolutionStaleAge must not be served stale")
+	assert.Equal(t, int64(2), calls.Load(), "must resolve synchronously via exactly one commit + one contents call")
+}
+
+// generateTestGitHubAppKey generates a throwaway RSA private key in PEM
+// format, suitable for configuring a fake GitHub App client in tests.
+func generateTestGitHubAppKey(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	return string(pemBytes)
+}
+
+// TestSkillsResolve_GHCacheHitForCredentialedBranchRef is the acceptance test
+// for the hub cache-hit path on a credentialed branch ref: a project with a
+// GitHub App installation (so the Hub mints a real, non-"public" token scope)
+// resolves a branch ref, then resolves it again — the second resolve must hit
+// the cache and make no new commit or contents calls, even though the Hub
+// still mints a fresh token on every call (that reordering is out of scope
+// here; this test only pins the cache-hit behavior for a credentialed scope).
+func TestSkillsResolve_GHCacheHitForCredentialedBranchRef(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "installed-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		commitSHA = "5555555555555555555555555555555555555555"
+	)
+	instID := int64(424242)
+
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var apiCalls, mintCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			http.NotFound(w, r)
+			return
+		}
+		mintCalls.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_test_token",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls.Add(1)
+		_, _ = w.Write([]byte(commitSHA))
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+
+	ctx := context.Background()
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   owner,
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	project.GitHubInstallationID = &instID
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	body := ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID}
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Empty(t, resp.Errors, "body: %s", rec.Body.String())
+	require.Len(t, resp.Resolved, 1)
+	require.Equal(t, int64(2), apiCalls.Load(), "first resolve is a cache miss: one commit + one contents call")
+	require.Equal(t, int64(1), mintCalls.Load())
+
+	rec2 := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", body)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var resp2 ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+	require.Empty(t, resp2.Errors)
+	require.Len(t, resp2.Resolved, 1)
+
+	assert.Equal(t, int64(2), apiCalls.Load(),
+		"second resolve of a credentialed branch ref must hit the cache: no new commit or contents calls")
+	assert.Equal(t, resp.Resolved[0], resp2.Resolved[0], "a cache hit must reproduce the miss response byte for byte")
 }
