@@ -54,6 +54,15 @@ const (
 	ScopeProjectSecretRead AgentTokenScope = "project:secret:read"
 	// ScopeAgentCreate allows the agent to create sub-agents within the same project.
 	ScopeAgentCreate AgentTokenScope = "project:agent:create"
+	// ScopeAgentSAAssign allows the agent to assign a GCP service account to
+	// an agent within the same project. Split from ScopeAgentCreate
+	// (ptone/scion#2339) so the two permissions are granted and checked
+	// independently: agentScopesToPermissionIDs (authz.go) maps this scope to
+	// gcp_service_account.assign, and also maps ScopeAgentCreate to the same
+	// permission for a JWT minted with the combined scope before the split,
+	// so an already-issued token keeps authorizing what it did when it was
+	// minted until it next refreshes onto the split scopes.
+	ScopeAgentSAAssign AgentTokenScope = "project:agent:sa_assign"
 	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same project.
 	ScopeAgentLifecycle AgentTokenScope = "project:agent:lifecycle"
 	// ScopeAgentNotify allows the agent to create notification subscriptions within the same project.
@@ -84,12 +93,36 @@ const (
 	ScopeGCPTokenPrefix = "project:gcp:token:"
 )
 
+// CurrentAgentScopeSchema is stamped onto every agent JWT this hub mints or
+// refreshes, so a token's scope list can be told apart from one minted under
+// an earlier, coarser scope vocabulary without inspecting the scopes
+// themselves. It increments only when a permission moves off a shared scope
+// onto its own (ptone/scion#2339 is schema 1: gcp_service_account.assign
+// gets project:agent:sa_assign instead of sharing project:agent:create).
+//
+// AgentTokenClaims.ScopeSchema is 0 (its Go zero value, also absent from the
+// wire form via omitempty) on any token minted before this field existed.
+// agentScopesToPermissionIDs treats schema 0 as "apply every scope grant
+// this hub has ever combined into another scope," so a token minted before
+// a split keeps authorizing what it authorized when it was minted. Schema
+// 0 must never be treated as "unrestricted" or "current" — it names a
+// specific, ambiguous-by-omission history, not a missing restriction.
+//
+// The zero-schema compatibility grants in agentScopesToPermissionIDs may be
+// deleted once no unexpired token can still carry schema 0: DefaultAgentTokenDuration
+// after CurrentAgentScopeSchema was introduced, since every agent refreshes
+// (or is re-minted) within one token lifetime.
+const CurrentAgentScopeSchema = 1
+
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
 	ProjectID string            `json:"project_id,omitempty"`
 	Scopes    []AgentTokenScope `json:"scopes,omitempty"`
 	Ancestry  []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
+	// ScopeSchema records which scope vocabulary Scopes was minted under.
+	// See CurrentAgentScopeSchema.
+	ScopeSchema int `json:"scope_schema,omitempty"`
 }
 
 // AgentTokenConfig holds configuration for agent token generation.
@@ -227,9 +260,10 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        jti,
 		},
-		ProjectID: projectID,
-		Scopes:    scopes,
-		Ancestry:  ancestry,
+		ProjectID:   projectID,
+		Scopes:      scopes,
+		Ancestry:    ancestry,
+		ScopeSchema: CurrentAgentScopeSchema,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()

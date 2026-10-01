@@ -46,6 +46,33 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 	assert.Equal(t, AgentTokenIssuer, claims.Issuer)
 }
 
+// TestAgentTokenService_ScopeSchemaStampedOnEveryToken pins ptone/scion#2339's
+// compatibility discriminator: every token this service mints or re-mints
+// (a refresh is just another call to GenerateAgentToken with the agent's
+// current role scopes) carries the current scope schema, so
+// agentScopesToPermissionIDs can tell a freshly (re)issued token apart from
+// one minted before AgentTokenClaims.ScopeSchema existed. It also pins that
+// AgentRoleFull's scope bundle carries both the agent-create and the
+// service-account-assign agent scopes, so a role=full agent keeps both
+// permissions once its token is next minted or refreshed.
+func TestAgentTokenService_ScopeSchemaStampedOnEveryToken(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	token, err := service.GenerateAgentToken("agent-full", "project-456", ScopesForRole(AgentRoleFull), nil)
+	require.NoError(t, err)
+
+	claims, err := service.ValidateAgentToken(token)
+	require.NoError(t, err)
+	assert.Equal(t, CurrentAgentScopeSchema, claims.ScopeSchema,
+		"a freshly (re)generated token must carry the current scope schema")
+	assert.Contains(t, claims.Scopes, ScopeAgentCreate)
+	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign)
+}
+
 func TestAgentTokenService_DefaultScopes(t *testing.T) {
 	service, err := NewAgentTokenService(AgentTokenConfig{
 		SigningKey: make([]byte, 32),
