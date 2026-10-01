@@ -126,6 +126,15 @@ export class ScionPageAgentCreate extends LitElement {
    */
   @state() private gcpIdentityUserSet = false;
   /**
+   * True when the currently displayed gcpMetadataMode is normalizeGcpModeFor-
+   * Target's own "block" → "passthrough" display substitution rather than a
+   * real default or user choice. Lets a later switch to a non-Kubernetes
+   * target restore "block" instead of leaving the substitute in place to be
+   * sent as an explicit choice nobody made. Cleared by any explicit
+   * `sl-change` pick and by loadGCPServiceAccounts recomputing from scratch.
+   */
+  private gcpModeSubstitutedForK8s = false;
+  /**
    * This project's own default GCP identity mode ('block', 'passthrough',
    * 'assign'), or '' when the project has none configured. Set in
    * loadGCPServiceAccounts. Used only to pick the accurate wording for the
@@ -244,7 +253,7 @@ export class ScionPageAgentCreate extends LitElement {
       return (
         "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
         'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
-        (this.gcpServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
+        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
       );
     }
     if (this.projectGCPIdentityDefaultMode) {
@@ -545,25 +554,46 @@ export class ScionPageAgentCreate extends LitElement {
    * Corrects the *displayed* gcpMetadataMode away from "block" when the
    * current broker/profile target is reliably known to be Kubernetes (see
    * targetRuntimeIsKubernetesOnly) — purely so the select has a matching,
-   * rendered option.
+   * rendered option — and restores it when the target later becomes
+   * non-Kubernetes again.
    *
-   * Also clears gcpIdentityUserSet when it rewrites the mode. Without this, a
-   * user who explicitly picked "Block" on a non-Kubernetes broker and then
-   * switched to a Kubernetes one would keep gcpIdentityUserSet true while the
-   * mode was silently rewritten to "passthrough" out from under them — submit
-   * would then send that auto-substituted passthrough as if the user had
-   * chosen it, through the Hub's passthrough ownership gate, for a value they
-   * never picked for this target. Clearing the flag puts the target back in
-   * the same "no explicit choice" state as
-   * if the user had never touched the picker, so an untouched target still
-   * submits with no explicit gcp_identity at all, and the hint reflects that.
+   * The substitution only ever fires when the displayed mode is "block" (the
+   * condition checks for exactly that), so the value it overwrites is always
+   * "block" itself, whether that came from this page's own placeholder
+   * default or a project/user choice of Block. gcpModeSubstitutedForK8s
+   * records that the current "passthrough" is this substitution rather than
+   * a real choice, so switching back to a non-Kubernetes target can restore
+   * "block" instead of leaving the substituted value in place to be sent
+   * as an explicit choice nobody made — on a non-Kubernetes target this page
+   * always sends the current mode explicitly (see buildConfig/handleSubmit),
+   * so a stale "passthrough" here would reach the Hub's passthrough
+   * ownership gate for a value the user never picked, where main would have
+   * sent "block". The flag is cleared by any explicit `sl-change` pick (that
+   * pick is a real choice, not a substitution to reverse) and by
+   * loadGCPServiceAccounts recomputing the defaults from scratch.
+   *
+   * Also clears gcpIdentityUserSet when it substitutes "block" away. Without
+   * this, a user who explicitly picked "Block" on a non-Kubernetes broker and
+   * then switched to a Kubernetes one would keep gcpIdentityUserSet true
+   * while the mode was silently rewritten to "passthrough" out from under
+   * them — submit would then send that auto-substituted passthrough as if
+   * the user had chosen it, through the Hub's passthrough ownership gate,
+   * for a value they never picked for this target. Clearing the flag puts
+   * the target back in the same "no explicit choice" state as if the user
+   * had never touched the picker, so an untouched target still submits with
+   * no explicit gcp_identity at all, and the hint reflects that.
+   *
    * Idempotent and safe to call from anywhere that just changed the broker,
    * profile, or mode.
    */
   private normalizeGcpModeForTarget(): void {
     if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
       this.gcpMetadataMode = 'passthrough';
+      this.gcpModeSubstitutedForK8s = true;
       this.gcpIdentityUserSet = false;
+    } else if (this.gcpModeSubstitutedForK8s && !this.targetRuntimeIsKubernetesOnly) {
+      this.gcpMetadataMode = 'block';
+      this.gcpModeSubstitutedForK8s = false;
     }
   }
 
@@ -865,8 +895,10 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
     // Recomputing defaults from scratch (initial load, or a project change):
-    // whatever this method assigns below is a default, not a user choice.
+    // whatever this method assigns below is a default, not a user choice,
+    // and not a Kubernetes display substitution to reverse later.
     this.gcpIdentityUserSet = false;
+    this.gcpModeSubstitutedForK8s = false;
     this.projectGCPIdentityDefaultMode = '';
 
     if (this.projectId) {
@@ -1122,7 +1154,7 @@ export class ScionPageAgentCreate extends LitElement {
       this.error =
         "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
         'dispatch. Choose Passthrough' +
-        (this.gcpServiceAccounts.length > 0 ? ' or Assign Service Account' : '') +
+        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account' : '') +
         ' before creating this agent.';
       return;
     }
@@ -1868,6 +1900,7 @@ export class ScionPageAgentCreate extends LitElement {
               | 'passthrough'
               | 'assign';
             this.gcpIdentityUserSet = true;
+            this.gcpModeSubstitutedForK8s = false;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1908,6 +1941,7 @@ export class ScionPageAgentCreate extends LitElement {
                           e.target as HTMLElement & { value: string }
                         ).value;
                         this.gcpIdentityUserSet = true;
+                        this.gcpModeSubstitutedForK8s = false;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(

@@ -123,20 +123,23 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
 }
 
 /**
- * Routes the initial page-load fetches so a single online kubernetes-only
- * broker is auto-selected, and the project's stored GCP identity default is
- * `mode` — reproducing the path in loadGCPServiceAccounts that applies a
- * project default *after* the broker is already known. Also captures the
- * JSON body of every POST /api/v1/agents request (mocked to a 400 so
- * handleSubmit's catch block sets `error` and returns without navigating),
- * so a test can assert whether a create request was sent at all, and what it
- * carried.
+ * Routes the initial page-load fetches so a single online broker (of
+ * `brokerType`, kubernetes-only by default) is auto-selected, and the
+ * project's stored GCP identity default is `mode` — reproducing the path in
+ * loadGCPServiceAccounts that applies a project default *after* the broker
+ * is already known. Also captures the JSON body of every POST
+ * /api/v1/agents request (mocked to a 400 so handleSubmit's catch block
+ * sets `error` and returns without navigating), so a test can assert
+ * whether a create request was sent at all, and what it carried.
  */
 function stubFetchForKubernetesProjectDefault(
   mode: string = 'block',
-  serviceAccounts: GCPServiceAccountFixture[] = []
+  serviceAccounts: GCPServiceAccountFixture[] = [],
+  brokerType: 'kubernetes' | 'docker' = 'kubernetes'
 ): { bodies: Array<Record<string, unknown>> } {
   const bodies: Array<Record<string, unknown>> = [];
+  const brokerId = brokerType === 'kubernetes' ? 'broker-k8s' : 'broker-docker';
+  const brokerName = brokerType === 'kubernetes' ? 'k8s-broker' : 'docker-broker';
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -165,10 +168,10 @@ function stubFetchForKubernetesProjectDefault(
           json: async () => ({
             brokers: [
               {
-                id: 'broker-k8s',
-                name: 'k8s-broker',
+                id: brokerId,
+                name: brokerName,
                 status: 'online',
-                profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+                profiles: [{ name: 'default', type: brokerType, available: true }],
               },
             ],
           }),
@@ -262,7 +265,7 @@ interface GCPServiceAccountFixture {
   createdBy: string;
 }
 
-function makeServiceAccount(id: string): GCPServiceAccountFixture {
+function makeServiceAccount(id: string, verified: boolean = true): GCPServiceAccountFixture {
   return {
     id,
     scope: 'project',
@@ -271,8 +274,8 @@ function makeServiceAccount(id: string): GCPServiceAccountFixture {
     projectId: 'gcp-proj',
     displayName: '',
     defaultScopes: [],
-    verified: true,
-    verifiedAt: '2026-01-01T00:00:00Z',
+    verified,
+    verifiedAt: verified ? '2026-01-01T00:00:00Z' : null,
     createdBy: 'user-1',
   };
 }
@@ -538,15 +541,36 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(gcpIdentityHint(el)).toContain('No GCP identity is selected yet.');
   });
 
-  it('mentions Assign Service Account in the Block-default hint only when one is offered', async () => {
+  it('mentions Assign Service Account in the Block-default hint only when a verified one is offered', async () => {
     stubFetchForKubernetesProjectDefault('block');
     const withoutSA = await mountAgentCreate();
     expect(gcpIdentityHint(withoutSA)).not.toContain('Assign Service Account');
 
     document.body.innerHTML = '';
+    stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a', false)]);
+    const withUnverifiedOnly = await mountAgentCreate();
+    expect(gcpIdentityHint(withUnverifiedOnly)).not.toContain('Assign Service Account');
+
+    document.body.innerHTML = '';
     stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a')]);
     const withSA = await mountAgentCreate();
     expect(gcpIdentityHint(withSA)).toContain('or Assign Service Account.');
+  });
+
+  it('blocks submit with the matching error text whether or not a verified service account is offered', async () => {
+    stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a', false)]);
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      error: string | null;
+    };
+    page.name = 'test-agent';
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(page.error).toContain('Choose Passthrough before creating this agent.');
+    expect(page.error).not.toContain('Assign Service Account');
   });
 
   it('blocks submit with no request sent when the stored project default is block and nothing was chosen', async () => {
@@ -593,10 +617,10 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
   });
 
-  // M10: the Block-default branch must not take precedence over an explicit
-  // user choice — once the user has picked something (here Assign, which
-  // requires a configured service account), the hint must say only that
-  // Block is unavailable, not that the project's rejected default applies.
+  // The Block-default branch must not take precedence over an explicit user
+  // choice — once the user has picked something (here Assign, which requires
+  // a configured service account), the hint must say only that Block is
+  // unavailable, not that the project's rejected default applies.
   it('yields to an explicit choice instead of the Block-default warning once the user picks one', async () => {
     stubFetchForKubernetesProjectDefault('block', [makeServiceAccount('sa-a')]);
     const el = await mountAgentCreate();
@@ -607,6 +631,29 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     expect(gcpIdentityHint(el)).toContain('Block is not available for a Kubernetes runtime target.');
     expect(gcpIdentityHint(el)).not.toContain('rejects at dispatch');
+  });
+
+  // blockDefaultNeedsExplicitChoice must require a known-Kubernetes target,
+  // not just a project default of block: Block is a valid, sendable choice
+  // on a docker target, so the picker must show it selected (not blank) and
+  // submit must send it, exactly as it would without this PR's changes.
+  it('shows Block selected and sends it when the project default is block on a non-Kubernetes target', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('block', [], 'docker');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+
+    const select = gcpIdentitySelect(el);
+    expect((select as HTMLElement & { value: string }).value).toBe('block');
+    expect(gcpIdentityHint(el)).not.toContain('No GCP identity is selected yet.');
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 
   // The project default mode is only ever assigned inside the
@@ -910,5 +957,129 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await page.handleSubmit(new Event('submit'));
     expect(tracker.bodies).toHaveLength(1);
     expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
+
+    // Switching back to the docker broker must restore "block" — the
+    // Kubernetes display substitution is reversible, not a one-way street
+    // that leaves a stale "passthrough" nobody chose in place.
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(tracker.bodies).toHaveLength(2);
+    expect(tracker.bodies[1].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // The display-only Kubernetes substitution (block -> passthrough) must be
+  // reversed when the target later becomes non-Kubernetes again — otherwise
+  // submit sends an explicit "passthrough" nobody chose, where main would
+  // have sent "block" (the component's own placeholder default here, since
+  // there is no project default configured).
+  it('restores block after switching from a Kubernetes broker back to docker, with no project default', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  it('restores the project default of block after switching from a Kubernetes broker back to docker', async () => {
+    const { bodies } = stubFetchForKubernetesProjectDefault('block');
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    expect(page.brokerId).toBe('broker-k8s');
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.brokers = [
+      ...page.brokers,
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
+  });
+
+  // Profile-only variant: the same restoration must happen when only the
+  // profile changes on a mixed broker (Kubernetes profile -> docker
+  // profile), not just on a broker switch.
+  it('restores block when only the profile changes back to a non-Kubernetes one on a mixed broker', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-mixed',
+        name: 'mixed-broker',
+        status: 'online',
+        profiles: [
+          { name: 'k8s-profile', type: 'kubernetes', available: true },
+          { name: 'docker-profile', type: 'docker', available: true },
+        ],
+      },
+    ];
+    page.brokerId = 'broker-mixed';
+    page.profile = 'k8s-profile';
+    await el.updateComplete;
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    page.profile = 'docker-profile';
+    await el.updateComplete;
+
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 });
