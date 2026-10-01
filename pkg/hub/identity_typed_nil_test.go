@@ -87,6 +87,8 @@ func TestGetIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 				stored = (*peerAgentIdentity)(nil)
 			case "explainAgentIdentity":
 				stored = (*explainAgentIdentity)(nil)
+			case "hubDeliveryIdentity":
+				stored = (*hubDeliveryIdentity)(nil)
 			case "brokerIdentityImpl":
 				stored = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":
@@ -157,6 +159,7 @@ func TestGetAgentIdentityFromContext_TypedNilTreatedAsMissing(t *testing.T) {
 		{"storedAgentIdentity", (*storedAgentIdentity)(nil)},
 		{"peerAgentIdentity", (*peerAgentIdentity)(nil)},
 		{"explainAgentIdentity", (*explainAgentIdentity)(nil)},
+		{"hubDeliveryIdentity", (*hubDeliveryIdentity)(nil)},
 		{"FederatedAgentIdentity", (*FederatedAgentIdentity)(nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

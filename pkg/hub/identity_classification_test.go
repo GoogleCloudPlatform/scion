@@ -127,6 +127,7 @@ var identityInventoryExpectation = map[string]bool{
 	"FederatedUserIdentity":    false,
 	"FederatedAgentIdentity":   false,
 	"FederatedServiceIdentity": false,
+	"hubDeliveryIdentity":      false,
 }
 
 // identitySourceInventory is a structural (AST-level) description of the
@@ -379,6 +380,18 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantPrincipalKind:  PrincipalKindAgent,
 				wantCredentialKind: CredentialKindAgentJWT,
 				wantAttested:       true,
+			},
+			{
+				name: "hubDeliveryIdentity",
+				identity: &hubDeliveryIdentity{
+					agentID: tid("classify-hd-agent"), projectID: tid("classify-project"),
+					boundAgentID: tid("classify-hd-agent"), ancestry: []string{tid("classify-user")},
+					evidence: &storedAgentIdentity{agent: &store.Agent{ID: tid("classify-hd-agent"),
+						ProjectID: tid("classify-project"), Ancestry: []string{tid("classify-user")}}},
+				},
+				wantPrincipalKind:  PrincipalKindAgent,
+				wantCredentialKind: CredentialKindHubDelivery,
+				wantAttested:       false, // even though evidence alone is attested
 			},
 			{
 				name:               "brokerIdentityImpl",
@@ -851,7 +864,7 @@ func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
 	suppliedKinds := []CredentialKind{
 		CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
 		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
-		CredentialKind("bogus"),
+		CredentialKindHubDelivery, CredentialKind("bogus"),
 	}
 
 	rows := []struct {
@@ -867,6 +880,7 @@ func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
 		{"user/uat (ScopedUserIdentity): a real UAT follows equality only, not the exception", PrincipalKindUser, CredentialKindUAT, nil},
 		{"dev/dev (DevUser): dev is deliberately excluded from the UAT exception", PrincipalKindDev, CredentialKindDev, nil},
 		{"agent/agent_jwt", PrincipalKindAgent, CredentialKindAgentJWT, nil},
+		{"agent/hub_delivery", PrincipalKindAgent, CredentialKindHubDelivery, nil},
 		{"federated_user/federation", PrincipalKindFederatedUser, CredentialKindFederation, nil},
 		{"federated_agent/federation", PrincipalKindFederatedAgent, CredentialKindFederation, nil},
 		{"federated_service/federation", PrincipalKindFederatedService, CredentialKindFederation, nil},
@@ -1154,6 +1168,8 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 				identity = (*peerAgentIdentity)(nil)
 			case "explainAgentIdentity":
 				identity = (*explainAgentIdentity)(nil)
+			case "hubDeliveryIdentity":
+				identity = (*hubDeliveryIdentity)(nil)
 			case "brokerIdentityImpl":
 				identity = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":

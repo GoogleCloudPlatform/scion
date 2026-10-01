@@ -326,6 +326,20 @@ type localAncestryProvenanceIdentity interface {
 // Type() — cannot be satisfied by an arbitrary or future type string. A
 // typed-nil concrete identity is treated the same as a nil interface: see
 // isNilIdentity.
+//
+// *hubDeliveryIdentity (ptone/scion#2228 part 2) never implements
+// localAncestryProvenanceIdentity, so this always returns false for it: the
+// credential is minted by the hub for one delivery and attests nothing
+// about how the agent came to exist. For a deliver permission, relationship
+// stage 2 and the progeny fact read ancestry evidence explicitly from the
+// stored agent record (hubDeliveryIdentity.evidence) instead — see
+// relationshipStageAncestryAttested (authz_delivery_credential.go).
+// ProgenyListPredicate and EvaluateProgeny are unchanged and keep calling
+// this function directly, so they return not-attested / match-nothing for
+// a hub_delivery principal. Every other consumer of this function (the
+// step-10 pre-backfill allow, messaging, material_grants, material_runtime)
+// stays on its not-attested path too, so no consumer extends trust to the
+// credential without an explicit arm.
 func AncestryIsHubAttested(identity Identity) bool {
 	if isNilIdentity(identity) {
 		return false
@@ -360,7 +374,9 @@ func AncestryIsHubAttested(identity Identity) bool {
 // (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
 // storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
 // brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
-// FederatedServiceIdentity). Its only current implementers are package-hub
+// FederatedServiceIdentity, hubDeliveryIdentity — the last classifies to
+// PrincipalKindAgent / CredentialKindHubDelivery and is never hub-attested,
+// see AncestryIsHubAttested). Its only current implementers are package-hub
 // test fakes that stand in for one of those types (ptone/scion#2123). The
 // method is unexported for the same reason localAncestryProvenance is: no
 // type outside package hub can implement it, so classification can never be

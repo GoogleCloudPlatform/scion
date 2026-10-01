@@ -121,6 +121,17 @@ func (a *AuthzService) checkDelegationCeiling(
 	explain *[]DecisionStep,
 	cause *DenyCause,
 ) (bool, string, error) {
+	// A hubDeliveryIdentity principal (ptone/scion#2228 part 2) never takes
+	// the ordinary delegator-permission proof below: it is routed to its own
+	// arm before the AgentIdentity assertion this function would otherwise
+	// reach. A typed nil also matches this type assertion, which is exactly
+	// why checkHubDeliveryCeiling's first check handles h == nil itself
+	// rather than relying on a panic-free path through the rest of this
+	// function.
+	if h, ok := req.Principal.Identity.(*hubDeliveryIdentity); ok {
+		return a.checkHubDeliveryCeiling(ctx, req, h, agentID, explain, cause)
+	}
+
 	// Derive scope from the principal's own project, not from the resource.
 	// The agent's project ID is always available from the identity and matches
 	// the scope under which delegation edges were created.

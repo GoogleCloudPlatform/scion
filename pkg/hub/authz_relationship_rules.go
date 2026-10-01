@@ -214,11 +214,31 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 				resourceID, eligible := a.progenyFactResourceID(resourceType, resource)
 				if eligible {
 					granted := allowRelationship(relType, resource.Type, resource.ID, agent.ID())
+					// The fact identity is explicit: a hubDeliveryIdentity
+					// principal (ptone/scion#2228 part 2) is never itself
+					// hub-attested, so the fact reads the stored-agent
+					// evidence instead of the asserted AgentIdentity above.
+					// The noEvidence guard keeps the fact closure correct
+					// independently of stage ordering — it does not rely on
+					// stage 2 having already rejected a missing evidence
+					// before this fact ever runs.
+					var factAgent AgentIdentity = agent
+					noEvidence := false
+					if h, ok := principal.Identity.(*hubDeliveryIdentity); ok {
+						if h == nil || h.evidence == nil {
+							noEvidence = true
+						} else {
+							factAgent = h.evidence
+						}
+					}
 					out = append(out, relationshipCandidate{
 						rule:         RelationshipRuleProgeny,
 						usesAncestry: true,
 						fact: func(ctx context.Context) (*SharingSource, bool, string) {
-							return a.progenySourceFor(ctx, agent, resourceType, resourceID, permissionID)
+							if noEvidence {
+								return nil, false, "delivery credential has no stored-agent evidence"
+							}
+							return a.progenySourceFor(ctx, factAgent, resourceType, resourceID, permissionID)
 						},
 						decision: Decision{
 							Allowed:      true,
@@ -320,8 +340,12 @@ func (a *AuthzService) runRelationshipStages(
 		return nil, false
 	}
 
-	// Stage 2: hub-attested ancestry.
-	if c.usesAncestry && !relationshipAncestryAttested(principal) {
+	// Stage 2: hub-attested ancestry. relationshipStageAncestryAttested
+	// (authz_delivery_credential.go) is relationshipAncestryAttested for
+	// every principal except hubDeliveryIdentity, for which it reads
+	// attestation from the stored-agent evidence, scoped to the three
+	// deliver permissions (ptone/scion#2228 part 2).
+	if c.usesAncestry && !relationshipStageAncestryAttested(principal, permissionID) {
 		reject(RelationshipRejectUntrustedAncestry, "ancestry is not hub-attested")
 		return nil, false
 	}

@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +69,7 @@ var deliveryGateKindCases = []struct {
 	{CredentialKindBroker, false},
 	{CredentialKindFederation, false},
 	{CredentialKindDev, false},
+	{CredentialKindHubDelivery, false},
 	{"unrecognized", false},
 }
 
@@ -405,11 +407,37 @@ func TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant(t *testing.T) {
 }
 
 // A delivery credential whose BoundAgentID differs from the principal
-// agent ID is denied.
+// agent ID is denied, even with a valid progeny grant for the principal.
 func TestDeliveryGate_Part2WrongBoundAgentDenied(t *testing.T) {
-	t.Skip("depends on the internal delivery credential kind and BoundAgentID, ptone/scion#2228 part 2: " +
-		"assert a delivery credential bound to agent A is denied secret.deliver and env_var.deliver for principal agent B, " +
-		"even with a valid progeny grant for B")
+	f := newGoldenFixture(t)
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+
+	agentB := tid("dg-wrong-bound-agent-b")
+	h := &hubDeliveryIdentity{
+		agentID:      agentB,
+		projectID:    f.projectAlpha.ID,
+		ancestry:     []string{f.projectOwnerID},
+		originUserID: f.projectOwnerID,
+		boundAgentID: tid("dg-wrong-bound-agent-a"), // bound to a different agent
+		evidence: &storedAgentIdentity{agent: &store.Agent{
+			ID: agentB, ProjectID: f.projectAlpha.ID, Ancestry: []string{f.projectOwnerID},
+		}},
+	}
+
+	cases := []struct {
+		perm string
+		res  Resource
+	}{
+		{"secret.deliver", Resource{Type: "secret", ID: f.secretID}},
+		{"env_var.deliver", Resource{Type: "env_var", ID: f.envVarID}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.perm, func(t *testing.T) {
+			d := f.authz.Decide(context.Background(), deliveryGateRequest(h, CredentialKindHubDelivery, tc.res, tc.perm))
+			assert.False(t, d.Allowed, "reason %q", d.Reason)
+			assert.Equal(t, "delivery credential is bound to a different agent", d.Reason)
+		})
+	}
 }
 
 // A valid internal delivery credential, bound to the principal agent, with
