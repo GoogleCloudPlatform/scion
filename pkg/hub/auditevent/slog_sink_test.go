@@ -128,6 +128,44 @@ func TestSlogSinkPreservesNestedSchemaThroughOTel(t *testing.T) {
 	assert.NotContains(t, string(got), "Scope")
 }
 
+func TestEmptyRequestCanonicalizesToAbsenceAcrossRenderAndHandlers(t *testing.T) {
+	t.Parallel()
+
+	event := validCreateEvent(t)
+	event.Request = &RequestRef{}
+	snapshot := newRenderSnapshot(event)
+	assert.Nil(t, snapshot.event.Request)
+	assert.Nil(t, snapshot.serialized.Request)
+
+	rendered, err := Render(event)
+	require.NoError(t, err)
+	var renderedObject map[string]any
+	require.NoError(t, json.Unmarshal(rendered, &renderedObject))
+	assert.NotContains(t, renderedObject, "request")
+
+	rawHandler := &captureSlogHandler{}
+	rawSink, err := NewSlogSink(slog.New(rawHandler))
+	require.NoError(t, err)
+	require.NoError(t, rawSink.Emit(context.Background(), event))
+	rawRecord := rawHandler.Records()[0]
+	assert.NotContains(t, recordAttrs(t, rawRecord), "request")
+	assert.JSONEq(t, string(rendered), string(recordAttrsJSON(t, rawRecord)))
+
+	exporter := &captureOTelExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	otelSink, err := NewSlogSink(slog.New(logging.NewOTelHandler("auditevent-test", provider)))
+	require.NoError(t, err)
+	require.NoError(t, otelSink.Emit(context.Background(), event))
+	otelRecords := exporter.Records()
+	require.Len(t, otelRecords, 1)
+	otelObject := otelRecordMap(otelRecords[0])
+	assert.NotContains(t, otelObject, "request")
+	otelJSON, err := json.Marshal(otelObject)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(rendered), string(otelJSON))
+}
+
 func TestSlogSinkRecordsEmitCallerPC(t *testing.T) {
 	t.Parallel()
 

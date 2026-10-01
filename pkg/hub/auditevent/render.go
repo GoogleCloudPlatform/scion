@@ -72,7 +72,7 @@ func newRenderSnapshot(event EnvelopeV1) renderSnapshot {
 	}
 
 	snapshotEvent := event
-	snapshotEvent.Request = cloneRequest(event.Request)
+	snapshotEvent.Request = cloneSnapshotRequest(event.Request)
 	snapshotEvent.Initiator = cloneIdentity(event.Initiator)
 	snapshotEvent.Principal = cloneIdentity(event.Principal)
 	snapshotEvent.Executor = cloneIdentity(event.Executor)
@@ -104,6 +104,14 @@ func newRenderSnapshot(event EnvelopeV1) renderSnapshot {
 			Payload:       payload,
 		},
 	}
+}
+
+func cloneSnapshotRequest(request *RequestRef) *RequestRef {
+	cloned := cloneRequest(request)
+	if cloned != nil && *cloned == (RequestRef{}) {
+		return nil
+	}
+	return cloned
 }
 
 func (snapshot renderSnapshot) render() ([]byte, error) {
