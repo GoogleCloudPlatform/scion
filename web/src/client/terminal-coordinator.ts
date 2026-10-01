@@ -20,6 +20,7 @@ import {
   type TerminalSession,
   type TerminalResourceInitializer,
 } from './terminal-sessions.js';
+import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import { dispatchTeardown } from '../utils/auth.js';
 
 /** Document focus observation is not a guarantee of desktop foreground activation. */
@@ -144,6 +145,16 @@ export class TerminalCoordinator {
   /** Only the owner's retained host receives document-local session handles. */
   get sessions(): readonly TerminalSession[] {
     return this.isOwner ? this.registry.list() : [];
+  }
+
+  /**
+   * Current metadata snapshot for agentId, for callers (terminal-persistence)
+   * that need to know availability (e.g. 'deleted') without holding a
+   * reference to the private registry. Undefined when the agent is not
+   * currently retained (no open or restored entry).
+   */
+  metadataFor(agentId: string): TerminalAgentMetadata | undefined {
+    return this.registry.metadata.get(agentId);
   }
 
   /**
