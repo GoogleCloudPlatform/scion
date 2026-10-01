@@ -61,6 +61,8 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
+import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   ChatPaletteDataController,
@@ -314,6 +316,8 @@ export class ScionPageChat extends LitElement {
   private _onDMPromoted = this.handleDMPromoted.bind(this);
   /** Bound keydown handler for Cmd/Ctrl+K quick switcher. */
   private _onKeydown = this._handleGlobalKeydown.bind(this);
+  /** Bound handler for the header palette button's open-request event. */
+  private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -1045,6 +1049,10 @@ export class ScionPageChat extends LitElement {
     }
     // Global Cmd/Ctrl+K listener for the quick switcher.
     document.addEventListener('keydown', this._onKeydown);
+    // Header palette button: a composed custom event rather than a direct
+    // reference, since the header renders as a sibling (slotted into
+    // scion-chat-shell), not an ancestor.
+    document.addEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     // Reactive half of the modal/route interaction: if another modal opens
     // or route hides chat while the palette is open, close it without
     // restoring focus into hidden chat. The guard itself
@@ -1075,6 +1083,7 @@ export class ScionPageChat extends LitElement {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     document.removeEventListener('keydown', this._onKeydown);
+    document.removeEventListener(CHAT_PALETTE_OPEN_REQUEST_EVENT, this._onPaletteOpenRequest);
     document.removeEventListener('sl-show', this._onDocumentModalShow);
     window.removeEventListener('popstate', this._onPopState);
     this._paletteDocumentsUnsubscribe?.();
@@ -3077,6 +3086,20 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * The header palette button's open-request handler. Shares the same route/
+   * visibility/modal guard as the shortcut, but skips
+   * `_eventFromTerminalSurface`: that guard exists to let Ctrl+K keep
+   * reaching the terminal's PTY, which only makes sense for a keystroke — a
+   * click on the header button is never a keypress the terminal could want.
+   * Opens with `{ mode: 'open' }` rather than toggling: see `togglePalette`'s
+   * doc comment for why the button must never close an already-open palette.
+   */
+  private _handlePaletteOpenRequest(): void {
+    if (!this._paletteOpenGuardsHold()) return;
+    void this.togglePalette({ mode: 'open' });
+  }
+
+  /**
    * The conditions that must hold for the palette to actually be allowed
    * open: the v2 experience, on the chat route, the page actually visible,
    * and no unrelated modal already up. Shared between a fresh Cmd/Ctrl+K
@@ -3275,13 +3298,32 @@ export class ScionPageChat extends LitElement {
    * queued (`_paletteCloseAnimating`) rather than opened immediately: see
    * `_handlePaletteAfterHide`, which runs the deferred open once that close
    * actually finishes.
+   *
+   * `mode` defaults to `'toggle'` (the shortcut's behaviour, unchanged byte
+   * for byte). `'open'` is the header button's contract: it never closes an
+   * already-open palette and never cancels an in-flight open, so a double
+   * tap or double click — common on touch, and not reliably distinguishable
+   * from two deliberate presses — can only ever leave the palette open,
+   * never toggle it shut. It differs from `'toggle'` at exactly three
+   * points, every one of them a no-op or an unconditional set in place of a
+   * toggle; everything else (`_openPalette`, the epoch, the watchdog, the
+   * lazy load, the after-hide queue and the focus handoff) runs through the
+   * same code for both modes.
    */
-  private async togglePalette(): Promise<void> {
+  private async togglePalette(options: { mode?: 'toggle' | 'open' } = {}): Promise<void> {
+    const mode = options.mode ?? 'toggle';
     if (this.v2PaletteOpen) {
+      // 'open': the palette is already open and visible — nothing to do.
+      if (mode === 'open') return;
       this._closePaletteAndCancelLoad();
       return;
     }
     if (this._palettePendingOpen) {
+      // 'open': a first-open lazy import is already in flight from an
+      // earlier press — let it finish rather than cancelling it (a 'toggle'
+      // here would cancel it instead, see below). This is exactly the race
+      // a double tap on the button hits during the very first open.
+      if (mode === 'open') return;
       // A second Ctrl+K arrived while the first press's lazy import was
       // still in flight — cancel the pending open rather
       // than opening a second time (or doing nothing, which would silently
@@ -3301,8 +3343,10 @@ export class ScionPageChat extends LitElement {
       // all. Queue it instead, the same way a still-animating palette close
       // is queued; `_closePaletteFilePreview` serves it once that close
       // actually arrives. Toggled, not set, for the same even-presses-end-
-      // closed reason as the palette's own queue below.
-      this._palettePendingReopen = !this._palettePendingReopen;
+      // closed reason as the palette's own queue below — except for 'open',
+      // which sets the queue unconditionally: a button press can only ever
+      // ask for open, never cancel a previously queued one.
+      this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
       return;
     }
     if (this._paletteCloseAnimating) {
@@ -3317,8 +3361,9 @@ export class ScionPageChat extends LitElement {
       // the shortcut is a toggle, so a second press during the same pending
       // close cancels the first press's queued reopen rather than leaving it
       // queued — an even number of presses while closing must still end
-      // closed, the same as it would with no close in flight at all.
-      this._palettePendingReopen = !this._palettePendingReopen;
+      // closed, the same as it would with no close in flight at all. 'open'
+      // sets it unconditionally instead, for the same reason as above.
+      this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
       return;
     }
     await this._openPalette();
@@ -3811,7 +3856,7 @@ export class ScionPageChat extends LitElement {
         // start (and bump it again) before the retarget's own await below
         // resolves.
         void this._openPalette({ skipInvokerCapture: true });
-        if (wasClosedBySelection) {
+        if (wasClosedBySelection && this._selectionHandsFocusToComposer()) {
           void this._retargetPaletteInvokerToNewComposer(this._paletteOpenEpoch);
         }
       } else {
@@ -3860,7 +3905,11 @@ export class ScionPageChat extends LitElement {
     }
     if (this._paletteClosedBySelection) {
       this._paletteClosedBySelection = false;
-      void this._focusComposerAfterPaletteSelection();
+      if (this._selectionHandsFocusToComposer()) {
+        void this._focusComposerAfterPaletteSelection();
+      } else {
+        this._focusPaletteFallback();
+      }
       return;
     }
     this._restorePaletteInvokerFocus();
@@ -4017,6 +4066,22 @@ export class ScionPageChat extends LitElement {
       .checkVisibility;
     if (typeof checkVisibility === 'function' && !checkVisibility.call(fallback)) return;
     fallback.focus();
+  }
+
+  /**
+   * Whether a palette selection should hand focus to the newly-selected
+   * conversation's composer. False on touch: focusing the composer would
+   * raise the on-screen keyboard immediately after the user just dismissed
+   * the palette, which is not what tapping a result is for on a phone.
+   * Shared by the ordinary selection-close path below and the queued-reopen
+   * path that can supersede it (`_handlePaletteAfterHide`'s
+   * `_palettePendingReopen` branch) — without sharing it, a reopen queued
+   * during a touch selection's close animation would silently re-target the
+   * invoker to the composer anyway, bypassing the touch rule the direct path
+   * enforces.
+   */
+  private _selectionHandsFocusToComposer(): boolean {
+    return !window.matchMedia(TOUCH_PRIMARY_QUERY).matches;
   }
 
   /**
