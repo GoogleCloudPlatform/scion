@@ -46,6 +46,8 @@ type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
+import { mergeChanged } from '../../client/agent-merge.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -389,7 +391,7 @@ export class ScionPageAgents extends LitElement {
     `,
   ];
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -470,44 +472,35 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Listen for real-time agent updates
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
-  private onAgentsUpdated(): void {
-    const updatedAgents = stateManager.getAgents();
-    // Merge SSE agent deltas into local agent list
-    const agentMap = new Map(this.agents.map((a) => [a.id, a]));
-    for (const agent of updatedAgents) {
-      const existing = agentMap.get(agent.id);
-      // When a scope filter is active, only update agents already in the
-      // filtered list — don't add new agents that weren't in the REST response.
-      // The server-side filter is the source of truth for ownership/membership.
-      if (!existing && this.agentScope !== 'all') {
-        continue;
-      }
-      const merged = { ...existing, ...agent } as Agent;
-      // Preserve _capabilities from existing state when the delta lacks them.
-      // For brand-new agents from SSE, inherit scope-level capabilities.
-      if (!merged._capabilities) {
-        if (existing?._capabilities) {
-          merged._capabilities = existing._capabilities;
-        } else if (this.scopeCapabilities) {
-          merged._capabilities = this.scopeCapabilities;
-        }
-      }
-      agentMap.set(agent.id, merged);
+  /**
+   * Live updates (design §7, §11): one `agents-changed` flush merged
+   * through `mergeChanged`, replacing the old `onAgentsUpdated` per-event
+   * full rebuild over `stateManager.getAgents()`.
+   */
+  private onAgentsChanged(e: Event): void {
+    // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
+    // `AgentsChangedDetail` itself is `detail.data`.
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    const merged = mergeChanged(this.agents, detail, {
+      getAgent: (id) => stateManager.getAgent(id),
+      // Today's add rule (design §6.2): global page, scope `all` only — a
+      // scope filter's server-side response is the source of truth for
+      // membership, so a brand-new SSE agent is not added under a filter.
+      // An ID already held keeps getting its updates regardless.
+      shouldAdd: () => this.agentScope === 'all',
+      scopeCapabilities: this.scopeCapabilities,
+    });
+    if (merged !== this.agents) {
+      this.agents = merged;
     }
-    // Remove agents that were explicitly deleted via SSE
-    const deletedIds = stateManager.getDeletedAgentIds();
-    for (const id of deletedIds) {
-      agentMap.delete(id);
-    }
-    this.agents = Array.from(agentMap.values());
   }
 
   private async loadAgents(): Promise<void> {
