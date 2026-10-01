@@ -28,19 +28,31 @@ the existing per-binding `POST`/`PATCH`/`DELETE /members[/{bindingID}]` API
     the full post-state, one audit row per binding change sharing a
     `CorrelationID`.
   - `customRoleAuthorityFromStore(ctx, s, actorID, projectID, perm)` — the
-    **one** function that decides custom-role grant/revoke authority
-    (direct owner OR system-scope `role_binding.create`/`.delete`), callable
-    pre-transaction with the outer store and in-transaction with `tx`. No
-    other call site makes this decision (design-d3-addendum.md A1). Built-in
-    governance (`checkBuiltInChangeGovernance`, `reevaluateActorTx`) stays on
-    the existing system-scope-only hub override, deliberately kept separate
-    so a principal holding only a custom role — even one carrying
+    **one** function that decides custom-role grant/revoke authority (direct
+    owner OR system-scope `role_binding.create`/`.delete`, the latter gated
+    on the actor holding no project role of their own — review r1 F2),
+    callable pre-transaction with the outer store and in-transaction with
+    `tx`. No other call site makes this decision (design-d3-addendum.md A1).
+    Built-in governance (`checkBuiltInChangeGovernance`, `reevaluateActorTx`)
+    stays on the existing system-scope-only hub override, deliberately kept
+    separate so a principal holding only a custom role — even one carrying
     `role_binding.create` — cannot bypass the built-in matrix (A2).
-  - `txCreateRoleBinding`/`txDeleteRoleBinding`: thin forwarders so the new
-    file never calls `tx.CreateRoleBinding`/`tx.DeleteRoleBinding` directly,
-    keeping every such call enumerable inside `project_membership_service.go`
-    per the existing RS1 O-3 AST guard and the `authzop` mutation catalog
-    (both extended additively — see Deviations).
+  - `checkNoRoleBindingPermissionInCreatedCustomRoles` (review r1 F1) — a
+    structural refusal, independent of the authority function above and of
+    `CanDelegate`: any newly created custom role whose permissions include
+    `role_binding.*` is refused for every actor, including the hub
+    `role_binding.*` override, which `CanDelegate` cannot refuse on its own
+    (that actor's own ceiling already includes it). Checked pre-transaction
+    and re-checked in-transaction from the same resolved role definitions.
+  - `applyRolePlanTx` (in `project_membership_service.go`): the one
+    purpose-named step that applies a `rolePlan`'s delete-then-create, so the
+    new engine never calls `tx.CreateRoleBinding`/`tx.DeleteRoleBinding`
+    directly, keeping every such call enumerable per the existing RS1 O-3 AST
+    guard and classified in the `authzop` mutation catalog (both extended
+    additively — see Deviations). Replaced an earlier pair of generic
+    forwarders (`txCreateRoleBinding`/`txDeleteRoleBinding`) after review r1
+    F3 flagged them as reusable primitives that left the governed call site
+    invisible to the catalog.
 - **`pkg/hub/handlers_project_members.go`**: `resolveMemberPrincipal`
   (extracted from `addProjectMember`, reused by both); `projectMemberGroup`
   response type; `roleKind` added to `projectMemberInfo`; the PUT/DELETE
@@ -84,26 +96,33 @@ in the code and tests, not just noted for later:
 keep/add/remove/built-in-change/built-in↔none/duplicates/custom-only, plus
 `.changes()` and `.hasCustomCreate/Remove()`.
 
-`pkg/hub/project_membership_set_test.go` (37 tests, SQLite): atomicity (one
-denial leaves every binding and the audit log untouched), admin tier, last
-owner (incl. an expired-owner removal while one active owner remains),
-eligibility, validation, the credential gate, idempotency (`changed:false`,
-no new audit rows), preconditions, hub override (via direct service calls —
-see Deviations), principal addressing (email/slug, 404 on an unbound
-principal), a concurrent-PUT race, and the 9 ported-and-re-targeted
+`pkg/hub/project_membership_set_test.go` (47 tests, SQLite; 58 total with the
+11 plan tests): atomicity (one denial leaves every binding and the audit log
+untouched), admin tier, last owner (incl. an expired-owner removal while one
+active owner remains), eligibility, validation, the credential gate (UAT and
+agent token), idempotency (`changed:false`, no new audit rows),
+preconditions, hub override (via direct service calls — see Deviations),
+principal addressing (email/slug, percent-encoding, a rejected embedded
+slash, 404 on an unbound principal), a concurrent-PUT race, audit-contract
+assertions (CorrelationID, `CanDelegateResult`, authority, roleKind on
+create/remove/DELETE-all rows), and the 9 ported-and-re-targeted
 miller79/scion PR #127 scenarios (`TestSetMemberRoles_Ported_*`).
 
 Escalation tests (ptone's list, verbatim names):
 - `TestSetMemberRoles_Escalation_BeyondCeilingLeavesOtherBindingsUnapplied` (i)
-- `TestSetMemberRoles_Escalation_OwnerCannotGrantRoleBindingPermission` (ii)
+- `TestSetMemberRoles_Escalation_RoleBindingPermissionRefusedForOwner` /
+  `_RefusedForHubOverride` (ii, for every actor — review r1 F1)
 - `TestSetMemberRoles_Escalation_CanDelegatePerBindingNotPerRequest` (iii)
-- `TestSetMemberRoles_Escalation_AdminCannotGrantAnyCustomRoleEvenWithinCeiling` (iv)
-- `TestSetMemberRoles_Escalation_CustomOnlyHolderCannotChangeBuiltIn` (v / A2)
+- `TestSetMemberRoles_Escalation_AdminCannotGrantAnyCustomRoleEvenWithinCeiling` /
+  `_AdminWithHubRoleBindingStillRefused` (iv, incl. review r1 F2)
+- `TestSetMemberRoles_Escalation_CustomOnlyHolderCannotChangeBuiltIn` (v / A2,
+  now also covering the DELETE-all/remove half per review r1 L1)
 
 Attribution: `TestSetMemberRoles_Ported_*` and the fixture pattern they share
 port miller79/scion PR #127's `handlers_roles_owner_custom_test.go`,
-re-targeted to the new PUT endpoint per design.md §7. Commits carrying this
-code trailer `Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.github.com>`.
+re-targeted to the new PUT endpoint per design.md §7. Commits carrying that
+ported code carry the trailer
+`Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.github.com>`.
 
 `go test ./pkg/hub/ -run 'RS|D002|PM1|ProjectMember'` is green, unmodified.
 
@@ -122,14 +141,16 @@ code trailer `Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.git
     files allowed to call `CreateRoleBinding`/`DeleteRoleBinding` directly.
     Rather than add `project_membership_set.go` to that allowlist (which
     would mean editing an `rs1_*` file against the brief's "stay green,
-    unmodified" instruction), the new engine calls two forwarders
-    (`txCreateRoleBinding`/`txDeleteRoleBinding`) added to
-    `project_membership_service.go` instead, so the direct store calls stay
-    inside the file that guard already exempts. `rs1_extended_test.go` was
-    not touched.
+    unmodified" instruction), the new engine calls a purpose-named
+    `applyRolePlanTx` added to `project_membership_service.go` instead, so
+    the direct store calls stay inside the file that guard already exempts.
+    `rs1_extended_test.go` was not touched. (Review r1 F3 replaced an earlier
+    pair of generic forwarders with this single-purpose step, after the
+    generic version was flagged as making the governed call site invisible
+    to the `authzop` catalog below — see "What was built".)
   - `pkg/hub/authzop/catalog.go`'s `MutationClassifications` table requires
     every discovered `CreateRoleBinding`/`DeleteRoleBinding` call site to be
-    classified. The two forwarders needed two new `ExemptionInternalOnly`
+    classified. `applyRolePlanTx` needed two new `ExemptionInternalOnly`
     entries (mirroring the existing `replaceBindingTx` entries), since a
     proper `OperationID` would need a `route_metadata.go` entry, which is
     off-limits for this slice. Flagging this for whoever eventually wires a
@@ -143,18 +164,17 @@ code trailer `Co-authored-by: Anthony Lofton <6901313+miller79@users.noreply.git
   call the service directly rather than through the equally-gated `/members`
   HTTP endpoints. In production the hub override is reached through
   `/api/v1/admin/role-bindings`, which has no `project.manage` gate; that
-  endpoint is unchanged in P1 (design.md §7 explicitly did not port PR #127's
-  relaxation of it).
+  endpoint is unchanged in P1 (design.md §7 explicitly did not port
+  miller79/scion PR #127's relaxation of it).
 
 ## Validation gate transcript
 
-`/scion-volumes/scratchpad/projects/members-multirole/p1-validation-transcript.md`
-(mirrored to `gs://scion-xproject-exchange/members-multirole/p1-validation-transcript.md`
-if the volume path was not visible). Shows, against a live dev hub: atomic
-add of `{admin, customA}` to a new user, edit member→admin keeping a custom
-role, a custom grant, a refused beyond-ceiling grant leaving state unchanged,
-and remove-all via DELETE, each followed by the bindings and mutation-audit
-rows read back via the API/sqlite3.
+Manually exercised against a live dev hub: atomic add of `{admin, customA}`
+to a new user, edit member→admin keeping a custom role, a custom grant, a
+refused beyond-ceiling grant leaving state unchanged, and remove-all via
+DELETE, each followed by the bindings and mutation-audit rows read back via
+the API/sqlite3. The transcript is held with the review artifacts, not in
+this upstream-bound file.
 
 ## Gates run
 
@@ -179,3 +199,53 @@ has no `LockProjectForMembership`, no mutation audit, and no credential gate
 (`handlers_roles.go`). `SetMemberRoles` would be the natural destination for
 it, but design.md explicitly reserves that reroute as optional P4/P1b
 cleanup, out of scope here.
+
+## Review round 1 fixes
+
+Closed every finding from the first review round (0 Critical, 1 High, 3
+Medium, 6 Low, 5 Nit) — F1-F4, L1-L6, N1-N5, no declines:
+
+- **F1** (High): a structural, actor-independent refusal
+  (`checkNoRoleBindingPermissionInCreatedCustomRoles`) now blocks any
+  *created* custom role carrying a `role_binding.*` permission for every
+  actor, including the hub override, pre-transaction and re-checked
+  in-transaction. The owner-only escalation test (ii) was re-scoped to prove
+  the guarantee for every actor, plus a new hub-override test asserting
+  refusal and zero writes.
+- **F2** (Medium): `customRoleAuthorityFromStore`'s hub `role_binding.*`
+  fallback is now gated on the actor holding no project role of their own,
+  matching the built-in governance override's own condition and the
+  function's own doc comment.
+- **F3** (Medium): the generic `txCreateRoleBinding`/`txDeleteRoleBinding`
+  forwarders were replaced with one purpose-named `applyRolePlanTx`; the two
+  `authzop/catalog.go` exemptions now describe what that step actually
+  governs. No `rs1_*`/`rs2_*`/... test file was touched.
+- **F4** (Medium): the audit-contract tests were vacuous (no request logger
+  in the test harness meant `CorrelationID` was always empty, so the
+  shared-ID assertion passed trivially). Added a helper that installs a real
+  request logger, and assertions on `CanDelegateResult`, the authority (Via)
+  field, and `roleKind` across create, remove, and DELETE-all rows.
+- **L1-L6, N1-N5**: all fixed — stronger escalation-test (v) assertions and
+  a remove variant; a hub-override case for the D1 agent-ineligibility test;
+  the credential gate now rejects a non-user (e.g. agent) identity with the
+  same `credential_insufficient` code a UAT gets, checked before resource
+  authorization; `principalEligibleForRole`'s custom-role branch is reached
+  only by an explicit "not built-in" guard rather than being the switch's
+  catch-all default; `roleKind` lost its `omitempty` and is now set on the
+  PATCH response too; a `projectRoleKind` helper replaces four separate
+  inlined copies; the role-change audit row now carries `roleKind` and
+  `principalType`; bare issue references were qualified
+  (`miller79/scion PR #127`, `ptone/scion#2529`) in both code comments and
+  commit history; this file was renamed to the dated convention and had its
+  internal-path references and stale test count removed; the concurrency
+  test no longer calls `require`-based helpers from a non-test goroutine.
+
+A finding-by-finding closure table (ID → commit/file:line → how closed) was
+produced for this round and shared with the reviewing agents; it is not
+duplicated here. `go test ./pkg/hub/ -run 'SetMemberRoles|RoleSet|Escalation|
+OwnerCustom|RS|D002|PM1|ProjectMember|Catalog|Classif|AST'`, `go test
+./pkg/hub/authzop/...`, `gofmt -l`, `go vet`, and a scoped
+`golangci-lint run --new-from-rev=upstream-main` all pass on the fixed head.
+The branch was rebased onto a fresh `upstream-main` afterward. Per the P1
+broker throttle, the full `make test-hub-sqlite`/`make ci` were not run
+locally for this round; they run in the PR's GitHub CI.
