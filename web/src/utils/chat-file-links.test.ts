@@ -33,6 +33,7 @@ import {
   isLikelyTextFileName,
   isLikelyTextMime,
   isLikelyBinaryFileName,
+  baseMimeType,
   extensionOf,
   resolveMessageProjectId,
 } from './chat-file-links.js';
@@ -834,9 +835,33 @@ describe('isLikelyTextFileName / isLikelyTextMime', () => {
     expect(isLikelyTextMime('image/png')).toBe(false);
   });
 
-  it('isLikelyTextMime ignores a trailing charset parameter and is case-insensitive', () => {
-    expect(isLikelyTextMime('Text/Plain; charset=utf-8')).toBe(true);
+  it('isLikelyTextMime is case-insensitive', () => {
     expect(isLikelyTextMime('APPLICATION/JSON')).toBe(true);
+  });
+
+  it('isLikelyTextMime ignores a trailing charset parameter', () => {
+    expect(isLikelyTextMime('text/plain; charset=utf-8')).toBe(true);
+  });
+});
+
+describe('baseMimeType', () => {
+  it('lowercases the MIME type', () => {
+    expect(baseMimeType('APPLICATION/OCTET-STREAM')).toBe('application/octet-stream');
+  });
+
+  it('strips a trailing parameter', () => {
+    expect(baseMimeType('application/octet-stream; charset=binary')).toBe(
+      'application/octet-stream'
+    );
+  });
+
+  it('trims surrounding whitespace around the base type', () => {
+    expect(baseMimeType('  application/octet-stream  ')).toBe('application/octet-stream');
+  });
+
+  it('is empty for an empty or parameter-only input', () => {
+    expect(baseMimeType('')).toBe('');
+    expect(baseMimeType(';charset=x')).toBe('');
   });
 });
 
@@ -851,11 +876,35 @@ describe('isLikelyBinaryFileName', () => {
     expect(isLikelyBinaryFileName('lib.so')).toBe(true);
   });
 
-  it('is true for a known audio, video, font or disk-image extension', () => {
-    expect(isLikelyBinaryFileName('clip.mp3')).toBe(true);
-    expect(isLikelyBinaryFileName('movie.mp4')).toBe(true);
-    expect(isLikelyBinaryFileName('icon.woff2')).toBe(true);
-    expect(isLikelyBinaryFileName('installer.dmg')).toBe(true);
+  it.each([
+    '.mp3',
+    '.wav',
+    '.ogg',
+    '.m4a',
+    '.flac',
+    '.aac',
+    '.mp4',
+    '.mkv',
+    '.mov',
+    '.webm',
+    '.avi',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+    '.eot',
+    '.dmg',
+    '.iso',
+    '.pkg',
+    '.deb',
+    '.rpm',
+  ])('is true for the known audio, video, font or disk-image extension %s', (ext) => {
+    expect(isLikelyBinaryFileName(`file${ext}`)).toBe(true);
+  });
+
+  it('is true for a known audio/video/font/disk-image extension regardless of case', () => {
+    expect(isLikelyBinaryFileName('CLIP.MP3')).toBe(true);
+    expect(isLikelyBinaryFileName('Icon.WOFF2')).toBe(true);
   });
 
   it('is false for ordinary text/code files that no allow-list enumerates', () => {

@@ -185,7 +185,9 @@ export class ScionChatFilePreview extends LitElement {
     }
 
     const isImage =
-      target.kind === 'attachment' ? IMAGE_MIMES.has(target.mime) : isImageFileName(target.name);
+      target.kind === 'attachment'
+        ? IMAGE_MIMES.has(baseMimeType(target.mime))
+        : isImageFileName(target.name);
     const isMarkdown = !isImage && isMarkdownFileName(target.name);
 
     // Resolved before the binary classification below, and in its own

@@ -357,6 +357,21 @@ describe('scion-chat-file-preview', () => {
     expect(img?.getAttribute('src')).toMatch(/^blob:/);
   });
 
+  it('loads an image whose MIME has different case and a parameter, as an inline image, not the binary placeholder', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(['x'], { type: 'image/png' })),
+    });
+    const el = await mount();
+    el.target = { ...IMAGE_ATTACHMENT, id: 'att-img-case', mime: 'Image/PNG; foo=bar' };
+    await settle(el);
+
+    const img = dialog(el)?.querySelector('img.file-preview-image');
+    expect(img?.getAttribute('src')).toMatch(/^blob:/);
+    expect(dialog(el)?.textContent).not.toContain("can't be shown here");
+  });
+
   it('revokes the previous object URL when the target changes to a different image', async () => {
     apiFetchMock.mockResolvedValue({
       ok: true,
