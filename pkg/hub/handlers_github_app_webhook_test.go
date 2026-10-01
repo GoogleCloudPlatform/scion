@@ -155,7 +155,7 @@ func TestHandleGitHubWebhook_NoSecretConfigured_UnsignedRejected(t *testing.T) {
 	// construction, so the capture must have observed something. This
 	// guards against a misrouted capture making the absence check below
 	// pass vacuously.
-	requireLogCaptureLive(t, &logBuf, "Control channel manager initialized")
+	requireLogCaptureLive(t, &logBuf, serverConstructionLogLine)
 
 	payload := mustJSON(t, map[string]interface{}{
 		"action": "created",

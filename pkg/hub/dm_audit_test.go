@@ -47,13 +47,19 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
+// serverConstructionLogLine mirrors the slog.Info call in server.go's New()
+// (see server.go:1509), the construction-time line most positive controls
+// in this package assert against.
+const serverConstructionLogLine = "Control channel manager initialized"
+
 // requireLogCaptureLive is a positive control for slog-capture regression
-// tests. It fails loudly if buf does not contain wantSubstring, a line the
-// exercised code path is already known to log. Without this, a misrouted or
-// broken capture -- for example one installed after the Server has already
-// snapshotted slog.Default() into a subsystem logger -- would make an
-// absence assertion on buf pass vacuously instead of catching the
-// regression it exists to guard against.
+// tests. It fails loudly if buf does not contain wantSubstring, a line
+// known to be logged after the capture was installed (for example the
+// Server's construction line). Without this, a misrouted or broken capture
+// -- for example one installed after the Server has already snapshotted
+// slog.Default() into a subsystem logger -- would make an absence
+// assertion on buf pass vacuously instead of catching the regression it
+// exists to guard against.
 func requireLogCaptureLive(t *testing.T, buf *bytes.Buffer, wantSubstring string) {
 	t.Helper()
 	if !strings.Contains(buf.String(), wantSubstring) {

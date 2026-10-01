@@ -582,7 +582,7 @@ func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
 	// a capture installed before it must already have observed something.
 	// This is the part that a capture-after-construct ordering bug (the
 	// regression this test guards against) would silently defeat.
-	requireLogCaptureLive(t, &buf, "Control channel manager initialized")
+	requireLogCaptureLive(t, &buf, serverConstructionLogLine)
 
 	projectID := tid("e1-ac4-p")
 	ownerID := tid("e1-ac4-o")

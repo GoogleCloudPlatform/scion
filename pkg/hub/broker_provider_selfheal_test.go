@@ -619,10 +619,11 @@ func captureDefaultCapturingHandler(t *testing.T) *capturingHandler {
 // requireRecordLive is the capturingHandler-based equivalent of
 // requireLogCaptureLive, for tests that inspect structured slog.Record
 // values (via findRecord) instead of a text/JSON buffer. It fails loudly if
-// capture holds no record with Message == wantMsg, a line the exercised code
-// path is already known to log. Without this, a misrouted or broken capture
-// would make an absence assertion on capture pass vacuously instead of
-// catching the regression it exists to guard against.
+// capture holds no record with Message == wantMsg, a line known to be
+// logged after the capture was installed (for example the Server's
+// construction line). Without this, a misrouted or broken capture would
+// make an absence assertion on capture pass vacuously instead of catching
+// the regression it exists to guard against.
 func requireRecordLive(t *testing.T, capture *capturingHandler, wantMsg string) {
 	t.Helper()
 	if _, ok := findRecord(capture.all(), wantMsg); !ok {
@@ -678,7 +679,7 @@ func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	// the capture must have observed something. This guards against a
 	// misrouted capture making the "no restamp log" check below pass
 	// vacuously.
-	requireRecordLive(t, capture, "Control channel manager initialized")
+	requireRecordLive(t, capture, serverConstructionLogLine)
 
 	broker, project := newProviderSelfHealFixture(t, s, "lognoop")
 

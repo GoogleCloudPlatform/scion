@@ -295,7 +295,7 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 	// a capture installed before it must already have observed something.
 	// This is the part that a capture-after-construct ordering bug (the
 	// regression this test guards against) would silently defeat.
-	requireLogCaptureLive(t, buf, "Control channel manager initialized")
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	const secret = "BROKER-INBOUND-RAW-SECRET-7Q3ZK9"
 
@@ -372,7 +372,7 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 	// a capture installed before it must already have observed something.
 	// This is the part that a capture-after-construct ordering bug (the
 	// regression this test guards against) would silently defeat.
-	requireLogCaptureLive(t, buf, "Control channel manager initialized")
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	project := &store.Project{
 		ID:      tid("proj-routed-raw"),

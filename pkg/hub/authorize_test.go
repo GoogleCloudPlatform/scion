@@ -261,7 +261,7 @@ func TestAuthorize_NoDenialLogWhenAllowed(t *testing.T) {
 	// Positive control: New() unconditionally logs during construction, so
 	// the capture must have observed something. This guards against a
 	// misrouted capture making the "no denial" check below pass vacuously.
-	requireLogCaptureLive(t, buf, "Control channel manager initialized")
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	rec := httptest.NewRecorder()
 	if !srv.authorize(rec, authzHelperRequest(authzHelperAdmin()), Resource{Type: "agent", ID: "x"}, ActionRead) {
@@ -748,7 +748,7 @@ func TestRequireAdmin_IdentityKinds(t *testing.T) {
 	// Positive control: New() unconditionally logs during construction, so
 	// the capture must have observed something. This guards against a
 	// misrouted capture making the "no denial" checks below pass vacuously.
-	requireLogCaptureLive(t, buf, "Control channel manager initialized")
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	tests := []struct {
 		name       string
