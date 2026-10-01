@@ -60,6 +60,50 @@ def temporary_home(path: str):
 
 
 @contextmanager
+def temporary_env(name: str, value: str | None):
+    """Temporarily set (or unset, with None) a single environment variable."""
+    old = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
+
+
+def _invoke_provision(thinking_level: str | None) -> str:
+    """Run the real provision() entry point end to end and return the
+    written ~/.codex/config.toml content.
+
+    Modeled on telemetry_provision_test.py's _invoke: a temp HOME, a
+    minimal bundle dir, auth forced to "none", and provision() itself
+    invoked -- not just the helpers it calls -- so a revert of the
+    one-line SCION_THINKING_LEVEL wiring inside provision() actually
+    fails the test (ptone/scion#2484 review round 1, R1). `thinking_level`
+    is the raw (unstripped) env value; None means unset.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        home = os.path.join(tmp, "home")
+        bundle = os.path.join(home, ".scion", "harness")
+        os.makedirs(os.path.join(bundle, "inputs"))
+        with temporary_home(home), temporary_env("SCION_THINKING_LEVEL", thinking_level):
+            ctx = scion_harness.ProvisionContext("codex", {
+                "harness_bundle_dir": bundle,
+                "harness_config": {},
+            })
+            ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")
+            provision.provision(ctx)
+        config_path = os.path.join(home, ".codex", "config.toml")
+        with open(config_path, "r", encoding="utf-8") as f:
+            return f.read()
+
+
+@contextmanager
 def _also_strip_key_damaging(header: str):
     """Force real damage for backstop tests (ptone/scion#2427 review round
     2, R2-b): monkeypatch scion_harness.strip_toml_top_level_key so every
@@ -381,55 +425,49 @@ class CodexProvisionTest(unittest.TestCase):
         # default" bug this fallback exists to fix.
         self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "not-a-number"), "medium")
 
-    def test_reconcile_codex_toml_writes_medium_when_thinking_level_unset(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "")
-                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                config_path = os.path.join(tmp, ".codex", "config.toml")
-                with open(config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.assertIn('model_reasoning_effort = "medium"', content)
+    def test_reconcile_codex_toml_writes_resolved_effort(self) -> None:
+        """_reconcile_codex_toml accepts a reasoning_effort written for the
+        first time (a previously-absent key) across every outcome of
+        _resolve_reasoning_effort_env: unset/invalid fall back to medium,
+        an explicit level keeps the existing bucket mapping (review round
+        1, N2: collapses 5 near-duplicate tests into one subTest table;
+        the regression coverage for provision()'s own wiring lives in
+        test_provision_resolves_reasoning_effort_from_env instead)."""
+        cases = (
+            ("", "medium"),
+            ("10", "low"),
+            ("90", "xhigh"),
+            ("not-a-number", "medium"),
+        )
+        for thinking_raw, expected_effort in cases:
+            with self.subTest(thinking_raw=thinking_raw):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with temporary_home(tmp):
+                        effort = provision._resolve_reasoning_effort_env(_test_ctx(), thinking_raw)
+                        self.assertEqual(effort, expected_effort)
+                        provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                        config_path = os.path.join(tmp, ".codex", "config.toml")
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        self.assertIn(f'model_reasoning_effort = "{expected_effort}"', content)
 
-    def test_reconcile_codex_toml_writes_medium_when_thinking_level_blank(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "   ".strip())
-                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                config_path = os.path.join(tmp, ".codex", "config.toml")
-                with open(config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.assertIn('model_reasoning_effort = "medium"', content)
-
-    def test_reconcile_codex_toml_writes_low_for_explicit_level_10(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "10")
-                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                config_path = os.path.join(tmp, ".codex", "config.toml")
-                with open(config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.assertIn('model_reasoning_effort = "low"', content)
-
-    def test_reconcile_codex_toml_writes_xhigh_for_explicit_level_90(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "90")
-                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                config_path = os.path.join(tmp, ".codex", "config.toml")
-                with open(config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.assertIn('model_reasoning_effort = "xhigh"', content)
-
-    def test_reconcile_codex_toml_writes_medium_for_invalid_thinking_level(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with temporary_home(tmp):
-                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "not-a-number")
-                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                config_path = os.path.join(tmp, ".codex", "config.toml")
-                with open(config_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                self.assertIn('model_reasoning_effort = "medium"', content)
+    def test_provision_resolves_reasoning_effort_from_env(self) -> None:
+        """Regression test for ptone/scion#2479 (review round 1, R1): drives
+        the real provision() entry point, not just the helpers it calls, so
+        reverting provision()'s one-line SCION_THINKING_LEVEL wiring fails
+        this test. Covers unset, whitespace-only, an explicit level padded
+        with whitespace (provision() strips before resolving), and an
+        invalid value."""
+        cases = (
+            (None, "medium"),
+            ("   ", "medium"),
+            (" 75 ", "high"),
+            ("abc", "medium"),
+        )
+        for thinking_level, expected_effort in cases:
+            with self.subTest(thinking_level=thinking_level):
+                content = _invoke_provision(thinking_level)
+                self.assertIn(f'model_reasoning_effort = "{expected_effort}"', content)
 
     def test_reconcile_codex_toml_writes_model_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

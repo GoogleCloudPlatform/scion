@@ -245,20 +245,14 @@ def _resolve_reasoning_effort(level: int) -> str:
     return "low"
 
 
-# Scion sets no thinking level anywhere by default, which previously left
-# `model_reasoning_effort` unwritten and let codex fall back to its own
-# bundled per-model catalog default — "low" for the model behind Scion's
-# default `medium` alias (ptone/scion#2479). This constant is the
-# codex-only floor applied whenever SCION_THINKING_LEVEL doesn't resolve to
-# an explicit level, so Scion's own idea of "medium" effort always applies
-# unless something upstream of this script (CLI flag, web UI, template, or
-# hub/project default) set SCION_THINKING_LEVEL explicitly.
+# Codex-only fallback effort when SCION_THINKING_LEVEL gives no explicit
+# level (ptone/scion#2479) -- see _resolve_reasoning_effort_env below.
 _DEFAULT_REASONING_EFFORT = "medium"
 
 
 def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_raw: str) -> str:
     """Resolve the (already-stripped) SCION_THINKING_LEVEL value into a
-    reasoning_effort, logging the decision via ctx.info.
+    reasoning_effort, logging the decision.
 
     An explicit integer value always wins and uses _resolve_reasoning_effort's
     mapping. An unset/blank value, or one that isn't a valid integer, falls
@@ -271,7 +265,11 @@ def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_
         try:
             thinking_level = int(thinking_raw)
         except ValueError:
-            ctx.info(
+            # Every Go path produces this value with strconv.Itoa, so a
+            # non-integer here means something upstream (a hand-set env, a
+            # template, or a harness-config env) is misconfigured -- warn
+            # rather than log at the same level as the normal paths below.
+            ctx.warn(
                 f"thinking_level={thinking_raw!r} is not a valid integer; "
                 f"reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)"
             )
