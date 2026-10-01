@@ -66,7 +66,6 @@ export async function applyServerFeatureFlags(): Promise<void> {
     const settings = pub.value as { nativeChatEnabled?: boolean };
     if (settings.nativeChatEnabled === false) {
       setFeatureFlag('web.native_chat', false);
-      setFeatureFlag('web.native_chat_v2', false);
     }
   }
 
