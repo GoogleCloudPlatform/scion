@@ -277,6 +277,28 @@ type AgentStore interface {
 	// ListAgents returns agents matching the filter criteria.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
 
+	// CountAgents returns the number of agents matching filter, applying the
+	// exact predicate ListAgents does for its total count, but without
+	// loading any rows. Used by the project sorted-mode candidate ceiling
+	// (design lists-graph.md 5.3 step 0) as a cheap pre-check before any
+	// member row is read.
+	CountAgents(ctx context.Context, filter AgentFilter) (int, error)
+
+	// ListAgentMembers returns up to max agents matching filter, in the
+	// sorted-mode total order for (sort, dir) (design lists-graph.md 4.2):
+	// sort="updated" orders by COALESCE(last_activity_event, updated) dir,
+	// then created DESC, id DESC; sort="created" orders by created dir, then
+	// id DESC. Each row carries exactly the fields agentResource
+	// (pkg/hub/capabilities.go) reads, plus Phase/Created/Updated/
+	// LastActivityEvent for positioning and stats — see AgentMember.
+	//
+	// max bounds the read so a candidate pool that grew past the caller's
+	// ceiling check is still detected (design 5.3 step 1): when the true
+	// candidate count exceeds max, exactly max rows are returned (the exact
+	// order among untaken rows is unspecified in that case, since the
+	// caller's only use of an over-max result is to refuse the request).
+	ListAgentMembers(ctx context.Context, filter AgentFilter, sort, dir string, max int) ([]AgentMember, error)
+
 	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
 	// whose reincarnation_state is non-terminal and whose row has not been
 	// updated since before olderThan. Backstop for the replica-safe
@@ -499,6 +521,53 @@ type AgentFilter struct {
 	// either the same way, since IDEQ simply never matches a user ID and
 	// ancestryContains still finds that user's descendants.
 	LineageRootID string
+}
+
+// AgentMember is the narrow projection ListAgentMembers reads for sorted-mode
+// candidate evaluation (design lists-graph.md 5.1). It carries exactly
+// the fields pkg/hub's agentResource(*Agent) reads — ID, OwnerID, ProjectID,
+// Labels, Ancestry — plus Phase, Created, Updated and LastActivityEvent for
+// positioning (pkg/store/agentsort) and stats.
+//
+// The projection is defined as "exactly the fields agentResource reads", not
+// as an independently maintained field list: ToAgent is the single
+// construction path a caller must use to build a Resource from a member, so
+// that a future agentResource input agentResource gains but AgentMember lacks
+// is caught by the equality gate described on ToAgent, rather than silently
+// widening what a race can miss (design 5.3 step 5a; the hub-side
+// non-waivable member/full equality test is the gate that exercises this).
+type AgentMember struct {
+	ID        string
+	OwnerID   string
+	ProjectID string
+	Labels    map[string]string
+	Ancestry  []string
+
+	Phase             string
+	Created           time.Time
+	Updated           time.Time
+	LastActivityEvent time.Time
+}
+
+// ToAgent copies m's fields into a new Agent, leaving every other field
+// zero. It is the one construction path for building an authorization
+// Resource from a member row: callers must derive it as
+// agentResource(m.ToAgent()), never by hand-listing AgentMember's fields, so
+// that comparing that Resource against agentResource(fullRow) (design 5.3
+// step 5a) actually proves the two rows agree on every input the kernel
+// reads, not just the ones some earlier author remembered to copy here.
+func (m AgentMember) ToAgent() *Agent {
+	return &Agent{
+		ID:                m.ID,
+		OwnerID:           m.OwnerID,
+		ProjectID:         m.ProjectID,
+		Labels:            m.Labels,
+		Ancestry:          m.Ancestry,
+		Phase:             m.Phase,
+		Created:           m.Created,
+		Updated:           m.Updated,
+		LastActivityEvent: m.LastActivityEvent,
+	}
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
