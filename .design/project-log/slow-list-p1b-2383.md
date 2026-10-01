@@ -107,6 +107,50 @@ entry is the summary for the project log.
    len(page))") requires the post-5a count; fixed, and covered by
    `TestListProjectAgentsSorted_Race_MissingRow`.
 
+## Review round 1 (slow-list-lists-em) — addressed
+
+- **D2 (required):** `ListAgentMembers` initially decoded full rows and
+  projected down in Go, rather than a genuine SQL `SELECT`. Reviewer called
+  this out as defeating the point for the server's `WriteTimeout`. Fixed:
+  it now selects exactly `agentMemberSelectFields` (the `agentResource`
+  inputs plus positioning/stats fields) via ent's `.Select()`, converted by
+  a new `entAgentToMember`.
+- **D3 (hard gate, required):** the first pass tested S6/S9 at small N
+  (1–12), reasoning that this sandbox's SQLite inserts were too slow for the
+  design's own sizes (25–1200, plus 2000/2001). That reasoning was wrong —
+  the slowness was `go build`'s cold `GOCACHE` compile time, not insert
+  throughput. `store.Store.WithTx`-wrapped bulk fixture creation (1200 rows
+  in ~0.6s) made the real sizes practical, and all of S6's sizes (25, 100,
+  500, 501, 1200) plus the two R<n sub-cases (n=1200/R=400 paged=1380;
+  n=500/R=200 complete=1905) and S9's real 2000/2001-row ceiling cases are
+  now covered. The R<n fixture uses a project-scoped role granting only
+  `agent.list` (not `agent.read`) combined with per-agent ownership — an
+  unconditional relationship grant independent of role bindings — to split
+  readability within one project for one caller without an access
+  constraint.
+- **D4:** reviewer asked for a 20-minute repro of the non-UTC `time.Time`
+  scan error through the *normal* store API (not a raw ent bypass). Done:
+  overriding `time.Local` and calling plain `CreateAgent`/`GetAgent`
+  reproduces the identical scan error. This is a real, pre-existing,
+  store-wide bug (any write while the process's local timezone isn't UTC
+  breaks the next read of that row) — not fixed here, flagged as a
+  follow-up for whoever owns `pkg/store/entadapter`'s time handling.
+- **D6 (required):** added a synthetic-decorator test for the reverse key
+  crossing (a row's key regressing below the cursor, causing it to resurface
+  on a later page) — the mirror case of the forward "skip" crossing, which
+  real write paths cannot produce (every write stamps a monotonically
+  non-decreasing `time.Now()`).
+- **D7:** checked whether CI runs these tests against Postgres. It does not:
+  CI's only Postgres job scopes `pkg/store/entadapter` to a `-run` pattern
+  (`^(TestLaunchStore_|TestReaper_|TestReport_H1_)`) that excludes the new
+  P1b tests. Flagged to slow-list-lists-em as a CI-scoping gap; the test
+  code itself is dialect-portable (`enttest.NewClient`) with no changes
+  needed if that job's scope is ever widened.
+- **D1, D5:** accepted as-is (P2 must add the global endpoint's SQL
+  ordering).
+
+New head after this round: `f74135786f75988d1209a42e50701cf4e4113851`.
+
 ## Verification
 
 - `go build ./...`: pass.
