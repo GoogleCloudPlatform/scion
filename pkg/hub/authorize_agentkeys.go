@@ -59,20 +59,22 @@ type KeysAuthzDecision struct {
 // operation (contract §3 "Authorization"). It maps decision 2's initial
 // policy — the route action is not a new independently granted permission —
 // onto the existing attach authority for user and dev callers, who get
-// attach parity through the same AK1 kernel CheckAccess(ActionAttach) call
-// the PTY endpoint uses. The agent-credential branch below checks
-// ScopeAgentLifecycle plus same-project membership and does not call
-// Decide; relationship evaluation for agent callers is required before
-// keys execution is wired, tracked in ptone/scion#2460 (keys contract
-// Phase 5):
+// attach decision parity through the same AK1 kernel evaluation — Decide
+// with ActionAttach — the PTY endpoint uses. The resulting audit record
+// carries no explicit permission ID for this path, because keys calls
+// CheckAccess without one (auditPermissionID, authz.go ~1786-1790). The
+// agent-credential branch below checks ScopeAgentLifecycle plus
+// same-project membership and does not call Decide; relationship
+// evaluation for agent callers is required before keys execution is
+// wired, tracked in ptone/scion#2460 (keys contract Phase 5):
 //
 //   - Human session / user access token: ActionAttach on the target agent,
-//     evaluated through the same AK1 kernel CheckAccess call every other
-//     attach-gated route uses. This is where owner/privacy/cross-member
-//     restrictions, UAT credential/project-boundary caveats (contract
-//     "User access token" row), and any explicit deny already live — this
-//     function does not special-case any of them, the same way
-//     authorizeAgentLifecycle does not. There is deliberately no
+//     evaluated through the same AK1 kernel decision (Decide with
+//     ActionAttach) every other attach-gated route uses. This is where
+//     owner/privacy/cross-member restrictions, UAT credential/project-boundary
+//     caveats (contract "User access token" row), and any explicit deny
+//     already live — this function does not special-case any of them,
+//     the same way authorizeAgentLifecycle does not. There is deliberately no
 //     ancestry/owner/super-admin *piercing* path here of the kind
 //     authorizeAgentMessage's user branch has: self/parent/ancestor status
 //     alone must not bypass attach authority for keys (contract "no

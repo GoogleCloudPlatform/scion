@@ -399,9 +399,8 @@ func TestAgentSubRoute_HandlerWithoutRouteFailsClosed(t *testing.T) {
 
 // TestAgentRouteRoot_MethodNotAllowed_SetsAllowHeader pins that a 405 from
 // the agent root and the project-agent root (an unsupported method such as
-// PUT on /api/v1/agents/{id} or /api/v1/projects/{p}/agents/{id}) carries the
-// Allow header merge-3's resolution kept on the inner method switch
-// (pat-b-b2-rev-5 O2).
+// PUT on /api/v1/agents/{id} or /api/v1/projects/{p}/agents/{id}) carries
+// Allow: GET, PATCH, DELETE.
 func TestAgentRouteRoot_MethodNotAllowed_SetsAllowHeader(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("agent_route_root_allow_header_project")
