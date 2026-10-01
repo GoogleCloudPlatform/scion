@@ -16,7 +16,6 @@ package auditevent
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/uuid"
 )
@@ -63,10 +62,10 @@ func OperationFromContext(ctx context.Context) (AuditOperationContext, bool) {
 func requireOperation(ctx context.Context) (AuditOperationContext, error) {
 	operation, ok := OperationFromContext(ctx)
 	if !ok {
-		return AuditOperationContext{}, fmt.Errorf("audit operation context is required")
+		return AuditOperationContext{}, invalid("operation_context", "is required")
 	}
 	if _, err := NewOperationContext(operation.CorrelationID); err != nil {
-		return AuditOperationContext{}, fmt.Errorf("invalid audit operation context: %w", err)
+		return AuditOperationContext{}, err
 	}
 	return operation, nil
 }

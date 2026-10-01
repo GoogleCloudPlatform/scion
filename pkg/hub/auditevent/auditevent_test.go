@@ -17,6 +17,7 @@ package auditevent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -52,43 +53,81 @@ func TestOperationContextRoundTripAndCreation(t *testing.T) {
 func TestPhaseOutcomeMatrix(t *testing.T) {
 	t.Parallel()
 
-	valid := []struct {
-		phase   Phase
-		outcome Outcome
-	}{
-		{PhaseAttempt, ""},
-		{PhaseDecision, OutcomeAllow},
-		{PhaseDecision, OutcomeDeny},
-		{PhaseObservation, OutcomeSucceeded},
-		{PhaseObservation, OutcomeFailed},
-		{PhaseCommit, OutcomeSucceeded},
-		{PhaseFailure, OutcomeFailed},
-		{PhaseDelivery, OutcomeSucceeded},
-		{PhaseDelivery, OutcomeFailed},
-		{PhaseDelivery, OutcomeSkipped},
-		{PhaseDelivery, OutcomeDeferred},
+	phases := []Phase{
+		PhaseAttempt, PhaseDecision, PhaseObservation, PhaseCommit, PhaseFailure, PhaseDelivery,
+		"unknown-phase-canary",
 	}
-	for _, tc := range valid {
-		assert.NoError(t, ValidatePhaseOutcome(tc.phase, tc.outcome), "%s/%s", tc.phase, tc.outcome)
+	outcomes := []Outcome{
+		"", OutcomeAllow, OutcomeDeny, OutcomeSucceeded, OutcomeFailed, OutcomeSkipped, OutcomeDeferred,
+		"unknown-outcome-canary",
+	}
+	allowed := map[Phase]map[Outcome]bool{
+		PhaseAttempt:     {"": true},
+		PhaseDecision:    {OutcomeAllow: true, OutcomeDeny: true},
+		PhaseObservation: {OutcomeSucceeded: true, OutcomeFailed: true},
+		PhaseCommit:      {OutcomeSucceeded: true},
+		PhaseFailure:     {OutcomeFailed: true},
+		PhaseDelivery: {
+			OutcomeSucceeded: true,
+			OutcomeFailed:    true,
+			OutcomeSkipped:   true,
+			OutcomeDeferred:  true,
+		},
 	}
 
-	invalid := []struct {
-		phase   Phase
-		outcome Outcome
-	}{
-		{PhaseAttempt, OutcomeSucceeded},
-		{PhaseDecision, ""},
-		{PhaseDecision, OutcomeSucceeded},
-		{PhaseObservation, ""},
-		{PhaseObservation, OutcomeAllow},
-		{PhaseObservation, OutcomeSkipped},
-		{PhaseCommit, OutcomeFailed},
-		{PhaseFailure, OutcomeSucceeded},
-		{PhaseDelivery, OutcomeAllow},
-		{"invented", OutcomeSucceeded},
+	for _, phase := range phases {
+		for _, outcome := range outcomes {
+			name := fmt.Sprintf("%s/%s", phase, outcome)
+			t.Run(name, func(t *testing.T) {
+				err := ValidatePhaseOutcome(phase, outcome)
+				if allowed[phase][outcome] {
+					assert.NoError(t, err)
+					return
+				}
+				assert.Error(t, err)
+			})
+		}
 	}
-	for _, tc := range invalid {
-		assert.Error(t, ValidatePhaseOutcome(tc.phase, tc.outcome), "%s/%s", tc.phase, tc.outcome)
+}
+
+func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
+	t.Parallel()
+
+	phases := []Phase{
+		PhaseAttempt, PhaseDecision, PhaseObservation, PhaseCommit, PhaseFailure, PhaseDelivery,
+		"unknown-phase-canary",
+	}
+	outcomes := []Outcome{
+		"", OutcomeAllow, OutcomeDeny, OutcomeSucceeded, OutcomeFailed, OutcomeSkipped, OutcomeDeferred,
+		"unknown-outcome-canary",
+	}
+
+	for _, entry := range Catalog() {
+		entry := entry
+		t.Run(entry.Family+"/"+entry.Action, func(t *testing.T) {
+			for _, phase := range phases {
+				for _, outcome := range outcomes {
+					event := validCreateEvent(t)
+					event.Family = entry.Family
+					event.Action = entry.Action
+					event.Phase = phase
+					event.Outcome = outcome
+					event.Severity = severityForOutcome(outcome)
+					wantValid := containsPhaseOutcome(entry.AllowedPairs, phase, outcome)
+					err := Validate(event)
+					if wantValid {
+						assert.NoError(t, err, "%s/%s", phase, outcome)
+					} else {
+						assert.Error(t, err, "%s/%s", phase, outcome)
+					}
+				}
+			}
+
+			for _, outcome := range []Outcome{OutcomeSucceeded, OutcomeFailed} {
+				assert.False(t, containsPhaseOutcome(entry.AllowedPairs, PhaseObservation, outcome),
+					"non-diagnostic action must reject observation/%s", outcome)
+			}
+		})
 	}
 }
 
@@ -165,7 +204,8 @@ func TestAccessBoundaryCreateRequiresOperationContext(t *testing.T) {
 		ConstraintID:   "constraint-1",
 		Classification: BoundaryTighten,
 	})
-	assert.ErrorContains(t, err, "operation context")
+	var validationErr *ValidationError
+	assert.ErrorAs(t, err, &validationErr)
 }
 
 func TestValidationRejectsCatalogAndPayloadViolations(t *testing.T) {
@@ -182,11 +222,11 @@ func TestValidationRejectsCatalogAndPayloadViolations(t *testing.T) {
 	undeclared := event
 	undeclared.Payload = testPayloadWithUndeclaredLeaf{}
 	_, err := Render(undeclared)
-	assert.ErrorContains(t, err, "undeclared payload leaf")
+	assert.Error(t, err)
 
 	wrongResource := event
 	wrongResource.Resource.Kind = "project"
-	assert.ErrorContains(t, Validate(wrongResource), "resource kind")
+	assert.Error(t, Validate(wrongResource))
 }
 
 func TestValidationRejectsBoundsAndInvalidEnums(t *testing.T) {
@@ -291,9 +331,121 @@ func TestCredentialValidationRejectsUnsafeMetadataWithoutEchoingValues(t *testin
 			_, err := NewCredentialRef(tc.input)
 			require.Error(t, err)
 			var validationErr *CredentialValidationError
-			assert.ErrorAs(t, err, &validationErr)
-			assert.NotContains(t, err.Error(), tc.canary)
+			require.ErrorAs(t, err, &validationErr)
+			assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, tc.canary)
 		})
+	}
+}
+
+func TestValidationErrorsAreTypedStableAndValueFree(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name   string
+		canary string
+		mutate func(*EnvelopeV1, string)
+	}
+	tests := []testCase{
+		{"event id", "event-id-canary", func(e *EnvelopeV1, c string) { e.EventID = c }},
+		{"family", "family-canary", func(e *EnvelopeV1, c string) { e.Family = c }},
+		{"action", "action-canary", func(e *EnvelopeV1, c string) { e.Action = c }},
+		{"phase", "phase-canary", func(e *EnvelopeV1, c string) { e.Phase = Phase(c) }},
+		{"outcome", "outcome-canary", func(e *EnvelopeV1, c string) { e.Outcome = Outcome(c) }},
+		{"severity", "severity-canary", func(e *EnvelopeV1, c string) { e.Severity = Severity(c) }},
+		{"correlation id", "correlation-canary", func(e *EnvelopeV1, c string) { e.CorrelationID = c + "\n" }},
+		{"causation id", "causation-canary", func(e *EnvelopeV1, c string) { e.CausationID = c }},
+		{"request id", "request-id-canary", func(e *EnvelopeV1, c string) {
+			e.Request = &RequestRef{ID: c}
+		}},
+		{"request method", "method-canary", func(e *EnvelopeV1, c string) {
+			e.Request = &RequestRef{Method: c}
+		}},
+		{"request route", "route-canary", func(e *EnvelopeV1, c string) {
+			e.Request = &RequestRef{Route: c + "\n"}
+		}},
+		{"request surface", "surface-canary", func(e *EnvelopeV1, c string) {
+			e.Request = &RequestRef{Surface: c + "\n"}
+		}},
+		{"initiator kind", "initiator-kind-canary", func(e *EnvelopeV1, c string) {
+			e.Initiator = &IdentityRef{Kind: IdentityKind(c), ID: "safe"}
+		}},
+		{"initiator id", "initiator-id-canary", func(e *EnvelopeV1, c string) {
+			e.Initiator = &IdentityRef{Kind: IdentityUser, ID: c + "\n"}
+		}},
+		{"principal kind", "principal-kind-canary", func(e *EnvelopeV1, c string) {
+			e.Principal.Kind = IdentityKind(c)
+		}},
+		{"principal id", "principal-id-canary", func(e *EnvelopeV1, c string) {
+			e.Principal.ID = c + "\n"
+		}},
+		{"executor kind", "executor-kind-canary", func(e *EnvelopeV1, c string) {
+			e.Executor = &IdentityRef{Kind: IdentityKind(c), ID: "safe"}
+		}},
+		{"executor id", "executor-id-canary", func(e *EnvelopeV1, c string) {
+			e.Executor = &IdentityRef{Kind: IdentitySystem, ID: c + "\n"}
+		}},
+		{"resource kind", "resource-kind-canary", func(e *EnvelopeV1, c string) { e.Resource.Kind = c }},
+		{"resource id", "resource-id-canary", func(e *EnvelopeV1, c string) { e.Resource.ID = c + "\n" }},
+		{"resource project id", "resource-project-canary", func(e *EnvelopeV1, c string) {
+			e.Resource.ProjectID = c + "\n"
+		}},
+		{"payload classification", "classification-canary", func(e *EnvelopeV1, c string) {
+			e.Payload = AccessBoundaryPayload{Classification: BoundaryClassification(c)}
+		}},
+		{"payload preview id", "preview-canary", func(e *EnvelopeV1, c string) {
+			e.Payload = AccessBoundaryPayload{Classification: BoundaryTighten, PreviewID: c + "\n"}
+		}},
+		{"payload draft hash", "draft-hash-canary", func(e *EnvelopeV1, c string) {
+			e.Payload = AccessBoundaryPayload{Classification: BoundaryTighten, DraftHash: c}
+		}},
+		{"payload changed field", "changed-field-canary", func(e *EnvelopeV1, c string) {
+			e.Payload = AccessBoundaryPayload{Classification: BoundaryTighten, ChangedFields: []string{c + "\n"}}
+		}},
+		{"undeclared payload leaf", "undeclared-leaf-canary", func(e *EnvelopeV1, c string) {
+			e.Payload = retainedMapPayload{leaves: map[string]any{
+				"classification": "tighten",
+				c:                "safe",
+			}}
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := validCreateEvent(t)
+			tc.mutate(&event, tc.canary)
+			err := Validate(event)
+			require.Error(t, err)
+			var validationErr *ValidationError
+			require.ErrorAs(t, err, &validationErr)
+			assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, tc.canary)
+		})
+	}
+}
+
+func TestValidationErrorContractIsStableThroughRender(t *testing.T) {
+	t.Parallel()
+
+	event := validCreateEvent(t)
+	event.Request = &RequestRef{Method: "method-contract-canary"}
+
+	for _, validate := range []func() error{
+		func() error { return Validate(event) },
+		func() error {
+			_, err := Render(event)
+			return err
+		},
+	} {
+		err := validate()
+		require.Error(t, err)
+		var validationErr *ValidationError
+		require.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, "request.method", validationErr.Field)
+		assert.Equal(t, "must be a standard HTTP method", validationErr.Rule)
+		assert.Equal(t,
+			"invalid audit event field request.method: must be a standard HTTP method",
+			err.Error(),
+		)
+		assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, "method-contract-canary")
 	}
 }
 
@@ -340,6 +492,14 @@ type changingTestPayload struct {
 	calls int
 }
 
+type retainedMapPayload struct {
+	leaves map[string]any
+}
+
+func (p retainedMapPayload) auditPayloadLeaves() map[string]any {
+	return p.leaves
+}
+
 func (p *changingTestPayload) auditPayloadLeaves() map[string]any {
 	p.calls++
 	if p.calls == 1 {
@@ -363,6 +523,112 @@ func TestRenderValidatesAndSerializesOnePayloadSnapshot(t *testing.T) {
 	assert.Equal(t, 1, payload.calls)
 	assert.NotContains(t, string(rendered), "snapshot-canary")
 	assert.JSONEq(t, `{"classification":"tighten"}`, extractPayloadJSON(t, rendered))
+}
+
+func TestRenderSnapshotDoesNotRetainEnvelopeOrPayloadAliases(t *testing.T) {
+	t.Parallel()
+
+	labels := map[string]string{"purpose": "automation"}
+	credential := mustCredentialRef(t, CredentialRefInput{Kind: CredentialUAT, Labels: labels})
+	request := &RequestRef{Method: "POST", Route: "/safe", Surface: "api"}
+	principal := &IdentityRef{Kind: IdentityUser, ID: "user-1"}
+	resource := &ResourceRef{Kind: "access_constraint", ID: "constraint-1", ProjectID: "project-1"}
+	changedFields := []string{"permissions"}
+	leaves := map[string]any{
+		"classification": "tighten",
+		"changed_fields": changedFields,
+	}
+	event := validCreateEvent(t)
+	event.Request = request
+	event.Principal = principal
+	event.Credential = &credential
+	event.Resource = resource
+	event.Payload = retainedMapPayload{leaves: leaves}
+
+	snapshot := newRenderSnapshot(event)
+
+	request.Method = "method-alias-canary"
+	principal.ID = "principal-alias-canary"
+	resource.ID = "resource-alias-canary"
+	labels["purpose"] = "label-alias-canary"
+	changedFields[0] = "slice-alias-canary"
+	leaves["classification"] = "payload-map-alias-canary"
+	leaves["undeclared-alias-canary"] = "unsafe"
+
+	rendered, err := snapshot.render()
+	require.NoError(t, err)
+	for _, canary := range []string{
+		"method-alias-canary",
+		"principal-alias-canary",
+		"resource-alias-canary",
+		"label-alias-canary",
+		"slice-alias-canary",
+		"payload-map-alias-canary",
+		"undeclared-alias-canary",
+	} {
+		assert.NotContains(t, string(rendered), canary)
+	}
+	assert.Contains(t, string(rendered), `"method":"POST"`)
+	assert.Contains(t, string(rendered), `"changed_fields":["permissions"]`)
+}
+
+func TestRenderIsRaceSafeAgainstMutationOfBuilderInputAliases(t *testing.T) {
+	t.Parallel()
+
+	labels := map[string]string{"purpose": "automation"}
+	credential := mustCredentialRef(t, CredentialRefInput{Kind: CredentialUAT, Labels: labels})
+	changedFields := []string{"permissions"}
+	event, err := buildAccessBoundaryCreate(
+		AuditOperationContext{CorrelationID: "corr-1"},
+		AccessBoundaryCreateInput{
+			Principal:      IdentityRef{Kind: IdentityUser, ID: "user-1"},
+			Credential:     &credential,
+			ConstraintID:   "constraint-1",
+			ProjectID:      "project-1",
+			Classification: BoundaryTighten,
+			ChangedFields:  changedFields,
+		},
+		uuid.MustParse("11111111-1111-4111-8111-111111111111").String(),
+		time.Date(2026, 10, 1, 12, 34, 56, 123456789, time.UTC),
+	)
+	require.NoError(t, err)
+	retainedFields := []string{"subjects"}
+	retainedLeaves := map[string]any{
+		"classification": "tighten",
+		"changed_fields": retainedFields,
+	}
+	retainedEvent := validCreateEvent(t)
+	retainedEvent.Payload = retainedMapPayload{leaves: retainedLeaves}
+	retainedSnapshot := newRenderSnapshot(retainedEvent)
+
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for i := range 100 {
+			labels["purpose"] = fmt.Sprintf("alias-%d", i)
+			changedFields[0] = fmt.Sprintf("alias-%d", i)
+			retainedFields[0] = fmt.Sprintf("retained-alias-%d", i)
+			retainedLeaves["classification"] = fmt.Sprintf("retained-alias-%d", i)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 100 {
+			rendered, renderErr := Render(event)
+			assert.NoError(t, renderErr)
+			assert.NotContains(t, string(rendered), "alias-")
+
+			retainedRendered, retainedRenderErr := retainedSnapshot.render()
+			assert.NoError(t, retainedRenderErr)
+			assert.NotContains(t, string(retainedRendered), "retained-alias-")
+		}
+	}()
+	close(start)
+	workers.Wait()
 }
 
 func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
@@ -469,6 +735,30 @@ func extractPayloadJSON(t *testing.T, record []byte) string {
 	}
 	require.NoError(t, json.Unmarshal(record, &envelope))
 	return string(envelope.Payload)
+}
+
+func containsPhaseOutcome(pairs []PhaseOutcome, phase Phase, outcome Outcome) bool {
+	for _, pair := range pairs {
+		if pair.Phase == phase && pair.Outcome == outcome {
+			return true
+		}
+	}
+	return false
+}
+
+func severityForOutcome(outcome Outcome) Severity {
+	if outcome == OutcomeDeny || outcome == OutcomeFailed {
+		return SeverityWarning
+	}
+	return SeverityInfo
+}
+
+func assertValidationErrorDoesNotRetain(t *testing.T, err error, field, rule, canary string) {
+	t.Helper()
+	assert.NotContains(t, err.Error(), canary)
+	assert.NotContains(t, field, canary)
+	assert.NotContains(t, rule, canary)
+	assert.NotContains(t, fmt.Sprintf("%#v", err), canary)
 }
 
 func validCreateEvent(t *testing.T) EnvelopeV1 {

@@ -48,39 +48,77 @@ type serializedCredentialRef struct {
 	Labels            map[string]string      `json:"labels,omitempty"`
 }
 
+// renderSnapshot owns every reference that validation or JSON encoding reads.
+// Payload implementations hand their leaves to this snapshot; callers must not
+// mutate a returned map while auditPayloadLeaves is running.
+type renderSnapshot struct {
+	event      EnvelopeV1
+	payload    map[string]any
+	hasPayload bool
+	serialized serializedEnvelopeV1
+}
+
 // Render validates and serializes an envelope with stable field names and no
 // undeclared payload leaves.
 func Render(event EnvelopeV1) ([]byte, error) {
+	return newRenderSnapshot(event).render()
+}
+
+func newRenderSnapshot(event EnvelopeV1) renderSnapshot {
 	var payload map[string]any
-	if event.Payload != nil {
-		payload = event.Payload.auditPayloadLeaves()
+	hasPayload := event.Payload != nil
+	if hasPayload {
+		payload = clonePayloadLeaves(event.Payload.auditPayloadLeaves())
 	}
-	if err := validateSnapshot(event, payload); err != nil {
-		return nil, fmt.Errorf("validate audit event: %w", err)
+
+	snapshotEvent := event
+	snapshotEvent.Request = cloneRequest(event.Request)
+	snapshotEvent.Initiator = cloneIdentity(event.Initiator)
+	snapshotEvent.Principal = cloneIdentity(event.Principal)
+	snapshotEvent.Executor = cloneIdentity(event.Executor)
+	snapshotEvent.Credential = cloneCredential(event.Credential)
+	snapshotEvent.Resource = cloneResource(event.Resource)
+	snapshotEvent.Payload = nil
+
+	return renderSnapshot{
+		event:      snapshotEvent,
+		payload:    payload,
+		hasPayload: hasPayload,
+		serialized: serializedEnvelopeV1{
+			SchemaVersion: snapshotEvent.SchemaVersion,
+			EventID:       snapshotEvent.EventID,
+			OccurredAt:    snapshotEvent.OccurredAt.Format("2006-01-02T15:04:05.999999999Z07:00"),
+			Family:        snapshotEvent.Family,
+			Action:        snapshotEvent.Action,
+			Phase:         snapshotEvent.Phase,
+			Outcome:       snapshotEvent.Outcome,
+			Severity:      snapshotEvent.Severity,
+			CorrelationID: snapshotEvent.CorrelationID,
+			CausationID:   snapshotEvent.CausationID,
+			Request:       snapshotEvent.Request,
+			Initiator:     snapshotEvent.Initiator,
+			Principal:     snapshotEvent.Principal,
+			Executor:      snapshotEvent.Executor,
+			Credential:    serializeCredential(snapshotEvent.Credential),
+			Resource:      snapshotEvent.Resource,
+			Payload:       payload,
+		},
 	}
-	encoded, err := json.Marshal(serializedEnvelopeV1{
-		SchemaVersion: event.SchemaVersion,
-		EventID:       event.EventID,
-		OccurredAt:    event.OccurredAt.Format("2006-01-02T15:04:05.999999999Z07:00"),
-		Family:        event.Family,
-		Action:        event.Action,
-		Phase:         event.Phase,
-		Outcome:       event.Outcome,
-		Severity:      event.Severity,
-		CorrelationID: event.CorrelationID,
-		CausationID:   event.CausationID,
-		Request:       event.Request,
-		Initiator:     event.Initiator,
-		Principal:     event.Principal,
-		Executor:      event.Executor,
-		Credential:    serializeCredential(event.Credential),
-		Resource:      event.Resource,
-		Payload:       payload,
-	})
+}
+
+func (snapshot renderSnapshot) render() ([]byte, error) {
+	if err := snapshot.validate(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(snapshot.serialized)
 	if err != nil {
 		return nil, fmt.Errorf("marshal audit event: %w", err)
 	}
 	return encoded, nil
+}
+
+func (snapshot renderSnapshot) validate() error {
+	return validateSnapshot(snapshot.event, snapshot.payload, snapshot.hasPayload)
 }
 
 func serializeCredential(credential *CredentialRef) *serializedCredentialRef {
@@ -94,5 +132,43 @@ func serializeCredential(credential *CredentialRef) *serializedCredentialRef {
 		BoundaryKind:      credential.BoundaryKind(),
 		BoundaryProjectID: credential.BoundaryProjectID(),
 		Labels:            credential.Labels(),
+	}
+}
+
+func clonePayloadLeaves(leaves map[string]any) map[string]any {
+	if leaves == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(leaves))
+	for key, value := range leaves {
+		clone[key] = clonePayloadValue(value)
+	}
+	return clone
+}
+
+func clonePayloadValue(value any) any {
+	switch value := value.(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		clone := make([]any, len(value))
+		for i, item := range value {
+			clone[i] = clonePayloadValue(item)
+		}
+		return clone
+	case map[string]string:
+		clone := make(map[string]string, len(value))
+		for key, item := range value {
+			clone[key] = item
+		}
+		return clone
+	case map[string]any:
+		return clonePayloadLeaves(value)
+	case *ImpactCounts:
+		return cloneImpactCounts(value)
+	case *int64:
+		return cloneInt64(value)
+	default:
+		return value
 	}
 }

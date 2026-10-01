@@ -63,3 +63,22 @@ Focused evidence after the fixes:
 - `Render` and every `Sink.Emit` path validate against the catalog before serialization; #2404 should not duplicate this schema validation in the store layer.
 - `DestinationHistory` is a catalog declaration, not persistence. This slice intentionally adds no store dependency or generic event store.
 - #2405 can map purpose-specific history rows to its response model directly; it does not need to deserialize the structured-log envelope.
+
+## Review round 2 remaining fixes
+
+Resolved Required findings 2, 3, and 4 from the full review of `628e3fba510ccb56c23dd3d67d4199a931a1acea`, while preserving the approved shared credential-metadata contract at `0a5ffe7eb0d4cd9e10d2362623b1686f71565031`:
+
+- All audit-envelope validation failures now use `ValidationError`, whose only structured fields are the stable field identifier and rule. Family, action, phase, outcome, severity, request, identity, resource, and payload failures no longer interpolate rejected values. The canonical credential contract continues to return its own typed, value-free `credentialmeta.ValidationError`. Canary coverage checks both rendered error text and structured fields for every rejected string-bearing source.
+- `Validate` and `Render` now materialize one renderer-owned snapshot. Envelope pointers, credential labels, the payload leaf map, and supported nested payload slices/maps/pointers are cloned before validation; the exact validated snapshot is marshaled. Retained-map and caller-alias regressions prove later mutations cannot change the encoded record, and targeted race coverage exercises concurrent mutation of original builder inputs and retained payload backing data after snapshot capture.
+- Phase/outcome coverage now checks the Cartesian product of all six phases, absent outcome, all six declared outcomes, and representative unknown values against the exact common matrix. Every catalog entry is checked across the same product so only literal `AllowedPairs` validate, with explicit assertions that the current non-diagnostic action rejects both observation outcomes.
+
+Targeted evidence after the fixes:
+
+- `go test -count=1 -p 2 ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -race -p 2 ./pkg/hub/auditevent` — PASS.
+- `go vet ./pkg/hub/auditevent` — PASS.
+- `go test -count=1 -cover -p 2 ./pkg/hub/auditevent` — PASS, 88.7% statement coverage.
+- `GOGC=40 golangci-lint run --new-from-rev=HEAD --concurrency=1 ./pkg/hub/auditevent/...` — PASS (`0 issues`).
+- `test -z "$(gofmt -l pkg/hub/auditevent/*.go)"` — PASS.
+- `git diff --check` — PASS.
+- Full `make ci` and `make ci-full` were intentionally not run under the campaign broker workload rule; it permits only targeted package checks with `-p 2` and scoped linting with concurrency 1.

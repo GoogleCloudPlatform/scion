@@ -123,6 +123,14 @@ func cloneIdentity(identity *IdentityRef) *IdentityRef {
 	return &copy
 }
 
+func cloneResource(resource *ResourceRef) *ResourceRef {
+	if resource == nil {
+		return nil
+	}
+	copy := *resource
+	return &copy
+}
+
 func cloneCredential(credential *CredentialRef) *CredentialRef {
 	if credential == nil {
 		return nil

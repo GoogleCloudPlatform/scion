@@ -26,6 +26,21 @@ import (
 	"github.com/google/uuid"
 )
 
+// ValidationError identifies a rejected audit-envelope field and rule without
+// retaining the rejected value.
+type ValidationError struct {
+	Field string
+	Rule  string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("invalid audit event field %s: %s", e.Field, e.Rule)
+}
+
+func invalid(field, rule string) error {
+	return &ValidationError{Field: field, Rule: rule}
+}
+
 // ValidatePhaseOutcome enforces the common truthful phase/result matrix.
 func ValidatePhaseOutcome(phase Phase, outcome Outcome) error {
 	valid := false
@@ -44,7 +59,7 @@ func ValidatePhaseOutcome(phase Phase, outcome Outcome) error {
 		valid = slices.Contains([]Outcome{OutcomeSucceeded, OutcomeFailed, OutcomeSkipped, OutcomeDeferred}, outcome)
 	}
 	if !valid {
-		return fmt.Errorf("invalid audit phase/outcome pair %q/%q", phase, outcome)
+		return invalid("phase_outcome", "must be a declared phase/outcome pair")
 	}
 	return nil
 }
@@ -52,30 +67,27 @@ func ValidatePhaseOutcome(phase Phase, outcome Outcome) error {
 // Validate checks the common envelope and its literal catalog schema before
 // an event reaches any sink.
 func Validate(event EnvelopeV1) error {
-	var payload map[string]any
-	if event.Payload != nil {
-		payload = event.Payload.auditPayloadLeaves()
-	}
-	return validateSnapshot(event, payload)
+	return newRenderSnapshot(event).validate()
 }
 
 // validateSnapshot validates the envelope against the already-materialized
 // payload leaves. Render uses this entry point so the exact validated map is
 // also the map serialized across the audit boundary.
-func validateSnapshot(event EnvelopeV1, payload map[string]any) error {
+func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool) error {
 	if event.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("schema_version must be %d", SchemaVersion)
+		return invalid("schema_version", fmt.Sprintf("must be %d", SchemaVersion))
 	}
 	if err := validateUUID("event_id", event.EventID); err != nil {
 		return err
 	}
 	if event.OccurredAt.IsZero() || event.OccurredAt.Location() != time.UTC {
-		return fmt.Errorf("occurred_at must be a non-zero UTC timestamp")
+		return invalid("occurred_at", "must be a non-zero UTC timestamp")
 	}
-	for name, value := range map[string]string{"family": event.Family, "action": event.Action} {
-		if err := validateBoundedString(name, value, 64); err != nil {
-			return err
-		}
+	if err := validateBoundedString("family", event.Family, 64); err != nil {
+		return err
+	}
+	if err := validateBoundedString("action", event.Action, 64); err != nil {
+		return err
 	}
 	if err := ValidatePhaseOutcome(event.Phase, event.Outcome); err != nil {
 		return err
@@ -85,7 +97,7 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any) error {
 		wantSeverity = SeverityWarning
 	}
 	if event.Severity != wantSeverity {
-		return fmt.Errorf("severity must be %q for outcome %q", wantSeverity, event.Outcome)
+		return invalid("severity", "must match the outcome")
 	}
 	if err := validateBoundedString("correlation_id", event.CorrelationID, 128); err != nil {
 		return err
@@ -98,12 +110,16 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any) error {
 	if err := validateRequest(event.Request, event.CorrelationID); err != nil {
 		return err
 	}
-	for name, identity := range map[string]*IdentityRef{
-		"initiator": event.Initiator,
-		"principal": event.Principal,
-		"executor":  event.Executor,
-	} {
-		if err := validateIdentity(name, identity); err != nil {
+	identities := []struct {
+		name     string
+		identity *IdentityRef
+	}{
+		{name: "initiator", identity: event.Initiator},
+		{name: "principal", identity: event.Principal},
+		{name: "executor", identity: event.Executor},
+	}
+	for _, item := range identities {
+		if err := validateIdentity(item.name, item.identity); err != nil {
 			return err
 		}
 	}
@@ -113,32 +129,32 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any) error {
 
 	entry, ok := catalogEntry(event.Family, event.Action)
 	if !ok {
-		return fmt.Errorf("audit action %q/%q is not declared in the catalog", event.Family, event.Action)
+		return invalid("family_action", "must be declared in the catalog")
 	}
 	pairAllowed := slices.Contains(entry.AllowedPairs, PhaseOutcome{Phase: event.Phase, Outcome: event.Outcome})
 	if !pairAllowed {
-		return fmt.Errorf("phase/outcome %q/%q is not allowed by the catalog for %s/%s", event.Phase, event.Outcome, event.Family, event.Action)
+		return invalid("phase_outcome", "must be allowed by the catalog entry")
 	}
 	if slices.Contains(entry.RequiredEnvelopeLeaves, "principal") && event.Principal == nil {
-		return fmt.Errorf("principal is required by the catalog")
+		return invalid("principal", "is required by the catalog")
 	}
 	if event.Resource == nil {
-		return fmt.Errorf("resource is required by the catalog")
+		return invalid("resource", "is required by the catalog")
 	}
 	if event.Resource.Kind != entry.ResourceKind {
-		return fmt.Errorf("resource kind must be %q for %s/%s", entry.ResourceKind, event.Family, event.Action)
+		return invalid("resource.kind", "must match the catalog entry")
 	}
 	if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {
 		return err
 	}
 	if slices.Contains(entry.RequiredEnvelopeLeaves, "resource.project_id") && event.Resource.ProjectID == "" {
-		return fmt.Errorf("resource.project_id is required by the catalog")
+		return invalid("resource.project_id", "is required by the catalog")
 	}
 	if err := validateOptionalBoundedString("resource.project_id", event.Resource.ProjectID, 128); err != nil {
 		return err
 	}
-	if event.Payload == nil {
-		return fmt.Errorf("payload is required")
+	if !hasPayload {
+		return invalid("payload", "is required")
 	}
 	return validatePayload(entry, payload)
 }
@@ -148,13 +164,13 @@ func validateRequest(request *RequestRef, correlationID string) error {
 		return nil
 	}
 	if request.ID != "" && request.ID != correlationID {
-		return fmt.Errorf("request.id must equal correlation_id")
+		return invalid("request.id", "must equal correlation_id")
 	}
 	if err := validateOptionalBoundedString("request.id", request.ID, 128); err != nil {
 		return err
 	}
 	if request.Method != "" && !slices.Contains([]string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}, request.Method) {
-		return fmt.Errorf("request.method %q is not a standard HTTP method", request.Method)
+		return invalid("request.method", "must be a standard HTTP method")
 	}
 	if err := validateOptionalBoundedString("request.route", request.Route, 256); err != nil {
 		return err
@@ -167,7 +183,7 @@ func validateIdentity(name string, identity *IdentityRef) error {
 		return nil
 	}
 	if !slices.Contains([]IdentityKind{IdentityUser, IdentityAgent, IdentityBroker, IdentitySystem, IdentityProject}, identity.Kind) {
-		return fmt.Errorf("%s.kind %q is invalid", name, identity.Kind)
+		return invalid(name+".kind", "must be a declared identity kind")
 	}
 	return validateBoundedString(name+".id", identity.ID, 128)
 }
@@ -185,7 +201,7 @@ func validatePayload(entry CatalogEntry, payload map[string]any) error {
 		allowed[schema.Name] = struct{}{}
 		value, ok := payload[schema.Name]
 		if !ok {
-			return fmt.Errorf("required payload leaf %q is missing", schema.Name)
+			return invalid("payload."+schema.Name, "is required by the catalog")
 		}
 		if err := validatePayloadLeaf(schema, value); err != nil {
 			return err
@@ -201,7 +217,7 @@ func validatePayload(entry CatalogEntry, payload map[string]any) error {
 	}
 	for leaf := range payload {
 		if _, ok := allowed[leaf]; !ok {
-			return fmt.Errorf("undeclared payload leaf %q", leaf)
+			return invalid("payload", "contains an undeclared leaf")
 		}
 	}
 	return nil
@@ -213,37 +229,37 @@ func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
 	case PayloadString:
 		text, ok := value.(string)
 		if !ok {
-			return fmt.Errorf("%s must be a string", name)
+			return invalid(name, "must be a string")
 		}
 		if err := validateBoundedString(name, text, schema.MaxBytes); err != nil {
 			return err
 		}
 		if len(schema.AllowedValues) > 0 && !slices.Contains(schema.AllowedValues, text) {
-			return fmt.Errorf("%s is not an allowed value", name)
+			return invalid(name, "must be an allowed value")
 		}
 	case PayloadInt64:
 		if _, ok := value.(int64); !ok {
-			return fmt.Errorf("%s must be int64", name)
+			return invalid(name, "must be int64")
 		}
 	case PayloadHexString:
 		digest, ok := value.(string)
 		if !ok || len(digest) != schema.ExactLength {
-			return fmt.Errorf("%s must be a %d-character hexadecimal digest", name, schema.ExactLength)
+			return invalid(name, fmt.Sprintf("must be a %d-character hexadecimal digest", schema.ExactLength))
 		}
 		if _, err := hex.DecodeString(digest); err != nil {
-			return fmt.Errorf("%s must be a %d-character hexadecimal digest", name, schema.ExactLength)
+			return invalid(name, fmt.Sprintf("must be a %d-character hexadecimal digest", schema.ExactLength))
 		}
 	case PayloadImpactCounts:
 		if _, ok := value.(ImpactCounts); !ok {
-			return fmt.Errorf("%s has an invalid type", name)
+			return invalid(name, "must be impact counts")
 		}
 	case PayloadStringArray:
 		items, ok := value.([]string)
 		if !ok {
-			return fmt.Errorf("%s must be a string array", name)
+			return invalid(name, "must be a string array")
 		}
 		if len(items) > schema.MaxItems {
-			return fmt.Errorf("%s must contain at most %d items", name, schema.MaxItems)
+			return invalid(name, fmt.Sprintf("must contain at most %d items", schema.MaxItems))
 		}
 		for i, item := range items {
 			if err := validateBoundedString(fmt.Sprintf("%s[%d]", name, i), item, schema.ItemMaxBytes); err != nil {
@@ -251,14 +267,14 @@ func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
 			}
 		}
 	default:
-		return fmt.Errorf("%s has undeclared catalog type %q", name, schema.Type)
+		return invalid(name, "has an undeclared catalog type")
 	}
 	return nil
 }
 
 func validateBoundedString(name, value string, maxBytes int) error {
 	if value == "" {
-		return fmt.Errorf("%s is required", name)
+		return invalid(name, "is required")
 	}
 	return validateOptionalBoundedString(name, value, maxBytes)
 }
@@ -266,7 +282,7 @@ func validateBoundedString(name, value string, maxBytes int) error {
 func validateUUID(name, value string) error {
 	parsed, err := uuid.Parse(value)
 	if err != nil || parsed == uuid.Nil || parsed.String() != value {
-		return fmt.Errorf("%s must be a canonical UUID", name)
+		return invalid(name, "must be a canonical UUID")
 	}
 	return nil
 }
@@ -276,10 +292,10 @@ func validateOptionalBoundedString(name, value string, maxBytes int) error {
 		return nil
 	}
 	if !utf8.ValidString(value) || len(value) > maxBytes {
-		return fmt.Errorf("%s must be valid UTF-8 of at most %d bytes", name, maxBytes)
+		return invalid(name, fmt.Sprintf("must be valid UTF-8 of at most %d bytes", maxBytes))
 	}
 	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
-		return fmt.Errorf("%s must not contain control characters", name)
+		return invalid(name, "must not contain control characters")
 	}
 	return nil
 }
