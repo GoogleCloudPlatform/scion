@@ -47,12 +47,14 @@ The native web chat includes a complete suite of collaboration and developer pro
 
 #### 1. Message Context Menu
 Right-clicking a message (on desktop) or tapping it (on touch devices without hover) opens a contextual **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
-- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
+- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions. Choosing **Reply** moves focus to the composer so you can start typing immediately.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
+- **Open terminal / Open in graph**: On a message from an agent, open that agent's terminal or jump to it in the lineage graph. These act on the message's author, not the thread's default agent. **Open terminal** appears only when you can attach to that agent.
 
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
+- **Mark Unread**: Right-click a thread in the thread rail, or a member in the members sidebar (for an existing DM with messages), and choose **Mark unread** to restore its unread marker. The change syncs to your other open tabs.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
 - **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership, ordering and each group's collapsed or expanded state are persisted server-side via your user preferences.
 - **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
@@ -374,6 +376,7 @@ Scion maintains different limits depending on the recipient type:
   `validation_error: message exceeds 2000 character limit`
   * *Tip*: If you have a long message or log to send to a user, split it into multiple messages under 1,800 characters, or write the full content to a shared scratchpad file and send the filepath.
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
+* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Raw and plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
 ### 2. Inbound Message Type Discrimination
 
