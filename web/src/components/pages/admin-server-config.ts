@@ -29,6 +29,9 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
+import { isValidTimeZone } from '../../utils/time.js';
+import '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
@@ -243,6 +246,7 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_timezone?: string;
   default_gcp_identity_mode?: string;
   default_gcp_identity_service_account_id?: string;
 
@@ -402,6 +406,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_timezone: 'Default Timezone',
   default_gcp_identity_mode: 'Default GCP Identity Mode',
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
@@ -489,6 +494,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
+  // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
+  @state() private defaultTimezone = '';
+
+  private get defaultTimezoneInvalid(): boolean {
+    return this.defaultTimezone !== '' && !isValidTimeZone(this.defaultTimezone);
+  }
 
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
@@ -1509,6 +1520,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
 
@@ -1827,6 +1839,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
+    }
     if (ok('default_gcp_identity_mode')) {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
@@ -2018,6 +2033,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+    }
+    // Sent unconditionally (not `|| undefined`): an explicit "" clears the
+    // field server-side (admin_settings.go's `DefaultTimezone *string`
+    // check), matching the default-agent-limits precedent above
+    // (ptone/scion#860). `|| undefined` would omit the key on clear and
+    // leave the stored value unchanged.
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
     }
 
     // Server
@@ -3306,6 +3329,33 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field">
+                  <label>Default Timezone</label>
+                  <span class="hint"
+                    >Timezone (<code>TZ</code>) for agent containers that have no pinned timezone
+                    and no <code>TZ</code> environment variable. Empty means UTC. Does not affect
+                    how times are displayed.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_timezone',
+                    this.defaultTimezone || 'UTC (default)',
+                    html`${this.renderEnvBadge('default_timezone')}<scion-timezone-picker
+                        label="Default Timezone"
+                        placeholder="Search for a timezone..."
+                        empty-label="UTC"
+                        .value=${this.defaultTimezone}
+                        @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+                          this.defaultTimezone = e.detail.timezone;
+                        }}
+                      ></scion-timezone-picker>`
+                  )}
+                  ${this.defaultTimezoneInvalid
+                    ? html`<div class="error">
+                        "${this.defaultTimezone}" is not a recognized timezone. Saving will be
+                        rejected.
+                      </div>`
+                    : nothing}
+                </div>
+                <div class="form-field">
                   <label>Default GCP Identity Mode</label>
                   <span class="hint"
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
@@ -3836,10 +3886,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Allow agent messaging across projects</sl-switch
             >
             <span class="hint">
-              When enabled, agents in Hub mode can send direct messages to agents in other projects on
-              this Hub. The sender needs Hub mode; each destination project independently chooses
-              whether to accept external messages. Disabling takes effect for new cross-project checks
-              and delayed deliveries. Already delivered messages are not recalled.
+              When enabled, agents in Hub mode can send direct messages to agents in other projects
+              on this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project
+              checks and delayed deliveries. Already delivered messages are not recalled.
             </span>
             ${this.crossProjectMessagingError
               ? html`<div class="status-message error" style="margin-top: 0.5rem">
