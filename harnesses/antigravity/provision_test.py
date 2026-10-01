@@ -325,6 +325,55 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         self.assertEqual(settings["model"], "new-model")
         self.assertEqual(settings["modelProvider"], "gemini")
 
+    def test_existing_settings_model_provider_absent_for_non_api_key_auth(self) -> None:
+        # Review round 2, O1: the api-key-only modelProvider guard is a
+        # rewritten branch in this PR, and writing modelProvider under
+        # vertex-ai/ADC/oauth would be the auth-mode regression the brief
+        # warns about. Pin it for the existing-file path.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"model": "old-model"}, f)
+
+            provision._prestage_onboarding(
+                tmp,
+                workspace=os.path.join(tmp, "workspace"),
+                model="new-model",
+                auth_method="vertex-ai",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("modelProvider", settings)
+
+    def test_malformed_existing_settings_model_provider_absent_for_non_api_key_auth(self) -> None:
+        # Same as above (O1), but for the malformed-file fallback path added
+        # in round 1 (R2), per the review's "also covers the 'every auth
+        # mode' wording" suggestion.
+        with tempfile.TemporaryDirectory() as tmp:
+            cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
+            os.makedirs(cli_dir, exist_ok=True)
+            settings_path = os.path.join(cli_dir, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                f.write("{bad json")
+
+            provision._prestage_onboarding(
+                tmp,
+                workspace=os.path.join(tmp, "workspace"),
+                model="new-model",
+                auth_method="vertex-ai",
+            )
+
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("modelProvider", settings)
+
     def test_malformed_existing_settings_falls_back_to_fresh_defaults(self) -> None:
         # Review round 1, R2: a malformed (or unexpectedly non-dict) existing
         # settings.json must not be rewritten as bare {"model": ...} -- that
