@@ -184,6 +184,55 @@ func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 	assert.WithinDuration(t, futureTime, evt.FireAt, 2*time.Second)
 }
 
+// TestScheduledEvent_CreateWithOffsetFireAt covers ptone/scion#2473 at the
+// HTTP boundary: an offset RFC 3339 fireAt (not "Z"/UTC) parses into a
+// time.Time with a nameless FixedZone. Before the UTC normalisation fix (in
+// the handler and at the entadapter store boundary), persisting this event
+// and then reading it back broke with a Scan error on SQLite. This exercises
+// the full create -> get round trip through the HTTP handlers, not just the
+// store directly.
+func TestScheduledEvent_CreateWithOffsetFireAt(t *testing.T) {
+	srv, _, projectID := setupScheduledEventTest(t)
+
+	// A fixed future offset timestamp, deliberately not UTC.
+	futureTime := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	offsetFireAt := futureTime.In(time.FixedZone("", 2*60*60)) // +02:00
+
+	req := CreateScheduledEventRequest{
+		EventType: "message",
+		FireAt:    offsetFireAt.Format(time.RFC3339),
+		AgentName: "test-agent",
+		Message:   "Scheduled with an offset fireAt",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var created store.ScheduledEvent
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	assert.WithinDuration(t, futureTime, created.FireAt, 2*time.Second)
+
+	// The read-back path is where ptone/scion#2473 actually broke: a
+	// subsequent Get on a row with an un-normalised offset fireAt failed to
+	// Scan.
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+
+	var fetched store.ScheduledEvent
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&fetched))
+	assert.WithinDuration(t, futureTime, fetched.FireAt, 2*time.Second)
+}
+
+// The fireIn-under-a-numeric-abbreviation-time.Local case
+// (TestCreateScheduledEvent_FireInUnderNonUTCLocalRoundTrips) lives in
+// pkg/store/entadapter instead of here: mutating the process-global
+// time.Local while this package's full hub server is up races background
+// goroutines started by server setup (observed via `go test -race`:
+// GCP/TLS client init calls time.Parse, which reads time.Local
+// concurrently). The entadapter package test exercises the same
+// time.Now().Add(duration) computation the handler performs, without that
+// concurrent background activity.
+
 func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
 
