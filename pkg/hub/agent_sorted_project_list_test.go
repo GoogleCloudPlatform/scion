@@ -733,12 +733,12 @@ func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 		return nil, err
 	}
 	m.once.Do(func() {
-		a, gerr := m.Store.GetAgent(ctx, m.agentID)
+		a, gerr := m.GetAgent(ctx, m.agentID)
 		if gerr != nil {
 			return
 		}
 		a.Labels = m.newLabels
-		_ = m.Store.UpdateAgent(ctx, a)
+		_ = m.UpdateAgent(ctx, a)
 	})
 	return members, nil
 }
@@ -817,7 +817,7 @@ func (d *deletingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 	if err != nil {
 		return nil, err
 	}
-	d.once.Do(func() { _ = d.Store.DeleteAgent(ctx, d.agentID) })
+	d.once.Do(func() { _ = d.DeleteAgent(ctx, d.agentID) })
 	return members, nil
 }
 
