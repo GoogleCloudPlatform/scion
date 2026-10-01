@@ -61,7 +61,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { isFeatureEnabled, NATIVE_CHAT_V2_FLAG } from '../../utils/feature-flags.js';
-import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
@@ -318,6 +318,8 @@ export class ScionPageChat extends LitElement {
   private _onKeydown = this._handleGlobalKeydown.bind(this);
   /** Bound handler for the header palette button's open-request event. */
   private _onPaletteOpenRequest = this._handlePaletteOpenRequest.bind(this);
+  /** Whether the device's primary pointer is touch -- see `_selectionHandsFocusToComposer`. */
+  private touchPrimary = new TouchPrimaryController(this);
   /** Map from project slug → project ID for deep-link resolution. */
   private _slugToProjectId = new Map<string, string>();
   /** Map from project ID → project slug for URL generation. */
@@ -4081,7 +4083,7 @@ export class ScionPageChat extends LitElement {
    * enforces.
    */
   private _selectionHandsFocusToComposer(): boolean {
-    return !window.matchMedia(TOUCH_PRIMARY_QUERY).matches;
+    return !this.touchPrimary.isTouch;
   }
 
   /**

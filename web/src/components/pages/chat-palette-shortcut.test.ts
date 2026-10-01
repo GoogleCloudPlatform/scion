@@ -1864,6 +1864,12 @@ describe('touch focus handoff: a conversation selection on touch does not focus 
   it('on touch, a selection close falls back instead of focusing the composer', () => {
     stubTouchPrimary(true);
     const page = createUnattachedPage();
+    // TouchPrimaryController only reads matchMedia() once connected (it
+    // ties the query's change listener to the host's connected lifetime),
+    // so the stub above is only observed once the page is actually in the
+    // document -- an unconnected page would see the controller's default
+    // (false) regardless of the stub, defeating this test.
+    document.body.appendChild(page);
     const focusComposerSpy = vi.spyOn(page, '_focusComposerAfterPaletteSelection');
     const fallbackSpy = vi.spyOn(page, '_focusPaletteFallback').mockImplementation(() => {});
     page._paletteClosedBySelection = true;
@@ -1878,6 +1884,7 @@ describe('touch focus handoff: a conversation selection on touch does not focus 
   it('on desktop (the default/positive control), a selection close still focuses the composer as before', () => {
     stubTouchPrimary(false);
     const page = createUnattachedPage();
+    document.body.appendChild(page);
     const focusComposerSpy = vi
       .spyOn(page, '_focusComposerAfterPaletteSelection')
       .mockResolvedValue(undefined);
