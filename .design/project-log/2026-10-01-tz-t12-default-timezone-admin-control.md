@@ -149,6 +149,61 @@ round-tripped back down and so never actually gated anything there (it only
 ever mattered for the blur handler, where it's still cleared, now only by
 `handleSearchInput`/`sl-clear`).
 
+### Round 2 review fixes
+
+**R2-1 [High] — duplicate package-level `nonPortableTimezoneNames` with task
+10's open PR (ptone/scion#2526): `pkg/hub` stops compiling once both are
+merged.** Both branches declare the same name independently, so neither
+PR's own CI catches it, but a scratch merge of the two fails to build.
+tz-lead/tz-em's sequencing ruling: task 10 lands first; this branch then
+stacks on `scion/tz-t10`, deletes its own `nonPortableTimezoneNames`, and
+both validators move to one shared `validateIANATimezone` extracted into a
+small file (`pkg/hub/timezone_validate.go`), reusing both existing handler
+test tables. **Pending** — rebase lands once tz-em supplies the post-rebase
+task 10 SHA; the PR body carries a "Depends on PR ptone/scion#2526 (merge
+first)" note until then.
+
+**R2-2 [Medium] — `isValidTimeZone` still accepted lowercase *aliases*
+Go rejects (R1-3 incomplete).** R1-3's case check only caught a name that
+resolves to a case variant of *itself* (`asia/tokyo` → `Asia/Tokyo`). A
+lowercase alias resolves to a *different* canonical string regardless of
+case (`asia/kolkata` and `Asia/Kolkata` both resolve to `Asia/Calcutta`), so
+it slipped through — `asia/kolkata`, `us/pacific`, `gmt`, `europe/kyiv`
+all passed client-side, all of which Go's `time.LoadLocation` rejects.
+Replaced the heuristic with the reviewer's option (a): a name is valid only
+if it resolves to itself exactly, or it is an exact-case member of a new,
+small `KNOWN_ALIAS_TIMEZONE_NAMES` set (the `SEARCH_ALIAS_HINTS` targets
+plus a few tested backward names: `US/Pacific`, `GMT`, `EST5EDT`). This
+is simpler than the round-1 case-insensitive-compare rule, not just
+stricter, and every round-1 test case still passes unchanged.
+
+**R2-3 [Medium] — picker regression: after a dropdown selection, external
+`.value` changes stopped updating the input (R1-7 fix was wrong).**
+`selectedViaDropdown` stayed `true` after a selection by design (to gate
+the blur handler), but `willUpdate`'s resync was gated on that same flag —
+so once any dropdown selection had been made, *every later, unrelated*
+external `.value` change was silently ignored until the user typed or
+cleared, not just that selection's own round-trip. Fixed by comparing
+values instead of checking the flag: resync whenever `this.value` differs
+from what the input currently means (`valueFor(searchQuery.trim())`),
+which keeps the same-value round-trip a no-op without the collateral
+damage, and reset `selectedViaDropdown` there once a real resync happens.
+The flag now only ever gates the blur handler, which is its one real job.
+
+**R2-4 [Low] — bare `#2` in the PR body** (GitHub autolinks it to the
+unrelated `ptone/scion#2`) — reworded to "tz-refactor task 2".
+
+**R2-5 [Low] — this log's `admin_settings.go` row wrongly credited it with
+the `handleSaveError` fix** (`handleSaveError` exists only in
+`admin-server-config.ts`) — removed that clause; the `admin-server-config.ts`
+row already recorded it correctly.
+
+**R2-6 [Nit] — the file-mode dispatcher test didn't prove dispatch itself
+stops injecting `TZ` after a clear**, only that `hubAgentDefaults()` goes
+back to empty (already covered by the handler test). Added a second
+`DispatchAgentCreate` after the clearing PUT and asserted `TZ` is absent
+from `ResolvedEnv`.
+
 ### Note on ICU canonicalization
 
 Node's ICU build (and browsers using the same CLDR data) returns
@@ -167,18 +222,18 @@ Documented in `time.test.ts` and exercised by the picker's R1-4 tests.
 | `pkg/config/hub_config.go` | Added `GlobalConfig.DefaultTimezone`, filled from raw settings.yaml (R1-1) |
 | `pkg/hub/operational_settings.go` | `BuildLayer1SnapshotFromFile` now sets `DefaultTimezone`; doc comments corrected (R1-1) |
 | `pkg/hub/hub_agent_defaults.go` | Corrected `hubAgentDefaults()`'s stale file-mode doc comment (R1-1) |
-| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2); fixed `handleSaveError`'s nested-error-shape bug (R1-2 addendum) |
+| `pkg/hub/admin_settings.go` | Added `validateDefaultTimezone` + file-mode 422 call site (R1-2) |
 | `pkg/hub/admin_settings_db.go` | DB-mode 422 now calls the shared `validateDefaultTimezone` (R1-2, "On Local") |
 | `pkg/hub/admin_settings_test.go` | New file-mode tests: persisted+applied, clear round-trip, invalid-rejected (incl. denylist), valid-persisted (incl. aliases) |
 | `pkg/hub/admin_settings_db_test.go` | New: `TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected` |
-| `pkg/hub/httpdispatcher_test.go` | New: `TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode`, the dispatcher-level R1-1 proof |
-| `web/src/utils/time.ts` | Added `browserTimeZone`, `isValidTimeZone`, `listTimeZones`; `isValidTimeZone` tightened (R1-3) |
-| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset/alias/denylist cases; R1-7 comment fix |
-| `web/src/components/shared/timezone-picker.ts` | New `<scion-timezone-picker>` shared component; R1-4/R1-5/R1-7 fixes |
-| `web/src/components/shared/timezone-picker.test.ts` | Unit tests for the picker, incl. R1-4/R1-5/R1-7 cases |
+| `pkg/hub/httpdispatcher_test.go` | New: `TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode`, the dispatcher-level R1-1 proof; re-dispatches after the clear to assert `TZ` is absent (R2-6) |
+| `web/src/utils/time.ts` | Added `browserTimeZone`, `isValidTimeZone`, `listTimeZones`; `isValidTimeZone` tightened (R1-3); replaced with the exact-match-or-known-alias rule (R2-2) |
+| `web/src/utils/time.test.ts` | Unit tests for the three helpers, incl. R1-3's case/offset/alias/denylist cases and R2-2's lowercase-alias/backward-name cases; R1-7 comment fix |
+| `web/src/components/shared/timezone-picker.ts` | New `<scion-timezone-picker>` shared component; R1-4/R1-5/R1-7 fixes; R2-3's `willUpdate` resync fix |
+| `web/src/components/shared/timezone-picker.test.ts` | Unit tests for the picker, incl. R1-4/R1-5/R1-7 cases, R2-2's lowercase-alias case, and R2-3's external-value-after-selection cases |
 | `web/src/components/pages/admin-server-config.ts` | Added the Default Timezone field; fixed `handleSaveError`'s nested-error-shape bug (R1-2 addendum) |
 | `web/src/components/pages/admin-server-config.test.ts` | New tests: load, DB/file-mode save (incl. explicit-`""`-on-clear), env-override read-only, inline validation hint, nested-error-shape 422 rendering |
-| `.design/project-log/2026-10-01-tz-t12-default-timezone-admin-control.md` | This file (R1-6) |
+| `.design/project-log/2026-10-01-tz-t12-default-timezone-admin-control.md` | This file (R1-6, R2-5) |
 
 ## Test evidence
 
@@ -203,7 +258,23 @@ Documented in `time.test.ts` and exercised by the picker's R1-4 tests.
   (`createTestStore`'s migration: `empty agent role backfill: sql: Scan
   error on column index 6, name "create_time"`) — confirmed this is the
   same failure on `main` at e572e72 for the pre-existing sibling test,
-  task #2's scope, not this task's.
+  tz-refactor task 2's scope, not this task's.
+
+## Round 2 test evidence
+
+Per tz-em's instruction, round 2 ran targeted tests only (`-p 2`), not the
+full `make ci`/`ci-full` or full suites — fork CI covers those.
+
+- `npm run typecheck` — clean.
+- `npx vitest run` on `time.test.ts`, `timezone-picker.test.ts` and
+  `admin-server-config.test.ts` — 86 passed (same 86 as round 1: R2-2's and
+  R2-3's new tests replace/extend existing ones in the same files rather
+  than adding net-new counts beyond what round 1 already added).
+- `go build -buildvcs=false -p 2 ./pkg/hub/...` — clean.
+- `TZ=Asia/Tokyo go test -buildvcs=false -p 2 ./pkg/hub -run 'TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode'` — pass, including the new post-clear re-dispatch assertion (R2-6).
+- R2-1 (sequencing with task 10's PR) is **not yet applied** — pending the
+  rebase onto `scion/tz-t10` once tz-em supplies the post-rebase SHA; see
+  the Round 2 review fixes section above.
 
 ## Deferred / out of scope
 
