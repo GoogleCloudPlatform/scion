@@ -282,6 +282,13 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
 		create.SetAppliedConfig(cfg)
 	}
+	// Always set, never leave NULL, even when harnessConfigOf returns "" (no
+	// harness configured). NULL is reserved to mean "never written by a
+	// binary that knows this column exists" — see
+	// CompositeStore.ReconcileHarnessConfigColumn's doc for why that
+	// distinction is what makes the reconcile query converge
+	// (ptone/scion#2146).
+	create.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 	if !a.LastSeen.IsZero() {
 		create.SetLastSeen(a.LastSeen)
 	}
@@ -712,6 +719,11 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	} else {
 		update.ClearAppliedConfig()
 	}
+	// Always set, never clear to NULL — see CreateAgent's identical comment
+	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
+	// AppliedConfig=nil (cleared above) still yields "" here, which is
+	// exactly the sentinel this row should carry, not NULL.
+	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
 	} else {
@@ -969,6 +981,48 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	}
 	for k, v := range filter.Labels {
 		preds = append(preds, labelContains(k, v))
+	}
+
+	// RequestedOwnerID is always ANDed, independent of the OwnerID/
+	// MemberOrOwnerProjectIDs OR-based Mine/Shared classification above
+	// (ptone/scion#2146 — see the field doc in pkg/store/store.go).
+	if filter.RequestedOwnerID != "" {
+		requestedOwnerUID, err := parseUUID(filter.RequestedOwnerID)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.OwnerIDEQ(requestedOwnerUID))
+	}
+
+	if filter.HarnessConfig != "" {
+		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
+	}
+
+	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
+	// --ancestors relationship query). Fail-closed like AuthorizedProjectIDs:
+	// nil means no restriction, empty non-nil means no agents match.
+	if filter.IDs != nil {
+		if len(filter.IDs) == 0 {
+			preds = append(preds, agent.IDEQ(uuid.Nil))
+		} else {
+			idUUIDs := parseUUIDList(filter.IDs)
+			if len(idUUIDs) > 0 {
+				preds = append(preds, agent.IDIn(idUUIDs...))
+			} else {
+				preds = append(preds, agent.IDEQ(uuid.Nil))
+			}
+		}
+	}
+
+	// LineageRootID: the root agent plus all its descendants, as one OR
+	// sub-predicate that is itself ANDed with everything else in preds
+	// (ptone/scion#2146 — see the field doc in pkg/store/store.go).
+	if filter.LineageRootID != "" {
+		rootUID, err := parseUUID(filter.LineageRootID)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.Or(agent.IDEQ(rootUID), ancestryContains(filter.LineageRootID)))
 	}
 
 	// AuthorizedProjectIDs: scope-aware authorization filter applied at the SQL
@@ -1317,6 +1371,22 @@ func marshalAppliedConfig(cfg *store.AgentAppliedConfig) string {
 		return ""
 	}
 	return string(data)
+}
+
+// harnessConfigOf extracts the top-level harness-config name from cfg, or ""
+// if cfg is nil or has none set. This is the single value CreateAgent and
+// UpdateAgent write into the harness_config shadow column (see its doc in
+// pkg/ent/schema/agent.go) — kept as its own function so both call sites
+// derive it identically and cannot drift (ptone/scion#2146). Both call
+// sites write this value UNCONDITIONALLY, including "", rather than
+// skipping the write or clearing the column to NULL when it's empty — NULL
+// is reserved to mean "never written by a binary that knows this column
+// exists".
+func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.HarnessConfig
 }
 
 // parseTimeString parses a status update's started_at string, accepting the

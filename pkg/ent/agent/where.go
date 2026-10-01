@@ -186,6 +186,11 @@ func AppliedConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldAppliedConfig, v))
 }
 
+// HarnessConfig applies equality check predicate on the "harness_config" field. It's identical to HarnessConfigEQ.
+func HarnessConfig(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldHarnessConfig, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldCreated, v))
@@ -1894,6 +1899,81 @@ func AppliedConfigEqualFold(v string) predicate.Agent {
 // AppliedConfigContainsFold applies the ContainsFold predicate on the "applied_config" field.
 func AppliedConfigContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldAppliedConfig, v))
+}
+
+// HarnessConfigEQ applies the EQ predicate on the "harness_config" field.
+func HarnessConfigEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldHarnessConfig, v))
+}
+
+// HarnessConfigNEQ applies the NEQ predicate on the "harness_config" field.
+func HarnessConfigNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldHarnessConfig, v))
+}
+
+// HarnessConfigIn applies the In predicate on the "harness_config" field.
+func HarnessConfigIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldHarnessConfig, vs...))
+}
+
+// HarnessConfigNotIn applies the NotIn predicate on the "harness_config" field.
+func HarnessConfigNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldHarnessConfig, vs...))
+}
+
+// HarnessConfigGT applies the GT predicate on the "harness_config" field.
+func HarnessConfigGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldHarnessConfig, v))
+}
+
+// HarnessConfigGTE applies the GTE predicate on the "harness_config" field.
+func HarnessConfigGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldHarnessConfig, v))
+}
+
+// HarnessConfigLT applies the LT predicate on the "harness_config" field.
+func HarnessConfigLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldHarnessConfig, v))
+}
+
+// HarnessConfigLTE applies the LTE predicate on the "harness_config" field.
+func HarnessConfigLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldHarnessConfig, v))
+}
+
+// HarnessConfigContains applies the Contains predicate on the "harness_config" field.
+func HarnessConfigContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldHarnessConfig, v))
+}
+
+// HarnessConfigHasPrefix applies the HasPrefix predicate on the "harness_config" field.
+func HarnessConfigHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldHarnessConfig, v))
+}
+
+// HarnessConfigHasSuffix applies the HasSuffix predicate on the "harness_config" field.
+func HarnessConfigHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldHarnessConfig, v))
+}
+
+// HarnessConfigIsNil applies the IsNil predicate on the "harness_config" field.
+func HarnessConfigIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldHarnessConfig))
+}
+
+// HarnessConfigNotNil applies the NotNil predicate on the "harness_config" field.
+func HarnessConfigNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldHarnessConfig))
+}
+
+// HarnessConfigEqualFold applies the EqualFold predicate on the "harness_config" field.
+func HarnessConfigEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldHarnessConfig, v))
+}
+
+// HarnessConfigContainsFold applies the ContainsFold predicate on the "harness_config" field.
+func HarnessConfigContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldHarnessConfig, v))
 }
 
 // AncestryIsNil applies the IsNil predicate on the "ancestry" field.

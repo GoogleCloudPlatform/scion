@@ -262,11 +262,12 @@ Messages are delivered in real-time to the Web Dashboard via Server-Sent Events 
 
 ### Delivery failures
 
-Messages to agents are never silently dropped:
+Messages are not silently dropped in these cases:
 
 - **Non-running recipients.** A message is rejected if the recipient agent is not running (suspended, stopped, in error, or still starting). For direct messages, human or agent, the send fails immediately with a `409` error. Pass `--wake` to resume a suspended agent and then deliver. Broadcast, group, and message-broker deliveries are rejected per recipient. A sending agent gets a `DELIVERY_FAILED` system notice ("Message delivery to `<agent>` failed: …") for each rejected recipient.
 - **Reincarnating recipients.** While an agent is being migrated with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate), messages to it are saved to its conversation history instead of being dispatched or dropped. DMs, group messages and @mentions return `202` with status `deferred`, and a sending agent gets a `DELIVERY_DEFERRED` system notice rather than a failure. The new generation is told to read what it missed with `scion conversation catch-up`. Scheduled messages that fire during a reincarnation fail loudly instead of being deferred.
 - **Late broker failures.** A Runtime Broker may accept a message into its short delivery buffer and then fail to deliver it, for example because the container has gone away. The broker reports this to the Hub. The Hub marks the message `failed` rather than leaving it `dispatched`, and notifies the sending agent.
+- **Agent messages to humans.** If the Hub's delivery queue for a project is saturated, the agent's send fails with `503` (`unavailable`); retry later. A retry may duplicate the message on an external chat channel such as Discord.
 
 ## Message Authorization & Modes
 

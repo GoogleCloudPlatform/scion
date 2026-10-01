@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +119,46 @@ func parseLabelFilters(params []string) (map[string]string, error) {
 		return nil, fmt.Errorf("invalid label filter: %w", err)
 	}
 	return m, nil
+}
+
+// maxRelationshipIDs caps the id[] relationship filter (ptone/scion#2146).
+// Unbounded, it is one IN(...) bind list per caller, limited
+// only by the ~1 MB HTTP header size (roughly 25k UUIDs) — that both bloats
+// the query next to AuthorizedProjectIDs and costs query-planning time far
+// beyond what the real use (a CLI-resolved Ancestry chain, or a lineage
+// root's own small candidate set) ever needs.
+const maxRelationshipIDs = 256
+
+// applyAgentAttributeAndRelationshipFilters reads the ownerId, ancestorId,
+// harnessConfig, id, and lineageRootId query params shared by listAgents and
+// listProjectAgents into filter. Factored into one place so the two list
+// endpoints cannot drift on these narrowing-only filters (ptone/scion#2146).
+//
+// Every field this sets is combined with the rest of the caller's filter
+// (including any authorization predicate, such as AuthorizedProjectIDs) using
+// AND — see the field docs on store.AgentFilter. None of them may be used to
+// widen a result beyond what the caller was already authorized to list.
+//
+// Returns a non-nil error (a caller-facing message, suitable for a 400) only
+// when id[] exceeds maxRelationshipIDs.
+func applyAgentAttributeAndRelationshipFilters(filter *store.AgentFilter, query url.Values) error {
+	filter.RequestedOwnerID = query.Get("ownerId")
+	filter.AncestorID = query.Get("ancestorId")
+	filter.HarnessConfig = query.Get("harnessConfig")
+	if ids := query["id"]; len(ids) > 0 {
+		if len(ids) > maxRelationshipIDs {
+			return fmt.Errorf("id: too many values (%d); maximum is %d", len(ids), maxRelationshipIDs)
+		}
+		// Canonicalize (dedupe + sort) before this reaches the cursor
+		// binding, like every other set-like filter field (Finding 8) —
+		// otherwise the same logical request with id= params in a
+		// different order mints a different cursor binding, and a cursor
+		// minted under one ordering is rejected when replayed under
+		// another.
+		filter.IDs = canonicalizeStringSlice(append([]string{}, ids...))
+	}
+	filter.LineageRootID = query.Get("lineageRootId")
+	return nil
 }
 
 type ListAgentsResponse struct {
@@ -312,6 +353,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+	if err := applyAgentAttributeAndRelationshipFilters(&filter, query); err != nil {
+		BadRequest(w, err.Error())
+		return
 	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
@@ -2463,10 +2508,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.TaskSummary = updates.TaskSummary
 	}
 
-	// Apply config updates (only allowed for agents in 'created' phase)
+	// Apply config updates (only allowed for non-deleted agents in 'created' or 'stopped' phase;
+	// starting a stopped agent always recreates its container from AppliedConfig).
 	if updates.Config != nil {
-		if agent.Phase != string(state.PhaseCreated) {
-			Conflict(w, "Config can only be updated for agents in 'created' phase")
+		if !agent.DeletedAt.IsZero() {
+			Conflict(w, "Config cannot be updated for deleted agents")
+			return
+		}
+		if agent.Phase != string(state.PhaseCreated) && agent.Phase != string(state.PhaseStopped) {
+			Conflict(w, "Config can only be updated for agents in 'created' or 'stopped' phase")
 			return
 		}
 		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
@@ -2992,6 +3042,40 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 			return
 		}
 		// Authorization passed — fall through to action dispatch below.
+		goto actionDispatch
+	}
+
+	// --- Keys action: routed through authorizeAgentKeys (contract §3) ---
+	// Terminal-keystroke injection itself is task 2.2's ExecuteAgentKeys;
+	// this branch only owns the authorization decision, so a denial
+	// matches the keys contract's outcome/status table (agentkeys.Outcome)
+	// instead of the generic !selfAccess block's differently-shaped 403
+	// below. Resolve {id} first, then compare projects inside
+	// authorizeAgentKeys (contract §3.1 "Option 1, chosen" for the
+	// top-level route): a foreign existing agent (422) and a nonexistent
+	// one (404, from writeErrorFromErr below) get different outcomes,
+	// matching this route's existing lifecycle-action disclosure. On
+	// success it falls through to actionDispatch: no case exists yet for
+	// api.AgentActionKeys (task 2.2 adds one), so the switch's own
+	// `default: NotFound(w, "Action")` answers an authorized call exactly
+	// like any other not-yet-implemented action — not because it was
+	// denied.
+	//
+	// No separate nil-identity guard: authorizeAgentKeys already fails
+	// closed (keys_denied) on a nil identity, and the shared auth
+	// middleware answers an unauthenticated request with 401 before this
+	// handler ever runs — an extra guard here would be dead code.
+	if action == api.AgentActionKeys {
+		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		decision := s.authorizeAgentKeys(r, targetAgent)
+		if !decision.Allowed {
+			writeAgentKeysAuthzDenial(w, decision)
+			return
+		}
 		goto actionDispatch
 	}
 

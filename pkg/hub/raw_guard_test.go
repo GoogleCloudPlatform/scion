@@ -802,8 +802,15 @@ func TestHandleAgentMessage_LogCapture_RawContentRedacted(t *testing.T) {
 	const secret = "HANDLE-AGENT-MESSAGE-RAW-SECRET-P8V2X"
 
 	t.Run("raw message content is redacted", func(t *testing.T) {
-		srv, _, _, sender, target, _, _ := deliverySetup(t)
+		// captureSlog must run before deliverySetup: deliverySetup's
+		// testServer call binds the server's subsystem message logger
+		// (logging.Subsystem, pkg/util/logging) to whatever slog.Default()
+		// is at that moment. That binding does not follow a later
+		// slog.SetDefault swap, so calling captureSlog afterward would leave
+		// the "message received for delivery" log line — the one carrying
+		// message_content — writing to the pre-swap logger instead of buf.
 		buf := captureSlog(t)
+		srv, _, _, sender, target, _, _ := deliverySetup(t)
 
 		sm := baseRawStructuredMessage(sender, target, secret)
 		rr := sendAgentDMWithMsg(t, srv, sender, target, sm, MessageRequest{})
@@ -813,8 +820,9 @@ func TestHandleAgentMessage_LogCapture_RawContentRedacted(t *testing.T) {
 	})
 
 	t.Run("non-raw message content is not redacted (control)", func(t *testing.T) {
-		srv, _, _, sender, target, _, _ := deliverySetup(t)
+		// See the ordering note in the sibling subtest above.
 		buf := captureSlog(t)
+		srv, _, _, sender, target, _, _ := deliverySetup(t)
 
 		sm := baseRawStructuredMessage(sender, target, secret)
 		sm.Raw = false
