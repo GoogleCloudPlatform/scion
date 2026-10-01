@@ -1,5 +1,5 @@
 variable "hub_name" {
-  description = "Hub name. Also the namespace name, and the base for the PV/PVC/Job names (\"<hub_name>-nfs\", \"<hub_name>-nfs-init\")."
+  description = "Hub name. Also the namespace name, and the base for the PV/PVC names (\"<hub_name>-nfs\") and the nfs-init Job's generated name prefix (\"<hub_name>-nfs-init-\")."
   type        = string
 
   validation {
