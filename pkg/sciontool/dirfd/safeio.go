@@ -194,22 +194,22 @@ const (
 
 	// TruncateInPlaceOrCreate refuses an existing symlink or any other
 	// non-regular leaf exactly like RefuseSymlink does, but when the leaf
-	// already exists AS a regular file, WriteFileNoFollow truncates and
-	// rewrites that file IN PLACE (open O_WRONLY|O_TRUNC|O_NOFOLLOW through
-	// the same already-open parent dirFd, no create-in-tmp-then-rename)
-	// instead of atomically replacing it. A missing leaf is still created
-	// via the ordinary create-then-rename path below, since there is
-	// nothing yet to write in place.
+	// already exists AS a regular file, WriteFileNoFollow rewrites that
+	// file IN PLACE: it reopens the leaf O_WRONLY|O_NOFOLLOW|O_NONBLOCK|
+	// O_CLOEXEC through the same already-open parent dirFd — deliberately
+	// without O_TRUNC — fstats that SAME fd, refuses a non-regular or
+	// hardlinked (Nlink != 1) leaf, and only then Ftruncates and rewrites
+	// it; there is no create-in-tmp-then-rename. A missing leaf is still
+	// created via the ordinary create-then-rename path below, since there
+	// is nothing yet to write in place.
 	//
 	// Trade-off (present tense): writing in place gives up
 	// WriteFileNoFollow's usual crash-atomicity for an existing regular
-	// leaf — a crash mid-write can leave the file truncated with only part
-	// of the new content on disk. This policy exists because the leaf may
-	// be bind-mounted: replacing a bind-mounted regular file's directory
-	// entry with a freshly created one via rename(2) fails EBUSY (the mount
-	// cannot follow the entry to a new inode), so create+rename is not an
-	// option there, and truncating the existing inode in place is the only
-	// way to update its content without unmounting it.
+	// leaf. This policy exists because the leaf may be bind-mounted:
+	// replacing a bind-mounted regular file's directory entry via
+	// rename(2) fails EBUSY, so create+rename is not an option there, and
+	// truncating the existing inode in place is the only way to update
+	// its content without unmounting it.
 	//
 	// This is deliberately its own opt-in policy value, not a change to
 	// ReplaceLeaf's or RefuseSymlink's own behavior: every other
