@@ -316,7 +316,7 @@ export class ScionAdminExperiments extends LitElement {
   private renderAttribution(): ReturnType<typeof html> | typeof nothing {
     if (!this.updatedAt) return nothing;
     return html`<p class="attribution">
-      Last changed by ${this.updatedBy} at
+      Last changed by ${this.updatedBy || 'unknown'} at
       <span title=${this.updatedAt}>${formatAttributionTime(this.updatedAt)}</span>
     </p>`;
   }

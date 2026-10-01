@@ -247,6 +247,36 @@ describe('scion-admin-experiments', () => {
     expect(timeSpan?.textContent).toBe('not-a-date');
   });
 
+  it('shows "unknown" for the attribution name if updated_by is null while updated_at is set', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(makeResponse({ updated_at: '2026-09-01T00:00:00Z', updated_by: null }))
+        )
+      )
+    );
+    element = await createElement();
+    await activate(element);
+
+    expect(shadowText(element)).toContain('Last changed by unknown at');
+  });
+
+  it('shows "unknown" for the attribution name if updated_by is an empty string', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(makeResponse({ updated_at: '2026-09-01T00:00:00Z', updated_by: '' }))
+        )
+      )
+    );
+    element = await createElement();
+    await activate(element);
+
+    expect(shadowText(element)).toContain('Last changed by unknown at');
+  });
+
   it('does not show attribution when there is no stored row', async () => {
     vi.stubGlobal(
       'fetch',
