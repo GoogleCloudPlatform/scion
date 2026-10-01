@@ -12,26 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build integration
+//go:build !integration
 
 package hub
 
 import (
 	"os"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
-// TestMain isolates $HOME (see isolateTestHome in
-// home_isolation_helpers_test.go) in addition to the existing ent test
-// database setup, so integration-tagged pkg/hub tests keep scion state off
-// the real developer/agent HOME (ptone/scion#2417).
+// TestMain isolates $HOME for the whole (non-integration) pkg/hub test
+// binary so tests keep scion state off the real developer/agent HOME (see
+// ptone/scion#2417). The integration build has its own TestMain in
+// main_integration_test.go, which applies the same isolation alongside the
+// ent test database setup — Go allows only one TestMain per package per
+// build, so the two are kept behind mutually exclusive build tags.
 func TestMain(m *testing.M) {
 	teardown := isolateTestHome()
-	enttest.MainSetup()
 	code := m.Run()
-	enttest.MainTeardown()
 	teardown()
 	os.Exit(code)
 }
