@@ -1620,21 +1620,58 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 	return best
 }
 
-// txCreateRoleBinding and txDeleteRoleBinding are thin forwarding helpers so
-// that project_membership_set.go's atomic SetMemberRoles engine (ptone/scion
-// #2529 P1) never calls tx.CreateRoleBinding/tx.DeleteRoleBinding directly.
-// They keep every direct role-binding mutation call in pkg/hub enumerable
-// within this one file, which is the exemption TestRS1_AST_BypassPathsDocumented
-// (rs1_extended_test.go) already grants to "the membership service itself" —
-// SetMemberRoles is that same service, split into a second file only to keep
-// this file's churn low (design.md §3.2), so it reuses the exemption through
-// these forwarders instead of needing its own allowlist entry.
-func (svc *ProjectMembershipService) txCreateRoleBinding(ctx context.Context, tx store.Store, rb *store.RoleBinding) (*store.RoleBinding, error) {
-	return tx.CreateRoleBinding(ctx, rb)
-}
+// applyRolePlanTx applies one rolePlan's mutations inside an open
+// SetMemberRoles transaction (ptone/scion#2529 P1, project_membership_set.go):
+// every Remove is deleted, then every Create is created (D4 partial unique
+// index ordering, design.md §3.2 Phase T step 5). The new binding half of
+// plan.BuiltInChange, if any, inherits NotBefore/ExpiresAt from the old
+// binding it replaces; every other create uses notBefore/expiresAt as given.
+//
+// This is the ONLY place SetMemberRoles mutates role bindings, and it is a
+// purpose-named step — not a reusable forwarder — so the authzop mutation
+// catalog (catalog.go) can classify it as exactly what it is: the governed
+// delete-then-create step of the membership service's "set roles for
+// principal" engine (review r1 F3). By the time this is called,
+// SetMemberRoles has already run the credential gate, the governance matrix
+// / custom-role authority (design-d3-addendum.md) including the F1
+// role_binding.* structural guard, CanDelegate and the last-owner check —
+// the same ordering AddMember/UpdateMemberRole/TransferOwnership use before
+// replaceBindingTx above. A dedicated OperationID (e.g.
+// project.membership.set) is deferred: wiring one needs a route_metadata.go
+// entry, out of scope for P1 (ptone/scion#2529).
+//
+// Returns the created bindings keyed by role definition ID, for the caller's
+// audit rows and built-in-swap bookkeeping.
+func (svc *ProjectMembershipService) applyRolePlanTx(ctx context.Context, tx store.Store, plan rolePlan, principalType, principalID, projectID, createdBy string, notBefore, expiresAt *time.Time) (map[string]*store.RoleBinding, error) {
+	for _, b := range plan.Remove {
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			return nil, fmt.Errorf("delete binding %s: %w", b.ID, err)
+		}
+	}
 
-func (svc *ProjectMembershipService) txDeleteRoleBinding(ctx context.Context, tx store.Store, id string) error {
-	return tx.DeleteRoleBinding(ctx, id)
+	created := make(map[string]*store.RoleBinding, len(plan.Create))
+	for _, d := range plan.Create {
+		nb := &store.RoleBinding{
+			RoleDefinitionID: d.ID,
+			PrincipalType:    principalType,
+			PrincipalID:      principalID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          projectID,
+			CreatedBy:        createdBy,
+			NotBefore:        notBefore,
+			ExpiresAt:        expiresAt,
+		}
+		if plan.BuiltInChange != nil && plan.BuiltInChange.New.ID == d.ID {
+			nb.NotBefore = plan.BuiltInChange.Old.NotBefore
+			nb.ExpiresAt = plan.BuiltInChange.Old.ExpiresAt
+		}
+		cb, err := tx.CreateRoleBinding(ctx, nb)
+		if err != nil {
+			return nil, fmt.Errorf("create binding for role %s: %w", d.ID, err)
+		}
+		created[d.ID] = cb
+	}
+	return created, nil
 }
 
 // enforceLastOwnerTx checks that at least two active direct owners exist,
