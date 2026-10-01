@@ -215,8 +215,19 @@ is evaluated on the **human principal at delivery time**.
   by a project owner does not pierce.
 
 - **`none` is sealed.** Only super-admin can reach `none`-mode agents on the
-  message plane. Project owners and lineage users retain `attach`/PTY access
-  (mode governs only the message plane), but cannot deliver messages.
+  message plane. The agent's creator, users in its ancestry chain, and
+  anyone else holding `agent.attach` on it directly keep `attach`/PTY access
+  and the keys operation (`POST /:id/keys`; mode governs only the message
+  plane), but cannot deliver messages. **Project owners and admins do not
+  get this through their role** — `agent.attach` is explicitly excluded
+  from what those roles grant (see
+  [Permissions & Policy](/scion/hosted/ha/permissions/#access-control--authorization)) —
+  so a project owner who is not the agent's creator or in its ancestry
+  chain is sealed out of `none`-mode agents the same as anyone else without
+  a direct grant. The `scion keys` CLI moves onto the keys operation with a
+  planned follow-up change — until then it sends through the deprecated
+  `message`/`raw` transport and is still subject to this same `none`-mode
+  seal.
 
 ---
 
@@ -250,8 +261,10 @@ This is a quarantine kill-switch independent of the agent's role.
 - Delivery to a newly-quarantined agent fails closed. The sender receives a
   system-plane notice about the delivery failure.
 - **Super-admin** can still reach quarantined agents.
-- **Attach/PTY** remains available to holders of `agent.attach`. Mode governs
-  only the message plane.
+- **Attach/PTY, and the keys operation (`POST /:id/keys`),** remain available
+  to holders of `agent.attach`. Mode governs only the message plane. (The
+  `scion keys` CLI moves onto that operation with a planned follow-up change;
+  until then it is still gated the same as `message --raw`.)
 - **System-plane** messages (scheduled events, lifecycle notifications)
   continue to be delivered.
 
