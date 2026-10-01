@@ -108,6 +108,14 @@ function parseDuration(s: string): number {
 }
 
 /**
+ * How long to show the client-side "deleted" state before SPA-navigating
+ * away, after a successful delete (or an SSE `deleted` event for this
+ * agent). Exported (rather than a magic number) so tests can reason about
+ * it and use fake timers.
+ */
+export const DELETE_REDIRECT_DELAY_MS = 1000;
+
+/**
  * Format seconds as "Xh Ym Zs".
  */
 function formatDurationHMS(totalSeconds: number): string {
@@ -144,6 +152,14 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private actionLoading: Record<string, boolean> = {};
+
+  /**
+   * True once this agent has been deleted (either by this page or by an
+   * SSE `deleted` event). Shows a brief client-side-only "deleted" view
+   * before the SPA redirect fires.
+   */
+  @state()
+  private deleted = false;
 
   @state()
   private userNotifications: Notification[] = [];
@@ -609,6 +625,8 @@ export class ScionPageAgentDetail extends LitElement {
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  /** Pending SPA-redirect timer for the deleted state; cancellable on disconnect. */
+  private deleteRedirectTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -637,13 +655,48 @@ export class ScionPageAgentDetail extends LitElement {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
     }
+    if (this.deleteRedirectTimer) {
+      clearTimeout(this.deleteRedirectTimer);
+      this.deleteRedirectTimer = null;
+    }
   }
 
   private onAgentsUpdated(): void {
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
+      return;
     }
+    // The agent was present and is now gone from state — it was removed by
+    // an SSE `deleted` event (deleted elsewhere). Show the same deleted
+    // state and SPA-redirect as a delete initiated from this page.
+    if (!updatedAgent && this.agent && !this.deleted) {
+      this.showDeletedStateThenRedirect();
+    }
+  }
+
+  /** Dispatch SPA navigation via the document-level nav-click listener. */
+  private navigateViaSpa(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
+    );
+  }
+
+  /**
+   * Show a brief client-side-only "deleted" state, then SPA-navigate to the
+   * project page (or /agents if there is no project). Used both for a
+   * delete/force-delete initiated from this page and for an SSE `deleted`
+   * event removing this agent elsewhere. The timer is cancellable so a
+   * disconnect (or a test using fake timers) does not leak it.
+   */
+  private showDeletedStateThenRedirect(): void {
+    if (this.deleted) return;
+    this.deleted = true;
+    const target = this.project ? `/projects/${this.project.id}` : '/agents';
+    this.deleteRedirectTimer = setTimeout(() => {
+      this.deleteRedirectTimer = null;
+      this.navigateViaSpa(target);
+    }, DELETE_REDIRECT_DELAY_MS);
   }
 
   private onProjectsUpdated(): void {
@@ -887,14 +940,14 @@ export class ScionPageAgentDetail extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
-              window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
+              this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
-        window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
+        this.showDeletedStateThenRedirect();
       } catch (err) {
         console.error('Failed to delete agent:', err);
         showToast(err instanceof Error ? err.message : 'Failed to delete agent');
@@ -1038,6 +1091,10 @@ export class ScionPageAgentDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    if (this.deleted) {
+      return this.renderDeletedState();
+    }
+
     if (this.loading) {
       return this.renderLoading();
     }
@@ -2549,6 +2606,21 @@ export class ScionPageAgentDetail extends LitElement {
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading agent...</p>
+      </div>
+    `;
+  }
+
+  /**
+   * Brief client-side-only state shown after a successful delete (or an
+   * SSE `deleted` event for this agent), before the SPA redirect fires.
+   * Action buttons are not rendered here, so there is nothing left to
+   * click on the way out.
+   */
+  private renderDeletedState() {
+    return html`
+      <div class="loading-state" data-testid="agent-deleted-state">
+        <sl-icon name="trash"></sl-icon>
+        <p>Agent deleted. Redirecting…</p>
       </div>
     `;
   }
