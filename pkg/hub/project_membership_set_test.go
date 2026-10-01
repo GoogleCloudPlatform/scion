@@ -17,11 +17,16 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,12 +179,27 @@ func mmrAuditRows(t *testing.T, s store.Store, projectID string) []*store.Mutati
 	return rows
 }
 
+// mmrEnableRequestLogging installs a request logger on srv so
+// RequestLogMiddleware populates *logging.RequestMeta (and therefore a real,
+// non-empty RequestID) on every request's context — which is what
+// logging.RequestIDFromContext / createAuditRecord read into
+// MutationAuditRecord.CorrelationID. testServer does not set a request
+// logger by default (review r1 F4: without one, CorrelationID is always ""
+// in tests, making cross-row correlation assertions vacuous). Discards
+// output; only the side effect of installing RequestMeta is wanted here.
+func mmrEnableRequestLogging(t *testing.T, srv *Server) {
+	t.Helper()
+	srv.SetRequestLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	t.Cleanup(func() { srv.SetRequestLogger(nil) })
+}
+
 // ---------------------------------------------------------------------------
 // Core atomic set/remove-all behavior
 // ---------------------------------------------------------------------------
 
 func TestSetMemberRoles_PutAddsBuiltInAndCustomAtomically(t *testing.T) {
 	f := setupMMRFixture(t)
+	mmrEnableRequestLogging(t, f.srv) // F4: so CorrelationID is a real, non-empty, shared request ID.
 	target := tid(t.Name() + "-target")
 	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
 		ID: target, Email: target + "@test.com", DisplayName: "Target", Role: "member", Status: "active",
@@ -200,9 +220,93 @@ func TestSetMemberRoles_PutAddsBuiltInAndCustomAtomically(t *testing.T) {
 		}
 	}
 	require.Len(t, addRows, 2)
+	require.NotEmpty(t, addRows[0].CorrelationID, "F4: a real request logger must produce a non-empty CorrelationID")
 	assert.Equal(t, addRows[0].CorrelationID, addRows[1].CorrelationID, "both rows share one CorrelationID")
 	assert.Contains(t, addRows[0].AfterSummary+addRows[1].AfterSummary, `"roleKind":"builtin"`)
 	assert.Contains(t, addRows[0].AfterSummary+addRows[1].AfterSummary, `"roleKind":"custom"`)
+
+	// F4: the custom-grant row records the CanDelegate result and the
+	// authority (Via) it was granted through (design.md §3.4, addendum §4
+	// item 5) — not just roleKind.
+	var customRow *store.MutationAuditRecord
+	for _, r := range addRows {
+		if strings.Contains(r.AfterSummary, `"roleKind":"custom"`) {
+			customRow = r
+		}
+	}
+	require.NotNil(t, customRow)
+	assert.Equal(t, "allowed", customRow.CanDelegateResult)
+	assert.Contains(t, customRow.AfterSummary, `"authority":"project_owner"`)
+}
+
+// TestSetMemberRoles_Audit_RemoveRecordsRoleKindAndAuthority is F4 (review
+// r1): a project_member_remove row for a custom binding must carry
+// roleKind:"custom" and the authority (Via) it was originally granted
+// through, not just the bare role name.
+func TestSetMemberRoles_Audit_RemoveRecordsRoleKindAndAuthority(t *testing.T) {
+	f := setupMMRFixture(t)
+	mmrEnableRequestLogging(t, f.srv)
+
+	require.Equal(t, http.StatusOK,
+		putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID,
+			[]string{f.memberRD.ID, f.withinCeiling.ID}, nil).Code)
+	beforeAudit := len(mmrAuditRows(t, f.store, f.projectID))
+
+	rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID,
+		[]string{f.memberRD.ID}, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rows := mmrAuditRows(t, f.store, f.projectID)
+	require.Greater(t, len(rows), beforeAudit)
+	var removeRow *store.MutationAuditRecord
+	for _, r := range rows {
+		if r.MutationType == "project_member_remove" && strings.Contains(r.BeforeSummary, `"roleKind":"custom"`) {
+			removeRow = r
+		}
+	}
+	require.NotNil(t, removeRow, "expected a project_member_remove row for the removed custom binding")
+	assert.NotEmpty(t, removeRow.CorrelationID)
+	assert.Contains(t, removeRow.BeforeSummary, `"authority":"project_owner"`)
+}
+
+// TestSetMemberRoles_Audit_DeleteAllRecordsRoleKind is F4 (review r1):
+// DELETE-all writes one project_member_remove row per binding, each with the
+// correct roleKind (builtin vs custom), sharing one CorrelationID.
+func TestSetMemberRoles_Audit_DeleteAllRecordsRoleKind(t *testing.T) {
+	f := setupMMRFixture(t)
+	mmrEnableRequestLogging(t, f.srv)
+
+	require.Equal(t, http.StatusOK,
+		putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID,
+			[]string{f.adminRD.ID, f.withinCeiling.ID}, nil).Code)
+	beforeAudit := len(mmrAuditRows(t, f.store, f.projectID))
+
+	rec := deleteMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	rows := mmrAuditRows(t, f.store, f.projectID)
+	var removeRows []*store.MutationAuditRecord
+	for _, r := range rows[beforeAudit:] {
+		if r.MutationType == "project_member_remove" {
+			removeRows = append(removeRows, r)
+		}
+	}
+	require.Len(t, removeRows, 2, "one row per removed binding (builtin admin + custom)")
+
+	var sawBuiltin, sawCustom bool
+	for _, r := range removeRows {
+		assert.NotEmpty(t, r.CorrelationID)
+		assert.Equal(t, removeRows[0].CorrelationID, r.CorrelationID, "all DELETE-all rows share one CorrelationID")
+		switch {
+		case strings.Contains(r.BeforeSummary, `"roleKind":"builtin"`):
+			sawBuiltin = true
+		case strings.Contains(r.BeforeSummary, `"roleKind":"custom"`):
+			sawCustom = true
+			assert.Contains(t, r.BeforeSummary, `"authority":"project_owner"`)
+		}
+	}
+	assert.True(t, sawBuiltin, "expected a roleKind:builtin remove row")
+	assert.True(t, sawCustom, "expected a roleKind:custom remove row")
 }
 
 func TestSetMemberRoles_PutChangesBuiltInKeepsCustom(t *testing.T) {
@@ -463,6 +567,14 @@ func TestSetMemberRoles_Escalation_CanDelegatePerBindingNotPerRequest(t *testing
 // Escalation (v) / acceptance A2: a custom-only holder cannot bypass the
 // built-in governance matrix, even if their custom role carries
 // role_binding.create.
+//
+// L1 (review r1): this is a forward guard. Today, custom authority is ALSO
+// system-scope-only (customRoleAuthorityFromStore / F2), so this test cannot
+// yet distinguish "the built-in matrix bypass is system-scope-only" from "no
+// bypass exists at all" — it will start doing real work once a later
+// authority model (design-d3-addendum.md §3 option (b)) gives custom roles a
+// project-scope path. It covers both halves of A2 ("set or remove"): setting
+// a built-in role, and removing one via DELETE-all.
 // ---------------------------------------------------------------------------
 
 func TestSetMemberRoles_Escalation_CustomOnlyHolderCannotChangeBuiltIn(t *testing.T) {
@@ -507,6 +619,16 @@ func TestSetMemberRoles_Escalation_CustomOnlyHolderCannotChangeBuiltIn(t *testin
 		[]string{f.adminRD.ID}, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeRoleAssignmentForbidden)
+	assert.Contains(t, rec.Body.String(), "actor has no project role", "proves the request reached reevaluateActorTx's hub-override branch, not an earlier layer with the same code")
+
+	// L1: the A2 guard also covers REMOVING a built-in role, not just setting
+	// one. f.member holds only the built-in project-member binding, so
+	// DELETE-all here is a built-in-role removal.
+	rec = deleteMemberRoles(t, f.srv, custodianUser, f.projectID, "user", f.member.ID)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeRoleAssignmentForbidden)
+	assert.Contains(t, rec.Body.String(), "actor has no project role")
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 1, "the member binding must survive the denied DELETE-all")
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +712,35 @@ func TestSetMemberRoles_Eligibility_CustomForAgentRejected(t *testing.T) {
 		[]string{f.memberRD.ID, f.withinCeiling.ID}, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodePrincipalIneligible)
+}
+
+// TestSetMemberRoles_Eligibility_CustomForAgentRejected_HubOverride is L2
+// (review r1): D1 (new custom roles blocked for agent principals) applies to
+// EVERY actor, including the hub role_binding.* override — not just the
+// owner the sibling test above exercises. principalEligibleForRole runs
+// before any actor-authority check (design-d3-addendum.md D1 / §4 item 6),
+// so the hub-override actor gets the same 400 principal_ineligible, never a
+// 403.
+func TestSetMemberRoles_Eligibility_CustomForAgentRejected_HubOverride(t *testing.T) {
+	f := setupMMRFixture(t)
+	ctx := context.Background()
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	require.NoError(t, f.store.CreateUser(ctx, &store.User{
+		ID: hubAdminID, Email: hubAdminID + "@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.store, hubAdminID)
+	mmrSeedHubAdmin(t, f.store, hubAdminID)
+
+	agentID := tid(t.Name() + "-agent")
+	svcCtx := mmrServiceCtx(hubAdminID, hubAdminID+"@test.com")
+	_, decision := f.srv.membershipService.SetMemberRoles(svcCtx, SetMemberRolesRequest{
+		ProjectID: f.projectID, PrincipalType: "agent", PrincipalID: agentID,
+		Actor:          mmrServiceIdentity(hubAdminID, hubAdminID+"@test.com"),
+		DesiredRoleIDs: []string{f.memberRD.ID, f.withinCeiling.ID},
+	})
+	require.NotNil(t, decision)
+	assert.Equal(t, ErrCodePrincipalIneligible, decision.DenialCode, "%+v", decision)
+	assert.Equal(t, http.StatusBadRequest, decision.HTTPStatus)
 }
 
 // TestSetMemberRoles_Eligibility_KeepingCustomOnAgentAllowed is design-d3-
@@ -879,24 +1030,51 @@ func TestSetMemberRoles_Addressing_DeleteOnPrincipalWithNoBindings404(t *testing
 // Concurrency
 // ---------------------------------------------------------------------------
 
+// mmrConcurrentPut issues one PUT …/members/principals/{type}/{id} and
+// returns its status code and any setup error, instead of calling require
+// internally (unlike putMemberRoles/doRequestAsUser). N4 (review r1):
+// require's t.FailNow is unsafe when called from a goroutine other than the
+// one running the test function, so concurrency tests must collect results
+// and assert on them back on the test goroutine after wg.Wait().
+func mmrConcurrentPut(srv *Server, actor *store.User, projectID, principalType, principalID string, roleIDs []string) (int, error) {
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		actor.ID, actor.Email, actor.DisplayName, actor.Role, ClientTypeWeb,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("generate token: %w", err)
+	}
+	body, err := json.Marshal(map[string]interface{}{"roleDefinitionIds": roleIDs})
+	if err != nil {
+		return 0, fmt.Errorf("marshal body: %w", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, mmrPrincipalPath(projectID, principalType, principalID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec.Code, nil
+}
+
 func TestSetMemberRoles_Concurrency_ConflictingPUTs(t *testing.T) {
 	f := setupMMRFixture(t)
 
 	var wg sync.WaitGroup
 	codes := make([]int, 2)
+	errs := make([]error, 2)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID, []string{f.adminRD.ID}, nil)
-		codes[0] = rec.Code
+		codes[0], errs[0] = mmrConcurrentPut(f.srv, f.owner, f.projectID, "user", f.member.ID, []string{f.adminRD.ID})
 	}()
 	go func() {
 		defer wg.Done()
-		rec := putMemberRoles(t, f.srv, f.owner, f.projectID, "user", f.member.ID, []string{f.withinCeiling.ID, f.memberRD.ID}, nil)
-		codes[1] = rec.Code
+		codes[1], errs[1] = mmrConcurrentPut(f.srv, f.owner, f.projectID, "user", f.member.ID, []string{f.withinCeiling.ID, f.memberRD.ID})
 	}()
 	wg.Wait()
 
+	for i, err := range errs {
+		require.NoError(t, err, "request %d setup", i)
+	}
 	for _, code := range codes {
 		assert.True(t, code == http.StatusOK || code == http.StatusConflict,
 			"expected 200 (serialized winner) or 409 membership_changed, got %d", code)
