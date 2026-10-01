@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -2523,10 +2524,6 @@ var startProcreapReaperOnce sync.Once
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
 	startProcreapReaperOnce.Do(procreap.StartReaper)
 
-	// Prime pkg/sciontool/log's lazy initialization synchronously before
-	// fanning out, matching production order: RunInit logs several lines
-	// before ever reaching configureSharedWorkspaceGit, so log.Init() has
-	// already run by the time this function's own log.Info call executes.
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
 
@@ -2541,11 +2538,13 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 
 	var wg sync.WaitGroup
 	gotContents := make([]string, iterations)
+	errs := make([]error, iterations)
 	for i := 0; i < iterations; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			if err := configureSharedWorkspaceGit(agentHomes[i], 0, 0, false); err != nil {
+				errs[i] = fmt.Errorf("configureSharedWorkspaceGit: %w", err)
 				return
 			}
 			gitconfigPath := filepath.Join(agentHomes[i], ".gitconfig")
@@ -2561,6 +2560,7 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 			// race at all.
 			content, err := os.ReadFile(gitconfigPath)
 			if err != nil {
+				errs[i] = fmt.Errorf("os.ReadFile: %w", err)
 				return
 			}
 			gotContents[i] = string(content)
@@ -2570,6 +2570,10 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 
 	const wantLine = "email = agent@scion.dev"
 	for i, got := range gotContents {
+		if errs[i] != nil {
+			t.Errorf("iteration %d: %v", i, errs[i])
+			continue
+		}
 		if !strings.Contains(got, wantLine) {
 			t.Errorf("iteration %d: gitconfig content = %q, want it to contain %q (a managed-exec regression would race the reaper and leave this key unset)", i, got, wantLine)
 		}

@@ -117,9 +117,9 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 
 func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.stopCalls++
 	m.lastStopAgentID = agentID
-	defer m.mu.Unlock()
 	return m.stopErr
 }
 
