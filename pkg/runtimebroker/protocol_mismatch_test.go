@@ -121,6 +121,9 @@ func (m *protocolMockManager) MessageRaw(ctx context.Context, agentID, projectID
 func (m *protocolMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }
+func (m *protocolMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
 func (m *protocolMockManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
 	return nil, nil
 }

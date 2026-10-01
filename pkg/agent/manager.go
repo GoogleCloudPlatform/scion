@@ -109,6 +109,12 @@ type Manager interface {
 	// above.
 	SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 
+	// SendKeysLocal is SendKeys's additive local-scope sibling for a project
+	// never linked to a Hub project ID (ptone/scion#2198/#2468 finding 3):
+	// same delivery core, scoped by the resolved local project-config
+	// directory path instead. See AgentManager.SendKeysLocal's doc comment.
+	SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error
+
 	// Watch returns a channel of status updates for an agent
 	Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error)
 
@@ -278,7 +284,7 @@ func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (tar
 	if len(candidates) == 0 {
 		candidates = unlabeled
 	}
-	candidates = dedupeByContainerID(candidates)
+	candidates = DedupeByContainerID(candidates)
 	switch len(candidates) {
 	case 0:
 		return api.AgentInfo{}, false, nil
@@ -297,7 +303,16 @@ func agentMatchesName(a api.AgentInfo, agentID string) bool {
 		strings.EqualFold(a.Name, agentID)
 }
 
-func dedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
+// DedupeByContainerID collapses duplicate listings of the same container
+// (some runtime backends can report an entry more than once for a single
+// container) down to one entry per container identity, keyed by
+// ContainerID when present, falling back to a composite of name/project
+// fields for an entry with no container (e.g. a "created" but not yet
+// started agent). Exported so callers outside this package (e.g. CLI
+// target-resolution code) that need the exact same de-duplication rule
+// selectAgentTarget and resolveKeysTarget already apply internally do not
+// need to keep a second copy of it.
+func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
 	}
@@ -761,6 +776,33 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 	return nil
 }
 
+// keysScope pins a SendKeys/SendKeysLocal call to exactly one identity
+// dimension — Hub-linked project ID or local project-config directory path
+// (never a project name) — matching whichever entry point built it.
+// resolveKeysTarget uses whichever field is set as the List filter; see
+// .design/agent-keys-contract.md §4.3 for the full invariant, including why
+// the path dimension compares through projectkeys.ResolvedPathEqual.
+type keysScope struct {
+	projectID   string
+	projectPath string
+}
+
+// filter returns the single label key/value this scope resolves containers
+// by, for use as one entry in resolveKeysTarget's List filter.
+func (s keysScope) filter() (key, value string) {
+	if s.projectPath != "" {
+		return projectkeys.LabelProjectPath, s.projectPath
+	}
+	return projectkeys.LabelProjectID, s.projectID
+}
+
+// empty reports whether neither identity dimension is set — the one case
+// resolveKeysTarget's callers (SendKeys, SendKeysLocal) must reject before
+// ever reaching List, rather than resolving against an unscoped filter.
+func (s keysScope) empty() bool {
+	return s.projectID == "" && s.projectPath == ""
+}
+
 // SendKeys sends the exact byte-for-byte keys string to an agent's tmux
 // session, with no trailing Enter, no paste buffer and no debounce — the
 // frozen primitive for the dedicated broker /keys route
@@ -828,6 +870,9 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 // inspecting its wrapped errors — see ErrKeysNotStarted's doc comment,
 // agentkeys.BrokerRequest's doc comment, and
 // .design/agent-keys-contract.md §4.3.
+//
+// See SendKeysLocal for the additive local-scope sibling that shares this
+// entire delivery core (sendKeysCore) under a different identity dimension.
 func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	// Reject malformed/oversized/empty keys before any resolution or Exec
 	// attempt — contract §2.3 ("an empty string is rejected before
@@ -841,11 +886,54 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	if runtimeNamesWithoutKeysSupport[m.Runtime.Name()] {
 		return ErrKeysUnsupported
 	}
-	if projectID == "" || expectedAgentID == "" {
+	scope := keysScope{projectID: projectID}
+	if scope.empty() || expectedAgentID == "" {
 		return agentkeys.ErrTargetNotFound
 	}
+	return m.sendKeysCore(ctx, scope, agentSlug, expectedAgentID, keys)
+}
 
-	target, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+// SendKeysLocal is SendKeys's additive local-scope sibling (agent-raw design
+// ruling, ptone/scion#2198/#2468 finding 3; see .design/agent-keys-contract.md
+// §3/§4.3 for the full rationale and invariants): it serves a purely local
+// project that was never linked to a Hub project, so its containers carry no
+// "scion.project_id" label at all. It shares SendKeys's entire delivery core
+// (sendKeysCore) unchanged — same atomic binding, lock, version/readiness
+// checks, re-verification, deadline enforcement, no-replay, error
+// classification — differing only in the scope dimension.
+//
+// projectPath must be the non-empty, already-resolved project-config
+// directory from config.GetResolvedProjectDir (never a project name: two
+// directories can share one). The caller resolves that scope and selects
+// the single target agent within it before calling, exactly as for
+// SendKeys; SendKeysLocal never falls back to an unlabeled or
+// name-only match the way selectAgentTarget (Stop/Delete) does, and an
+// empty projectPath or expectedAgentID fails closed to
+// agentkeys.ErrTargetNotFound, the same as SendKeys. The two entry points'
+// scopes are never mixed or retried into one another.
+func (m *AgentManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
+	if err := agentkeys.ValidateKeys(keys); err != nil {
+		return err
+	}
+	if runtimeNamesWithoutKeysSupport[m.Runtime.Name()] {
+		return ErrKeysUnsupported
+	}
+	scope := keysScope{projectPath: projectPath}
+	if scope.empty() || expectedAgentID == "" {
+		return agentkeys.ErrTargetNotFound
+	}
+	return m.sendKeysCore(ctx, scope, agentSlug, expectedAgentID, keys)
+}
+
+// sendKeysCore is the shared delivery core behind both SendKeys and
+// SendKeysLocal, identical in every step except which keysScope resolution
+// is pinned to. See SendKeys's doc comment for the full set of guarantees
+// (atomic identity binding, injection lock, version gate, readiness probe,
+// pre-delivery re-verification, deadline enforcement at each checkpoint,
+// sensitive-exec transport, and error classification) — all of it applies
+// here unchanged, parameterized only by scope.
+func (m *AgentManager) sendKeysCore(ctx context.Context, scope keysScope, agentSlug, expectedAgentID, keys string) error {
+	target, err := m.resolveKeysTarget(ctx, scope, agentSlug, expectedAgentID)
 	if err != nil {
 		return err
 	}
@@ -896,14 +984,14 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	}
 
 	// Re-verify target identity (a correctness hardening): re-resolve with
-	// the same (projectID, agentSlug, expectedAgentID) and require the
-	// result still identifies the same target as the original resolution
+	// the same scope/agentSlug/expectedAgentID and require the result still
+	// identifies the same target as the original resolution
 	// (sameTargetInstance). Nothing here ever delivers to a target other
 	// than the one originally resolved: a second resolveKeysTarget failure
 	// returns its own sentinel or error unchanged (never reclassified), and
 	// only an identity mismatch between the two resolutions itself produces
 	// ErrTargetNotFound.
-	revalidated, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+	revalidated, err := m.resolveKeysTarget(ctx, scope, agentSlug, expectedAgentID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Nothing has been sent at this point: an expiry discovered via
@@ -946,19 +1034,20 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	return nil
 }
 
-// resolveKeysTarget resolves the single container SendKeys must act on and
-// proves, before returning it, that: (a) it is the one and only container
-// matching (projectID, agentSlug); and (b) its "agent_id" label equals
-// expectedAgentID. Callers must pass non-empty projectID/expectedAgentID;
-// resolveKeysTarget does not itself guard against an unscoped lookup (that
-// is enforced once, in SendKeys). Any failure to prove one of these returns
-// the matching agentkeys sentinel (never a slug-only fallback) — see
-// SendKeys's doc comment for why no caller may split this resolution across
-// two separate List calls.
-func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSlug, expectedAgentID string) (api.AgentInfo, error) {
+// resolveKeysTarget resolves the single container sendKeysCore must act on
+// and proves, before returning it, that: (a) it is the one and only
+// container matching (scope, agentSlug); and (b) its "agent_id" label
+// equals expectedAgentID. Callers must pass a non-empty scope (SendKeys and
+// SendKeysLocal both guard this before calling in); resolveKeysTarget does
+// not itself guard against an unscoped lookup. Any failure to prove one of
+// these returns the matching agentkeys sentinel (never a slug-only or
+// project-name-only fallback) — see SendKeys's doc comment for why no
+// caller may split this resolution across two separate List calls.
+func (m *AgentManager) resolveKeysTarget(ctx context.Context, scope keysScope, agentSlug, expectedAgentID string) (api.AgentInfo, error) {
+	filterKey, filterValue := scope.filter()
 	filter := map[string]string{
-		"scion.name":       strings.ToLower(agentSlug),
-		"scion.project_id": projectID,
+		"scion.name": strings.ToLower(agentSlug),
+		filterKey:    filterValue,
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
@@ -971,7 +1060,7 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSl
 			matches = append(matches, a)
 		}
 	}
-	matches = dedupeByContainerID(matches)
+	matches = DedupeByContainerID(matches)
 
 	if len(matches) != 1 {
 		// Zero matches, or more than one distinct container matching the

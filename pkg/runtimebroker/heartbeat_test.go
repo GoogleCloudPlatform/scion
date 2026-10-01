@@ -140,6 +140,10 @@ func (m *heartbeatMockManager) SendKeys(ctx context.Context, projectID, agentSlu
 	return nil
 }
 
+func (m *heartbeatMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+
 func (m *heartbeatMockManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
 	return nil, nil
 }

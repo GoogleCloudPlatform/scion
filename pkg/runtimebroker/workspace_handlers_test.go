@@ -75,6 +75,10 @@ func (m *mockAgentManager) SendKeys(ctx context.Context, projectID, agentSlug, e
 	return nil
 }
 
+func (m *mockAgentManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+
 func (m *mockAgentManager) Watch(ctx context.Context, name string) (<-chan api.StatusEvent, error) {
 	return nil, nil
 }
