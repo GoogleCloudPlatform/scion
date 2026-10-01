@@ -319,9 +319,13 @@ func isNilIdentity(identity Identity) bool {
 	if identity == nil {
 		return true
 	}
+	// reflect.ValueOf(identity) already unwraps the interface to its
+	// concrete dynamic value, so v.Kind() can never itself be
+	// reflect.Interface here — that case is omitted so this list names only
+	// the kinds IsNil can actually observe through this call.
 	v := reflect.ValueOf(identity)
 	switch v.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
 		return v.IsNil()
 	default:
 		return false
