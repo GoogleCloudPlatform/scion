@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,12 +75,69 @@ func (p PoolConfig) apply(db *sql.DB) {
 	}
 }
 
+// withUTCTimezone returns dsn with the modernc.org/sqlite "_timezone" DSN
+// option forced to "UTC", preserving any other query options already
+// present. modernc parses every bound and scanned time.Time through the
+// connection's configured location (sqlite.go, applyQueryParams), so this
+// makes every SQLite time.Time bind and read-back canonical UTC regardless
+// of the process's time.Local — including legacy rows written with a
+// non-UTC zone suffix (tz-refactor design §2.1.2).
+//
+// dsn may be a bare path, an in-memory name (":memory:"), a "file:" URI with
+// or without an existing query, or a DSN that already sets "_timezone": the
+// option is force-replaced because modernc honours only the first value for
+// a repeated key, so a naive append would leave the operator's value in
+// effect.
+func withUTCTimezone(dsn string) string {
+	base, rawQuery, _ := strings.Cut(dsn, "?")
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// An unparsable query string is already an error modernc itself will
+		// surface at open time; don't mask it by discarding it here.
+		values = url.Values{}
+	}
+	values.Set("_timezone", "UTC")
+	return base + "?" + values.Encode()
+}
+
+// utcTimeHook is an Ent mutation hook that converts every time.Time field
+// value being set in a mutation (explicit or defaulted) to UTC before it is
+// persisted. It is redundant with the SQLite DSN "_timezone=UTC" option for
+// values that reach the database, but it also normalises what a
+// create/update echoes back to the caller, and it is the only one of the two
+// mechanisms that does anything on Postgres (field.Time maps to
+// timestamptz there, so the hook's only effect is the echoed-back value; see
+// tz-refactor design §2.1.2).
+func utcTimeHook(next ent.Mutator) ent.Mutator {
+	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+		for _, name := range m.Fields() {
+			v, ok := m.Field(name)
+			if !ok {
+				continue
+			}
+			t, ok := v.(time.Time)
+			if !ok {
+				continue
+			}
+			// Always convert, even when Location() is already time.UTC: a
+			// time.Time can carry a monotonic clock reading (e.g. a bare
+			// time.Now() under a process pinned to UTC by util.PinProcessUTC)
+			// whose String() form appends " m=...". Only .UTC()/.In() strip
+			// it, and doing so unconditionally is cheap and idempotent.
+			if err := m.SetField(name, t.UTC()); err != nil {
+				return nil, fmt.Errorf("utcTimeHook: setting field %q to UTC: %w", name, err)
+			}
+		}
+		return next.Mutate(ctx, m)
+	})
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
 func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
@@ -95,6 +153,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(utcTimeHook)
 	return client, nil
 }
 
@@ -109,7 +168,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 // are connection-scoped; with a larger pool, unprimed connections would not
 // inherit them.
 func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
@@ -127,6 +186,7 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(utcTimeHook)
 	return client, nil
 }
 
@@ -208,6 +268,7 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(utcTimeHook)
 	return client, nil
 }
 
