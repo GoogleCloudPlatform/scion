@@ -238,7 +238,7 @@ func (s *Server) hubDefaultRuntimeAllowed(ctx context.Context, runtimeBrokerID, 
 	if err != nil || broker == nil {
 		slog.Info("hub-default GCP passthrough downgraded to block: runtime broker unavailable",
 			"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
-			"broker", runtimeBrokerID, "profile", profileName)
+			"broker", runtimeBrokerID, "profile", profileName, "error", err)
 		return false, ""
 	}
 	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)

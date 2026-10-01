@@ -3367,7 +3367,16 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// Use opts.Profile for ResolveRuntime so it picks up the same profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
-	resolved := s.runtimeResolver(opts.ProjectPath, opts.Name, opts.Profile)
+	//
+	// runtimeResolver is set to agent.ResolveRuntime by New() and should
+	// never be nil in production; this falls back to the same function so a
+	// Server built without New() (e.g. a test literal) resolves identically
+	// to production instead of panicking.
+	resolver := s.runtimeResolver
+	if resolver == nil {
+		resolver = agent.ResolveRuntime
+	}
+	resolved := resolver(opts.ProjectPath, opts.Name, opts.Profile)
 
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Settings resolved to different runtime",

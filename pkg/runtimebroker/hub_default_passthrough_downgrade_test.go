@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // newTestServerForRuntimeRemap builds a server whose broker-default runtime
@@ -373,6 +374,16 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 	if !slices.Contains(capturedEnv, "SCION_METADATA_MODE=block") {
 		t.Errorf("expected the saved-profile resolution to downgrade to block, got env %v", capturedEnv)
 	}
+}
+
+// TestDowngradeUnverifiedHubDefaultPassthrough_NilEnv proves a nil env does
+// not panic even when every other condition would otherwise trigger the
+// write-the-block-bundle path (requireLocalRuntime true, mode passthrough,
+// and a non-local-container resolved runtime type). No production call site
+// currently passes a nil env — buildStartContext always allocates one — but
+// the function is meant to degrade safely rather than rely on that.
+func TestDowngradeUnverifiedHubDefaultPassthrough_NilEnv(t *testing.T) {
+	downgradeUnverifiedHubDefaultPassthrough(nil, nil, store.GCPMetadataModePassthrough, true, "kubernetes")
 }
 
 // TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers is

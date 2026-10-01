@@ -2981,6 +2981,53 @@ runtimes:
 	}
 }
 
+// TestResolveManagerForOpts_NilRuntimeResolverFallsBack proves that a nil
+// srv.runtimeResolver does not panic when settings resolve to a runtime
+// other than the broker's default. New() always sets runtimeResolver to
+// agent.ResolveRuntime, so this only matters for a Server built without
+// New() (e.g. a test literal, or some future construction path) — but
+// resolveManagerForOpts falls back to that exact same function rather than
+// a stand-in, so the fallback resolves identically to production.
+func TestResolveManagerForOpts_NilRuntimeResolverFallsBack(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectPath := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(projectPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	settingsYAML := `schema_version: "1"
+profiles:
+  apple:
+    runtime: container
+runtimes:
+  container:
+    type: container
+`
+	if err := os.WriteFile(filepath.Join(projectPath, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := newTestServerWithProvisionCapture()
+	srv.config.ForceRuntime = ""
+	srv.runtimeResolver = nil
+
+	opts := api.StartOptions{
+		Name:        "test-agent",
+		Profile:     "apple",
+		ProjectPath: projectPath,
+	}
+
+	// Must not panic.
+	mgr, _ := srv.resolveManagerForOpts(opts)
+
+	// Profile specifies "container" runtime which differs from mock's
+	// "mock", so the fallback must have actually resolved a new manager
+	// rather than silently keeping the default.
+	if mgr == srv.manager {
+		t.Error("expected a different manager when the nil-resolver fallback resolves a different runtime")
+	}
+}
+
 func TestResolveManagerForOpts_ProfileWithSameRuntime(t *testing.T) {
 	// Create a temp project directory with settings that specify the same runtime as the broker
 	tmpDir := t.TempDir()

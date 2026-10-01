@@ -824,8 +824,15 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 //
 // env and envCls are mutated in place. envCls may be nil (the hub did not
 // send classifications for this request); a nil map is left nil, matching
-// classifyBrokerEnv's own rule elsewhere in this file.
+// classifyBrokerEnv's own rule elsewhere in this file. env itself is
+// produced by buildStartContext as a non-nil map on every current call path,
+// but a nil env is handled the same way: with no env there is nothing to
+// downgrade, and writing into a nil map would panic, so a nil env returns
+// early instead.
 func downgradeUnverifiedHubDefaultPassthrough(env map[string]string, envCls map[string]api.EnvKind, currentMetadataMode string, requireLocalRuntime bool, resolvedRuntimeType string) {
+	if env == nil {
+		return
+	}
 	if !requireLocalRuntime || currentMetadataMode != store.GCPMetadataModePassthrough {
 		return
 	}
