@@ -133,6 +133,12 @@ type MembershipDecision struct {
 	DenialCode string
 	Reason     string
 	HTTPStatus int
+	// Details carries structured denial context (e.g. roleDefinitionId,
+	// requiredPermission, currentRoleDefinitionIds) for the PUT/DELETE
+	// principal endpoints (ptone/scion#2529 P1). Additive: nil for every
+	// existing call site, which keeps AddMember/UpdateMemberRole/RemoveMember
+	// responses byte-identical.
+	Details map[string]interface{}
 }
 
 // MembershipResult is the outcome of a successful membership mutation.
@@ -688,7 +694,13 @@ func principalEligibleForRole(principalType, roleName string) bool {
 			principalType == store.RoleBindingPrincipalAgent ||
 			principalType == store.RoleBindingPrincipalGroup
 	default:
-		return false
+		// Custom project-scoped roles (ptone/scion#2529 D1, ruling "block"):
+		// user and group only. A custom binding on an agent is a delegation
+		// grant and stays hub-gated via /admin/role-bindings. This is the
+		// one eligibility switch for custom roles; no other call site may
+		// special-case principal type for custom-role eligibility.
+		return principalType == store.RoleBindingPrincipalUser ||
+			principalType == store.RoleBindingPrincipalGroup
 	}
 }
 
@@ -1606,6 +1618,23 @@ func (svc *ProjectMembershipService) highestAuthorityBindingFromStore(ctx contex
 		}
 	}
 	return best
+}
+
+// txCreateRoleBinding and txDeleteRoleBinding are thin forwarding helpers so
+// that project_membership_set.go's atomic SetMemberRoles engine (ptone/scion
+// #2529 P1) never calls tx.CreateRoleBinding/tx.DeleteRoleBinding directly.
+// They keep every direct role-binding mutation call in pkg/hub enumerable
+// within this one file, which is the exemption TestRS1_AST_BypassPathsDocumented
+// (rs1_extended_test.go) already grants to "the membership service itself" —
+// SetMemberRoles is that same service, split into a second file only to keep
+// this file's churn low (design.md §3.2), so it reuses the exemption through
+// these forwarders instead of needing its own allowlist entry.
+func (svc *ProjectMembershipService) txCreateRoleBinding(ctx context.Context, tx store.Store, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	return tx.CreateRoleBinding(ctx, rb)
+}
+
+func (svc *ProjectMembershipService) txDeleteRoleBinding(ctx context.Context, tx store.Store, id string) error {
+	return tx.DeleteRoleBinding(ctx, id)
 }
 
 // enforceLastOwnerTx checks that at least two active direct owners exist,

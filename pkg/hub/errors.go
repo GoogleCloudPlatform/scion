@@ -217,6 +217,23 @@ const (
 	// so clients (the web terminal pane) can recognise the rejection
 	// reliably and show a specific message (design ptone/scion#2291 §6).
 	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
+
+	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set contains an unknown role definition ID, a
+	// non-project-scoped role, or more than one built-in membership role
+	// (ptone/scion#2529 P1, design.md §3.1).
+	ErrCodeInvalidRoleSet = "invalid_role_set"
+
+	// ErrCodeEmptyRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set is empty; the client must use DELETE instead
+	// (ptone/scion#2529 P1, design.md §3.1).
+	ErrCodeEmptyRoleSet = "empty_role_set"
+
+	// ErrCodeMembershipChanged is returned when a precondition
+	// (expectedRoleDefinitionIds) or the re-read under lock finds the
+	// principal's project roles no longer match what the caller observed
+	// (ptone/scion#2529 P1, design.md §3.2, §3.6).
+	ErrCodeMembershipChanged = "membership_changed"
 )
 
 // elevatedClientErrorStatus reports whether a 4xx status code should be

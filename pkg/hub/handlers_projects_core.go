@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1765,6 +1766,25 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		memberPath := strings.TrimPrefix(subPath, "members")
 		memberPath = strings.TrimPrefix(memberPath, "/")
 		memberPath = strings.TrimSuffix(memberPath, "/")
+		// ptone/scion#2529 P1: …/members/principals/{principalType}/{principalId}
+		// sits above handleProjectMemberByID's binding-ID dispatch — binding
+		// IDs are UUIDs, so there is no collision with the literal
+		// "principals" segment (design.md §3.1).
+		if strings.HasPrefix(memberPath, "principals/") {
+			principalPath := strings.TrimPrefix(memberPath, "principals/")
+			parts := strings.SplitN(principalPath, "/", 2)
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+				principalType := parts[0]
+				principalID := parts[1]
+				if unescaped, uErr := url.PathUnescape(principalID); uErr == nil {
+					principalID = unescaped
+				}
+				s.handleProjectMemberPrincipal(w, r, projectID, principalType, principalID)
+			} else {
+				NotFound(w, "Member principal")
+			}
+			return
+		}
 		if memberPath == "" {
 			s.handleProjectMembers(w, r, projectID)
 		} else {

@@ -2801,6 +2801,21 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement used by AddMember/UpdateMemberRole/TransferOwnership; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement cleanup; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "MigrateMultiRoleBindings", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 R-3 pre-constraint migration: removes duplicate bindings keeping highest authority; idempotent, admin-only, runs within transaction", Scope: "pkg/hub/project_membership_service.go"}},
+	// ptone/scion#2529 P1: txCreateRoleBinding/txDeleteRoleBinding are thin
+	// forwarders so project_membership_set.go's SetMemberRoles (the atomic
+	// "set roles for principal" engine backing PUT/DELETE
+	// .../members/principals/{type}/{id}) never calls tx.CreateRoleBinding/
+	// tx.DeleteRoleBinding directly — keeping every direct role-binding
+	// mutation call enumerable in this one file per RS1 O-3
+	// (rs1_extended_test.go TestRS1_AST_BypassPathsDocumented). SetMemberRoles
+	// itself performs the credential gate, governance matrix / custom-role
+	// authority (design-d3-addendum.md), CanDelegate and last-owner checks
+	// before ever reaching these forwarders, the same way AddMember/
+	// UpdateMemberRole/TransferOwnership govern replaceBindingTx above. A
+	// dedicated OperationID (e.g. project.membership.set) is deferred: wiring
+	// one requires a route_metadata.go entry, which is out of scope for P1.
+	{File: "pkg/hub/project_membership_service.go", Function: "txCreateRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "forwarder for SetMemberRoles (project_membership_set.go), which fully governs every create before calling it inside WithTx", Scope: "pkg/hub/project_membership_service.go"}},
+	{File: "pkg/hub/project_membership_service.go", Function: "txDeleteRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "forwarder for SetMemberRoles (project_membership_set.go), which fully governs every removal before calling it inside WithTx", Scope: "pkg/hub/project_membership_service.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_roles.go — role/binding CRUD
