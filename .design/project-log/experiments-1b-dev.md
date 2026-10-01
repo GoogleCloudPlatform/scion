@@ -89,8 +89,9 @@ second rebases onto the other.
   pass.
 - `npm run typecheck`: clean.
 - `npx prettier --check` on touched files: clean, except
-  `admin-server-config.ts` and `header.ts`, which fail on pre-existing
-  hunks outside this diff (fails the same way at the pre-1b base).
+  `admin-server-config.ts`, `admin-server-config.test.ts`, and `header.ts`,
+  which fail on pre-existing hunks outside this diff (fails the same way on
+  a clean upstream-main worktree).
 - `npx eslint` scoped to the touched `src/` and `e2e/` files: no new errors
   or warnings in `feature-flags.ts`, `server-feature-flags.ts`,
   `server-feature-flags.test.ts`, `admin-experiments.ts`, `open-terminal.ts`,
