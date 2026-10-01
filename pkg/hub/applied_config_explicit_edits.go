@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 
@@ -307,4 +308,29 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 	for _, i := range changed {
 		dst.Field(i).Set(cfgVal.Field(i))
 	}
+}
+
+// deepCopyTelemetryConfig returns an independent copy of cfg via a JSON
+// marshal/unmarshal round trip (the same technique deepCopyScionConfig uses,
+// handlers_agent_create_helpers.go). Returns nil for a nil input, and nil
+// (with the error swallowed) if marshaling ever fails.
+//
+// Used by applyAgentUpdate's R3-1 carve-out (ptone/scion#2493) to preserve
+// the live InlineConfig.Telemetry across a PATCH that never mentions
+// "telemetry" -- a copy, not the same pointer, so the caller's subsequent
+// wholesale InlineConfig replace (agent.AppliedConfig.InlineConfig = cfg)
+// never leaves the new InlineConfig aliasing the old one's Telemetry.
+func deepCopyTelemetryConfig(cfg *api.TelemetryConfig) *api.TelemetryConfig {
+	if cfg == nil {
+		return nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	var out api.TelemetryConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return &out
 }
