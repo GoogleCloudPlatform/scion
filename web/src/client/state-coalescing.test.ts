@@ -85,8 +85,8 @@ function genEvents(count: number, seed: number): FuzzEvent[] {
     const roll = rand();
     if (roll < 0.15) {
       const ev: FuzzEvent = { kind: 'created', id, phase: pick(PHASES), name: `Agent ${id}` };
-      // B3 (round 1 review): fuzz capability preservation under the
-      // equality skip, not just the two hand-seeded IDs.
+      // Fuzz capability preservation under the equality skip, not just the
+      // two hand-seeded IDs.
       if (rand() < 0.3) ev.capabilityActions = ['stop', 'restart'];
       events.push(ev);
     } else if (roll < 0.25) {
@@ -162,9 +162,8 @@ function referenceApply(events: FuzzEvent[]): Map<string, Agent> {
     const existing = agents.get(ev.id);
     const isCreated = ev.kind === 'created';
     if (!existing && !isCreated) {
-      // N1 (round 1 review): a status/ports delta for an ID already known
-      // to be deleted (and not yet recreated) is dropped outright, not
-      // buffered.
+      // A status/ports delta for an ID already known to be deleted (and
+      // not yet recreated) is dropped outright, not buffered.
       if (deletedIds.has(ev.id)) continue;
       const delta = fuzzEventToDelta(ev);
       const prev = pending.get(ev.id);
@@ -330,11 +329,11 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     const verifyFlush = (batchEvents: FuzzEvent[]): void => {
       const before = prevSnapshot;
 
-      // Expected dirty.unknown for this window (round 2 review N1): an ID
-      // gets added the moment a non-created, non-ports delta arrives for it
-      // while it is absent from `before` and not tombstoned; a later
-      // `created` or `deleted` for that same ID within the window resolves
-      // it out again (mirrors recordUnknownDirty/dirty.unknown.delete).
+      // Expected dirty.unknown for this window: an ID gets added the moment
+      // a non-created, non-ports delta arrives for it while it is absent
+      // from `before` and not tombstoned; a later `created` or `deleted`
+      // for that same ID within the window resolves it out again (mirrors
+      // recordUnknownDirty/dirty.unknown.delete).
       const expectedUnknown = new Set<string>();
       const knownThisWindow = new Set<string>(before.keys());
       for (const ev of batchEvents) {
@@ -392,8 +391,8 @@ describe('W2 coalescing fuzz (10k random events)', () => {
         }
       }
 
-      // (b) round 2 review N1: two-directional, including the unknown set,
-      // not just "every real change is covered".
+      // (b) two-directional, including the unknown set, not just "every
+      // real change is covered".
       expect(new Set(detail.upserted)).toEqual(expectedUpserted);
       expect(new Set(detail.unknown.keys())).toEqual(expectedUnknown);
       if (expectedUnknown.size > 0) {
@@ -419,14 +418,12 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       prevSnapshot = after;
     };
 
-    // N1 (round 3 review): tombstones are permanent within one scope, so
-    // with a fixed 24-ID pool every ID is deleted at least once within the
-    // first ~5% of a 10k-event run, and the exact-unknown check (b) above
-    // goes untested for the rest. Alternating the scope every ~500 events
-    // clears deletedAgentIds (and state.agents) the same way a real
-    // navigation would, giving the fuzz repeated fresh windows instead of
-    // one. It also extends the dedicated setScope-discard test below to
-    // the fuzz's own in-flight dirty sets.
+    // Tombstones are permanent within one scope, so with a fixed 24-ID pool
+    // every ID is deleted at least once within the first ~5% of a
+    // 10k-event run, and the exact-unknown check (b) above goes untested
+    // for the rest. Alternating the scope every ~500 events clears
+    // deletedAgentIds (and state.agents) the same way a real navigation
+    // would, giving the fuzz repeated fresh windows instead of one.
     const scopes: ViewScope[] = [{ type: 'dashboard' }, { type: 'project', projectId: 'p-fuzz' }];
     let scopeIndex = 0;
     let eventsSinceScopeChange = 0;
@@ -452,8 +449,6 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       if (eventsSinceScopeChange >= SCOPE_RESET_INTERVAL) {
         eventsSinceScopeChange = 0;
         scopeIndex = (scopeIndex + 1) % scopes.length;
-        const changedBefore = changedSpy.mock.calls.length;
-        const updatedBefore = updatedSpy.mock.calls.length;
 
         sm.setScope(scopes[scopeIndex] as ViewScope); // actual scope change
 
@@ -462,22 +457,13 @@ describe('W2 coalescing fuzz (10k random events)', () => {
         // expected sets would be computed against stale state.
         prevSnapshot = new Map();
         deletedIdsShadow = new Set<string>();
-
-        // Assert no stale flush fires for the discarded dirty set, however
-        // something might still try to trigger it.
-        vi.advanceTimersByTime(1000);
-        const leftover = rafCallbacks.shift();
-        leftover?.(0);
-        rafCallbacks.length = 0;
-        expect(changedSpy).toHaveBeenCalledTimes(changedBefore);
-        expect(updatedSpy).toHaveBeenCalledTimes(updatedBefore);
       }
     }
 
     expect(flushCount).toBeGreaterThan(50); // sanity: genuinely interleaved, not one giant flush
-    // Floor (round 3 review N1): the exact-unknown check in (b) must stay
-    // exercised throughout the run, not just in an opening window before
-    // every one of a small fixed ID pool gets permanently tombstoned.
+    // The exact-unknown check in (b) must stay exercised throughout the
+    // run, not just in an opening window before every one of a small fixed
+    // ID pool gets permanently tombstoned.
     expect(flushesWithNonEmptyUnknown).toBeGreaterThanOrEqual(200);
   }, 30_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
 

@@ -186,6 +186,24 @@ non-blocking finding and one nit remained:
   — consumers should treat `deleted` as idempotent/safe-as-superset, not
   assume every entry corresponds to a real transition.
 
+## Round 4 review (confirmation; APPROVE, two small items to close)
+
+Round 4 verified round 3's N1 and nit-1 closed with mutation evidence (the
+round-3-surviving single-ID mutant for `recordUnknownDirty` now fails the
+fuzz) and confirmed the round's `state.ts` change was comment-only. It
+raised two small new items:
+
+- **N1**: the in-fuzz "no stale flush across setScope" assertion added in
+  round 3 could never fail, since the scope-reset block runs only after
+  `verifyFlush` already drained the batch's flush — so there is never a
+  pending flush left to discard at that point. Took option (b) as directed:
+  deleted the vacuous assertion and the "extends ... in-flight dirty sets"
+  claim from the comment (the dedicated, already-existing B3
+  setScope-discard test is what actually covers that behavior).
+- **nit-1**: dropped the remaining "(round N review X)" tags from four
+  inline comments in `state-coalescing.test.ts` that were added by the
+  round-3 fix itself (test *names* keep their tags, as agreed in round 3).
+
 ## Deviations from the brief
 
 - `seedAgents`'s existing (pre-P1a) callers use the single-argument form with
