@@ -381,7 +381,9 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 // spuriously); clears SCION_HOST_UID and the leaked
 // SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID env vars that would
 // otherwise let config.IsHubContext() or FindProjectRoot() mask the "not in
-// a scion project" failure these tests guard against; points HOME at a
+// a scion project" failure these tests guard against, plus SCION_PROJECT
+// and SCION_CREATOR (unused on this path today, but cleared defensively
+// against sandbox leakage per .gemini/styleguide.md); points HOME at a
 // fresh temp dir; and changes into a temp dir with no .scion project
 // anywhere above it (t.Chdir restores the working directory itself).
 func setupNoProjectPreRun(t *testing.T) {
@@ -413,6 +415,12 @@ func setupNoProjectPreRun(t *testing.T) {
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	t.Setenv("SCION_HUB_URL", "")
 	t.Setenv("SCION_PROJECT_ID", "")
+	// SCION_PROJECT and SCION_CREATOR aren't read on this code path today,
+	// but the sandbox container can leak them (see .gemini/styleguide.md,
+	// "Sandbox gotchas"), so clear them defensively alongside the vars
+	// above to keep these tests isolated against future readers.
+	t.Setenv("SCION_PROJECT", "")
+	t.Setenv("SCION_CREATOR", "")
 	t.Setenv("HOME", t.TempDir())
 
 	// A directory with no .scion project anywhere above it.
