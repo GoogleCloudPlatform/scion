@@ -109,16 +109,23 @@ export class ScionTimezonePicker extends LitElement {
     // willUpdate (before render), not updated (after), so this is part of
     // the same update cycle instead of scheduling a second one.
     //
-    // selectedViaDropdown is reset only by handleSearchInput and the
-    // sl-clear handler (a genuine new user edit), not unconditionally here
-    // (R1-7 — the previous unconditional reset ran before the parent's
-    // updated `.value` prop round-tripped back down, so it never actually
-    // gated this resync; it only gated the blur handler below, which is
-    // where it matters: without it, a dropdown mousedown selection that is
-    // followed by a blur event would re-emit the same value a second time
-    // via commitTyped).
-    if (changed.has('value') && !this.selectedViaDropdown) {
+    // Gate on whether `value` actually differs from what the input
+    // currently means (`valueFor(searchQuery)`), not on `selectedViaDropdown`
+    // (tz-refactor task 12 review round 2, R2-3 — a regression from R1-7's
+    // fix): gating on the flag made every resync after a dropdown selection
+    // a no-op until the user typed or cleared, including resyncs for
+    // completely unrelated *later* external value changes, so an external
+    // `.value` set after a selection was silently ignored. Comparing values
+    // keeps the round-trip-the-same-value case a no-op without that
+    // collateral damage. `selectedViaDropdown` is still reset here, since a
+    // real resync means whatever it was gating is now stale; it otherwise
+    // stays as set by selectZone()/handleSearchInput()/sl-clear, which is
+    // where it still matters — gating the blur handler's commitTyped() call
+    // below, so a dropdown mousedown selection followed by a blur event
+    // doesn't re-emit the same value a second time.
+    if (changed.has('value') && this.value !== this.valueFor(this.searchQuery.trim())) {
       this.searchQuery = this.displayValue(this.value);
+      this.selectedViaDropdown = false;
     }
   }
 

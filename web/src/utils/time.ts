@@ -57,6 +57,29 @@ export function browserTimeZone(): string {
 }
 
 /**
+ * Exact-case alias and backward-compatibility names `time.LoadLocation`
+ * accepts that are not themselves canonical per `Intl.supportedValuesOf`
+ * (ICU resolves them to a different name) — e.g. "Asia/Kolkata" resolves to
+ * "Asia/Calcutta". `isValidTimeZone` accepts a name here only with this
+ * exact casing; a lowercase variant like "asia/kolkata" is still rejected
+ * (tz-refactor task 12 review round 2, R2-2).
+ *
+ * Kept deliberately small: the four `SEARCH_ALIAS_HINTS` targets from
+ * `timezone-picker.ts` (so a search for one of those bare names can offer
+ * and then accept the full alias it names), plus a few commonly-typed
+ * backward/POSIX-style names.
+ */
+const KNOWN_ALIAS_TIMEZONE_NAMES: ReadonlySet<string> = new Set([
+  'Asia/Kolkata',
+  'Europe/Kyiv',
+  'Asia/Kathmandu',
+  'Asia/Ho_Chi_Minh',
+  'US/Pacific',
+  'GMT',
+  'EST5EDT',
+]);
+
+/**
  * Reports whether `zone` is a time zone name the server-side resolver
  * (Go's `time.LoadLocation`, used for `agent_defaults.default_timezone` and
  * the per-user display-timezone preference) would also accept.
@@ -65,17 +88,21 @@ export function browserTimeZone(): string {
  * for this purpose; every zone-name check elsewhere should call this
  * function instead of constructing its own `Intl.DateTimeFormat`.
  *
- * `Intl.DateTimeFormat` alone is looser than `time.LoadLocation` in two ways
- * this function corrects, so the two validators agree (tz-refactor task 12
- * review round 1, R1-3):
- * - **Case.** `Intl` matches zone names case-insensitively (`asia/tokyo`,
- *   `utc` both resolve), `time.LoadLocation` does not. Rejected by checking
- *   whether `resolvedOptions().timeZone` matches `zone` case-insensitively
- *   but not exactly — which still *accepts* a genuine alias such as
- *   "Asia/Kathmandu" (resolves to "Asia/Katmandu": a different string, not a
- *   same-string case variant).
- * - **Offsets.** `Intl` accepts numeric offset IDs like "+05:30" (and
- *   resolves them to themselves, so the case check above would not catch
+ * `Intl.DateTimeFormat` alone is looser than `time.LoadLocation` in ways
+ * this function corrects, so the two validators agree:
+ * - **Case and aliases (tz-refactor task 12 review rounds 1 and 2, R1-3 and
+ *   R2-2).** `Intl` matches zone names case-insensitively, and resolves
+ *   many aliases to a *different* canonical string regardless of case
+ *   ("Asia/Kolkata" and "asia/kolkata" both resolve to "Asia/Calcutta").
+ *   `time.LoadLocation` accepts neither a case variant nor a lowercase
+ *   alias, but does accept a handful of exact-case aliases. So a name is
+ *   valid only if it resolves to *itself* exactly (covers both ordinary
+ *   canonical names and any alias that happens to resolve to itself,
+ *   `EST5EDT`-style and `Etc/GMT+5`-style names included), or it is an
+ *   exact-case match in `KNOWN_ALIAS_TIMEZONE_NAMES` (aliases that resolve
+ *   to a different canonical string but that Go still accepts).
+ * - **Offsets.** `Intl` accepts numeric offset IDs like "+05:30" (which
+ *   resolve to themselves, so the exact-match rule above would not catch
  *   them); `time.LoadLocation` rejects them. Rejected explicitly.
  *
  * It also rejects tzdata's own non-portable names ("Local", "localtime",
@@ -92,8 +119,7 @@ export function isValidTimeZone(zone: string): boolean {
   } catch {
     return false;
   }
-  if (resolved !== zone && resolved.toLowerCase() === zone.toLowerCase()) return false;
-  return true;
+  return resolved === zone || KNOWN_ALIAS_TIMEZONE_NAMES.has(zone);
 }
 
 /**

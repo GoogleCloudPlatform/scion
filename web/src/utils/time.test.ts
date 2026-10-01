@@ -82,6 +82,27 @@ describe('isValidTimeZone', () => {
     expect(isValidTimeZone('Europe/Kiev')).toBe(true);
   });
 
+  // tz-refactor task 12 review round 2, R2-2: round 1's case check only
+  // caught a name resolving to a case variant of *itself*. A lowercase
+  // alias resolves to a *different* canonical string, so it slipped
+  // through — e.g. "asia/kolkata" resolves to "Asia/Calcutta", not
+  // "Asia/kolkata", so it isn't a same-string case variant. Go's
+  // time.LoadLocation rejects every one of these lowercase forms.
+  it('rejects lowercase aliases that Go rejects, even though Intl resolves them', () => {
+    expect(isValidTimeZone('asia/kolkata')).toBe(false);
+    expect(isValidTimeZone('us/pacific')).toBe(false);
+    expect(isValidTimeZone('gmt')).toBe(false);
+    expect(isValidTimeZone('europe/kyiv')).toBe(false);
+  });
+
+  it('accepts the exact-case aliases and backward names Go accepts', () => {
+    expect(isValidTimeZone('Asia/Kolkata')).toBe(true);
+    expect(isValidTimeZone('US/Pacific')).toBe(true);
+    expect(isValidTimeZone('GMT')).toBe(true);
+    expect(isValidTimeZone('Etc/GMT+5')).toBe(true);
+    expect(isValidTimeZone('EST5EDT')).toBe(true);
+  });
+
   it('rejects tzdata names that are not a portable IANA zone, matching the server denylist', () => {
     // Intl.DateTimeFormat already throws for all four, so no explicit
     // denylist is needed on the client side — this just locks that in.

@@ -155,6 +155,20 @@ describe('scion-timezone-picker', () => {
     expect(filtered).toContain('Asia/Kolkata');
   });
 
+  // tz-refactor task 12 review round 2, R2-2: a lowercase alias used to
+  // slip through isValidTimeZone and get prepended as if it were a real,
+  // selectable zone name; Go's time.LoadLocation rejects it.
+  it('typing a lowercase alias Go rejects does not offer it', async () => {
+    const el = await createElement();
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'asia/kolkata' },
+    } as unknown as Event);
+    await el.updateComplete;
+
+    const filtered = (el as Record<string, unknown>)['filteredZones'] as string[];
+    expect(filtered).not.toContain('asia/kolkata');
+  });
+
   it('a known alternate-name search term surfaces its canonical zone (Kolkata, Kyiv, Kathmandu)', async () => {
     const el = await createElement();
 
@@ -195,6 +209,54 @@ describe('scion-timezone-picker', () => {
     await el.updateComplete;
 
     expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
+  });
+
+  // tz-refactor task 12 review round 2, R2-3: a regression from R1-7's fix.
+  // selectedViaDropdown stayed true after a selection (by design, to gate
+  // the blur handler), but willUpdate's resync was gated on that same flag,
+  // so once ANY dropdown selection had been made, every later external
+  // `.value` change was silently ignored until the user typed or cleared —
+  // including unrelated changes made well after the selection, not just the
+  // selection's own round-trip.
+  it('resyncs on an external value change after a dropdown selection, to a different zone', async () => {
+    const el = await createElement();
+    (el as Record<string, (...args: unknown[]) => void>)['selectZone']('Asia/Tokyo');
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
+
+    // A later, unrelated external change — not the selection's own
+    // round-trip — must still be reflected.
+    el.value = 'Europe/Berlin';
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Europe/Berlin');
+  });
+
+  it('resyncs to the empty entry on an external value change to "" after a dropdown selection', async () => {
+    const el = await createElement();
+    el.emptyLabel = 'Auto';
+    el.requestUpdate();
+    await el.updateComplete;
+
+    (el as Record<string, (...args: unknown[]) => void>)['selectZone']('Asia/Tokyo');
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
+
+    // An external change to a different zone first (a real property change —
+    // `value` starts at '' by default, so setting it straight to '' here
+    // would be a no-op Lit never reports as "changed").
+    el.value = 'Europe/Berlin';
+    el.requestUpdate();
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Europe/Berlin');
+
+    // ...then externally cleared.
+    el.value = '';
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Auto');
   });
 
   it('filters the list by the typed substring, case-insensitively', async () => {
