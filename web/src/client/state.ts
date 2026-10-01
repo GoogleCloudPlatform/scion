@@ -99,7 +99,13 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
   for (let i = 0; i < a.length; i++) {
     const ai = a[i];
     const bi = b[i];
-    if (ai === undefined || bi === undefined) return ai === bi;
+    // Arrays from JSON never have holes, so ai/bi are only undefined here
+    // past a shorter length, already ruled out above. Handled explicitly
+    // anyway (round 2 review nit-1): a hole in only one array is a
+    // difference, not a reason to stop comparing the rest; a hole in both
+    // is equal at this index and comparison continues.
+    if (ai === undefined && bi === undefined) continue;
+    if (ai === undefined || bi === undefined) return false;
     if (!shallowObjectEqual(ai, bi)) return false;
   }
   return true;
@@ -424,10 +430,20 @@ export class StateManager extends EventTarget {
     this.completeFlag = null;
     this.generation++;
     this.sawDisconnectThisGeneration = false;
-    // B1 (round 1 review): the previous connection's `connected` is stale
-    // the instant scope changes — `sseClient.connect()` below tears it down
-    // without a `disconnected` event, so both flags must be reset by hand.
-    this.state.connected = false;
+    // B1 (round 1 review, revised round 2): `sseClient.connect()` below
+    // tears the previous connection down without a `disconnected` event, so
+    // `connectedGeneration` (which `sseConnected` reads) must be reset by
+    // hand — otherwise a stale generation could still read as connected.
+    // Deliberately NOT touching `state.connected`/`isConnected` here: round
+    // 1 also reset that, but it is a visible behaviour change for the one
+    // existing reader, chat-thread.ts:1536 (`this._sawSseConnect =
+    // stateManager.isConnected`), which seeds its reconnect catch-up from
+    // it. Making `isConnected` go stale-false across this gap made that
+    // page swallow its own first post-navigation `connected` as "nothing to
+    // catch up on", silently dropping chat messages sent in the window
+    // between `setScope` and the new connection opening. `sseConnected`
+    // never reads `state.connected` (see its own JSDoc), so nothing here
+    // needs it reset. Round 2 review (B1).
     this.connectedGeneration = null;
     this.rejectStaleSseConnectWaiters();
 
@@ -835,7 +851,18 @@ export class StateManager extends EventTarget {
     this.dirty.unknown.set(agentId, next);
   }
 
-  /** Record a delta applied to a known agent into every open seed epoch (§7, §8). */
+  /**
+   * Record a delta into every open seed epoch (§7, §8), merged last-wins
+   * per field with anything already recorded for this ID in that epoch.
+   *
+   * Called from two places (round 2 review nit-2): the known-agent/created
+   * merge path, with the *finalized* delta (post sticky-activity/detail
+   * processing, as `mergeAgentDelta` returns it); and the unknown-ID
+   * buffering branch, with the *raw*, unprocessed delta (B2, round 1
+   * review) — there is no base to merge against yet for that one, so
+   * `seedAgents` runs it through `mergeAgentDelta` itself once the REST
+   * snapshot provides a base.
+   */
   private recordSeedEpochDelta(agentId: string, delta: Partial<Agent>): void {
     if (this.seedEpochs.size === 0) return;
     for (const epoch of this.seedEpochs.values()) {

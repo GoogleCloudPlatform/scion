@@ -320,9 +320,38 @@ describe('W2 coalescing fuzz (10k random events)', () => {
 
     let prevSnapshot = new Map<string, Agent>(sm.getAgents().map((a) => [a.id, a]));
     let flushCount = 0;
+    // Mirrors state.deletedAgentIds: permanent for the test's lifetime,
+    // used (like production's N1 check) to decide whether a status/ports
+    // delta for an absent ID would be buffered as unknown at all.
+    const deletedIdsShadow = new Set<string>();
 
-    const verifyFlush = (): void => {
+    const verifyFlush = (batchEvents: FuzzEvent[]): void => {
       const before = prevSnapshot;
+
+      // Expected dirty.unknown for this window (round 2 review N1): an ID
+      // gets added the moment a non-created, non-ports delta arrives for it
+      // while it is absent from `before` and not tombstoned; a later
+      // `created` or `deleted` for that same ID within the window resolves
+      // it out again (mirrors recordUnknownDirty/dirty.unknown.delete).
+      const expectedUnknown = new Set<string>();
+      const knownThisWindow = new Set<string>(before.keys());
+      for (const ev of batchEvents) {
+        if (ev.kind === 'deleted') {
+          knownThisWindow.delete(ev.id);
+          deletedIdsShadow.add(ev.id);
+          expectedUnknown.delete(ev.id);
+        } else if (ev.kind === 'created') {
+          knownThisWindow.add(ev.id);
+          expectedUnknown.delete(ev.id);
+        } else if (ev.kind === 'status') {
+          // Ports events for an absent ID are dropped outright (accepted
+          // deviation 2, FYI round 2) — never buffered, never recorded in
+          // dirty.unknown — so only "status" deltas populate this set.
+          if (!knownThisWindow.has(ev.id) && !deletedIdsShadow.has(ev.id)) {
+            expectedUnknown.add(ev.id);
+          }
+        }
+      }
 
       // Trigger exactly one flush: whichever mechanism is due is already
       // pending (scheduleFlush always arms both), so either fires it.
@@ -342,24 +371,36 @@ describe('W2 coalescing fuzz (10k random events)', () => {
       const detail = (
         changedSpy.mock.calls[flushCount - 1]?.[0] as CustomEvent<{ data: AgentsChangedDetail }>
       ).detail.data;
-      const reported = new Set([...detail.upserted, ...detail.deleted, ...detail.unknown.keys()]);
 
       const after = new Map(sm.getAgents().map((a) => [a.id, a]));
-      const allIds = new Set([...before.keys(), ...after.keys()]);
+      const allIds = new Set([...before.keys(), ...after.keys(), ...expectedUnknown]);
 
+      const expectedUpserted = new Set<string>();
+      const removedThisWindow = new Set<string>();
+      const untouched = new Set<string>();
       for (const id of allIds) {
-        const wasPresent = before.has(id);
-        const isPresent = after.has(id);
-        const refChanged = wasPresent && isPresent && before.get(id) !== after.get(id);
-        const wasDeleted = wasPresent && !isPresent;
-        // (b) every ID whose reference changed or that was deleted this
-        // flush window must be reported.
-        if (refChanged || wasDeleted) {
-          expect(reported.has(id)).toBe(true);
-        } else if (!reported.has(id)) {
-          // (c) every ID NOT reported keeps the same reference (or absence).
-          expect(after.get(id)).toBe(before.get(id));
+        if (after.has(id) && before.get(id) !== after.get(id)) {
+          expectedUpserted.add(id);
+        } else if (before.has(id) && !after.has(id)) {
+          removedThisWindow.add(id);
+        } else if (!expectedUnknown.has(id)) {
+          // Same reference present in both (or absent from both), and not
+          // buffered as unknown this window: nothing should report it.
+          untouched.add(id);
         }
+      }
+
+      // (b) round 2 review N1: two-directional, including the unknown set,
+      // not just "every real change is covered".
+      expect(new Set(detail.upserted)).toEqual(expectedUpserted);
+      expect(new Set(detail.unknown.keys())).toEqual(expectedUnknown);
+      for (const id of removedThisWindow) {
+        expect(detail.deleted).toContain(id); // deleted ⊇ IDs actually removed
+      }
+      for (const id of untouched) {
+        expect(detail.upserted).not.toContain(id);
+        expect(detail.deleted).not.toContain(id);
+        expect(detail.unknown.has(id)).toBe(false);
       }
 
       // (d) after this flush, advancing the OTHER mechanism fires nothing
@@ -376,19 +417,18 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     let i = 0;
     while (i < events.length) {
       const batchSize = 1 + Math.floor(batchPick() * 8);
+      const batchEvents: FuzzEvent[] = [];
       for (let b = 0; b < batchSize && i < events.length; b++, i++) {
-        applyEvent(sm, events[i] as FuzzEvent);
+        const ev = events[i] as FuzzEvent;
+        batchEvents.push(ev);
+        applyEvent(sm, ev);
       }
       // Only flush if something was actually dirtied by this batch — an
       // all-no-op batch (e.g. every event targeting a just-tombstoned ID)
       // schedules nothing.
       if (rafCallbacks.length > 0) {
-        verifyFlush();
+        verifyFlush(batchEvents);
       }
-    }
-    // Drain whatever the final batch scheduled.
-    if (rafCallbacks.length > 0) {
-      verifyFlush();
     }
 
     expect(flushCount).toBeGreaterThan(50); // sanity: genuinely interleaved, not one giant flush
@@ -751,6 +791,31 @@ describe('W2 sseConnected(generation)', () => {
     expect(resolved).toBe(true);
   });
 
+  it('N2 (round 2 review): connected then disconnected then sseConnected stays pending until the next connected', async () => {
+    // The other half of the connectedGeneration contract: a drop within the
+    // SAME generation (no setScope) must not resolve sseConnected early
+    // either, and a call made while disconnected must still wait.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    const gen = sm.scopeGeneration;
+
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('disconnected'));
+
+    let resolved = false;
+    void sm.sseConnected(gen).then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+  });
+
   it('rejects immediately when the generation is already stale', async () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
@@ -787,13 +852,36 @@ describe('W2 sseConnected(generation)', () => {
     await Promise.resolve();
     // Must still be pending: sse-client.ts's connect() tears the old
     // connection down without a `disconnected` event, so `state.connected`
-    // alone would wrongly read as "still connected" here.
+    // alone would wrongly read as "still connected" here. `sseConnected`
+    // tracks this itself via `connectedGeneration`, not `isConnected`.
     expect(resolved).toBe(false);
 
     sm.sseClientInstance.dispatchEvent(new CustomEvent('connected')); // gen N+1 connects
     await Promise.resolve();
     await Promise.resolve();
     expect(resolved).toBe(true);
+  });
+
+  it('B1 (round 2 review): isConnected is left alone by setScope — chat-thread.ts:1536 reads it to seed its reconnect catch-up', () => {
+    // Round 1 also reset `state.connected` in setScope, as a "consider" fix
+    // alongside connectedGeneration. That is a silent behaviour change for
+    // chat-thread.ts, the one reader of `stateManager.isConnected`: it seeds
+    // `_sawSseConnect` from it, and swallows the first `connected` it sees
+    // as "nothing to catch up on" when that flag is already true. Making
+    // isConnected go stale-false across a setScope made a warm navigation
+    // into chat wrongly swallow its post-navigation `connected` as the
+    // "first" one, silently dropping messages sent in that window. Pinned
+    // here so a future change that needs `isConnected` to be
+    // generation-accurate also has to update chat-thread's catch-up logic
+    // in the same change, not accidentally as a side effect of state.ts.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+    expect(sm.isConnected).toBe(true);
+
+    sm.setScope({ type: 'project', projectId: 'p1' }); // actual scope change
+
+    expect(sm.isConnected).toBe(true);
   });
 
   it('N3 (round 1 review): disconnect() rejects every pending waiter instead of leaving it hanging', async () => {

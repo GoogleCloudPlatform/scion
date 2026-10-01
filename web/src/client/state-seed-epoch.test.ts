@@ -229,6 +229,31 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.activity).toBe('waiting_for_input');
   });
 
+  it('N2 (round 2 review): a partial (compact-drain) seed with a recorded epoch delta keeps full fields and applies the delta', () => {
+    // §8's compact drain calls seedAgents(result.agents, {token, partial:
+    // true}) — the combination round 1's W3 tests never exercised together.
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+
+    // A fuller seed already established full fields for this ID.
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'running', labels: { env: 'prod' } } as Agent]);
+
+    const token = sm.beginSeedEpoch();
+    // SSE delivers a fresher update during the compact drain's fetch.
+    emit(sm, 'agent.a1.status', { phase: 'error' });
+
+    sm.seedAgents([{ id: 'a1', name: 'A1', phase: 'stopped' } as Agent], {
+      token,
+      partial: true,
+    });
+
+    // The compact seed's own phase is superseded by the SSE update recorded
+    // in the epoch, same as a non-partial seed; the full field the compact
+    // seed never carries (labels) is kept, same as any partial seed.
+    expect(sm.getAgent('a1')?.phase).toBe('error');
+    expect(sm.getAgent('a1')?.labels).toEqual({ env: 'prod' });
+  });
+
   it('N2 (round 1 review): seedAgents ends the epoch itself — a second call with the same token is a no-op', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
