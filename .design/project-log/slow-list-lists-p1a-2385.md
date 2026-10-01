@@ -134,6 +134,35 @@ Commit `6552bb88c1d18e43f11f75844abee64e871bb79a`, rebased on `origin/main`
 - **FYI** (created-after-delete in one flush): fixed — a re-upsert now
   removes the ID from `dirty.deleted`.
 
+## Round 2 review fixes (slow-list-lists-rev-p1a-2)
+
+Commit `d5ab6b820f66265fc4f3019dd8c059488a6d6e4f`, rebased on `origin/main`
+(f06ccbc, unchanged since round 1's fix). All 14 round-1 findings verified
+closed by the round-2 reviewer. Round 2 found:
+
+- **B1** (new, introduced by round 1's own B1 fix): resetting
+  `state.connected = false` in `setScope` silently changed
+  `chat-thread.ts:1536`'s reconnect-catch-up seeding
+  (`stateManager.isConnected`), risking silently dropped chat messages on a
+  warm navigation into chat. Fixed by removing that line — `connectedGeneration`
+  alone is what `sseConnected` needs, and it never reads `state.connected`.
+  Added a test pinning that `isConnected` is unchanged by `setScope`.
+- **N1**: the W2 fuzz's property (b) was one-directional and never examined
+  buffered/unknown IDs, so dropping one from `dirty.unknown` or
+  over-reporting an unchanged ID in `upserted` would still pass. Fixed:
+  the fuzz now computes the expected unknown set per flush window from the
+  batch's own events and asserts `upserted`/`unknown` exactly, `deleted` as
+  a superset of IDs actually removed.
+- **N2**: added the untested `{token, partial: true}` combination (the
+  compact drain's exact call shape) and a
+  `connected`→`disconnected`→`sseConnected`-stays-pending test (the other
+  half of the `connectedGeneration` contract within one generation).
+- **nit-1/nit-2**: fixed (array-hole comparison intent in `exposedPortsEqual`;
+  `recordSeedEpochDelta`'s JSDoc now documents both call sites).
+- **FYIs** (`setCurrentUserId` generation gap; ports-for-unknown-ID still
+  droppable by a first-drain seed): no code change, noted in the gs report
+  for P1c.
+
 ## Deviations from the brief
 
 - `seedAgents`'s existing (pre-P1a) callers use the single-argument form with
