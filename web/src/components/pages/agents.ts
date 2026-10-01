@@ -120,6 +120,16 @@ export class ScionPageAgents extends LitElement {
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
 
+  /**
+   * The scope `this.agents` was actually fetched for — set alongside
+   * `this.agents` itself (never alongside `agentScope`, which changes
+   * synchronously on click while the new list is still in flight). The graph
+   * view's filterKey reads this, not `agentScope`, so a scope switch isn't
+   * mistaken for a delete before the new list lands (#2481).
+   */
+  @state()
+  private loadedScope: 'all' | 'mine' | 'shared' = 'all';
+
   @state()
   private phaseFilter: AgentPhase | '' = '';
 
@@ -451,6 +461,7 @@ export class ScionPageAgents extends LitElement {
     const hydratedCaps = stateManager.getScopeCapabilities('agent');
     if (hydratedAgents.length > 0 && hydratedCaps && this.agentScope === 'all') {
       this.agents = hydratedAgents;
+      this.loadedScope = 'all';
       this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedAgents(this.agents);
@@ -520,9 +531,13 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
+    // Captured now, not read again after the await: agentScope can change
+    // (another click) while this request is in flight, and loadedScope must
+    // reflect the scope *this response* was fetched for.
+    const requestedScope = this.agentScope;
     const params = new URLSearchParams();
-    if (this.agentScope !== 'all') {
-      params.set('scope', this.agentScope);
+    if (requestedScope !== 'all') {
+      params.set('scope', requestedScope);
     }
     if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
       params.append('label', this.labelFilter.trim());
@@ -541,6 +556,7 @@ export class ScionPageAgents extends LitElement {
     const data = (await response.json()) as
       | { agents?: Agent[]; _capabilities?: Capabilities }
       | Agent[];
+    this.loadedScope = requestedScope;
     if (Array.isArray(data)) {
       this.agents = data;
       this.scopeCapabilities = undefined;
@@ -1108,11 +1124,8 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (this.viewMode === 'graph') {
-      // filterKey (#2481 review round 1, R1) lets the graph tell "the filter
-      // changed" (re-fit, same as before #2481) from "an agent was deleted"
-      // (stay in place) — every displayAgents input that can narrow or widen
-      // the list goes in, not just phaseFilter.
-      const filterKey = `${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
+      // Everything that can narrow/widen `filtered` independent of a delete.
+      const filterKey = `${this.loadedScope}|${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
       return html`<scion-agent-tree-view
         .agents=${filtered}
         filterKey=${filterKey}

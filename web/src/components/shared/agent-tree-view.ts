@@ -653,8 +653,8 @@ export class ScionAgentTreeView extends LitElement {
     ) {
       this.didAutoFit = false;
     }
-    // A filter change (#2481 review round 1, R1) is the user picking a
-    // different view, not a delete — re-fit, same as pre-#2481.
+    // A filter change is the user picking a different view, not a delete —
+    // re-fit, same as pre-#2481.
     if (changedProperties.has('filterKey') && changedProperties.get('filterKey') !== undefined) {
       this.didAutoFit = false;
     }
@@ -950,6 +950,12 @@ export class ScionAgentTreeView extends LitElement {
     let layout: ForestLayout;
     if (this.layoutCache && this.layoutCache.signature === signature) {
       ({ hiddenCounts, layout } = this.layoutCache);
+      // filterKey isn't part of the topology signature: it can change with no
+      // effect on this render's own topology (e.g. a status filter that
+      // happens to match the same agents), which would otherwise leave the
+      // cache holding a stale filterKey for the next comparison and make a
+      // later real delete take the fresh-layout path instead of staying put.
+      this.layoutCache.filterKey = this.filterKey;
     } else {
       // Descendant counts always come from a fresh forest build — cheap, and
       // needed to get an accurate collapse-chip count regardless of which

@@ -652,6 +652,26 @@ describe('scion-agent-tree-view filterKey distinguishes a filter change from a d
 
     expect(view.didAutoFit).toBe(false);
   });
+
+  it('a filterKey change that hits the layout cache does not leave it stale for the next delete (#2490 review round 2, R3)', async () => {
+    // Change filterKey alone (e.g. "All" -> "Running" when every agent is
+    // already running): the topology signature is unaffected by filterKey,
+    // so with the agents array unchanged this is a cache *hit*, which must
+    // still refresh the cached filterKey. Otherwise the next render (a real
+    // delete, filterKey unchanged from here on) would see a stale
+    // previous.filterKey mismatch and reflow the whole graph instead of
+    // staying on the stable path.
+    el.filterKey = 'stopped'; // beforeEach already set 'running'; this is the change
+    await el.updateComplete;
+    const before = nodePositions(el);
+
+    el.agents = el.agents.filter((a) => a.id !== 'a2'); // a leaf delete, filterKey unchanged since
+    await el.updateComplete;
+
+    const after = nodePositions(el);
+    expect(after['r1']).toBe(before['r1']);
+    expect(after['a1']).toBe(before['a1']);
+  });
 });
 
 describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => {
