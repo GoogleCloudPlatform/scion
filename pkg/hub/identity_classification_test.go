@@ -1130,16 +1130,11 @@ func TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks(t *t
 // interface takes, emitting exactly one audit record with an empty derived
 // PrincipalID.
 //
-// credentialContextForIdentity's typed-nil *ScopedUserIdentity case is the
-// one exception to "classify as the empty credential context": it predates
-// this test (ptone/scion#2143) and intentionally returns
-// CredentialContext{Kind: CredentialKindUAT} with a zero Ceiling, not the
-// empty CredentialContext — see the comment on that case in authz.go for why
-// collapsing it into the shared empty-context path would be a fail-open
-// regression for a caller that derives a Credential independently of
-// Principal.Identity. This test does not change that outcome; it only
-// confirms Decide still denies through the separate Principal-nil check,
-// which runs first regardless of the derived credential.
+// credentialContextForIdentity returns CredentialContext{Kind:
+// CredentialKindUAT} (zero Ceiling) for a typed-nil *ScopedUserIdentity
+// rather than the empty context (ptone/scion#2143; see authz.go). Decide
+// still denies it with "missing principal", since the Principal check runs
+// first.
 func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 	for name := range identityInventoryExpectation {
 		t.Run(name, func(t *testing.T) {
@@ -1187,14 +1182,13 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 
 			wantCredential := CredentialContext{}
 			if name == "ScopedUserIdentity" {
-				// Pre-existing ptone/scion#2143 fail-closed guard; see the
-				// doc comment above for why this type is exempt from the
-				// empty-context expectation every other type satisfies.
+				// Typed-nil *ScopedUserIdentity keeps a UAT credential with
+				// a zero ceiling; see above.
 				wantCredential = CredentialContext{Kind: CredentialKindUAT}
 			}
 			require.NotPanics(t, func() {
 				credential := credentialContextForIdentity(identity)
-				assert.Equal(t, wantCredential, credential, "typed-nil identity must classify into its established credential context")
+				assert.Equal(t, wantCredential, credential, "typed-nil identity must classify into the expected credential context")
 			}, "credentialContextForIdentity must not panic on a typed-nil %s", name)
 
 			require.NotPanics(t, func() {

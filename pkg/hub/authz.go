@@ -1671,29 +1671,16 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 // CredentialKindInteractive, so Decide's fail-closed classification check
 // denies it instead of treating an unknown identity as an ordinary
 // interactive session. A typed-nil concrete identity (see isNilIdentity)
-// takes this same empty-context path as a nil interface, checked before the
-// type switch below touches it: a nil concrete pointer panics on the field
-// or method access inside several of its arms — except a typed-nil
-// *ScopedUserIdentity, handled separately above the isNilIdentity check: see
-// the comment on that case for why its outcome must stay CredentialKindUAT
-// rather than fold into the shared empty-context path.
+// takes this same empty-context path, checked before the type switch below
+// touches it; see the *ScopedUserIdentity case below for the one exception.
 func credentialContextForIdentity(identity Identity) CredentialContext {
-	// A typed-nil *ScopedUserIdentity is checked before the general
-	// isNilIdentity guard below, because it is the one concrete type whose
-	// typed-nil outcome here must NOT collapse to the empty CredentialContext
-	// that isNilIdentity's other cases share. A caller may derive a
-	// CredentialContext from a UAT identity independently of the request's
-	// Principal.Identity (see TestUATCeiling_Decide_TypedNilScopedIdentityCredentialDeniesRatherThanLiftingRestriction),
-	// so Decide's Principal-nil check (which already denies a typed-nil
-	// Principal.Identity with "missing principal") does not cover this case.
-	// Returning the empty CredentialContext{} here instead would give
-	// request.Credential.Kind == "", which skips Decide's
-	// suppliedCredentialCompatible/ceiling restriction entirely (that check
-	// only runs when request.Credential.Kind != "") and authorizes the
-	// request exactly as if no UAT credential had been supplied at all — a
-	// fail-open regression. Keeping Kind == CredentialKindUAT with a zero
-	// Ceiling (FrozenPermissionCeiling.Allows denies every permission) keeps
-	// this fail-closed, as established by ptone/scion#2143.
+	// A typed-nil *ScopedUserIdentity returns Kind == CredentialKindUAT with a
+	// zero Ceiling, not the empty context the other typed-nil types get. A
+	// caller may supply this CredentialContext independently of
+	// Principal.Identity, so Decide's missing-principal check does not cover
+	// it; an empty Kind would skip Decide's
+	// suppliedCredentialCompatible/ceiling check, while a UAT Kind with a
+	// zero Ceiling denies every permission (ptone/scion#2143).
 	if v, ok := identity.(*ScopedUserIdentity); ok && v == nil {
 		return CredentialContext{Kind: CredentialKindUAT}
 	}
