@@ -345,10 +345,9 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 	srv.mux.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
-	// Positive control: the rejection path does log (writeError logs 4xx
-	// responses at Debug), so the capture must have observed something. This
-	// guards against a misrouted capture making the NotContains check below
-	// pass vacuously.
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
 	requireLogCaptureLive(t, buf, "API client error")
 
 	assert.NotContains(t, rec.Body.String(), secret, "raw content must not appear in the error response")
@@ -430,10 +429,9 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 	assert.Equal(t, convCountBefore, countStoreConversations(t, s, ctx),
 		"rejected routed raw message must not create a conversation")
 
-	// Positive control: the rejection path does log (writeError logs 4xx
-	// responses at Debug), so the capture must have observed something. This
-	// guards against a misrouted capture making the NotContains check below
-	// pass vacuously.
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
 	requireLogCaptureLive(t, buf, "API client error")
 
 	// Rejected-case log/error-body secret capture for the routed inbound

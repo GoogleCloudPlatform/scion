@@ -35,8 +35,8 @@ import (
 //
 // Call this BEFORE constructing a Server (or anything else that snapshots
 // slog.Default() into a fixed subsystem logger, e.g. logging.Subsystem).
-// Capturing after construction can leave the test's NotContains-style
-// assertions vacuous: see requireLogCaptureLive below.
+// Capturing after construction can leave the test's absence assertions
+// vacuous: see requireLogCaptureLive below.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -51,15 +51,31 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 // tests. It fails loudly if buf does not contain wantSubstring, a line the
 // exercised code path is already known to log. Without this, a misrouted or
 // broken capture -- for example one installed after the Server has already
-// snapshotted slog.Default() into a subsystem logger -- would make a
-// NotContains assertion on buf pass vacuously instead of catching the
+// snapshotted slog.Default() into a subsystem logger -- would make an
+// absence assertion on buf pass vacuously instead of catching the
 // regression it exists to guard against.
 func requireLogCaptureLive(t *testing.T, buf *bytes.Buffer, wantSubstring string) {
 	t.Helper()
 	if !strings.Contains(buf.String(), wantSubstring) {
 		t.Fatalf("log capture positive control failed: buffer does not contain %q; "+
-			"the capture may be misrouted, so the NotContains assertions below it "+
+			"the capture may be misrouted, so the absence assertions below it "+
 			"would be vacuous. captured=%q", wantSubstring, buf.String())
+	}
+}
+
+// requireRecordLive is the capturingHandler-based equivalent of
+// requireLogCaptureLive, for tests that inspect structured slog.Record
+// values (via findRecord) instead of a text/JSON buffer. It fails loudly if
+// capture holds no record with Message == wantMsg, a line the exercised code
+// path is already known to log. Without this, a misrouted or broken capture
+// would make an absence assertion on capture pass vacuously instead of
+// catching the regression it exists to guard against.
+func requireRecordLive(t *testing.T, capture *capturingHandler, wantMsg string) {
+	t.Helper()
+	if _, ok := findRecord(capture.all(), wantMsg); !ok {
+		t.Fatalf("log capture positive control failed: no record with message %q; "+
+			"the capture may be misrouted, so the absence assertions below it "+
+			"would be vacuous", wantMsg)
 	}
 }
 

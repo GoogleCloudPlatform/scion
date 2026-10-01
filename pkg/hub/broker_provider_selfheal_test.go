@@ -662,10 +662,7 @@ func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	// the capture must have observed something. This guards against a
 	// misrouted capture making the "no restamp log" check below pass
 	// vacuously.
-	_, liveOK := findRecord(capture.all(), "Control channel manager initialized")
-	require.True(t, liveOK, "log capture positive control failed: expected construction to log "+
-		"\"Control channel manager initialized\"; the capture may be misrouted, so the absence "+
-		"check below would be vacuous")
+	requireRecordLive(t, capture, "Control channel manager initialized")
 
 	broker, project := newProviderSelfHealFixture(t, s, "lognoop")
 
