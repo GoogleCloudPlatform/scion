@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -504,6 +505,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	r.cleanupAgentSecrets(ctx, namespace, config.Name)
 	r.cleanupStalePod(ctx, namespace, config.Name)
 
+	// The hub transport credential is delivered through the per-agent Secret
+	// (secretKeyRef) rather than as a plain pod env value.
+	config.Env, config.ResolvedSecrets = divertTransportCredential(config.Env, config.ResolvedSecrets)
+
 	// Create K8s Secret or SecretProviderClass before the pod
 	if len(config.ResolvedSecrets) > 0 {
 		useGKEPath := r.GKEMode
@@ -832,6 +837,70 @@ func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, ag
 	}
 
 	return secretName, nil
+}
+
+// transportCredentialSecretKey is the data key under which the hub transport
+// credential is stored in the per-agent Secret (scion-agent-<name>). It is
+// chosen to be unlikely to collide with the Name of a user- or
+// project-defined secret; divertTransportCredential drops any resolved
+// secret that uses it.
+const transportCredentialSecretKey = "scion-transport-credential"
+
+// divertTransportCredential moves the hub transport credential
+// (transportauth.EnvTransportToken) out of the plain KEY=VALUE env list and
+// into the resolved secrets as an environment-type entry, so that it lands in
+// the per-agent Secret and the pod references it via secretKeyRef.
+//
+// It returns new slices and never modifies the backing arrays of its inputs.
+// When the credential is absent (or empty) from env, both inputs are returned
+// unchanged.
+//
+// The hub-provided value takes precedence: any existing environment-type
+// resolved secret that targets the same env var, and any resolved secret
+// that uses transportCredentialSecretKey as its Name, is dropped (with a
+// warning) so the pod spec carries exactly one entry for the variable and
+// the Secret carries exactly one value under the key.
+func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]string, []api.ResolvedSecret) {
+	const prefix = transportauth.EnvTransportToken + "="
+	var value string
+	found := false
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) && len(e) > len(prefix) {
+			// Last non-empty occurrence wins; an empty entry is treated as
+			// unset (see the absent case below).
+			value = e[len(prefix):]
+			found = true
+		}
+	}
+	if !found {
+		return env, secrets
+	}
+
+	outEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		outEnv = append(outEnv, e)
+	}
+
+	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
+	for _, s := range secrets {
+		if (s.Type == "environment" && s.Target == transportauth.EnvTransportToken) || s.Name == transportCredentialSecretKey {
+			runtimeLog.Warn("Dropping resolved secret that conflicts with the hub transport credential",
+				"secret", s.Name, "target", s.Target, "source", s.Source)
+			continue
+		}
+		outSecrets = append(outSecrets, s)
+	}
+	outSecrets = append(outSecrets, api.ResolvedSecret{
+		Name:   transportCredentialSecretKey,
+		Type:   "environment",
+		Target: transportauth.EnvTransportToken,
+		Value:  value,
+		Source: "hub",
+	})
+	return outEnv, outSecrets
 }
 
 // createSecretProviderClass creates a SecretProviderClass CRD for GKE
