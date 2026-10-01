@@ -619,9 +619,15 @@ function packShiftEdge(
  *   Each *affected* unit is laid out on its own — `buildLineageForest` +
  *   `pruneCollapsed` + `layoutForest[WithUsers]` on just its surviving
  *   members, the same pipeline `freshLayout` below uses for everything, so
- *   collapse state and user grouping can't drift — then placed in its old
- *   footprint if that doesn't overlap any already-placed unit, otherwise
- *   appended just past the rightmost one so far.
+ *   collapse state and user grouping can't drift — then anchored at its old
+ *   footprint. If it no longer fits there (it widened), it stays anchored
+ *   anyway, and everything from that footprint's old right edge onward —
+ *   frozen content, and any later affected unit — shifts right by exactly
+ *   the overflow: a uniform, order-preserving translation, the same thing a
+ *   fresh layout does when inserting one more slot, not a reshuffle or a
+ *   relocation to the far end. A unit with no old footprint at all (every
+ *   member was hidden by collapse before) is the one case with nothing to
+ *   anchor to, and is appended past whatever has been placed so far.
  */
 export function computeStableLayout(
   agents: Agent[],
@@ -700,15 +706,20 @@ export function computeStableLayout(
   // competing for the same old footprint and shoving each other off-screen.
   const oldTreeOf = oldTreeKeysOf(buildLineageForest(previous.agents));
   const unitOf = currentUnitsOf(buildLineageForest(agents), showUsers, oldTreeOf);
+  // Old-side units via the same propagation rule as the current side (not a
+  // per-node `rootUserOf` check): an old unit's membership must be read off
+  // the old tree the same way a current one is, or the two can disagree for
+  // a non-root node whose own ancestry names a different "user" than the
+  // tree it's attached to.
+  const oldUnitOf = currentUnitsOf(buildLineageForest(previous.agents), showUsers, oldTreeOf);
 
   // A unit is affected if any of its *current* members descended from an old
   // tree the removal touched — propagated via old-tree membership, not an
-  // agent's own removal status, so a survivor that shares a current unit
-  // (the same user group) with an affected one is always pulled in even if
-  // its own old tree wasn't touched (this is what keeps a user's untouched
-  // roots from being dropped, #2481 review round 2 C1's "mid" case, and what
-  // correctly recomputes an orphan's new group even when the removed parent
-  // had no ancestry of its own to name that group, round 3's R2).
+  // agent's own removal status. Two cases this catches that a removed
+  // agent's own status wouldn't: a user's untouched roots are re-laid out
+  // together with the rest of its group rather than dropped from it, and an
+  // orphan whose removed parent had no ancestry of its own still gets its
+  // (new) group recomputed instead of leaving a dangling edge.
   const touchedOldTrees = new Set<string>();
   for (const id of removal.removedIds) {
     const tree = oldTreeOf.get(id);
@@ -736,40 +747,59 @@ export function computeStableLayout(
   }
   const isSurvivorAffected = (agentId: string): boolean => affectedUnits.has(unitOf.get(agentId)!);
 
-  const placedNodes: PositionedNode[] = previous.layout.nodes.filter(
+  // Frozen (unaffected) content keeps its exact old position unless an
+  // affected unit to its left widens past its old footprint, in which case
+  // it — and everything else from that point on — shifts right by exactly
+  // the overflow. Kept separate from `placedUnit*` below until the very end:
+  // the cumulative shift a piece of frozen content needs depends on *every*
+  // affected unit's overflow to its left, not just the nearest one, so it's
+  // computed once from the final list of overflow boundaries rather than by
+  // mutating these arrays once per affected unit.
+  let frozenNodes = previous.layout.nodes.filter(
     (n) => !removal.removedIds.has(n.agent.id) && !isSurvivorAffected(n.agent.id)
   );
-  const placedUsers: PositionedUser[] = previous.layout.users.filter(
-    (u) => !affectedUnits.has(userKey(u.id))
-  );
-  const placedEdges: PositionedEdge[] = previous.layout.edges.filter(
+  let frozenUsers = previous.layout.users.filter((u) => !affectedUnits.has(userKey(u.id)));
+  let frozenEdges = previous.layout.edges.filter(
     (e) =>
       !removal.removedIds.has(e.parentId) &&
       !removal.removedIds.has(e.childId) &&
       !isSurvivorAffected(e.childId)
   );
-
-  // Already-placed rectangles, for real interval-overlap testing — not just
-  // "is there room to the right of everything" — so a re-rooted unit can
-  // land back in its old footprint even when it isn't the rightmost thing on
-  // the canvas (an earlier version only ever matched the rightmost case).
-  const occupied: { min: number; max: number }[] = [
-    ...placedNodes.map((n) => packSpan(orientation, [n])!),
-    ...placedUsers.map((u) => packSpan(orientation, [u])!),
-  ];
-  const overlapsOccupied = (span: { min: number; max: number }): boolean =>
-    occupied.some((o) => span.min < o.max && o.min < span.max);
-  let frontier = occupied.reduce((max, o) => Math.max(max, o.max), -Infinity);
   const gap = orientation === 'horizontal' ? H_GAP_Y : GAP_X;
 
-  // Every entry in affectedUnits came from some current agent's own unit, so
-  // this is already exactly the set of units that need recomputing.
-  for (const unit of [...affectedUnits].sort(compareIds)) {
+  const placedUnitNodes: PositionedNode[] = [];
+  const placedUnitUsers: PositionedUser[] = [];
+  const placedUnitEdges: PositionedEdge[] = [];
+
+  // Affected units are processed in old-footprint order (left to right).
+  // `pendingShift` is the total overflow accumulated from earlier units in
+  // this pass: a unit's own anchor must account for it too, or two adjacent
+  // affected units could both anchor at their (now stale) old positions and
+  // overlap each other. `shiftBoundaries` records where each unit's own
+  // overflow starts applying, so frozen content's final shift — computed
+  // once, after this loop — is the sum of every boundary at or before its
+  // own old position, not just the nearest one.
+  const unitsInOldOrder = [...affectedUnits]
+    .map((unit) => {
+      const oldPositions = previous.layout.nodes.filter((n) => oldUnitOf.get(n.agent.id) === unit);
+      const oldUser = previous.layout.users.find((u) => userKey(u.id) === unit);
+      const oldSpan = packSpan(orientation, oldUser ? [...oldPositions, oldUser] : oldPositions);
+      return { unit, oldSpan };
+    })
+    .sort(
+      (a, b) =>
+        (a.oldSpan?.min ?? Infinity) - (b.oldSpan?.min ?? Infinity) || compareIds(a.unit, b.unit)
+    );
+
+  let pendingShift = 0;
+  const shiftBoundaries: { atOrAfter: number; amount: number }[] = [];
+
+  for (const { unit, oldSpan } of unitsInOldOrder) {
     const unitAgents = agents.filter((a) => unitOf.get(a.id) === unit);
     // A unit can be "affected" with no current members at all: a removed old
     // root whose entire subtree is gone, nothing promoted (see the
     // user-group fallback above). Nothing to lay out or place — it just
-    // disappears, which placedUsers' own affected-unit filter already did.
+    // disappears, which the frozen-content filters above already did.
     if (unitAgents.length === 0) continue;
 
     const unitForest = buildLineageForest(unitAgents);
@@ -777,36 +807,58 @@ export function computeStableLayout(
     let unitLayout = showUsers ? layoutForestWithUsers(unitForest) : layoutForest(unitForest);
     if (orientation === 'horizontal') unitLayout = transposeLayout(unitLayout);
     const unitSpan = packSpan(orientation, [...unitLayout.nodes, ...unitLayout.users])!;
-
-    const uid = userIdFromKey(unit);
-    const oldPositions =
-      uid !== null
-        ? previous.layout.nodes.filter((n) => rootUserOf(n.agent) === uid)
-        : previous.layout.nodes.filter((n) => oldTreeOf.get(n.agent.id) === unit);
-    const oldUser = uid !== null ? previous.layout.users.find((u) => u.id === uid) : undefined;
-    const oldSpan = packSpan(orientation, oldUser ? [...oldPositions, oldUser] : oldPositions);
-
     const width = unitSpan.max - unitSpan.min;
-    const candidate = oldSpan ? { min: oldSpan.min, max: oldSpan.min + width } : null;
-    const offset =
-      candidate && !overlapsOccupied(candidate)
-        ? candidate.min - unitSpan.min
-        : (frontier === -Infinity ? 0 : frontier + gap) - unitSpan.min;
 
-    for (const n of unitLayout.nodes) placedNodes.push(packShift(orientation, n, offset));
-    for (const u of unitLayout.users) placedUsers.push(packShift(orientation, u, offset));
-    for (const e of unitLayout.edges) placedEdges.push(packShiftEdge(orientation, e, offset));
-    const finalSpan = { min: unitSpan.min + offset, max: unitSpan.max + offset };
-    occupied.push(finalSpan);
-    frontier = Math.max(frontier, finalSpan.max);
+    let offset: number;
+    if (oldSpan) {
+      // Anchor at the old footprint, shifted right by whatever earlier
+      // affected units in this same pass already pushed into this unit's old
+      // territory — never append elsewhere while an old footprint exists.
+      const anchor = oldSpan.min + pendingShift;
+      offset = anchor - unitSpan.min;
+      const overflow = width - (oldSpan.max - oldSpan.min);
+      if (overflow > 0) {
+        shiftBoundaries.push({ atOrAfter: oldSpan.max, amount: overflow });
+        pendingShift += overflow;
+      }
+    } else {
+      // No old position at all (every member was hidden by collapse before):
+      // nothing to anchor to, so append past whatever is placed so far,
+      // including frozen content's eventual shift.
+      const frontier = Math.max(
+        -Infinity,
+        ...placedUnitNodes.map((n) => packSpan(orientation, [n])!.max),
+        ...placedUnitUsers.map((u) => packSpan(orientation, [u])!.max),
+        ...frozenNodes.map((n) => packSpan(orientation, [n])!.max + pendingShift),
+        ...frozenUsers.map((u) => packSpan(orientation, [u])!.max + pendingShift)
+      );
+      offset = (frontier === -Infinity ? 0 : frontier + gap) - unitSpan.min;
+    }
+
+    for (const n of unitLayout.nodes) placedUnitNodes.push(packShift(orientation, n, offset));
+    for (const u of unitLayout.users) placedUnitUsers.push(packShift(orientation, u, offset));
+    for (const e of unitLayout.edges) placedUnitEdges.push(packShiftEdge(orientation, e, offset));
   }
 
-  return {
-    nodes: placedNodes,
-    edges: placedEdges,
-    users: placedUsers,
-    ...layoutExtent(placedNodes, placedUsers),
-  };
+  const cumulativeShiftFor = (axisPos: number): number =>
+    shiftBoundaries.reduce((total, b) => (axisPos >= b.atOrAfter ? total + b.amount : total), 0);
+  frozenNodes = frozenNodes.map((n) => {
+    const amount = cumulativeShiftFor(packAxis(orientation, n));
+    return amount > 0 ? packShift(orientation, n, amount) : n;
+  });
+  frozenUsers = frozenUsers.map((u) => {
+    const amount = cumulativeShiftFor(packAxis(orientation, u));
+    return amount > 0 ? packShift(orientation, u, amount) : u;
+  });
+  frozenEdges = frozenEdges.map((e) => {
+    const amount = cumulativeShiftFor(orientation === 'horizontal' ? e.y2 : e.x2);
+    return amount > 0 ? packShiftEdge(orientation, e, amount) : e;
+  });
+
+  const nodes = [...frozenNodes, ...placedUnitNodes];
+  const users = [...frozenUsers, ...placedUnitUsers];
+  const edges = [...frozenEdges, ...placedUnitEdges];
+  return { nodes, edges, users, ...layoutExtent(nodes, users) };
 }
 
 /**
