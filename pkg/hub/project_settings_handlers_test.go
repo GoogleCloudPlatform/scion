@@ -1106,6 +1106,32 @@ func TestProjectSettings_DefaultGCPIdentity_PropagatesRealBrokerLookupError(t *t
 		"a real store error resolving the broker must propagate as a 500, not be silently treated as allow; body: %s", rec.Body.String())
 }
 
+// A project_providers row whose BrokerID no longer resolves to a runtime
+// broker (the broker was deleted, or this caller cannot read it) must NOT be
+// treated as a real error: GetRuntimeBroker returns store.ErrNotFound in that
+// case specifically, and projectIsKubernetesBound's "do not guess" rule
+// applies — the write is allowed, same as any other unconfirmable broker.
+// This is the ErrNotFound branch that TestProjectSettings_..._PropagatesRealBrokerLookupError
+// does not exercise (that test injects a generic error, not ErrNotFound) — PR
+// 2332 review round 2, finding 5, mutation G4b.
+func TestProjectSettings_DefaultGCPIdentity_AllowsBlockForDanglingProviderLink(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	// A provider link with no corresponding runtime_broker row: never created
+	// via createTestBroker, so GetRuntimeBroker(ctx, this ID) returns
+	// store.ErrNotFound.
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-dangling-" + t.Name()), BrokerName: "dangling-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a dangling project_providers link (ErrNotFound) must not confirm Kubernetes-bound; body: %s", rec.Body.String())
+}
+
 // TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed pins that the write
 // site and the consumption site AGREE about hub-scoped service accounts.
 //

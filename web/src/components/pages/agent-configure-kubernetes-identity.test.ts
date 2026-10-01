@@ -15,13 +15,24 @@
  */
 
 /**
- * Phase 2 of ptone/scion#2328: block is not offered as a GCP identity choice
- * for a Kubernetes runtime target on the agent Configure page (PR 2332 review
- * round 1, finding 3 — this page was not covered in the first pass).
+ * Phase 2 of ptone/scion#2328: block is not offered as a NEW GCP identity
+ * choice for a Kubernetes runtime target on the agent Configure page.
  *
  * The target is reliably known from the agent's own runtimeBrokerId and
- * appliedConfig.profile, loaded via GET /api/v1/runtime-brokers/{id}. This
- * mirrors agent-create.ts's treatment via the shared runtime-kind helpers.
+ * appliedConfig.profile, loaded via GET /api/v1/runtime-brokers/{id} — the
+ * shared runtime-kind helpers classify it, same as agent-create.ts.
+ *
+ * Unlike agent-create (a pure create flow), this page edits an EXISTING
+ * agent that may already have a real stored identity. PR 2332 review round 2
+ * findings 1 and 2 established two rules this file pins:
+ *  - A stored value (including a stored "block") is never migrated: the
+ *    Block option is disabled for a NEW selection, not removed, and a Save
+ *    of an untouched stored value must not rewrite it.
+ *  - Nothing is sent at all (gcp_identity omitted from the PATCH) unless the
+ *    user explicitly changed the picker — omitting it is a true no-op on the
+ *    server, and sending an explicit "passthrough" instead would route the
+ *    request through the Hub's passthrough ownership gate for a request that
+ *    never asked for passthrough.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,6 +46,7 @@ interface BrokerProfileFixture {
   available: boolean;
 }
 
+/** Default: nothing configured at all (the common, neutral case). */
 function makeAgent(overrides: Record<string, unknown> = {}) {
   return {
     id: 'agent-1',
@@ -44,7 +56,6 @@ function makeAgent(overrides: Record<string, unknown> = {}) {
     runtimeBrokerId: 'broker-1',
     appliedConfig: {
       profile: '',
-      gcpIdentity: { metadataMode: 'block' },
     },
     ...overrides,
   };
@@ -89,6 +100,29 @@ function createFetchHandler(opts?: {
   };
 }
 
+/**
+ * Same as createFetchHandler, but also records every PATCH /api/v1/agents/{id}
+ * request body, so a test can assert whether gcp_identity was included
+ * without needing the full Save success flow to complete differently.
+ */
+function createFetchHandlerCapturingPatch(opts?: {
+  agent?: Record<string, unknown>;
+  brokerProfiles?: BrokerProfileFixture[];
+}): {
+  handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  patchBodies: Array<Record<string, unknown>>;
+} {
+  const patchBodies: Array<Record<string, unknown>> = [];
+  const base = createFetchHandler(opts);
+  const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    if (init?.method === 'PATCH' && typeof init.body === 'string') {
+      patchBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    }
+    return base(url);
+  };
+  return { handler, patchBodies };
+}
+
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
   path = '/agents/agent-1/configure'
@@ -121,12 +155,24 @@ function gcpIdentitySelect(el: HTMLElement): Element | null {
   return el.shadowRoot?.querySelector('#gcp-mode') ?? null;
 }
 
-function gcpIdentityHint(el: HTMLElement): string {
-  const select = gcpIdentitySelect(el);
-  return select?.parentElement?.querySelector('.hint')?.textContent?.trim() ?? '';
+function blockOption(el: HTMLElement): Element | null {
+  return gcpIdentitySelect(el)?.querySelector('sl-option[value="block"]') ?? null;
 }
 
-describe('agent-configure: block is not offered for a Kubernetes target', () => {
+function gcpIdentityHelpTextSlot(el: HTMLElement): string {
+  return gcpIdentitySelect(el)?.querySelector('[slot="help-text"]')?.textContent?.trim() ?? '';
+}
+
+interface AgentConfigureInternals {
+  gcpMetadataMode: string;
+  gcpServiceAccountId: string;
+  gcpIdentityUserSet: boolean;
+  error: string | null;
+  handleSave: () => Promise<void>;
+  handleStart: () => Promise<void>;
+}
+
+describe('agent-configure: block is not a NEW choice for a Kubernetes target', () => {
   vi.setConfig({ testTimeout: 15000 });
   let element: HTMLElement | null = null;
 
@@ -143,34 +189,36 @@ describe('agent-configure: block is not offered for a Kubernetes target', () => 
     vi.restoreAllMocks();
   });
 
-  it('hides Block when the agent is dispatched to a kubernetes-only broker', async () => {
+  it('disables (does not remove) Block for a kubernetes-only broker when nothing is stored', async () => {
     element = await createComponent(
       createFetchHandler({
         brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
       })
     );
 
-    const select = gcpIdentitySelect(element);
-    expect(select).not.toBeNull();
-    expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
-    expect(gcpIdentityHint(element)).toContain('not available for a Kubernetes runtime target');
+    const option = blockOption(element);
+    expect(option).not.toBeNull();
+    expect(option!.hasAttribute('disabled')).toBe(true);
+    expect(gcpIdentityHelpTextSlot(element)).toContain('not supported on the Kubernetes runtime');
   });
 
-  it('keeps Block offered for a docker broker', async () => {
+  it('keeps Block enabled for a docker broker', async () => {
     element = await createComponent(
       createFetchHandler({
         brokerProfiles: [{ name: 'default', type: 'docker', available: true }],
       })
     );
 
-    const select = gcpIdentitySelect(element);
-    expect(select!.querySelector('sl-option[value="block"]')).not.toBeNull();
+    const option = blockOption(element);
+    expect(option).not.toBeNull();
+    expect(option!.hasAttribute('disabled')).toBe(false);
   });
 
-  it('corrects a stored "block" mode away once the target broker loads as known-Kubernetes', async () => {
-    // The agent's stored mode is block (set before this restriction existed);
-    // the broker fetch resolves asynchronously, after populateForm has
-    // already read that stored value into state.
+  // PR 2332 review round 2, finding 2: a stored "block" must display exactly
+  // as stored on a known-Kubernetes target — disabled for a NEW selection,
+  // but never auto-corrected away. This replaces the round-1 test that
+  // pinned the opposite (migrating) behavior.
+  it('keeps a stored "block" selected, not auto-corrected, on a known-Kubernetes target', async () => {
     element = await createComponent(
       createFetchHandler({
         agent: makeAgent({
@@ -180,35 +228,155 @@ describe('agent-configure: block is not offered for a Kubernetes target', () => 
       })
     );
 
-    const internals = element as unknown as { gcpMetadataMode: string };
-    expect(internals.gcpMetadataMode).not.toBe('block');
+    const page = element as unknown as AgentConfigureInternals;
+    expect(page.gcpMetadataMode).toBe('block');
+    const option = blockOption(element);
+    expect(option!.hasAttribute('disabled')).toBe(true);
   });
 
-  it('rejects Save when the mode is block for a known-Kubernetes target, without sending a PATCH', async () => {
-    const calls: string[] = [];
-    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
-      calls.push(`${init?.method ?? 'GET'} ${path}`);
-      return createFetchHandler({
-        brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
-      })(url);
-    };
+  it('resaves a stored "block" unchanged without sending gcp_identity at all', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      agent: makeAgent({
+        appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'block' } },
+      }),
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
     element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
 
-    const page = element as unknown as {
-      gcpMetadataMode: string;
-      error: string | null;
-      handleSave: () => Promise<void>;
-    };
-    // Force the mode back to block synchronously (no intervening await), to
-    // exercise the save-time guard directly rather than the reactive
-    // correction that would otherwise fix it first.
+    await page.handleSave();
+
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
+  });
+
+  it('rejects Save when the user explicitly attempts a new block selection on a known-Kubernetes target', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    // The UI itself prevents clicking into "block" once disabled; this
+    // simulates the only way the guard could still be reached, and checks it
+    // is transition-based (fires on an explicit new choice of block, not on
+    // an untouched value) — see the resave test above for the other half.
+    page.gcpIdentityUserSet = true;
     page.gcpMetadataMode = 'block';
 
-    calls.length = 0;
     await page.handleSave();
 
     expect(page.error).toContain('not available for a Kubernetes runtime target');
-    expect(calls.some((c) => c.startsWith('PATCH'))).toBe(false);
+    expect(patchBodies).toHaveLength(0);
+  });
+
+  // PR 2332 review round 2, finding 5, mutation A8: only the Save guard was
+  // tested; the identical Start guard was untested and the mutant survived.
+  it('rejects Start under the same condition, without sending a PATCH', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    page.gcpIdentityUserSet = true;
+    page.gcpMetadataMode = 'block';
+
+    await page.handleStart();
+
+    expect(page.error).toContain('not available for a Kubernetes runtime target');
+    expect(patchBodies).toHaveLength(0);
+  });
+
+  // PR 2332 review round 2, finding 5, mutation C1: the page must use
+  // appliedConfig.profile (not an empty string) to resolve the target on a
+  // broker whose profiles mix runtime types.
+  it('uses appliedConfig.profile to resolve the target on a mixed-profile broker', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        agent: makeAgent({ appliedConfig: { profile: 'k8s-profile' } }),
+        brokerProfiles: [
+          { name: 'k8s-profile', type: 'kubernetes', available: true },
+          { name: 'docker-profile', type: 'docker', available: true },
+        ],
+      })
+    );
+
+    const option = blockOption(element);
+    expect(option!.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('does not disable Block on a mixed-profile broker when the chosen profile is not Kubernetes', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        agent: makeAgent({ appliedConfig: { profile: 'docker-profile' } }),
+        brokerProfiles: [
+          { name: 'k8s-profile', type: 'kubernetes', available: true },
+          { name: 'docker-profile', type: 'docker', available: true },
+        ],
+      })
+    );
+
+    const option = blockOption(element);
+    expect(option!.hasAttribute('disabled')).toBe(false);
+  });
+
+  // PR 2332 review round 2, finding 1.
+  it('omits gcp_identity on Save when nothing is stored and nothing was chosen, for a known-Kubernetes target', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough'); // display-only correction
+
+    await page.handleSave();
+
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
+  });
+
+  it('sends an explicit passthrough on Save once the user picks it for a known-Kubernetes target', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      brokerProfiles: [{ name: 'default', type: 'kubernetes', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    page.gcpIdentityUserSet = true;
+    page.gcpMetadataMode = 'passthrough';
+
+    await page.handleSave();
+
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
+    const { handler, patchBodies } = createFetchHandlerCapturingPatch({
+      agent: makeAgent({
+        appliedConfig: { profile: '', gcpIdentity: { metadataMode: 'passthrough' } },
+      }),
+      brokerProfiles: [{ name: 'default', type: 'docker', available: true }],
+    });
+    element = await createComponent(handler);
+    const page = element as unknown as AgentConfigureInternals;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+
+    await page.handleSave();
+
+    // Unchanged from storage, and not a Kubernetes target: gcp_identity is
+    // still omitted (true no-op), which is also correct here — this pins
+    // that the omit-when-untouched rule does not regress a plain resave on a
+    // non-Kubernetes target either.
+    expect(page.error).toBeNull();
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).not.toHaveProperty('gcp_identity');
   });
 });

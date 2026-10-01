@@ -54,6 +54,7 @@ interface AgentCreateInternals {
   profile: string;
   gcpMetadataMode: string;
   gcpServiceAccountId: string;
+  gcpIdentityUserSet: boolean;
 }
 
 function stubFetch(): void {
@@ -85,6 +86,38 @@ function stubFetchTrackingCalls(): { calls: string[] } {
     })
   );
   return { calls };
+}
+
+/**
+ * Captures the JSON body of every POST /api/v1/agents request, so a test can
+ * assert whether gcp_identity was included without letting the real success
+ * path (navigateTo, a second /start call) run. The mocked response is a 400
+ * so handleSubmit's catch block sets `error` and returns before navigating.
+ */
+function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unknown>> } {
+  const bodies: Array<Record<string, unknown>> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/v1/agents') && init?.method === 'POST') {
+        if (typeof init.body === 'string') {
+          bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: { message: 'stub: not actually created' } }),
+        } as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+      } as Response);
+    })
+  );
+  return { bodies };
 }
 
 /**
@@ -397,5 +430,107 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
 
     expect(page.error).toContain('not available for a Kubernetes runtime target');
     expect(tracker.calls.some((c) => c.includes('/api/v1/agents'))).toBe(false);
+  });
+
+  // PR 2332 review round 2, finding 1: on a known-Kubernetes target,
+  // substituting an explicit "passthrough" for an untouched picker routes the
+  // create request through the Hub's passthrough ownership gate (broker
+  // owner/admin + a registered host service account) — which a request that
+  // never asked for passthrough should not have to pass, and which also
+  // bypasses Phase 1's unset-on-Kubernetes fallback. The create request must
+  // omit gcp_identity entirely unless the user actually chose something.
+  it('omits gcp_identity from the create request on a known-Kubernetes target when nothing was explicitly chosen', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('passthrough'); // display-only correction, not a user choice
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0]).not.toHaveProperty('gcp_identity');
+  });
+
+  it('sends an explicit passthrough on a known-Kubernetes target once the user picks it', async () => {
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-k8s',
+        name: 'k8s-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'kubernetes', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-k8s';
+    await el.updateComplete;
+
+    // Simulate the user explicitly interacting with the picker (the
+    // @sl-change handler sets this alongside the mode itself).
+    page.gcpIdentityUserSet = true;
+    page.gcpMetadataMode = 'passthrough';
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  it('still sends gcp_identity for a non-Kubernetes target even when untouched', async () => {
+    // Scope check: the omission in finding 1 is specific to known-Kubernetes
+    // targets. A docker target's existing default behavior (send the
+    // displayed mode explicitly) must be unaffected.
+    const tracker = stubFetchCapturingCreateRequests();
+    const el = await mountAgentCreate();
+    const page = internals(el) as AgentCreateInternals & {
+      name: string;
+      projectId: string;
+      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+    };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+    page.brokers = [
+      {
+        id: 'broker-docker',
+        name: 'docker-broker',
+        status: 'online',
+        profiles: [{ name: 'default', type: 'docker', available: true }],
+      },
+    ];
+    page.brokerId = 'broker-docker';
+    await el.updateComplete;
+
+    expect(page.gcpIdentityUserSet).toBe(false);
+    expect(page.gcpMetadataMode).toBe('block');
+
+    await page.handleSubmit(new Event('submit'));
+
+    expect(tracker.bodies).toHaveLength(1);
+    expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
 });

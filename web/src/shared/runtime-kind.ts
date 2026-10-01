@@ -19,20 +19,27 @@
  * used by every surface that hides or disables the "block" GCP identity mode
  * for a Kubernetes target (ptone/scion#2328 Phase 2).
  *
- * A `BrokerProfile.type` is the runtime config's map key name, not a
- * resolved/normalized type (pkg/runtimebroker/handlers.go,
- * cmd/server_broker.go build it directly from the settings profile map). The
- * runtime factory (pkg/runtime/factory.go) accepts "k8s" as an alias for
- * "kubernetes" and normalizes "remote" to "kubernetes" before dispatch, so
- * all three spellings must be treated as the same runtime here — matching
- * literally on "kubernetes" alone misses profiles registered under either
- * alias.
+ * A `BrokerProfile.type` is the settings *runtime key* the profile's
+ * `runtime:` field references (pkg/runtimebroker/handlers.go,
+ * cmd/server_broker.go build it directly from that map), not a resolved
+ * type. The runtime factory (pkg/runtime/factory.go) accepts "k8s" as an
+ * alias for "kubernetes" and normalizes "remote" to "kubernetes" before
+ * dispatch, so all three spellings must be treated as the same runtime here
+ * — matching literally on "kubernetes" alone misses profiles registered
+ * under either alias. Phase 1 (pkg/runtimebroker/start_context.go,
+ * ptone/scion#2338) classifies by this same string set against the resolved
+ * runtime's Name(), so the two cannot drift on which spellings count.
  *
- * This does not cover a custom-named runtime profile (e.g. a profile named
- * "my-cluster" whose settings declare `runtime: kubernetes`): the broker
- * reports the profile's own name as `type` in that case, not the resolved
- * runtime it points to. Fixing that needs the broker to report a resolved
- * type; out of scope here (ptone/scion#2332 review, finding 4).
+ * This is exact on a profile named after its runtime (e.g. a profile named
+ * "my-cluster" with `runtime: kubernetes` correctly reports type
+ * "kubernetes"). The gap is a custom-named *runtime entry* —
+ * `runtimes.gke-prod: {type: kubernetes}` referenced by `runtime: gke-prod`
+ * reports type "gke-prod" and is missed here. The same gap runs in reverse: a
+ * runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit
+ * `type: docker` (or any other non-Kubernetes type) is misclassified as
+ * Kubernetes here, though it dispatches as that other type. Both need the
+ * broker to report its resolved type instead of the profile's runtime key;
+ * out of scope here (ptone/scion#2332 review round 2, finding 4).
  */
 const KUBERNETES_RUNTIME_TYPES = new Set(['kubernetes', 'k8s', 'remote']);
 

@@ -69,6 +69,7 @@ function makeBroker(id: string, profiles?: BrokerProfileFixture[]): BrokerFixtur
 function createFetchHandler(opts?: {
   brokers?: BrokerFixture[];
   settings?: Record<string, unknown>;
+  resolvedSettings?: Record<string, unknown>;
 }) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -97,8 +98,7 @@ function createFetchHandler(opts?: {
           JSON.stringify({
             projectId: 'proj-1',
             project: opts?.settings ?? {},
-            settings: opts?.settings ?? {},
-            resolvedSettings: {},
+            settings: opts?.resolvedSettings ?? {},
           }),
           {
             status: 200,
@@ -152,6 +152,7 @@ function blockOption(el: HTMLElement): Element | null {
   return field?.querySelector('sl-option[value="block"]') ?? null;
 }
 
+/** Whitespace-normalized: Lit template literals preserve literal newlines/indentation verbatim in textContent. */
 function fieldHelpText(el: HTMLElement): string {
   const fields = Array.from(el.shadowRoot?.querySelectorAll('.config-field') ?? []);
   const field = fields.find((f) =>
@@ -159,7 +160,9 @@ function fieldHelpText(el: HTMLElement): string {
   );
   return Array.from(field?.querySelectorAll('.field-help') ?? [])
     .map((n) => n.textContent ?? '')
-    .join(' ');
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function gcpIdentitySelect(el: HTMLElement): Element | null {
@@ -203,7 +206,8 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     const option = blockOption(element);
     expect(option).not.toBeNull();
     expect(option!.hasAttribute('disabled')).toBe(true);
-    expect(fieldHelpText(element)).toContain('Kubernetes');
+    const helpText = gcpIdentitySelect(element)!.querySelector('[slot="help-text"]');
+    expect(helpText?.textContent).toContain('Kubernetes');
   });
 
   it('leaves Block enabled when linked brokers mix runtime types', async () => {
@@ -288,7 +292,13 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     }
   );
 
-  it('gives the disabled Block option a tooltip and links the select to the explanation', async () => {
+  // PR 2332 review round 2, finding 3: aria-describedby on the <sl-select>
+  // HOST has no accessibility effect — the element that receives focus is the
+  // role="combobox" input inside Shoelace's shadow root, which a host
+  // attribute cannot reach across the shadow boundary. The explanation must
+  // be slotted into the select's help-text slot instead, which Shoelace
+  // wires to that combobox internally.
+  it('gives the disabled Block option a tooltip and slots the explanation into the select help-text', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
@@ -300,14 +310,13 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(option!.getAttribute('title')).toContain('Kubernetes');
 
     const select = gcpIdentitySelect(element);
-    const describedBy = select!.getAttribute('aria-describedby');
-    expect(describedBy).toBeTruthy();
-    const hint = element!.shadowRoot?.getElementById(describedBy!);
-    expect(hint).not.toBeNull();
-    expect(hint!.textContent).toContain('Kubernetes');
+    expect(select!.hasAttribute('aria-describedby')).toBe(false);
+    const helpText = select!.querySelector('[slot="help-text"]');
+    expect(helpText).not.toBeNull();
+    expect(helpText!.textContent).toContain('Kubernetes');
   });
 
-  it('does not add a tooltip or aria-describedby when the project is not reliably Kubernetes-bound', async () => {
+  it('does not add a tooltip or a help-text slot when the project is not reliably Kubernetes-bound', async () => {
     element = await createComponent(
       createFetchHandler({
         brokers: [makeBroker('b1', [{ name: 'default', type: 'docker', available: true }])],
@@ -318,7 +327,7 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(option!.hasAttribute('title')).toBe(false);
 
     const select = gcpIdentitySelect(element);
-    expect(select!.hasAttribute('aria-describedby')).toBe(false);
+    expect(select!.querySelector('[slot="help-text"]')).toBeNull();
   });
 
   it('changes the "inherit" fallback label to passthrough for a Kubernetes-bound project', async () => {
@@ -355,5 +364,100 @@ describe('project-settings: GCP identity Block option and Kubernetes-bound proje
     expect(select!.getAttribute('value')).toBe('block');
     const option = blockOption(element);
     expect(option!.hasAttribute('disabled')).toBe(true);
+  });
+
+  // PR 2332 review round 2, finding 5, mutation P4: the inherited-hub-"block"
+  // hint had no test and the mutant removing it survived.
+  it('flags an inherited hub default of block for a Kubernetes-bound project', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        resolvedSettings: {
+          'scion.io/default-gcp-identity-mode': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'block',
+          },
+        },
+      })
+    );
+
+    expect(fieldHelpText(element)).toContain('hub default is "Block"');
+    expect(fieldHelpText(element)).toContain('Kubernetes');
+  });
+
+  // PR 2332 review round 2, finding 6: a hub default of "passthrough" only
+  // takes effect on the hub's own embedded broker; on any other broker
+  // (which every broker here is, by definition, once the project is
+  // confirmed Kubernetes-bound) it falls back to "Block", which the
+  // Kubernetes runtime rejects at dispatch. The existing hint text must warn
+  // about this for a Kubernetes-bound project, not just repeat the generic
+  // "other brokers get Block" note.
+  it('extends the inherited hub-passthrough hint with a Kubernetes rejection warning', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        resolvedSettings: {
+          'scion.io/default-gcp-identity-mode': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'passthrough',
+          },
+        },
+      })
+    );
+
+    const text = fieldHelpText(element);
+    expect(text).toContain('embedded broker');
+    expect(text).toContain('Kubernetes');
+    expect(text).toContain('rejects at dispatch');
+  });
+
+  it('does not add the Kubernetes warning to the hub-passthrough hint for a non-Kubernetes-bound project', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'docker', available: true }])],
+        resolvedSettings: {
+          'scion.io/default-gcp-identity-mode': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'passthrough',
+          },
+        },
+      })
+    );
+
+    expect(fieldHelpText(element)).not.toContain('rejects at dispatch');
+  });
+
+  // A hub default of "assign" with no service account configured falls
+  // through to "Block" the same way an unverified one does.
+  it('extends the inherited hub-assign hint when no service account is configured, for a Kubernetes-bound project', async () => {
+    element = await createComponent(
+      createFetchHandler({
+        brokers: [makeBroker('b1', [{ name: 'default', type: 'kubernetes', available: true }])],
+        resolvedSettings: {
+          'scion.io/default-gcp-identity-mode': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'present',
+            hubValue: 'assign',
+          },
+          'scion.io/default-gcp-identity-service-account-id': {
+            projectSet: false,
+            projectValue: null,
+            hubDefault: 'absent',
+            hubValue: null,
+          },
+        },
+      })
+    );
+
+    const text = fieldHelpText(element);
+    expect(text).toContain('no service account is configured');
+    expect(text).toContain('rejected at dispatch');
   });
 });

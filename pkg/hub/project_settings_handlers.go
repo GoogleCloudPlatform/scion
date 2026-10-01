@@ -344,13 +344,25 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 // isKubernetesRuntimeType reports whether a BrokerProfile.Type names the
 // Kubernetes runtime, under any spelling the runtime factory accepts
 // (pkg/runtime/factory.go): "kubernetes" itself, the "k8s" alias, and
-// "remote" (normalized to "kubernetes" before dispatch). A profile's Type is
-// the runtime config's map key name, not a resolved type
-// (cmd/server_broker.go, pkg/runtimebroker/handlers.go build it directly from
-// the settings profile map) — a custom-named profile whose settings declare
-// `runtime: kubernetes` still reports its own name here, not "kubernetes".
-// That gap needs the broker to report a resolved type instead; out of scope
-// for this check (ptone/scion#2332 review round 1, finding 4).
+// "remote" (normalized to "kubernetes" before dispatch). Phase 1
+// (pkg/runtimebroker/start_context.go, ptone/scion#2338) classifies by this
+// same string set, checked against the resolved runtime's Name() rather than
+// a stored profile field, so the two cannot drift on which spellings count.
+//
+// A profile's Type is the settings *runtime key* the profile's `runtime:`
+// field references (cmd/server_broker.go, pkg/runtimebroker/handlers.go build
+// it directly from that map), not a resolved type. This function is exact on
+// a profile named after its runtime (e.g. a profile named "my-cluster" with
+// `runtime: kubernetes` correctly reports Type "kubernetes"). The gap is a
+// custom-named *runtime entry*: `runtimes.gke-prod: {type: kubernetes}`
+// referenced by `runtime: gke-prod` reports Type "gke-prod" and is missed
+// here (pkg/config/settings_v1.go ResolveRuntime resolves it through
+// V1RuntimeConfig.Type, which this function never sees). The same gap runs in
+// reverse: a runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit
+// `type: docker` (or any other non-Kubernetes type) is misclassified as
+// Kubernetes here, though it dispatches as that other type. Both gaps need
+// the broker to report its resolved type instead of the profile's runtime
+// key; out of scope for this check (ptone/scion#2332 review round 2, finding 4).
 func isKubernetesRuntimeType(t string) bool {
 	switch t {
 	case "kubernetes", "k8s", "remote":

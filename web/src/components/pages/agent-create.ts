@@ -104,6 +104,21 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private harnessAuth = '';
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
   @state() private gcpServiceAccountId = '';
+  /**
+   * True once the user has explicitly interacted with the GCP Identity
+   * picker (either select) this session. Reset whenever defaults are
+   * recomputed from scratch (loadGCPServiceAccounts, on project change).
+   *
+   * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
+   * target with no explicit user choice, the request omits gcp_identity
+   * entirely so the Hub's own project/hub-default ladder — and, if nothing is
+   * configured anywhere, Phase 1's unset fallback — resolves it. Substituting
+   * an explicit "passthrough" there instead would route the request through
+   * the Hub's passthrough ownership gate (broker owner/admin + registered
+   * host service account), which a request that never asked for passthrough
+   * should not have to pass (PR 2332 review round 2, finding 1).
+   */
+  private gcpIdentityUserSet = false;
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -411,20 +426,25 @@ export class ScionPageAgentCreate extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    // Block is not offered for a Kubernetes runtime target. Re-check whenever
-    // the broker/profile selection, the broker list itself, or the mode
-    // changes, and fall back to passthrough rather than leaving a selection
-    // this page no longer renders an option for. This runs in willUpdate
-    // (before render), not updated, so the correction lands in the same
-    // update cycle instead of scheduling a second one.
+    // Block is not offered for a Kubernetes runtime target: the <sl-option>
+    // is not rendered, so a mode of "block" would leave the select showing
+    // nothing. Re-check whenever the broker/profile selection, the broker
+    // list itself, or the mode changes, and fall back to displaying
+    // "passthrough" instead. This runs in willUpdate (before render), not
+    // updated, so the correction lands in the same update cycle instead of
+    // scheduling a second one. (This is a display-only correction — whether
+    // an explicit identity is actually sent on submit is gated separately by
+    // gcpIdentityUserSet; see buildConfig/handleSubmit.)
     //
-    // This alone does not cover every path: loadGCPServiceAccounts sets
-    // gcpMetadataMode directly (its own default, and a project default of
-    // "block") *after* the broker is already selected, in the same task —
-    // that assignment does not itself change brokerId/profile/brokers, so it
-    // would not otherwise re-trigger this check before the value is read
-    // elsewhere. normalizeGcpModeForTarget is called explicitly at the end
-    // of loadGCPServiceAccounts to cover that path too.
+    // gcpMetadataMode is in the trigger list above, so this check does
+    // already re-run when loadGCPServiceAccounts assigns it directly (its own
+    // default, or a project default of "block") — the explicit call at the
+    // end of loadGCPServiceAccounts is not covering a gap in this trigger
+    // list. It exists because loadGCPServiceAccounts is async: code right
+    // after `await this.loadGCPServiceAccounts()` that reads
+    // targetRuntimeIsKubernetesOnly or gcpMetadataMode would otherwise run in
+    // the same synchronous turn as the assignment, before Lit's next
+    // willUpdate has had a chance to fire.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
@@ -443,10 +463,13 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Corrects gcpMetadataMode away from "block" when the current broker/
-   * profile target is reliably known to be Kubernetes (see
-   * targetRuntimeIsKubernetesOnly). Idempotent and safe to call from
-   * anywhere that just changed the broker, profile, or mode.
+   * Corrects the *displayed* gcpMetadataMode away from "block" when the
+   * current broker/profile target is reliably known to be Kubernetes (see
+   * targetRuntimeIsKubernetesOnly) — purely so the select has a matching,
+   * rendered option. It does not mark the choice as user-made
+   * (gcpIdentityUserSet is untouched here), so an untouched target still
+   * submits with no explicit gcp_identity at all. Idempotent and safe to call
+   * from anywhere that just changed the broker, profile, or mode.
    */
   private normalizeGcpModeForTarget(): void {
     if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
@@ -751,6 +774,9 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpServiceAccounts = [];
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
+    // Recomputing defaults from scratch (initial load, or a project change):
+    // whatever this method assigns below is a default, not a user choice.
+    this.gcpIdentityUserSet = false;
 
     if (this.projectId) {
       try {
@@ -1027,8 +1053,18 @@ export class ScionPageAgentCreate extends LitElement {
       const builtLabels = this.buildLabels();
       if (builtLabels) body.labels = builtLabels;
 
-      // GCP identity
-      if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
+      // GCP identity. On a known-Kubernetes target with no explicit user
+      // choice, omit gcp_identity entirely rather than send the displayed
+      // "passthrough" default: an explicit passthrough request routes through
+      // the Hub's passthrough ownership gate (broker owner/admin + a
+      // registered host service account), which a request that never asked
+      // for passthrough should not have to pass. Omitting it lets the Hub's
+      // own project/hub-default ladder resolve it — including Phase 1's
+      // unset-on-Kubernetes fallback when nothing is configured anywhere
+      // (PR 2332 review round 2, finding 1).
+      if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) {
+        // omit body.gcp_identity
+      } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
         body.gcp_identity = {
           metadata_mode: 'assign',
           service_account_id: this.gcpServiceAccountId,
@@ -1733,6 +1769,7 @@ export class ScionPageAgentCreate extends LitElement {
               | 'block'
               | 'passthrough'
               | 'assign';
+            this.gcpIdentityUserSet = true;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
@@ -1753,7 +1790,9 @@ export class ScionPageAgentCreate extends LitElement {
               ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
               : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
           ${this.targetRuntimeIsKubernetesOnly
-            ? ' Block is not available for a Kubernetes runtime target.'
+            ? this.gcpIdentityUserSet
+              ? ' Block is not available for a Kubernetes runtime target.'
+              : " Block is not available for a Kubernetes runtime target. No explicit identity has been chosen, so the broker's own Kubernetes default applies automatically; choosing Passthrough or Assign here sends that choice explicitly instead."
             : ''}
         </div>
       </div>
@@ -1772,6 +1811,7 @@ export class ScionPageAgentCreate extends LitElement {
                         this.gcpServiceAccountId = (
                           e.target as HTMLElement & { value: string }
                         ).value;
+                        this.gcpIdentityUserSet = true;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(
