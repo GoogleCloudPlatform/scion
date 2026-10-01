@@ -571,11 +571,11 @@ func TestGCPServiceAccountUse_ExactIDComparison(t *testing.T) {
 }
 
 // TestGCPServiceAccountUse_UserDecisionUnchanged pins that the per-SA
-// agent-credential path is gated on isAgentPrincipal
-// and so leaves a User principal's decision over gcp_service_account.use
-// unaffected: a user with no role is denied, and a system-admin user (who
-// holds every registered permission through the super-admin role) is
-// admitted, exactly as for any other permission.
+// agent-credential path is gated on isAgentPrincipal and so leaves a User
+// principal's decision over gcp_service_account.use unaffected: a user with
+// no role is denied, and a system-admin user (who holds every registered
+// permission through the super-admin role) is admitted, exactly as for any
+// other permission.
 func TestGCPServiceAccountUse_UserDecisionUnchanged(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()

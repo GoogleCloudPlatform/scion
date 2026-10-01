@@ -453,9 +453,9 @@ func (a *AuthzService) intersectCredentialCaveats(actor Identity, perms []string
 		// Zero Resource: CanDelegate reasons about a target-agnostic
 		// permission set, never one resource instance, so the
 		// gcp_service_account.use per-SA match (agentScopeRestriction's one
-		// resource-aware exception) can never engage here -- it falls
-		// through to the same static (empty) AgentScopes behavior this
-		// permission has always had for delegation.
+		// resource-aware exception) can never engage here, so
+		// gcp_service_account.use is always filtered out of an agent's
+		// delegable set.
 		r := agentScopeRestriction(v, Resource{})
 		restriction = &r
 	}

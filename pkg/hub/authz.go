@@ -1307,8 +1307,7 @@ func agentGCPServiceAccountUseScopeMatch(agent AgentIdentity, permissionID strin
 // resource ID must never be read there as general, delegable
 // gcp_service_account.use authority. CanDelegate calls agentScopeRestriction
 // with a zero Resource, so agentGCPServiceAccountUseScopeMatch always denies
-// there and that caller falls through to the static (empty) AgentScopes
-// list, which decides it.
+// there and gcp_service_account.use is never in an agent's delegable set.
 func gcpServiceAccountUseBinding(agent AgentIdentity, permissionID string, resource Resource) (*CandidateBinding, *RolePermissions) {
 	if !agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource) {
 		return nil, nil
