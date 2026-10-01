@@ -148,8 +148,10 @@ resource "kubernetes_job_v1" "nfs_init" {
       # No metadata.name here: the kubernetes_job_v1 provider schema rejects
       # spec.template.metadata.name together with the Job's own
       # metadata.generate_name ("Conflicting configuration arguments"). The
-      # pod template needs no name of its own; Kubernetes names the pods it
-      # creates from this template.
+      # ConflictsWith is the absolute path metadata.0.generate_name, i.e. a
+      # provider schema quirk, not a Kubernetes rule. The pod template needs
+      # no name of its own; Kubernetes names the pods it creates from this
+      # template.
       metadata {}
 
       spec {

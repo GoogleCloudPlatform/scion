@@ -633,7 +633,16 @@ each existing hub, applying this version should show the legacy
 the OIDC secret and its version dropped from state on refresh (already
 deleted out-of-band by pass 4, so they show as "changed outside of Terraform",
 not as a destroy); the Cloud Run service updated in place (the legacy env var
-removed); and `time_sleep.iam_propagation` replaced. No resources added. If
+removed); and `time_sleep.iam_propagation` replaced. This version also
+replaces `module.agent_runtime_k8s.kubernetes_job_v1.nfs_init` once, on each
+existing hub's first apply of it: the Job moves from a fixed name to a
+generated name, and both are ForceNew, so Terraform create-before-destroys
+the Job; the new Job re-runs the same idempotent mkdir/chown as the one it
+replaces. That same apply updates
+`module.hub_cloudrun.terraform_data.boot_prerequisites` in place, because its
+`nfs_init_job` input is only known after the replacement Job is created. The
+only add in this plan is that replacement Job (a replace counts as one add
+and one destroy); nothing else is added. If
 the OIDC secret/version show up as a destroy instead, pass 4 has not actually
 deleted them yet — stop and confirm pass 5 first.
 
