@@ -937,6 +937,8 @@ describe('project-detail — agent list window', () => {
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('small');
       expect(internals(el).agentWindow.items.find((a) => a.id === 'a-4')?.phase).toBe('running');
+      const beforeAgents = (el as unknown as { agents: Agent[] }).agents;
+      const untouched = beforeAgents.find((a) => a.id === 'a-3');
 
       (
         stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
@@ -950,11 +952,14 @@ describe('project-detail — agent list window', () => {
       // The small-state list view must see the same live update grid/tree/
       // stats already saw via `this.agents` — no re-adoption step, and no
       // extra request.
-      expect((el as unknown as { agents: Agent[] }).agents.find((a) => a.id === 'a-4')?.phase).toBe(
-        'stopped'
-      );
+      const afterAgents = (el as unknown as { agents: Agent[] }).agents;
+      expect(afterAgents.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(internals(el).agentWindow.items.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(requests.length).toBe(1);
+      // mergeChanged (design §7, W2/A10): the array identity changed (a-4
+      // changed), but every untouched agent is carried over by reference.
+      expect(afterAgents).not.toBe(beforeAgents);
+      expect(afterAgents.find((a) => a.id === 'a-3')).toBe(untouched);
 
       // A brand-new SSE-created agent, sorted to the top by `updated` desc, appears.
       (

@@ -51,6 +51,7 @@ import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
 import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
+import { mergeChanged } from '../../client/agent-merge.js';
 import { sortAgents } from '../../shared/agent-sort.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
@@ -309,7 +310,7 @@ export class ScionPageProjectDetail extends LitElement {
    * states exist today (design §11); held and capped land once
    * `agent-drain.ts` exists. The small state reads `this.agents` live
    * through `getHeldAgents` rather than a copy, so an SSE update applied by
-   * `onAgentsUpdated` is visible immediately with no re-adoption step.
+   * `mergeAgentsChanged` is visible immediately with no re-adoption step.
    */
   private agentWindow = new AgentListWindow({
     viewState: {
@@ -331,8 +332,15 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnAgentsChanged = (e: Event) => {
     // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
-    // `AgentsChangedDetail` itself is `detail.data`.
-    this.agentWindow.applyChanges((e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data);
+    // `AgentsChangedDetail` itself is `detail.data`. The paged state merges
+    // through the window (design §6.2); the small/held state merges
+    // through `mergeChanged` instead of a per-event full rebuild (design
+    // §7, §11 — this replaces the old `onAgentsUpdated`).
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    this.agentWindow.applyChanges(detail);
+    if (this.agentWindow.state !== 'paged') {
+      this.mergeAgentsChanged(detail);
+    }
   };
 
   private boundOnAgentsResync = () => {
@@ -1083,7 +1091,6 @@ export class ScionPageProjectDetail extends LitElement {
     }
   `;
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
@@ -1167,7 +1174,6 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     // Listen for real-time updates
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
@@ -1176,7 +1182,6 @@ export class ScionPageProjectDetail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.removeEventListener(
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
@@ -1342,46 +1347,37 @@ export class ScionPageProjectDetail extends LitElement {
     this.visitedFileTabs = new Set(this.visitedFileTabs).add(tab);
   }
 
-  private onAgentsUpdated(): void {
-    // The small state's `this.agents` rebuild is skipped while the window is
-    // paged: `this.agents` is intentionally empty then, and live updates for
-    // the list view instead go through `agentWindow.applyChanges` (design
-    // §11, §6.2).
-    if (this.agentWindow.state === 'paged') return;
-    const updatedAgents = stateManager.getAgents();
-    // Merge SSE agent deltas into local agent list
-    const agentMap = new Map(this.agents.map((a) => [a.id, a]));
-    // Lazily derive scope capabilities from existing agents if not yet set.
+  /**
+   * Live updates for the small/held state (design §7, §11): one
+   * `agents-changed` flush merged through `mergeChanged`, replacing the old
+   * `onAgentsUpdated` per-event full rebuild over `stateManager.getAgents()`.
+   * A no-op while the window is paged — `this.agents` is intentionally
+   * empty then, and the list view's live updates go through
+   * `agentWindow.applyChanges` instead (design §6.2), called by
+   * `boundOnAgentsChanged` before this.
+   */
+  private mergeAgentsChanged(detail: AgentsChangedDetail): void {
+    // Lazily derive scope capabilities from existing agents if not yet set
+    // (e.g. a delta arrives before the page's own load has set it).
     if (!this.agentScopeCapabilities) {
-      for (const a of agentMap.values()) {
+      for (const a of this.agents) {
         if (a._capabilities) {
           this.agentScopeCapabilities = a._capabilities;
           break;
         }
       }
     }
-    for (const agent of updatedAgents) {
-      if (agent.projectId === this.projectId || agentMap.has(agent.id)) {
-        const existing = agentMap.get(agent.id);
-        const merged = { ...existing, ...agent } as Agent;
-        // New agents from SSE don't carry per-resource _capabilities.
-        // Inherit scope-level capabilities so action buttons render.
-        if (!merged._capabilities) {
-          if (existing?._capabilities) {
-            merged._capabilities = existing._capabilities;
-          } else if (this.agentScopeCapabilities) {
-            merged._capabilities = this.agentScopeCapabilities;
-          }
-        }
-        agentMap.set(agent.id, merged);
-      }
+    const merged = mergeChanged(this.agents, detail, {
+      getAgent: (id) => stateManager.getAgent(id),
+      // Today's add rule (design §6.2): any agent in this project, or an ID
+      // already held (e.g. one whose projectId changed underneath it keeps
+      // getting its updates until an explicit `deleted` removes it).
+      shouldAdd: (agent) => agent.projectId === this.projectId,
+      scopeCapabilities: this.agentScopeCapabilities,
+    });
+    if (merged !== this.agents) {
+      this.agents = merged;
     }
-    // Remove agents that were explicitly deleted via SSE
-    const deletedIds = stateManager.getDeletedAgentIds();
-    for (const id of deletedIds) {
-      agentMap.delete(id);
-    }
-    this.agents = Array.from(agentMap.values());
   }
 
   private onProjectsUpdated(): void {
@@ -1760,8 +1756,8 @@ export class ScionPageProjectDetail extends LitElement {
     // Exit the window out of `'paged'` unconditionally: a truncated legacy
     // set is still rendered through `this.agents` directly (grid/tree,
     // exactly as before the window existed), and leaving the window
-    // `'paged'` here is what caused `onAgentsUpdated` to keep skipping and
-    // `agentStats` to keep reading a member index seeded for a now-stale
+    // `'paged'` here is what caused `mergeAgentsChanged` to keep skipping
+    // and `agentStats` to keep reading a member index seeded for a now-stale
     // request. `listViewUsesWindow` alone still gates whether the *list
     // view* may render from the window.
     this.agentWindow.setSmall();
