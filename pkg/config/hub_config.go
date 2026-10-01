@@ -1059,6 +1059,57 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	return gc, true
 }
 
+// serverConfigSources resolves the actual server.yaml/server.yml file path(s)
+// loadGlobalConfigLegacy reads (global dir plus the effective local config
+// location) for the unused-keys warning's dedup key and log message. This
+// mirrors what that function actually loads (step 2 and step 3 below,
+// including loadServerConfigFile's own yaml/yml lookup), not just the
+// directories it looks in: a directory with no server config file is
+// omitted, matching settingsHierarchySources, and a relative configPath (or
+// the default ".") is resolved to an absolute path so it isn't ambiguous in
+// a hub or broker log where the process's cwd isn't obvious. Like
+// settingsHierarchySources, a resolved path already seen (e.g. configPath, or
+// the cwd it defaults to, is the global dir itself) is not listed twice.
+func serverConfigSources(configPath string) []string {
+	seen := make(map[string]struct{}, 2)
+	add := func(out []string, path string) []string {
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			return out
+		}
+		seen[clean] = struct{}{}
+		return append(out, path)
+	}
+
+	var out []string
+	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
+		if path := GetServerConfigPath(globalDir); path != "" {
+			out = add(out, path)
+		}
+	}
+
+	dir := configPath
+	if dir == "" {
+		dir = "."
+	}
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		// configPath names a file directly; loadGlobalConfigLegacy loads it
+		// as-is in that case (see step 3 below).
+		path := dir
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	} else if path := GetServerConfigPath(dir); path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	}
+
+	return out
+}
+
 // loadGlobalConfigLegacy loads global configuration from server.yaml files using the legacy path.
 func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	k := koanf.New(".")
@@ -1159,7 +1210,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	// produce false-positive warnings if the check ran after merging env vars.
 	{
 		var probe GlobalConfig
-		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config")
+		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
 
 	// 4. Load environment variables (SCION_SERVER_ prefix)
