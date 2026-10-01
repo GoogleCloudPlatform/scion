@@ -307,17 +307,27 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 	t.Run("empty_value_label_filter", func(t *testing.T) {
 		var wantFiltered []string
 		for _, row := range rows {
-			if fullRows[row.ID].Labels["team"] == "" {
+			// r4 review nit-B: distinguish "key present with an empty
+			// value" from "key absent" (a bare map index would treat both
+			// as "" and silently pass a missing-key row too; it makes no
+			// difference for this fixture, since every row sets "team"
+			// explicitly, but the predicate should still say what it means).
+			v, ok := fullRows[row.ID].Labels["team"]
+			if ok && v == "" {
 				wantFiltered = append(wantFiltered, row.ID)
 			}
 		}
 		require.NotEmpty(t, wantFiltered, "the fixture must actually contain readable team=\"\" rows, or this sub-test proves nothing")
 
+		// limit=2 (r4 review nit-B): the 5 readable team="" rows no longer
+		// fit on a single page (limit=7 did, so a cursor carrying an
+		// empty-value label filter was never exercised across pages).
 		var got []string
+		pages := 0
 		cursor := ""
-		for pages := 0; ; pages++ {
+		for ; ; pages++ {
 			require.Less(t, pages, 1000)
-			q := "sort=updated&dir=desc&limit=7&label=team="
+			q := "sort=updated&dir=desc&limit=2&label=team="
 			if cursor != "" {
 				q += "&cursor=" + url.QueryEscape(cursor)
 			}
@@ -332,6 +342,7 @@ func TestListProjectAgentsSorted_PagedWalk_NonOwnerPartialRead_IndependentRefere
 			}
 			cursor = resp.NextCursor
 		}
+		require.Greater(t, pages, 0, "limit=2 over 5 rows must take more than one page, or the cursor round-trip for an empty-value label filter is not actually exercised")
 		assert.Equal(t, wantFiltered, got, "a label=team= (empty-value) walk must match the same independent reference, additionally filtered to team=\"\" in this test")
 		for _, id := range got {
 			assert.True(t, readableSet[id], "the filtered walk must never return an agent from another project or one the caller cannot read: %s", id)

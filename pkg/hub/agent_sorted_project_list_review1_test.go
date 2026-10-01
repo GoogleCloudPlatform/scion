@@ -81,7 +81,7 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 			// test and against A15 itself, so a genuine future change to
 			// either the formula or the ceiling constant is caught here
 			// too, not just silently diverges from this literal table.
-			require.Equal(t, effectivePagedPageSize(limit, n), wantPEff,
+			require.Equal(t, wantPEff, effectivePagedPageSize(limit, n),
 				"this test's hard-coded table must track effectivePagedPageSize's actual behavior")
 			require.LessOrEqual(t, 5+n+7*wantPEff, sortedProjectDecisionCeiling,
 				"the erratum's whole point: P_eff must keep the paged request inside A15")
