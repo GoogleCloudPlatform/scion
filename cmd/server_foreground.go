@@ -37,6 +37,7 @@ import (
 
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -386,20 +388,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					_ = mp.Shutdown(shutdownCtx)
 				}()
 
-				dbRec, dbErr := dbmetrics.New(mp)
-				if dbErr != nil {
-					log.Printf("WARNING: hub db metrics disabled: %v", dbErr)
-				} else {
-					hubDBRec = dbRec
-					hubSrv.SetDBMetrics(dbRec)
-				}
-
-				dispRec, dispErr := dispatchmetrics.New(mp)
-				if dispErr != nil {
-					log.Printf("WARNING: hub dispatch metrics disabled: %v", dispErr)
-				} else {
-					hubSrv.SetDispatchMetrics(dispRec)
-				}
+				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 
 				if hubSrv.GetBrokerAuthService() != nil {
 					otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
@@ -1796,6 +1785,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		StalledThreshold:             cfg.Hub.StalledThreshold,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
+		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
+		LaunchTimeout:                cfg.Hub.LaunchTimeout,
+		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
@@ -1890,6 +1882,41 @@ func resolveTransportAudience(oidcAudience, mode, hubEndpoint string) string {
 		return hubEndpoint
 	}
 	return ""
+}
+
+// wireHubCoreMetrics wires the Hub's db, broker-dispatch and launch-reaper
+// metrics recorders to mp, returning the db recorder for callers that need
+// to pass it along separately (event publisher / web server construction).
+// Extracted from runServerStart's OTel-metrics block above so it can be
+// exercised directly in a test with a ManualReader-backed MeterProvider (see
+// server_foreground_metrics_test.go), rather than only indirectly through
+// the whole runServerStart path.
+func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.Recorder {
+	var hubDBRec dbmetrics.Recorder
+
+	dbRec, dbErr := dbmetrics.New(mp)
+	if dbErr != nil {
+		log.Printf("WARNING: hub db metrics disabled: %v", dbErr)
+	} else {
+		hubDBRec = dbRec
+		hubSrv.SetDBMetrics(dbRec)
+	}
+
+	dispRec, dispErr := dispatchmetrics.New(mp)
+	if dispErr != nil {
+		log.Printf("WARNING: hub dispatch metrics disabled: %v", dispErr)
+	} else {
+		hubSrv.SetDispatchMetrics(dispRec)
+	}
+
+	reaperRec, reaperErr := reapermetrics.New(mp)
+	if reaperErr != nil {
+		log.Printf("WARNING: hub launch reaper metrics disabled: %v", reaperErr)
+	} else {
+		hubSrv.SetReaperMetrics(reaperRec)
+	}
+
+	return hubDBRec
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {

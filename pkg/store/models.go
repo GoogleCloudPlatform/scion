@@ -112,11 +112,11 @@ type Agent struct {
 	// ever touched this agent.
 	ReincarnationUpdatedAt *time.Time `json:"reincarnationUpdatedAt,omitempty"`
 
-	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// --- Async agent create (design §3.3) ---
 	// These are the persisted launch_* columns. They are internal bookkeeping,
 	// not the client-facing shape — untagged (json:"-") so they never leak
-	// directly onto the wire. The client-facing computed view (AgentLaunch /
-	// ComputeAgentLaunch, design §3.2) is P1a-ii scope, not here.
+	// directly onto the wire. See Launch/AgentLaunch below for the
+	// client-facing computed view derived from these columns.
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
@@ -135,12 +135,19 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+
+	// Launch is the computed, client-facing view of the launch_* columns
+	// above (design §3.2; see launch_view.go). It is nil unless a
+	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
+	// ComputeAgentLaunch) — store methods that return an *Agent do not
+	// populate it themselves, so a snapshot always reflects the fields
+	// present at the moment it was computed, not at load time.
+	Launch *AgentLaunch `json:"launch,omitempty"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch
 // (design §3.3 in-flight predicate). Used by the store-side predicates
-// (IsInFlight, IsIncompleteCreate); the client-facing AgentLaunch view is
-// P1a-ii scope.
+// (IsInFlight, IsIncompleteCreate).
 var InFlightPhases = map[string]bool{
 	"created":      true,
 	"provisioning": true,

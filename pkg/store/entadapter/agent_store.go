@@ -265,7 +265,14 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		SetCreated(now).
 		SetUpdated(now).
 		SetStateVersion(a.StateVersion).
-		SetGeneration(a.Generation)
+		SetGeneration(a.Generation).
+		// The async-launch client opt-in (design §3.2) is the one
+		// launch_* field CreateAgent sets — the rest start at their column
+		// defaults ("", false, 0) because a freshly created agent has no
+		// launch yet. Every other launch_* column is written only by
+		// BeginLaunch/MarkLaunchAccepted/EndLaunch/ApplyLaunchReport/
+		// RunLaunchReaperTick (§3.3).
+		SetLaunchAsyncOptIn(a.LaunchAsyncOptIn)
 
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))

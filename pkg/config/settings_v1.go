@@ -619,6 +619,14 @@ type V1ServerHubConfig struct {
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
+	// AsyncAgentLaunch is the non-blocking agent create kill switch.
+	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
+	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
+	// Today it only sets the reaper's staleness window (8x this value); it
+	// will also be sent to the broker once the async dispatch path lands.
+	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1832,6 +1840,17 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
+		if v1.Hub.AsyncAgentLaunch != nil {
+			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
+		}
+		if v1.Hub.LaunchTimeout != "" {
+			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
+				gc.Hub.LaunchTimeout = d
+			}
+		}
+		if v1.Hub.LaunchKeepaliveSeconds != nil {
+			gc.Hub.LaunchKeepaliveSeconds = *v1.Hub.LaunchKeepaliveSeconds
+		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
 		}
@@ -2161,6 +2180,17 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
+	}
+	if gc.Hub.AsyncAgentLaunch {
+		asyncLaunch := true
+		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.LaunchTimeout > 0 {
+		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
+	}
+	if gc.Hub.LaunchKeepaliveSeconds > 0 {
+		keepalive := gc.Hub.LaunchKeepaliveSeconds
+		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
 
