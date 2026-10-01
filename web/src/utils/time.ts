@@ -45,3 +45,40 @@ export function formatRelativeTime(dateString: string): string {
     return dateString;
   }
 }
+
+/**
+ * Returns the browser's resolved IANA time zone (e.g. "America/New_York").
+ *
+ * This is the fallback used wherever a user has not chosen an explicit
+ * display zone: `preferences.timezone`, else this value.
+ */
+export function browserTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+/**
+ * Reports whether `zone` is a time zone name `Intl` accepts (e.g. an IANA
+ * name such as "Asia/Tokyo", or "UTC").
+ *
+ * This is the one place in the web app allowed to probe `Intl.DateTimeFormat`
+ * for this purpose; every zone-name check elsewhere should call this
+ * function instead of constructing its own `Intl.DateTimeFormat`.
+ */
+export function isValidTimeZone(zone: string): boolean {
+  if (!zone) return false;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the IANA time zone names the browser supports, plus "UTC" (in
+ * case the runtime's list omits it).
+ */
+export function listTimeZones(): string[] {
+  const zones = Intl.supportedValuesOf('timeZone');
+  return zones.includes('UTC') ? zones : [...zones, 'UTC'];
+}
