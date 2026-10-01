@@ -862,6 +862,46 @@ describe('scion-page-admin-server-config', () => {
 
       expect(shadowText(element)).toContain('Something went terribly wrong');
     });
+
+    // tz-refactor task 12 review round 1, R1-2 addendum: handleSaveError's
+    // default case previously only handled a flat {error: "<string>", ...}
+    // shape. The real Go writeError() helper (pkg/hub/errors.go), used by
+    // every plain field-validation 400/422 on this page — including
+    // default_timezone's — responds with {error: {code, message, details}}.
+    // Before the fix, body.error being an object meant the switch never
+    // matched a case, body.message was undefined (nested at
+    // body.error.message instead), and the real message was replaced by the
+    // generic fallback. This is the shape the handler actually sends, unlike
+    // the idealized flat-string shapes the other Criterion 8 tests above use
+    // for validation_failed/revision_conflict/layer0_rejected.
+    it('a real writeError()-shaped 422 (nested error.message) renders its message, not the generic fallback', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message:
+                  'invalid default_timezone "Not/A/Timezone": unknown time zone Not/A/Timezone',
+              },
+            },
+          }),
+        })
+      );
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('invalid default_timezone "Not/A/Timezone"');
+      expect(text).not.toContain('An unexpected error occurred');
+    });
   });
 
   // ── Schema fallback ──

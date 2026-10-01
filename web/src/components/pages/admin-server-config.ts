@@ -2317,12 +2317,30 @@ export class ScionPageAdminServerConfig extends LitElement {
         break;
       }
 
-      default:
+      default: {
+        // Pre-existing bug, fixed here because tz-refactor task 12's AC
+        // needs it ("an invalid name shows the server's 422 message"): the
+        // Go writeError() helper (pkg/hub/errors.go), which backs every
+        // plain field-validation 400/422 on this page — default_timezone,
+        // agent_endpoint, default_user_role — responds with
+        // {error: {code, message, details}}, not the flat {error: "<code
+        // string>", ...} shape the cases above handle. body.error is an
+        // object there, so it never matched a case above, body.message is
+        // undefined (the message is nested at body.error.message, not
+        // top-level), and typeof body.error === 'string' is false, so this
+        // fell through to the generic fallback and the real message was
+        // silently lost.
+        const nestedError =
+          typeof body.error === 'object' && body.error !== null
+            ? (body.error as Record<string, unknown>)
+            : null;
         this.error =
           (body.message as string) ||
+          (nestedError?.message as string) ||
           (typeof body.error === 'string' ? body.error : null) ||
           'An unexpected error occurred';
         break;
+      }
     }
   }
 
