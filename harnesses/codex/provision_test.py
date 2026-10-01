@@ -345,6 +345,92 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(provision._resolve_reasoning_effort(-10), "low")
         self.assertEqual(provision._resolve_reasoning_effort(150), "xhigh")
 
+    # -- SCION_THINKING_LEVEL -> reasoning_effort resolution (ptone/scion#2479) --
+    #
+    # Scion sets no thinking level anywhere by default, so with
+    # model_reasoning_effort left unwritten codex fell back to its own
+    # bundled per-model catalog default ("low" for the model behind Scion's
+    # "medium" alias). _resolve_reasoning_effort_env is the fix: it always
+    # returns a usable effort, defaulting to _DEFAULT_REASONING_EFFORT
+    # ("medium") whenever SCION_THINKING_LEVEL doesn't resolve to an
+    # explicit level, while an explicit, valid level still wins outright.
+
+    def test_resolve_reasoning_effort_env_unset_defaults_to_medium(self) -> None:
+        self.assertEqual(
+            provision._resolve_reasoning_effort_env(_test_ctx(), ""),
+            provision._DEFAULT_REASONING_EFFORT,
+        )
+        self.assertEqual(provision._DEFAULT_REASONING_EFFORT, "medium")
+
+    def test_resolve_reasoning_effort_env_blank_defaults_to_medium(self) -> None:
+        # provision() strips the raw env value before calling this, so a
+        # whitespace-only SCION_THINKING_LEVEL arrives here as "".
+        self.assertEqual(
+            provision._resolve_reasoning_effort_env(_test_ctx(), "   ".strip()),
+            "medium",
+        )
+
+    def test_resolve_reasoning_effort_env_explicit_levels_win(self) -> None:
+        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "10"), "low")
+        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "90"), "xhigh")
+
+    def test_resolve_reasoning_effort_env_invalid_value_defaults_to_medium(self) -> None:
+        # Chosen behavior (stated in the PR body): a non-integer value is
+        # treated the same as unset/blank rather than silently reproducing
+        # the "no model_reasoning_effort written -> codex's own low
+        # default" bug this fallback exists to fix.
+        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "not-a-number"), "medium")
+
+    def test_reconcile_codex_toml_writes_medium_when_thinking_level_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "")
+                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "medium"', content)
+
+    def test_reconcile_codex_toml_writes_medium_when_thinking_level_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "   ".strip())
+                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "medium"', content)
+
+    def test_reconcile_codex_toml_writes_low_for_explicit_level_10(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "10")
+                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "low"', content)
+
+    def test_reconcile_codex_toml_writes_xhigh_for_explicit_level_90(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "90")
+                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "xhigh"', content)
+
+    def test_reconcile_codex_toml_writes_medium_for_invalid_thinking_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                effort = provision._resolve_reasoning_effort_env(_test_ctx(), "not-a-number")
+                provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
+                config_path = os.path.join(tmp, ".codex", "config.toml")
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "medium"', content)
+
     def test_reconcile_codex_toml_writes_model_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with temporary_home(tmp):

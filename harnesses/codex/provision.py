@@ -245,6 +245,44 @@ def _resolve_reasoning_effort(level: int) -> str:
     return "low"
 
 
+# Scion sets no thinking level anywhere by default, which previously left
+# `model_reasoning_effort` unwritten and let codex fall back to its own
+# bundled per-model catalog default — "low" for the model behind Scion's
+# default `medium` alias (ptone/scion#2479). This constant is the
+# codex-only floor applied whenever SCION_THINKING_LEVEL doesn't resolve to
+# an explicit level, so Scion's own idea of "medium" effort always applies
+# unless something upstream of this script (CLI flag, web UI, template, or
+# hub/project default) set SCION_THINKING_LEVEL explicitly.
+_DEFAULT_REASONING_EFFORT = "medium"
+
+
+def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_raw: str) -> str:
+    """Resolve the (already-stripped) SCION_THINKING_LEVEL value into a
+    reasoning_effort, logging the decision via ctx.info.
+
+    An explicit integer value always wins and uses _resolve_reasoning_effort's
+    mapping. An unset/blank value, or one that isn't a valid integer, falls
+    back to _DEFAULT_REASONING_EFFORT: both cases mean this script has no
+    explicit signal from CLI/web/template/hub, so they're treated the same
+    way rather than letting an invalid value silently reproduce the
+    "low" bug this fallback exists to fix.
+    """
+    if thinking_raw:
+        try:
+            thinking_level = int(thinking_raw)
+        except ValueError:
+            ctx.info(
+                f"thinking_level={thinking_raw!r} is not a valid integer; "
+                f"reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)"
+            )
+            return _DEFAULT_REASONING_EFFORT
+        reasoning_effort = _resolve_reasoning_effort(thinking_level)
+        ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
+        return reasoning_effort
+    ctx.info(f"thinking_level=<unset>, reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)")
+    return _DEFAULT_REASONING_EFFORT
+
+
 # The line-oriented TOML string/comment masking, bracket-depth tracking,
 # header detection, top-level key strip/insert, and the tomllib
 # round-trip/preservation backstop all live in scion_harness now (shared
@@ -546,14 +584,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.project_instructions(ctx, instructions_file)
 
     thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    reasoning_effort: str | None = None
-    if thinking_raw:
-        try:
-            thinking_level = int(thinking_raw)
-            reasoning_effort = _resolve_reasoning_effort(thinking_level)
-            ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
-        except ValueError:
-            pass
+    reasoning_effort = _resolve_reasoning_effort_env(ctx, thinking_raw)
 
     telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
