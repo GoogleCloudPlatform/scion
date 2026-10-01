@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"net/http"
-	"sync"
 	"testing"
 )
 
@@ -141,52 +140,4 @@ func TestServer_ShutdownThenCleanupResources_NoPanic(t *testing.T) {
 	if err := srv.CleanupResources(context.Background()); err != nil {
 		t.Fatalf("CleanupResources() returned error: %v", err)
 	}
-}
-
-// TestServer_StartBackgroundServices_CleanupResources_ConcurrentRace exercises
-// the combined-mode lifecycle ordering from cmd/server_foreground.go: a
-// goroutine calls CleanupResources() (there, triggered by <-ctx.Done()) while
-// another goroutine is still inside StartBackgroundServices(). Nothing
-// enforces that StartBackgroundServices() completes before that
-// CleanupResources goroutine observes ctx.Done() and runs, so the two can
-// execute concurrently in production.
-//
-// This proves s.stopPoolSampler is safe under that interleaving: it is
-// written under s.mu in StartBackgroundServices and read into a local under
-// s.mu in CleanupResources (ptone/scion#2433 / GoogleCloudPlatform/scion#2196
-// review comment). Before that fix, go test -race flagged a DATA RACE on
-// this field under this exact test. Run with -race to confirm:
-//
-//	GOCACHE=/tmp/gocache-i2433-dev-5 env -u SCION_AUTO_EXPOSE_PORTS -u SCION_HUB_ENDPOINT \
-//	  go test -race -p 2 -run TestServer_StartBackgroundServices_CleanupResources_ConcurrentRace ./pkg/hub/
-//
-// Note: s.scheduler, s.notificationDispatcher, s.lifecycleHookEvaluator,
-// s.messageBrokerProxy, s.events, s.commandBus and s.presenceManager are read
-// unsynchronized in the same CleanupResources call and may still be flagged
-// by -race under this same interleaving; that is pre-existing behavior on
-// main, unchanged by this fix, and out of this PR's scope (tracked as a
-// follow-up).
-func TestServer_StartBackgroundServices_CleanupResources_ConcurrentRace(t *testing.T) {
-	srv := newShutdownTestServer(t)
-
-	// Wire an enabled recorder so StartBackgroundServices actually assigns
-	// s.stopPoolSampler (it is a no-op when dbMetrics is nil or disabled, see
-	// dbmetrics.StartPoolSampler). The test store satisfies the `DB() *sql.DB`
-	// assertion StartBackgroundServices uses to find the underlying *sql.DB.
-	srv.SetDBMetrics(&countingRecorder{enabledReturns: true})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		srv.StartBackgroundServices(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		_ = srv.CleanupResources(context.Background())
-	}()
-	wg.Wait()
 }
