@@ -2545,6 +2545,17 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
+		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
+		// Classify raw before authorizeAgentMessage runs (contract §6.1's
+		// branch-point invariant), reusing the agent already resolved above
+		// (the same shared resolution block every other action on this route
+		// uses -- the bridge introduces no separate resolution step). A
+		// raw-selected request is handled here entirely; a non-raw request
+		// falls through completely unaffected, body restored byte-for-byte.
+		if s.tryAgentKeysMessageBridge(w, r, agent, agentID, "/api/v1/projects/"+projectID+"/agents/"+agent.ID+"/keys", true) {
+			return
+		}
+
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
