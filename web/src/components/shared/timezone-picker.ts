@@ -36,7 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { listTimeZones } from '../../utils/time.js';
+import { isValidTimeZone, listTimeZones } from '../../utils/time.js';
 
 /** Event detail emitted when a zone is selected or typed. */
 export interface TimezoneChangeDetail {
@@ -44,6 +44,28 @@ export interface TimezoneChangeDetail {
 }
 
 const MAX_VISIBLE_RESULTS = 50;
+
+/**
+ * Search aids for a handful of common city/country names that Intl's
+ * canonical zone list (`listTimeZones()`) does not contain under that
+ * spelling, because ICU's canonical pick for that zone is a different
+ * historical name (tz-refactor task 12 review round 1, R1-4). A plain
+ * substring match against the candidate list alone finds nothing for these
+ * — e.g. "asia/katmandu".includes("kathmandu") is false — so typing one of
+ * these terms also surfaces the zone it names.
+ *
+ * This is a convenience list, not a correctness boundary: a full, exact,
+ * valid zone name or alias the list doesn't name here (e.g. "Asia/Kolkata"
+ * itself, typed in full) is still offered — see filteredZones's
+ * isValidTimeZone check below.
+ */
+const SEARCH_ALIAS_HINTS: ReadonlyArray<readonly [term: string, zone: string]> = [
+  ['kolkata', 'Asia/Calcutta'],
+  ['kyiv', 'Europe/Kiev'],
+  ['kathmandu', 'Asia/Katmandu'],
+  ['ho chi minh', 'Asia/Saigon'],
+  ['ho_chi_minh', 'Asia/Saigon'],
+];
 
 @customElement('scion-timezone-picker')
 export class ScionTimezonePicker extends LitElement {
@@ -86,10 +108,18 @@ export class ScionTimezonePicker extends LitElement {
     // value is reflected without the user having to retype. Computed in
     // willUpdate (before render), not updated (after), so this is part of
     // the same update cycle instead of scheduling a second one.
+    //
+    // selectedViaDropdown is reset only by handleSearchInput and the
+    // sl-clear handler (a genuine new user edit), not unconditionally here
+    // (R1-7 — the previous unconditional reset ran before the parent's
+    // updated `.value` prop round-tripped back down, so it never actually
+    // gated this resync; it only gated the blur handler below, which is
+    // where it matters: without it, a dropdown mousedown selection that is
+    // followed by a blur event would re-emit the same value a second time
+    // via commitTyped).
     if (changed.has('value') && !this.selectedViaDropdown) {
       this.searchQuery = this.displayValue(this.value);
     }
-    this.selectedViaDropdown = false;
   }
 
   private displayValue(value: string): string {
@@ -97,16 +127,53 @@ export class ScionTimezonePicker extends LitElement {
   }
 
   private get candidates(): string[] {
-    // The empty entry's label is matched like any other zone name but maps
-    // back to '' on selection.
-    return this.emptyLabel ? [this.emptyLabel, ...this.allZones] : this.allZones;
+    // De-duplicate: if emptyLabel collides with a real zone name already in
+    // allZones (e.g. the admin default's empty-label="UTC", and
+    // listTimeZones() always includes the real "UTC"), drop that zone from
+    // the plain list so there is one row, not two (R1-5).
+    const base = this.emptyLabel
+      ? this.allZones.filter((z) => z !== this.emptyLabel)
+      : this.allZones;
+
+    // Always include the current value, even when it's a valid alias
+    // Intl's canonical list omits (e.g. a stored "Asia/Kathmandu" when the
+    // canonical list only has "Asia/Katmandu" — see isValidTimeZone's
+    // doc comment), so a persisted alias is listed instead of looking
+    // "not found" on focus (R1-4).
+    const extras: string[] = [];
+    if (this.emptyLabel) extras.push(this.emptyLabel);
+    if (this.value && this.value !== this.emptyLabel && !base.includes(this.value)) {
+      extras.push(this.value);
+    }
+    return [...extras, ...base];
   }
 
   private get filteredZones(): string[] {
-    const query = this.searchQuery.trim().toLowerCase();
+    const trimmed = this.searchQuery.trim();
+    const query = trimmed.toLowerCase();
     const candidates = this.candidates;
     if (!query) return candidates.slice(0, MAX_VISIBLE_RESULTS);
-    return candidates.filter((z) => z.toLowerCase().includes(query)).slice(0, MAX_VISIBLE_RESULTS);
+
+    let matches = candidates.filter((z) => z.toLowerCase().includes(query));
+
+    // Alias search aid (R1-4): surface the canonical zone for a handful of
+    // common alternate names a plain substring match can't find (see
+    // SEARCH_ALIAS_HINTS's doc comment).
+    for (const [term, zone] of SEARCH_ALIAS_HINTS) {
+      if (term.includes(query) && candidates.includes(zone) && !matches.includes(zone)) {
+        matches = [zone, ...matches];
+      }
+    }
+
+    // If the typed text is itself a full, valid zone name or alias not
+    // already offered (e.g. "Asia/Kolkata", a valid Intl alias absent from
+    // supportedValuesOf — see isValidTimeZone), surface it directly so it
+    // can be selected (R1-4).
+    if (isValidTimeZone(trimmed) && !matches.includes(trimmed)) {
+      matches = [trimmed, ...matches];
+    }
+
+    return matches.slice(0, MAX_VISIBLE_RESULTS);
   }
 
   private valueFor(displayText: string): string {

@@ -108,6 +108,95 @@ describe('scion-timezone-picker', () => {
     expect(events[events.length - 1].timezone).toBe('');
   });
 
+  // tz-refactor task 12 review round 1, R1-5: listTimeZones() always
+  // contains the real "UTC", so empty-label="UTC" must not produce two
+  // "UTC" rows in the dropdown.
+  it('does not duplicate a real zone name that collides with empty-label', async () => {
+    const el = await createElement();
+    el.emptyLabel = 'UTC';
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const options = Array.from(el.shadowRoot?.querySelectorAll('.timezone-search-option') ?? []);
+    const utcRows = options.filter((o) => o.textContent?.trim() === 'UTC');
+    expect(utcRows.length).toBe(1);
+  });
+
+  // tz-refactor task 12 review round 1, R1-4: a stored alias Intl's
+  // canonical list omits (listTimeZones() has "Asia/Katmandu", not
+  // "Asia/Kathmandu") must still be listed when the field is focused,
+  // instead of the dropdown claiming no match for the field's own value.
+  it('lists a stored alias value even though it is absent from the canonical zone list', async () => {
+    const el = await createElement();
+    el.value = 'Asia/Kathmandu';
+    el.requestUpdate();
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Kathmandu');
+
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const filtered = (el as Record<string, unknown>)['filteredZones'] as string[];
+    expect(filtered).toContain('Asia/Kathmandu');
+    const options = Array.from(el.shadowRoot?.querySelectorAll('.timezone-search-option') ?? []);
+    expect(options.some((o) => o.textContent?.trim() === 'Asia/Kathmandu')).toBe(true);
+  });
+
+  it('typing a full, valid alias not in the canonical list still offers it', async () => {
+    const el = await createElement();
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'Asia/Kolkata' },
+    } as unknown as Event);
+    await el.updateComplete;
+
+    const filtered = (el as Record<string, unknown>)['filteredZones'] as string[];
+    expect(filtered).toContain('Asia/Kolkata');
+  });
+
+  it('a known alternate-name search term surfaces its canonical zone (Kolkata, Kyiv, Kathmandu)', async () => {
+    const el = await createElement();
+
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'Kolkata' },
+    } as unknown as Event);
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['filteredZones'] as string[]).toContain('Asia/Calcutta');
+
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'Kyiv' },
+    } as unknown as Event);
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['filteredZones'] as string[]).toContain('Europe/Kiev');
+
+    (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
+      target: { value: 'Kathmandu' },
+    } as unknown as Event);
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['filteredZones'] as string[]).toContain('Asia/Katmandu');
+  });
+
+  // tz-refactor task 12 review round 1, R1-7: selecting from the dropdown
+  // must not leave the field looking like it needs to be re-resolved (the
+  // previous unconditional reset in willUpdate was a no-op dressed up as a
+  // guard; this exercises the actual sequence that matters — select, then
+  // the parent round-trips the same value back down as a prop update).
+  it('keeps the selected display text when the parent round-trips the same value back as a prop', async () => {
+    const el = await createElement();
+    (el as Record<string, (...args: unknown[]) => void>)['selectZone']('Asia/Tokyo');
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
+
+    // Simulate the parent applying the emitted value back as a prop, as
+    // admin-server-config.ts's @timezone-change handler does.
+    el.value = 'Asia/Tokyo';
+    el.requestUpdate();
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Asia/Tokyo');
+  });
+
   it('filters the list by the typed substring, case-insensitively', async () => {
     const el = await createElement();
     (el as Record<string, (...args: unknown[]) => void>)['handleSearchInput']({
