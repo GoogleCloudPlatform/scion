@@ -99,7 +99,7 @@ func TestUATBoundary_StoreAndHubValidityAgree(t *testing.T) {
 				if storeOK && !hubValid {
 					t.Errorf("store accepted but hub rejected: validators disagree")
 				}
-				if hubValid && !storeOK && !(kind == "project" && (projectID == nonUUID || projectID == nilUUID)) {
+				if hubValid && !storeOK && (kind != "project" || (projectID != nonUUID && projectID != nilUUID)) {
 					t.Errorf("hub accepted but store rejected for a reason other than the project ID's UUID form")
 				}
 			})
