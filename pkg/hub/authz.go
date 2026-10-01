@@ -1240,15 +1240,11 @@ func agentScopesToPermissionIDs(scopes []AgentTokenScope) []string {
 	for _, s := range scopes {
 		scopeSet[string(s)] = true
 	}
-	seen := make(map[string]bool)
 	var ids []string
 	for _, p := range permissions.Registry {
 		for _, s := range p.AgentScopes {
 			if scopeSet[s] {
-				if !seen[p.ID] {
-					seen[p.ID] = true
-					ids = append(ids, p.ID)
-				}
+				ids = append(ids, p.ID)
 				break
 			}
 		}
