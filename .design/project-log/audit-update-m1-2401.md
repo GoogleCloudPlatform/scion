@@ -52,6 +52,8 @@ Focused evidence after the fixes:
 - `make fmt-check` — PASS.
 - `GOGC=40 golangci-lint run --concurrency=1 ./pkg/hub/auditevent/...` — PASS (`0 issues`).
 - `git diff --check` — PASS.
+- `GOFLAGS='-p=2' make ci` — PARTIAL / environment-limited. Formatting, no-SQLite vet, and all custom checks passed; the package under change passed. `test-fast` then reproduced unrelated ambient failures in `cmd` (missing Hub authorization), `pkg/config` (leaked `SCION_PROJECT`), and `pkg/harness` (`CODEX_HOME` policy conflict), so the dependent build target was not reached.
+- `GOFLAGS='-p=2' make build` — PASS (`./build/scion`).
 
 ## #2404 / #2405 interface facts
 

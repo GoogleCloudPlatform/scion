@@ -222,10 +222,15 @@ func validCredentialLabelKey(value string) bool {
 		return false
 	}
 	for i, r := range value {
-		switch {
-		case i == 0 && (r < 'a' || r > 'z'):
+		if i == 0 {
+			if r >= 'a' && r <= 'z' {
+				continue
+			}
 			return false
-		case i > 0 && !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-'):
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
+		default:
 			return false
 		}
 	}
