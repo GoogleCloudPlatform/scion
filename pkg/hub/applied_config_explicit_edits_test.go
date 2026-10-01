@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -409,37 +411,158 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 // Review round 1 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-1.md)
 // ============================================================================
 
+// configureUntouchedBody loads the golden fixture shared with
+// agent-configure-build-config.test.ts's "R2-2" vitest case
+// (web/src/components/pages/agent-configure-build-config.test.ts): the exact
+// JSON body the real, fixed buildConfig emits for a fully untouched form
+// loaded from a live config with model "golden-model" and nothing else set.
+// Loading the SAME file in both places means a future buildConfig change
+// that stops matching it breaks the vitest case directly, instead of
+// leaving this Go test to silently test a body nobody's buildConfig
+// actually produces anymore (ptone/scion#2493 R2-2).
+func configureUntouchedBody(t *testing.T) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "configure-untouched-body.json"))
+	require.NoError(t, err)
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &body))
+	return body
+}
+
 // TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone is R1-1's
-// hub-side regression test: a live config carrying real hub-stamped
-// telemetry and an explicit env key, PATCHed with the body the FIXED
-// agent-configure.ts buildConfig now sends for a fully untouched form --
-// which, after the R1-1 web fix, omits "env" and "telemetry" entirely rather
-// than echoing synthesized values -- must leave both untouched in
-// CreateInputs. Before the fix, buildConfig always sent `env.
-// SCION_AUTO_EXPOSE_PORTS` and `telemetry: {enabled}`, which this helper
-// would have recorded as explicit edits and frozen into CreateInputs,
-// dropping the hub telemetry config at the next reincarnate.
+// hub-side regression test, tightened per review round 2 (R2-2): a live
+// config with a REALISTIC hub-stamped telemetry config (Cloud.Endpoint set,
+// not just Enabled) and live Env/InlineConfig populated the way create
+// leaves them, PATCHed with configureUntouchedBody (the real buildConfig
+// output for an untouched form, not a hand-written approximation), must
+// leave CreateInputs and live Env untouched, and must never record telemetry
+// into CreateInputs -- the one thing Option C (recordExplicitEdits) actually
+// controls.
+//
+// It does NOT assert that live AppliedConfig.InlineConfig.Telemetry
+// survives: every config PATCH (even this "untouched" one) replaces
+// InlineConfig wholesale with exactly what the request decoded to
+// (options.md §7.2, pre-existing, out of scope for this PR), so a request
+// body that never mentions "telemetry" drops it from the LIVE InlineConfig
+// on the very first PATCH, independent of recordExplicitEdits. Both
+// `assert.Nil(...InlineConfig.Telemetry)` calls below document that known,
+// unrelated effect rather than warn about a regression.
+//
+// Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
+// never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
+// a second PATCH that only edits the one custom env key (step 2, as the
+// FIXED buildConfig would send after a reload -- see
+// agent-configure-build-config.test.ts's matching "facet (a)" vitest case)
+// must not synthesize one.
 func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	ctx := context.Background()
 
+	enabled := true
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
-		a.AppliedConfig.Env = map[string]string{"EXPLICIT_KEY": "explicit-value", "SCION_AUTO_EXPOSE_PORTS": "false"}
+		a.AppliedConfig.Model = "golden-model"
+		// "As create leaves them": InlineConfig.Env mirrors live Env (the
+		// create path aliases the two; see handlers_agent_create_helpers.go),
+		// and InlineConfig.Model matches the live Model.
+		a.AppliedConfig.Env = map[string]string{"EXPLICIT_KEY": "explicit-value"}
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{
-			Env:       map[string]string{"EXPLICIT_KEY": "explicit-value", "SCION_AUTO_EXPOSE_PORTS": "false"},
-			Telemetry: &api.TelemetryConfig{Enabled: boolPtr(true)},
+			Model: "golden-model",
+			Env:   map[string]string{"EXPLICIT_KEY": "explicit-value"},
+			Telemetry: &api.TelemetryConfig{
+				Enabled: &enabled,
+				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://telemetry.example.com"},
+			},
 		}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
 	})
 
 	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
 	require.NoError(t, err)
+	beforeEnv, err := json.Marshal(agent.AppliedConfig.Env)
+	require.NoError(t, err)
 
-	// No "env" key, no "telemetry" key -- exactly what buildConfig sends for
-	// an untouched form after the R1-1 fix (populateForm/buildConfig in
-	// agent-configure.ts). Owned scalar fields are still echoed explicit-empty.
+	// Step 1: the untouched-form body, byte-for-byte what the real buildConfig
+	// emits (loaded from the shared golden fixture).
+	rec := patchAgentConfig(t, srv, agent.ID, configureUntouchedBody(t))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after),
+		"an untouched Save must leave CreateInputs (including hub telemetry) alone")
+	afterEnv, err := json.Marshal(updated.AppliedConfig.Env)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(beforeEnv), string(afterEnv), "an untouched Save must leave live Env alone")
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Nil(t, updated.AppliedConfig.InlineConfig.Env,
+		"documents the pre-existing wholesale-InlineConfig-replace side effect (options.md §7.2, not fixed by this PR): "+
+			"InlineConfig.Env does go nil on an untouched save. The web-side R2-1 fix is what keeps populateForm reading "+
+			"the real auto-expose value back from the live AppliedConfig.Env regardless, not this.")
+
+	// Step 2: a reload-shaped PATCH (as the FIXED buildConfig would send
+	// after re-loading the now-ic.Env-nil agent and editing the one custom
+	// row) must not synthesize a SCION_AUTO_EXPOSE_* key that was never live
+	// -- R2-1 facet (a).
+	step2 := configureUntouchedBody(t)
+	step2["env"] = map[string]interface{}{"EXPLICIT_KEY": "changed-value"}
+	rec2 := patchAgentConfig(t, srv, agent.ID, step2)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	final, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "changed-value", final.AppliedConfig.Env["EXPLICIT_KEY"])
+	assert.NotContains(t, final.AppliedConfig.Env, "SCION_AUTO_EXPOSE_PORTS",
+		"a fixture whose live env never had an auto-expose key must never gain one just because an unrelated row changed")
+	require.NotNil(t, final.AppliedConfig.CreateInputs.InlineConfig)
+	assert.Equal(t, "changed-value", final.AppliedConfig.CreateInputs.InlineConfig.Env["EXPLICIT_KEY"])
+	assert.NotContains(t, final.AppliedConfig.CreateInputs.InlineConfig.Env, "SCION_AUTO_EXPOSE_PORTS")
+	// recordExplicitEdits never saw a "telemetry" key in either step's body
+	// (buildConfig only sends it when the user actually toggles it), so
+	// CreateInputs never picks it up as explicit -- the one thing Option C
+	// controls here.
+	assert.Nil(t, final.AppliedConfig.CreateInputs.InlineConfig.Telemetry,
+		"telemetry was never present in either PATCH body, so CreateInputs must never record it")
+	// The live InlineConfig.Telemetry is, separately, ALSO nil at this point
+	// -- but that is the pre-existing wholesale-InlineConfig-replace effect
+	// (options.md §7.2: every config PATCH overwrites InlineConfig with
+	// exactly what the request decoded to, dropping any field the request
+	// didn't send, including on step 1's "untouched" PATCH). That loss is
+	// unrelated to recordExplicitEdits/CreateInputs and out of scope for
+	// this PR; asserted here only so a future §7.2 fix has a test that
+	// notices the behavior changing.
+	assert.Nil(t, final.AppliedConfig.InlineConfig.Telemetry)
+}
+
+// TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue
+// is R2-1 facet (b)'s dedicated regression: an agent whose live env DOES
+// have an explicit auto-expose key (true) must keep it true across an
+// untouched Save (step 1) followed by an unrelated custom-row edit (step 2,
+// sent as the FIXED buildConfig would after re-loading from the now-nil
+// InlineConfig.Env and reading the real value back from AppliedConfig.Env).
+// Before the fix, step 2 would have sent the global default (false) instead
+// of the real live value (true), silently flipping the live setting off and
+// recording the flip into CreateInputs.
+func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Env = map[string]string{"K": "v", "SCION_AUTO_EXPOSE_PORTS": "true"}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Env: map[string]string{"K": "v", "SCION_AUTO_EXPOSE_PORTS": "true"},
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Env: map[string]string{"K": "v", "SCION_AUTO_EXPOSE_PORTS": "true"}},
+		}
+	})
+
+	// Step 1: untouched Save (no env key at all).
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"thinking_level":     nil,
 		"branch":             "",
@@ -449,12 +572,29 @@ func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	updated, err := s.GetAgent(ctx, agent.ID)
+	mid, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	assert.Equal(t, "true", mid.AppliedConfig.Env["SCION_AUTO_EXPOSE_PORTS"], "step 1 must leave live auto-expose unchanged")
+	require.NotNil(t, mid.AppliedConfig.InlineConfig)
+	assert.Nil(t, mid.AppliedConfig.InlineConfig.Env, "sanity check: InlineConfig.Env does go nil after the untouched save")
+
+	// Step 2: the FIXED page reloads, reads SCION_AUTO_EXPOSE_PORTS=true back
+	// from the live AppliedConfig.Env (not the now-nil InlineConfig.Env), and
+	// re-sends that same value while the user edits the unrelated K row.
+	rec2 := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"K": "v2", "SCION_AUTO_EXPOSE_PORTS": "true"},
+	})
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+
+	final, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	assert.JSONEq(t, string(before), string(after),
-		"an untouched Save (no env/telemetry keys at all) must leave CreateInputs' env and telemetry alone")
+	assert.Equal(t, "true", final.AppliedConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
+		"live auto-expose must still be true, never silently flipped to the global default")
+	assert.Equal(t, "v2", final.AppliedConfig.Env["K"])
+	require.NotNil(t, final.AppliedConfig.CreateInputs.InlineConfig)
+	assert.Equal(t, "v2", final.AppliedConfig.CreateInputs.InlineConfig.Env["K"], "the real edit must still be recorded")
+	assert.Equal(t, "true", final.AppliedConfig.CreateInputs.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"],
+		"re-sending the unchanged real value must not be misrecorded or lost")
 }
 
 // TestApplyAgentUpdate_ImageCompareCanonicalizesBothSides is R1-2: old.Image
