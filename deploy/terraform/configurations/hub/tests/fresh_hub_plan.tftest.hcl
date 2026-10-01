@@ -2,7 +2,7 @@
 # end, fully offline, for a brand-new hub with NOTHING pre-existing — no
 # shared infra, no prior state, no Secret Manager secret already holding a
 # version. mock_provider replaces every provider this root and its module
-# tree use (google, google-beta, kubernetes, tls, random, time) with a
+# tree use (google, google-beta, kubernetes, random, time) with a
 # schema-driven fake that never calls a real API, so there is no GCP project,
 # no credentials, and no registry access needed to run this file.
 #
@@ -28,7 +28,6 @@
 mock_provider "google" {}
 mock_provider "google-beta" {}
 mock_provider "kubernetes" {}
-mock_provider "tls" {}
 mock_provider "random" {}
 mock_provider "time" {}
 
