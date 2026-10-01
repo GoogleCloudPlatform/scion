@@ -959,3 +959,62 @@ func TestAsyncCreate_ForcesHeartbeatAfterSuccess(t *testing.T) {
 		t.Fatal("expected a forced heartbeat after the succeeded terminal was answered")
 	}
 }
+
+// TestAsyncCreate_MarkerWriteFailureFailsLaunch covers a launch marker write
+// failure failing the launch outright (a failed report, Start never called)
+// rather than only logging a warning and continuing with resource cleanup
+// silently disabled for the rest of the launch.
+func TestAsyncCreate_MarkerWriteFailureFailsLaunch(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	projectDir := t.TempDir()
+	dir, err := launchMarkersDir(projectDir, false)
+	if err != nil {
+		t.Fatalf("launchMarkersDir: %v", err)
+	}
+	// Put a regular file where the marker directory needs to be, so
+	// writeLaunchMarker's os.MkdirAll fails.
+	if err := os.MkdirAll(filepath.Dir(dir), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write file at marker directory path: %v", err)
+	}
+
+	var mu sync.Mutex
+	var failedCode string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			failedCode = req.ErrorCode
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-marker-fail", "asyncLaunch": true, "launchId": "L-marker-fail",
+		"launchTimeoutSeconds": 300, "projectPath": projectDir,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedCode != ""
+	}) {
+		t.Fatal("expected a failed report once the marker write failed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if failedCode != "runtime_error" {
+		t.Fatalf("ErrorCode = %q, want runtime_error", failedCode)
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called when the marker write fails, got %d calls", n)
+	}
+}
