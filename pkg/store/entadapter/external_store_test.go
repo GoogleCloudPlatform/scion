@@ -227,8 +227,8 @@ func TestExternalStore_UserAccessToken(t *testing.T) {
 
 // TestExternalStore_UserAccessToken_HubBoundaryRoundTrip pins that a
 // hub-boundary token (NULL project_id) round-trips through create/get/
-// by-hash/list/count identically to a project-boundary one, and its
-// project_id reads back empty, never "".
+// by-hash/list/count identically to a project-boundary one, and its NULL
+// project_id reads back as the empty string, never as the nil UUID.
 func TestExternalStore_UserAccessToken_HubBoundaryRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestExternalStore(t)
@@ -250,6 +250,7 @@ func TestExternalStore_UserAccessToken_HubBoundaryRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hub", got.BoundaryKind)
 	assert.Equal(t, "", got.ProjectID)
+	assert.NotEqual(t, uuid.Nil.String(), got.ProjectID)
 	assert.NoError(t, got.ValidateBoundary())
 
 	byHash, err := s.GetUserAccessTokenByHash(ctx, "hub-hash-1")

@@ -345,25 +345,28 @@ func TestValidateToken_RejectsMalformedStoredBoundary(t *testing.T) {
 func TestValidateToken_CarriesStoredBoundary(t *testing.T) {
 	projectID := tid("carried-project")
 	cases := []struct {
-		name          string
-		boundaryKind  string
-		projectID     string
-		wantBoundary  TokenBoundary
-		wantProjectID string
+		name           string
+		boundaryKind   string
+		projectID      string
+		wantBoundary   TokenBoundary
+		wantProjectID  string
+		wantDecoration decorationBoundary
 	}{
 		{
-			name:          "hub row",
-			boundaryKind:  string(permissions.BoundaryKindHub),
-			projectID:     "",
-			wantBoundary:  TokenBoundary{Kind: BoundaryKindHub, ProjectID: ""},
-			wantProjectID: "",
+			name:           "hub row",
+			boundaryKind:   string(permissions.BoundaryKindHub),
+			projectID:      "",
+			wantBoundary:   TokenBoundary{Kind: BoundaryKindHub, ProjectID: ""},
+			wantProjectID:  "",
+			wantDecoration: decorationBoundary{Kind: "hub", ProjectID: ""},
 		},
 		{
-			name:          "project row",
-			boundaryKind:  string(permissions.BoundaryKindProject),
-			projectID:     projectID,
-			wantBoundary:  TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID},
-			wantProjectID: projectID,
+			name:           "project row",
+			boundaryKind:   string(permissions.BoundaryKindProject),
+			projectID:      projectID,
+			wantBoundary:   TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID},
+			wantProjectID:  projectID,
+			wantDecoration: decorationBoundary{Kind: "project", ProjectID: projectID},
 		},
 	}
 	for _, c := range cases {
@@ -397,6 +400,14 @@ func TestValidateToken_CarriesStoredBoundary(t *testing.T) {
 			}
 			if cc.ProjectID != c.wantProjectID {
 				t.Errorf("CredentialContext.ProjectID = %q, want %q", cc.ProjectID, c.wantProjectID)
+			}
+
+			decoration := identity.Decoration()
+			if decoration == nil {
+				t.Fatalf("identity.Decoration() is nil for a UAT identity")
+			}
+			if decoration.Boundary != c.wantDecoration {
+				t.Errorf("identity.Decoration().Boundary = %+v, want %+v", decoration.Boundary, c.wantDecoration)
 			}
 		})
 	}
