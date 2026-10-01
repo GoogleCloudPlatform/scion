@@ -564,7 +564,26 @@ func TestCredentialDecoration_AC3_LegacyRowWithBadLabelKeyRendersSanitized(t *te
 // real-middleware UAT request, and existing (pre-E.1) project UATs continue
 // to work without any hub-boundary support.
 func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
+	// The capture must be installed before testServer: testServer's New()
+	// call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by buf. As a side
+	// effect, buf now also covers the mint call below, not just the read
+	// request -- a strictly stronger check.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	srv, s := testServer(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// a capture installed before it must already have observed something.
+	// This is the part that a capture-after-construct ordering bug (the
+	// regression this test guards against) would silently defeat.
+	requireLogCaptureLive(t, &buf, serverConstructionLogLine)
+
 	projectID := tid("e1-ac4-p")
 	ownerID := tid("e1-ac4-o")
 	rs4Project(t, s, projectID, ownerID)
@@ -580,11 +599,6 @@ func TestCredentialDecoration_AC4_NoPlaintextOrHashInLogs(t *testing.T) {
 	hash := sha256.Sum256([]byte(key))
 	hashHex := hex.EncodeToString(hash[:])
 	prefix := resp["accessToken"].(map[string]interface{})["prefix"].(string)
-
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	rec := doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/projects/"+projectID, nil)
 	if rec.Code != http.StatusOK {

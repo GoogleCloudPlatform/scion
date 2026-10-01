@@ -616,6 +616,23 @@ func captureDefaultCapturingHandler(t *testing.T) *capturingHandler {
 	return capture
 }
 
+// requireRecordLive is the capturingHandler-based equivalent of
+// requireLogCaptureLive, for tests that inspect structured slog.Record
+// values (via findRecord) instead of a text/JSON buffer. It fails loudly if
+// capture holds no record with Message == wantMsg, a line known to be
+// logged after the capture was installed (for example the Server's
+// construction line). Without this, a misrouted or broken capture would
+// make an absence assertion on capture pass vacuously instead of catching
+// the regression it exists to guard against.
+func requireRecordLive(t *testing.T, capture *capturingHandler, wantMsg string) {
+	t.Helper()
+	if _, ok := findRecord(capture.all(), wantMsg); !ok {
+		t.Fatalf("log capture positive control failed: no record with message %q; "+
+			"the capture may be misrouted, so the absence assertions below it "+
+			"would be vacuous", wantMsg)
+	}
+}
+
 // TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp covers ptone/scion#2356:
 // a successful restamp logs one Info line with brokerID, brokerName, and count.
 func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
@@ -649,8 +666,20 @@ func TestBrokerProviderSelfHeal_LogsInfoOnSuccessfulRestamp(t *testing.T) {
 // TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed covers ptone/scion#2356:
 // a tick that heals nothing must not emit the restamp Info line.
 func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
+	// captureDefaultCapturingHandler must run before testServer: testServer's
+	// New() call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by the capture.
+	capture := captureDefaultCapturingHandler(t)
 	ctx := context.Background()
 	srv, s := testServer(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// the capture must have observed something. This guards against a
+	// misrouted capture making the "no restamp log" check below pass
+	// vacuously.
+	requireRecordLive(t, capture, serverConstructionLogLine)
 
 	broker, project := newProviderSelfHealFixture(t, s, "lognoop")
 
@@ -664,8 +693,6 @@ func TestBrokerProviderSelfHeal_NoInfoLogWhenNothingHealed(t *testing.T) {
 	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.BrokerStatusOnline, provider.Status, "precondition")
-
-	capture := captureDefaultCapturingHandler(t)
 
 	srv.selfHealBrokerProviders(ctx, []string{broker.ID})
 
