@@ -39,7 +39,7 @@ func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.
 	case http.MethodPost:
 		s.createGCPServiceAccount(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -74,7 +74,7 @@ func (s *Server) handleProjectGCPServiceAccountByID(w http.ResponseWriter, r *ht
 	case http.MethodDelete:
 		s.deleteGCPServiceAccount(w, r, projectID, saID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -963,7 +963,7 @@ type GCPQuotaResponse struct {
 func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	// Route guard enforces hub.health.read permission.
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1019,7 +1019,7 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 // Called by the metadata sidecar to obtain a GCP access token for the agent's assigned SA.
 func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1102,7 +1102,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 // Called by the metadata sidecar to obtain a GCP OIDC identity token.
 func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

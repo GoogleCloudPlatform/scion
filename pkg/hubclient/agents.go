@@ -153,7 +153,31 @@ type ListAgentsOptions struct {
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
 	IncludeDeleted  bool              // Include soft-deleted agents
-	Page            apiclient.PageOptions
+
+	// OwnerID, when set, restricts results to agents owned by this principal
+	// ID. Always combined with every other option using AND (ptone/scion#2146).
+	OwnerID string
+
+	// AncestorID, when set, restricts results to agents whose Ancestry chain
+	// contains this principal ID (transitive descendants of AncestorID).
+	AncestorID string
+
+	// HarnessConfig, when set, restricts results to agents whose resolved
+	// harness-config name equals this value.
+	HarnessConfig string
+
+	// IDs, when non-empty, restricts results to agents whose ID is in this
+	// set. Used for relationship queries (e.g. CLI --ancestors) that resolve
+	// a specific set of candidate IDs client-side and ask the Hub to narrow
+	// them to the caller's authorized, currently-existing agents.
+	IDs []string
+
+	// LineageRootID, when set, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry contains it — the root agent plus
+	// all its descendants. Used by CLI --lineage.
+	LineageRootID string
+
+	Page apiclient.PageOptions
 }
 
 // ListAgentsResponse is the response from listing agents.
@@ -329,6 +353,21 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}

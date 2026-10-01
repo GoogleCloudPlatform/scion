@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates check-harness-coverage check-authorization-catalog check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -101,6 +101,13 @@ test-hub-sqlite:
 # preserve). Fixing those is out of scope for this design; -run keeps this
 # job to what it was scoped to test.
 #
+# The -run regex also includes the broker-settings compare-and-set and
+# row-lock tests (TestPutBrokerSettings*, TestDeleteBrokerSettings*,
+# TestUsesRowLocks_ReflectsBackend, ptone/scion#2327): they assert
+# dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
+# tests do, so they belong in this job's Postgres coverage rather than running
+# only against SQLite.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -133,7 +140,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -181,6 +188,13 @@ check-conversation-upsert-guard:
 ## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
 check-security-marker-gates:
 	@./hack/check-security-marker-gates.sh
+
+## check-harness-coverage: Verify every harnesses/<name>/Dockerfile has a build step in each full-catalog cloudbuild-*.yaml
+# NOTE: same caveat as check-authz-guards above -- make collapses the
+# script's exit 1 (a harness is out of sync) and exit 2 (could not run) into
+# one code. CI invokes the script directly to tell those apart.
+check-harness-coverage:
+	@./image-build/scripts/check-harness-coverage.sh
 
 ## check-authorization-catalog: Validate authorization operation catalog, permission coverage, and generated report
 check-authorization-catalog:

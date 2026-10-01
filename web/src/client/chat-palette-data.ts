@@ -36,8 +36,10 @@ import type {
 } from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
 import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
+import { formatFileSize } from '../utils/chat-file-links.js';
 import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
-import { dmCandidateId, threadCandidateId } from './chat-palette-types.js';
+import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
+import type { RecentFile } from './chat-recent-files.js';
 
 /** Agents page size. The server default is much larger; 100 keeps pages small enough to show progress. */
 const AGENTS_PAGE_LIMIT = 100;
@@ -524,6 +526,66 @@ export function buildThreadCandidates(
       searchFields,
       activityMs: activityMsFromTimestamp(thread.lastActivityAt),
       target,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * The secondary line for a Documents row: the project and container path for
+ * a detected path, or the project and attachment metadata for an attachment,
+ * so records that share a file name remain distinguishable.
+ */
+function documentSecondaryLabel(file: RecentFile): string {
+  const projectName = file.source.projectName;
+  if (file.target.kind === 'path') {
+    return projectName
+      ? `${projectName} — ${file.target.containerPath}`
+      : file.target.containerPath;
+  }
+  // Size and date, joined only where both are known — appended so two
+  // attachments sharing a name and project (the same filename reattached, or
+  // shared across conversations) are still distinguishable in the list. A Go
+  // zero timestamp (never a real send time) is treated the same as a missing
+  // one, matching activityMsFromTimestamp's own definition of "unknown" for
+  // this same field.
+  const activityMs = activityMsFromTimestamp(file.source.sentAt);
+  const metadata = [
+    formatFileSize(file.target.size),
+    activityMs > 0
+      ? new Date(activityMs).toLocaleDateString('en', { month: 'short', day: 'numeric' })
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const label = metadata ? `Attachment · ${metadata}` : 'Attachment';
+  return projectName ? `${projectName} — ${label}` : label;
+}
+
+/**
+ * Build Documents candidates from the recent-files store's current
+ * snapshot. Unlike the other three groups, there is no network fetch here:
+ * `chatRecentFiles` is an already-live, identity-scoped index, and this only
+ * maps its records into the shared candidate shape so Documents matches
+ * share the same global ranking as Agents/Threads/People. Search fields are
+ * the file's display name (every record), its container path (path targets),
+ * and its captured project label when known.
+ */
+export function buildDocumentCandidates(records: readonly RecentFile[]): PaletteCandidate[] {
+  const candidates: PaletteCandidate[] = [];
+  for (const file of records) {
+    const searchFields = [file.name];
+    if (file.target.kind === 'path') searchFields.push(file.target.containerPath);
+    if (file.source.projectName) searchFields.push(file.source.projectName);
+
+    candidates.push({
+      id: documentCandidateId(file.key),
+      group: 'documents',
+      label: file.name,
+      secondaryLabel: documentSecondaryLabel(file),
+      searchFields,
+      activityMs: activityMsFromTimestamp(file.source.sentAt),
+      target: { kind: 'document', file },
     });
   }
   return candidates;

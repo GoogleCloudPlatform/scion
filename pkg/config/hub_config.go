@@ -753,6 +753,14 @@ type GlobalConfig struct {
 	// unset — the fail-safe default (enforced) applies.
 	EnforceBrokerQuotas *bool `json:"-" yaml:"-" koanf:"-"`
 
+	// AgentSecretsUserScopeOnly controls whether agents are restricted to
+	// writing user (profile) scope secrets only. Populated from
+	// settings.yaml agent_secrets.user_scope_only in file/SQLite mode, so a
+	// file-mode admin save takes effect without a restart. nil means
+	// unset — the permissive default (agents may write project scope)
+	// applies.
+	AgentSecretsUserScopeOnly *bool `json:"-" yaml:"-" koanf:"-"`
+
 	// DefaultHarnessConfig is the hub-level default harness config name.
 	// Populated from the top-level default_harness_config key in settings.yaml
 	// in file/SQLite mode.
@@ -1816,6 +1824,19 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 			if eb, ok := qMap["enforce_broker_quotas"]; ok {
 				if b, ok := eb.(bool); ok {
 					gc.EnforceBrokerQuotas = &b
+				}
+			}
+		}
+	}
+
+	// Check for top-level "agent_secrets" section — it lives outside
+	// "server" in settings.yaml and controls hub-level policy for secrets
+	// written by agents.
+	if asRaw, ok := raw["agent_secrets"]; ok && asRaw != nil {
+		if asMap, ok := asRaw.(map[string]interface{}); ok {
+			if uso, ok := asMap["user_scope_only"]; ok {
+				if b, ok := uso.(bool); ok {
+					gc.AgentSecretsUserScopeOnly = &b
 				}
 			}
 		}

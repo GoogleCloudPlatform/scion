@@ -41,6 +41,10 @@ import {
   buildFileApiUrl,
   isImageFileName,
   isMarkdownFileName,
+  isLikelyTextFileName,
+  isLikelyTextMime,
+  isLikelyBinaryFileName,
+  baseMimeType,
   TEXT_PREVIEW_MAX_BYTES,
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
@@ -181,19 +185,20 @@ export class ScionChatFilePreview extends LitElement {
     }
 
     const isImage =
-      target.kind === 'attachment' ? IMAGE_MIMES.has(target.mime) : isImageFileName(target.name);
+      target.kind === 'attachment'
+        ? IMAGE_MIMES.has(baseMimeType(target.mime))
+        : isImageFileName(target.name);
     const isMarkdown = !isImage && isMarkdownFileName(target.name);
-    this.loadState = { status: 'loading', isImage, isMarkdown, isBinary: false };
 
-    const controller = new AbortController();
-    this.controller = controller;
-
-    // Resolved in its own try/catch, separate from the network try/catch
-    // below: a thrown target-URL builder error (see `downloadUrlFor`) is an
-    // internal detail (e.g. "buildFileApiUrl: unsafe project id") that must
-    // never reach the user directly — it's mapped to the same generic,
-    // fixed message a broken/malicious link always gets, never the raw
-    // builder message.
+    // Resolved before the binary classification below, and in its own
+    // try/catch separate from the network try/catch further down: a thrown
+    // target-URL builder error (see `downloadUrlFor`) is an internal detail
+    // (e.g. "buildFileApiUrl: unsafe project id") that must never reach the
+    // user directly — it's mapped to the same generic, fixed message a
+    // broken/malicious link always gets, never the raw builder message. This
+    // must run first: an unsafe target should show that generic error state
+    // regardless of what its name/MIME would otherwise classify as, not the
+    // binary-placeholder state below (which has no download link to offer).
     let baseUrl: string;
     try {
       baseUrl = downloadUrlFor(target);
@@ -207,6 +212,29 @@ export class ScionChatFilePreview extends LitElement {
       };
       return;
     }
+
+    // Classify before fetching so binary bytes never reach the code editor.
+    // A path uses a deny-list of known binary extensions: the server already
+    // rejects non-UTF-8 workspace content (shown as the error state below),
+    // so any other name is fetched and previewed. An attachment is classified
+    // by its MIME type; a generic `application/octet-stream` (what agent
+    // attachments with an unmapped extension report, see
+    // `pkg/hub/attachments_agent.go`) still counts as text when the file name
+    // is a recognized text file.
+    const isRecognizedText =
+      target.kind === 'attachment'
+        ? isLikelyTextMime(target.mime) ||
+          (baseMimeType(target.mime) === 'application/octet-stream' &&
+            isLikelyTextFileName(target.name))
+        : !isLikelyBinaryFileName(target.name);
+    if (!isImage && !isRecognizedText) {
+      this.loadState = { status: 'ready', isImage, isMarkdown, isBinary: true };
+      return;
+    }
+    this.loadState = { status: 'loading', isImage, isMarkdown, isBinary: false };
+
+    const controller = new AbortController();
+    this.controller = controller;
 
     try {
       if (isImage) {
@@ -347,7 +375,8 @@ export class ScionChatFilePreview extends LitElement {
     if (state.isBinary) {
       return html`
         <div class="file-preview-placeholder">
-          This file is too large to preview inline. Use the Download button.
+          This file can't be shown here — it's too large or not a previewable type. Use the Download
+          button.
         </div>
       `;
     }

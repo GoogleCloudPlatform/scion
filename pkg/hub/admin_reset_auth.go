@@ -13,7 +13,7 @@ import (
 // Authorization: enforced by routeGuard via hub.auth_reset.execute permission.
 func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

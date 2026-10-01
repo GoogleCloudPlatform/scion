@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -320,6 +321,49 @@ func TestHarnessConfigPatch(t *testing.T) {
 	}
 	if result.Description != "Updated description" {
 		t.Errorf("expected description 'Updated description', got %q", result.Description)
+	}
+}
+
+// TestHandleHarnessConfigFinalize_PersistsModelAliases is a regression test
+// for ptone/scion#2365 review round 1 (R2): the production record that
+// triggered the bug was written through the push/finalize path
+// (handleHarnessConfigFinalize), not the directory-bootstrap sync covered
+// by TestBootstrapHarnessConfigsFromDir_PersistsModelAliases. Without this
+// test, a regression in the finalize handler specifically would go
+// unnoticed because the read-time backfill would silently mask it (aliases
+// would still resolve correctly, just via an extra storage download on
+// every create instead of the already-stamped record).
+func TestHandleHarnessConfigFinalize_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testHarnessConfigFileServer(t)
+	ctx := context.Background()
+
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+	stor := srv.GetStorage().(*contentMockStorage)
+
+	configYAML := "harness: codex\nmodel_aliases:\n  small: tiny-model\n  large: finalize-large-model\n"
+	objectPath := hc.StoragePath + "/config.yaml"
+	stor.content[objectPath] = []byte(configYAML)
+	stor.objects[objectPath] = &storage.Object{Name: objectPath, Size: int64(len(configYAML))}
+
+	body := map[string]interface{}{
+		"manifest": map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"path": "config.yaml", "size": len(configYAML), "hash": "sha256:placeholder"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	updated, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+	if updated.Config == nil || updated.Config.ModelAliases["large"] != "finalize-large-model" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after finalize, got %+v", "finalize-large-model", updated.Config)
 	}
 }
 

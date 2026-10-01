@@ -58,7 +58,7 @@ type inboundMessageRequest struct {
 // topics use scion.project.
 func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

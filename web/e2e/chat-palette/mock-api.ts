@@ -153,7 +153,35 @@ export interface PaletteFixtureOverrides {
     string,
     { humans: Array<{ id: string; kind: 'user'; displayName: string }> }
   >;
+  /** `GET /api/v1/chat/attachments/{id}` bodies, for the Documents preview. */
+  attachmentsById?: Record<string, { mime: string; body: string }>;
+  /** `GET /api/v1/projects/{projectId}/workspace/files/{filePath}?format=json` bodies, for the Documents preview. */
+  workspaceFiles?: Record<string, Record<string, { content: string; size: number }>>;
 }
+
+/** A path-based Documents fixture: an existing text file at a known project/path. */
+export const DOC_TEXT_FILE = {
+  name: 'notes.txt',
+  projectId: SPACE_ALPHA.projectId,
+  projectName: SPACE_ALPHA.projectName,
+  containerPath: '/workspace/notes.txt',
+  filePath: 'notes.txt',
+  content: 'hello from the seeded recent file',
+  sentAt: '2026-09-28T12:00:00Z',
+};
+
+/**
+ * A binary attachment Documents fixture, well under the inline text-preview
+ * size limit — its MIME type, not its size, is what must classify it as
+ * binary, so a small non-text file is never fetched and rendered as text.
+ */
+export const DOC_BINARY_ATTACHMENT = {
+  id: 'att-binary-1',
+  name: 'archive.bin',
+  mime: 'application/octet-stream',
+  size: 2048,
+  sentAt: '2026-09-28T13:00:00Z',
+};
 
 /**
  * Endpoint-shaped request interception for the chat palette fixture: every
@@ -290,6 +318,31 @@ export async function setupApiMocks(
     }
     if (path === '/api/v1/chat/presence') {
       return route.fulfill({ json: {} });
+    }
+    const attachmentMatch = path.match(/^\/api\/v1\/chat\/attachments\/([^/]+)$/);
+    if (attachmentMatch) {
+      const id = decodeURIComponent(attachmentMatch[1]);
+      const fixture = overrides.attachmentsById?.[id];
+      if (!fixture) {
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', message: 'Attachment not found' } },
+        });
+      }
+      return route.fulfill({ contentType: fixture.mime, body: fixture.body });
+    }
+    const workspaceFileMatch = path.match(/^\/api\/v1\/projects\/([^/]+)\/workspace\/files\/(.+)$/);
+    if (workspaceFileMatch) {
+      const projectId = decodeURIComponent(workspaceFileMatch[1]);
+      const filePath = decodeURIComponent(workspaceFileMatch[2]);
+      const fixture = overrides.workspaceFiles?.[projectId]?.[filePath];
+      if (!fixture) {
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', message: 'File not found' } },
+        });
+      }
+      return route.fulfill({ json: { content: fixture.content, size: fixture.size } });
     }
     // Unnamed endpoint: empty object keeps the real components' defensive
     // `data.foo ?? []`-style parsing harmless without asserting they call it.

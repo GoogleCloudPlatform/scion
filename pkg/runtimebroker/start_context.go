@@ -465,6 +465,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// resolvedEnv when dispatching a start for a provisioned agent.
 		gcpMetadataMode = mode
 	}
+	// requireLocalRuntime follows the identical struct-or-env precedence —
+	// see downgradeUnverifiedHubDefaultPassthrough's doc comment for what
+	// it means and how it's used below and in recheckHubDefaultPassthrough.
+	requireLocalRuntime := false
+	if in.Config != nil && in.Config.GCPIdentity != nil {
+		requireLocalRuntime = in.Config.GCPIdentity.RequireLocalRuntime
+	} else if v := env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"]; v != "" {
+		requireLocalRuntime = v == "true"
+	}
 	// Allow-list, not a deny-list. The previous form tested for the two modes
 	// that need the redirect and let everything else fall through untouched,
 	// which meant an unrecognised mode — a typo, a value from a newer hub, an
@@ -516,6 +525,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				gcpMetadataMode,
 				store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough),
 		}
+	}
+	// Re-stamp into env (absent when false) for recheckHubDefaultPassthrough
+	// to read back later on the start/restart paths — see its doc comment.
+	if requireLocalRuntime {
+		env["SCION_METADATA_REQUIRE_LOCAL_RUNTIME"] = "true"
+		classifyBrokerEnv("SCION_METADATA_REQUIRE_LOCAL_RUNTIME", api.EnvKindPlain)
 	}
 
 	// Debug log final env
@@ -753,7 +768,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Manager resolution ---
-	mgr := s.resolveManagerForOpts(opts)
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+
+	// See downgradeUnverifiedHubDefaultPassthrough's doc comment: on the
+	// create path this is the only, authoritative resolution; start/restart
+	// re-run this same check after their own, later resolution.
+	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, resolvedRuntimeType)
 
 	return &startContext{
 		Opts:               opts,
@@ -761,6 +781,74 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Manager:            mgr,
 		EnvClassifications: envCls,
 	}, nil
+}
+
+// hubDefaultPassthroughRuntimeTypes mirrors pkg/hub's map of the same name
+// (default_gcp_identity.go): the runtime types the hub-default passthrough
+// rung may apply to. Kept as the broker's own independent copy rather than a
+// shared import — the hub and broker are separate deployables, and this is
+// the broker's own second-line check on a value the hub already decided,
+// not a re-import of that decision.
+var hubDefaultPassthroughRuntimeTypes = map[string]bool{
+	"docker": true,
+	"podman": true,
+}
+
+// downgradeUnverifiedHubDefaultPassthrough re-checks a hub-default-granted
+// GCP identity passthrough once the broker knows the runtime this agent will
+// actually run under (resolvedRuntimeType, from resolveManagerForOpts), and
+// rewrites env to the same "block" bundle buildStartContext's own block/
+// assign case sets, if that runtime is not a local container runtime.
+//
+// The hub's hub-default rung resolves an agent's runtime from the broker's
+// own registration-time data (RuntimeBroker.Profiles/DefaultProfile), which
+// can disagree with what this broker resolves for the same dispatch against
+// its own, current project-effective settings (in-repo overrides, a DB
+// settings overlay, or just registration drift). requireLocalRuntime is the
+// signal that a passthrough grant came from that rung specifically —
+// store.GCPIdentityConfig.RequireLocalRuntime on the create path, or the
+// SCION_METADATA_REQUIRE_LOCAL_RUNTIME env var buildStartContext re-stamps
+// for the start/restart paths, which never receive that struct at all (see
+// its call sites for why each path needs its own call to this function).
+// Explicit and project-level passthrough are never flagged, so this is a
+// no-op for them by construction — this is strictly a second line of
+// defense behind the hub-side gate (hubDefaultRuntimeAllowed,
+// pkg/hub/default_gcp_identity.go), not a replacement for it.
+//
+// Called three times: once in buildStartContext, which is the only,
+// authoritative resolution on the create path; and once each in startAgent
+// and restartAgent (via the recheckHubDefaultPassthrough function), which
+// re-resolve the manager a second time after a saved-profile lookup
+// buildStartContext cannot see, making that second resolution the
+// authoritative one on those two paths.
+//
+// env and envCls are mutated in place. envCls may be nil (the hub did not
+// send classifications for this request); a nil map is left nil, matching
+// classifyBrokerEnv's own rule elsewhere in this file. env itself is
+// produced by buildStartContext as a non-nil map on every current call path,
+// but a nil env is handled the same way: with no env there is nothing to
+// downgrade, and writing into a nil map would panic, so a nil env returns
+// early instead.
+func downgradeUnverifiedHubDefaultPassthrough(env map[string]string, envCls map[string]api.EnvKind, currentMetadataMode string, requireLocalRuntime bool, resolvedRuntimeType string) {
+	if env == nil {
+		return
+	}
+	if !requireLocalRuntime || currentMetadataMode != store.GCPMetadataModePassthrough {
+		return
+	}
+	if hubDefaultPassthroughRuntimeTypes[resolvedRuntimeType] {
+		return
+	}
+	set := func(key, value string) {
+		env[key] = value
+		if envCls != nil {
+			envCls[key] = api.EnvKindPlain
+		}
+	}
+	set("SCION_METADATA_MODE", store.GCPMetadataModeBlock)
+	set("SCION_METADATA_PORT", "18380")
+	set("GCE_METADATA_HOST", "localhost:18380")
+	set("GCE_METADATA_ROOT", "localhost:18380")
 }
 
 // startContextError is returned by buildStartContext for errors that need

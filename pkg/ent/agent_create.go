@@ -414,6 +414,20 @@ func (_c *AgentCreate) SetNillableAppliedConfig(v *string) *AgentCreate {
 	return _c
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (_c *AgentCreate) SetHarnessConfig(v string) *AgentCreate {
+	_c.mutation.SetHarnessConfig(v)
+	return _c
+}
+
+// SetNillableHarnessConfig sets the "harness_config" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableHarnessConfig(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetHarnessConfig(*v)
+	}
+	return _c
+}
+
 // SetAncestry sets the "ancestry" field.
 func (_c *AgentCreate) SetAncestry(v []string) *AgentCreate {
 	_c.mutation.SetAncestry(v)
@@ -1117,6 +1131,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldAppliedConfig, field.TypeString, value)
 		_node.AppliedConfig = value
 	}
+	if value, ok := _c.mutation.HarnessConfig(); ok {
+		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
+		_node.HarnessConfig = value
+	}
 	if value, ok := _c.mutation.Ancestry(); ok {
 		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
 		_node.Ancestry = value
@@ -1819,6 +1837,24 @@ func (u *AgentUpsert) UpdateAppliedConfig() *AgentUpsert {
 // ClearAppliedConfig clears the value of the "applied_config" field.
 func (u *AgentUpsert) ClearAppliedConfig() *AgentUpsert {
 	u.SetNull(agent.FieldAppliedConfig)
+	return u
+}
+
+// SetHarnessConfig sets the "harness_config" field.
+func (u *AgentUpsert) SetHarnessConfig(v string) *AgentUpsert {
+	u.Set(agent.FieldHarnessConfig, v)
+	return u
+}
+
+// UpdateHarnessConfig sets the "harness_config" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateHarnessConfig() *AgentUpsert {
+	u.SetExcluded(agent.FieldHarnessConfig)
+	return u
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (u *AgentUpsert) ClearHarnessConfig() *AgentUpsert {
+	u.SetNull(agent.FieldHarnessConfig)
 	return u
 }
 
@@ -2838,6 +2874,27 @@ func (u *AgentUpsertOne) UpdateAppliedConfig() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearAppliedConfig() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearAppliedConfig()
+	})
+}
+
+// SetHarnessConfig sets the "harness_config" field.
+func (u *AgentUpsertOne) SetHarnessConfig(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetHarnessConfig(v)
+	})
+}
+
+// UpdateHarnessConfig sets the "harness_config" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateHarnessConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateHarnessConfig()
+	})
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (u *AgentUpsertOne) ClearHarnessConfig() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearHarnessConfig()
 	})
 }
 
@@ -4085,6 +4142,27 @@ func (u *AgentUpsertBulk) UpdateAppliedConfig() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearAppliedConfig() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearAppliedConfig()
+	})
+}
+
+// SetHarnessConfig sets the "harness_config" field.
+func (u *AgentUpsertBulk) SetHarnessConfig(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetHarnessConfig(v)
+	})
+}
+
+// UpdateHarnessConfig sets the "harness_config" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateHarnessConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateHarnessConfig()
+	})
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (u *AgentUpsertBulk) ClearHarnessConfig() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearHarnessConfig()
 	})
 }
 

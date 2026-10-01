@@ -93,6 +93,9 @@ type ServerConfigResponse struct {
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
 
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
@@ -152,6 +155,9 @@ type ServerConfigUpdateRequest struct {
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
 
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 }
@@ -188,7 +194,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -217,7 +223,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -229,7 +235,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -352,6 +358,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
 		Quotas:               vs.Quotas,
+		AgentSecrets:         vs.AgentSecrets,
 
 		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
 		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
@@ -684,6 +691,14 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			raw["quotas"] = marshalToMap(req.Quotas)
 		} else {
 			delete(raw, "quotas")
+		}
+	}
+	if req.AgentSecrets != nil {
+		// Section-generic zero check; see the Quotas block above.
+		if !isZeroStruct(req.AgentSecrets) {
+			raw["agent_secrets"] = marshalToMap(req.AgentSecrets)
+		} else {
+			delete(raw, "agent_secrets")
 		}
 	}
 	if req.Federation != nil {

@@ -54,7 +54,7 @@ func (s *Server) handleAdminInvites(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAdminInvitesCreate(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -79,7 +79,7 @@ func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) == 2 && parts[1] == "revoke" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleAdminInviteRevoke(w, r, id, user)
@@ -92,7 +92,7 @@ func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleAdminInviteDelete(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 

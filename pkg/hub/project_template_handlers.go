@@ -31,7 +31,7 @@ type SetTemplateRequest struct {
 // Requires admin role + ActionUpdate on the project.
 func (s *Server) handleSetTemplate(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

@@ -109,6 +109,24 @@ jobs:
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 
+      - name: Check Harness Coverage in Cloud Build Configs
+        run: |
+          # Invoked directly rather than via a Makefile target, for the same
+          # reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (a harness is out of sync, ptone/scion#2357)
+          # and exit 2 (could not run, e.g. no PyYAML) into one code.
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; } || true
+          set +e
+          ./image-build/scripts/check-harness-coverage.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Harness coverage::A harnesses/<name>/Dockerfile is out of sync with one or more cloudbuild-*.yaml configs (see ptone/scion#2357). Details are in the step log above." ;;
+            *) echo "::error title=Harness coverage NOT checked::check-harness-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure and is NOT a statement about the codebase. Do not read it as a coverage failure." ;;
+          esac
+          exit "$rc"
+
       - name: Check Security Marker Gates
         run: |
           # Invoked directly rather than via `make check-security-marker-gates`:
@@ -202,12 +220,14 @@ jobs:
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the new T1 launch store/reaper tests in pkg/store/entadapter, which
-      # run unchanged against SQLite (the default `go test` build) and
-      # Postgres (here, via -tags integration) to prove dialect parity. This
-      # job owns every Postgres-specific assertion in P1a: the transaction-
-      # scoped advisory lock, SKIP LOCKED, lock_timeout/idle-in-transaction
-      # SET LOCAL, and the per-row savepoints.
+      # the entadapter tests selected by test-launch-store-postgres's -run
+      # regex (see that Makefile target's comment for the current list, the
+      # source of truth), which run unchanged against SQLite (the default
+      # `go test` build) and Postgres (here, via -tags integration) to prove
+      # dialect parity. This job owns every Postgres-specific assertion in
+      # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
+      # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
+      # savepoints.
       - name: Run launch store tests (Postgres-enabled)
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable

@@ -210,6 +210,11 @@ type HubContext struct {
 	BrokerID    string
 	ProjectPath string
 	IsGlobal    bool
+	// CredentialKind mirrors hubsync.HubContext.CredentialKind — see its doc
+	// for what it records and why (ptone/scion#2146). Zero value
+	// (hubsync.CredentialKindUnknown) on any HubContext not built via
+	// CheckHubAvailability* (e.g. a test double).
+	CredentialKind hubsync.CredentialKind
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub over
@@ -294,13 +299,14 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	// Convert hubsync.HubContext to cmd.HubContext
 	return &HubContext{
-		Client:      hubCtx.Client,
-		Endpoint:    hubCtx.Endpoint,
-		Settings:    hubCtx.Settings,
-		ProjectID:   hubCtx.ProjectID,
-		BrokerID:    hubCtx.BrokerID,
-		ProjectPath: hubCtx.ProjectPath,
-		IsGlobal:    hubCtx.IsGlobal,
+		Client:         hubCtx.Client,
+		Endpoint:       hubCtx.Endpoint,
+		Settings:       hubCtx.Settings,
+		ProjectID:      hubCtx.ProjectID,
+		BrokerID:       hubCtx.BrokerID,
+		ProjectPath:    hubCtx.ProjectPath,
+		IsGlobal:       hubCtx.IsGlobal,
+		CredentialKind: hubCtx.CredentialKind,
 	}, nil
 }
 

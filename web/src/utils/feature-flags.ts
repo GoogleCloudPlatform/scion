@@ -90,15 +90,3 @@ export function setFeatureFlag(name: string, enabled: boolean): void {
  * to fall back to wave-1 UI for rollback.
  */
 export const NATIVE_CHAT_V2_FLAG = 'web.native_chat_v2';
-
-/**
- * Temporary rollout flag for the grouped quick-command palette that replaces
- * the flat `scion-chat-switcher` (native chat quick command palette, phases
- * 1-3). Default OFF — deliberately absent from DEFAULT_ON_FLAGS.
- *
- * Only meaningful when {@link NATIVE_CHAT_V2_FLAG} is also enabled: v1 has no
- * palette. Phase 4 removes this flag along with the flat presentation it
- * gates once the full palette is validated.
- * Enable via server injection or localStorage: scion:feature:web.native_chat_palette=true
- */
-export const NATIVE_CHAT_PALETTE_FLAG = 'web.native_chat_palette';

@@ -130,6 +130,7 @@ var (
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
 		{Name: "message", Type: field.TypeString, Nullable: true},
 		{Name: "applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "harness_config", Type: field.TypeString, Nullable: true},
 		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
@@ -162,7 +163,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[53]},
+				Columns:    []*schema.Column{AgentsColumns[54]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -171,12 +172,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[53]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[54]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[47]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -184,7 +185,15 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[43]},
+				Columns: []*schema.Column{AgentsColumns[44]},
+			},
+			{
+				Name:    "agent_harness_config_reconcile_pending",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "harness_config IS NULL AND applied_config IS NOT NULL",
+				},
 			},
 		},
 	}
@@ -1753,6 +1762,7 @@ var (
 		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true},
 		{Name: "resources", Type: field.TypeString, Nullable: true},
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
+		{Name: "default_profile", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
