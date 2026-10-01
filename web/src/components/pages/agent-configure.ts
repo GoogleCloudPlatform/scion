@@ -532,24 +532,37 @@ export class ScionPageAgentConfigure extends LitElement {
     const config: ScionConfigPayload = {};
     const caps = this.harnessCapabilities;
 
+    // Fields below are either dual-purpose on the hub side (empty means
+    // "unchanged", not "clear" — model, image, auth_selectedType, task: see
+    // applyAgentUpdate) or not rendered by this page at all (e.g. volumes,
+    // skills, mcp_servers), so an omitted key is always the right way to say
+    // "I didn't touch this". They keep the truthy-only guard below.
     const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.branch) config.branch = this.branch;
-    if (this.containerUser) config.user = this.containerUser;
     if (this.authMethod && this.authMethodSupported(this.authMethod))
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
-    if (this.systemPrompt && !this.isUnsupported(caps?.prompts.system_prompt))
-      config.system_prompt = this.systemPrompt;
-    if (this.agentInstructions) config.agent_instructions = this.agentInstructions;
-    if (this.maxTurns && !this.isUnsupported(caps?.limits.max_turns))
-      config.max_turns = this.maxTurns;
-    if (this.maxModelCalls && !this.isUnsupported(caps?.limits.max_model_calls))
+
+    // Fields below are plain, single-value fields this page owns outright
+    // (it is the only place that edits them, once a harness supports them)
+    // and clearing one back to empty is a meaningful, intentional edit — not
+    // "I never looked at this field". They must be sent even when empty, so
+    // the hub's recordExplicitEdits (ptone/scion#2493) can tell "present and
+    // cleared" apart from "absent", and record the clear as an explicit
+    // CreateInputs edit instead of silently leaving a stale value in place
+    // for `scion reincarnate` to restore. A harness-unsupported field is
+    // still omitted entirely, since this page gives the user no way to view
+    // or edit it in that case.
+    config.branch = this.branch;
+    config.user = this.containerUser;
+    config.agent_instructions = this.agentInstructions;
+    if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
+    if (!this.isUnsupported(caps?.limits.max_turns)) config.max_turns = this.maxTurns;
+    if (!this.isUnsupported(caps?.limits.max_model_calls))
       config.max_model_calls = this.maxModelCalls;
-    if (this.maxDuration && !this.isUnsupported(caps?.limits.max_duration))
-      config.max_duration = this.maxDuration;
+    if (!this.isUnsupported(caps?.limits.max_duration)) config.max_duration = this.maxDuration;
 
     // Resources
     const hasResources =
