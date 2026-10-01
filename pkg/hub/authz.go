@@ -1230,7 +1230,7 @@ func ceilingRestriction(ceiling permissions.FrozenPermissionCeiling) Restriction
 // (agentGCPServiceAccountUseScopeMatch), never against the static AgentScopes
 // map below -- see gcpServiceAccountUseBinding's doc comment for why a static
 // list cannot express a per-instance token scope. Every other permission is
-// decided by the static AgentScopes map alone.
+// decided by that static map alone.
 func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 	scopes := agent.Scopes()
 	if len(scopes) == 0 {
@@ -1299,16 +1299,14 @@ func agentGCPServiceAccountUseScopeMatch(agent AgentIdentity, permissionID strin
 // user-scoped (scopeApplies always admits system scope) -- scope containment
 // here is not the point, the per-request resource-ID match already is.
 //
-// It is built fresh inside decide() on every call: never cached, and never
-// added to the static AgentScopes mapping that both agentScopesToPermissionIDs
-// (Step 5b's synthetic bindings) and agentScopeRestriction (its own walk of
-// Registry.AgentScopes) read. That separation matters because
-// agentScopeRestriction also filters, via intersectCredentialCaveats, what
-// CanDelegate lets an agent delegate to something it creates -- a grant scoped
-// to one resource ID must never be read there as general, delegable
-// gcp_service_account.use authority. intersectCredentialCaveats calls
-// agentScopeRestriction with a zero Resource, so
-// agentGCPServiceAccountUseScopeMatch always denies there and
+// It is built fresh inside decide() on every call: never cached, and never added
+// to the target-agnostic agentScopesToPermissionIDs (Step 5b's project-scoped
+// binding) or to the static AgentScopes set that agentScopeRestriction builds.
+// That static set also drives intersectCredentialCaveats/CanDelegate, which
+// decides what an agent may delegate to something it creates -- a grant scoped to
+// one resource ID must never be read there as general, delegable
+// gcp_service_account.use authority. CanDelegate calls agentScopeRestriction with
+// a zero Resource, so agentGCPServiceAccountUseScopeMatch always denies there and
 // gcp_service_account.use is never in an agent's delegable set.
 func gcpServiceAccountUseBinding(agent AgentIdentity, permissionID string, resource Resource) (*CandidateBinding, *RolePermissions) {
 	if !agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource) {

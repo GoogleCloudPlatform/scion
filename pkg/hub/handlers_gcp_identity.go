@@ -1042,9 +1042,9 @@ func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCP
 // token; each mint re-derives them from the store.
 //
 // A false return covers every failure in the same path, including any store
-// lookup error, so the caller renders the one denial it already had for "no
-// GCP identity assigned" -- a refusal here discloses nothing beyond what that
-// existing denial already discloses.
+// lookup error, so the caller renders the same "no GCP identity assigned" denial
+// it uses when no GCP identity is assigned -- a refusal here discloses nothing
+// beyond what that denial discloses.
 func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil || sa == nil {

@@ -84,9 +84,10 @@ const (
 	// this one permission keys off a constant rather than a literal string.
 	// The Registry row below keeps its ID as the literal string, not this
 	// constant: pkg/hub/authzop/catalog_test.go reads registry.go as text
-	// and extracts each row's ID from the first quoted string after "{ID:",
-	// so an identifier there would parse as no ID at all.
-	// TestMaterialPermissions_Registered pins the two against each other.
+	// and takes the first quoted string on each line starting with "{ID:"
+	// as that row's ID, so an identifier there would make it read the
+	// row's Description as the ID. TestMaterialPermissions_Registered pins
+	// the constant against the row.
 	PermissionGCPServiceAccountUse = "gcp_service_account.use"
 
 	UATScopeAgentManage         = "agent:manage"
