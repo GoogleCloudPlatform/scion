@@ -81,7 +81,7 @@ func SetExecResolveForTest(resolve func(name string) (string, error)) func() {
 // execAsUserCmd runs `su - <user> -c <cmd>`, a login shell — and `su -`
 // discards the entire inherited environment, including the CA-bundle env
 // vars buildActorTemplate (pkg/runtime/substrate_template.go) sets on the
-// container when egress_trust_bundle is configured. Left unfixed, any
+// container when egress_trust_bundle is configured. Without this, any
 // exec-invoked command (the broker exec endpoint, `scion look`, or
 // `/scion/v1/exec` directly) that makes a TLS request loses the gateway CA
 // even though the harness itself trusts it fine.
