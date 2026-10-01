@@ -292,7 +292,7 @@ func projectOwnerPermissionIDs() []string {
 		// restore) is retained so owners keep management oversight of
 		// members' agents.
 		//
-		// agent.port_access is included (R4): a forwarded
+		// agent.port_access is included (R5): a forwarded
 		// port serves only what the agent chooses to listen on, not its
 		// environment or secret files, so owners and admins may open
 		// members' exposed ports. project-member still does not carry it;

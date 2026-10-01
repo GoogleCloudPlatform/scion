@@ -237,8 +237,8 @@ These built-in roles bundle common permissions for human users:
 | `project-admin` | Like `project-owner`, but without `agent.delete` or `agent.set_message_mode`. |
 | `project-member` | Basic project permissions. |
 
-:::caution[Breaking change: role revisions 3 and 4]
-The `project-owner` and `project-admin` roles are at revision 4. On upgrade, existing Hubs reconcile these roles automatically. Revision 3 removed `agent.attach` and `agent.port_access` and added `agent.lifecycle`; revision 4 restores `agent.port_access`, so owners and admins can open forwarded ports on any agent in their project. Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
+:::caution[Breaking change: role revision 3; port access restored in revision 5]
+The `project-owner` and `project-admin` roles are at revision 5. On upgrade, existing Hubs reconcile these roles automatically. Revision 3 removed `agent.attach` and `agent.port_access` and added `agent.lifecycle`; revision 4 added `gcp_service_account.assign`; revision 5 restores `agent.port_access`, so owners and admins can open forwarded ports on any agent in their project. Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
 :::
 
 ### Hub Roles

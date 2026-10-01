@@ -931,7 +931,7 @@ func TestR2_ProjectOwnerRetainsHumanAgentManagement(t *testing.T) {
 	// relationship grants instead.
 	assert.False(t, permSet["agent.attach"],
 		"project-owner must NOT carry agent.attach (cross-member secret exposure)")
-	// R4: forwarded ports are reachable project-wide.
+	// R5: forwarded ports are reachable project-wide.
 	assert.True(t, permSet["agent.port_access"], "project-owner must carry agent.port_access")
 }
 
@@ -1527,4 +1527,77 @@ func TestNormalizedDefaultRole(t *testing.T) {
 	} {
 		assert.Equal(t, want, normalizedDefaultRole(in), "input %q", in)
 	}
+}
+
+// TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins simulates a
+// hub that last applied revision 4 of project-owner/project-admin (no
+// agent.port_access) and verifies that startup reconciliation upgrades the
+// stored roles, so an existing owner binding can open a member's ports
+// without any re-binding. project-member is left without port access.
+func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	without := func(perms []string, drop string) []string {
+		out := make([]string, 0, len(perms))
+		for _, p := range perms {
+			if p != drop {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	r4 := map[string][]string{
+		store.ProjectRoleOwner: without(projectOwnerPermissionIDs(), "agent.port_access"),
+		store.ProjectRoleAdmin: without(projectAdminPermissionIDs(), "agent.port_access"),
+	}
+	for name, perms := range r4 {
+		rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+		require.NoError(t, err)
+		require.NoError(t, s.UpdateSystemRoleDefinitionPermissions(ctx, rd.ID, perms))
+		recordBuiltInRoleMarker(ctx, s, name, builtInRoleMarker{Revision: 4, PermHash: permListHash(perms)})
+	}
+
+	projectID := tid("r5-port-project")
+	ownerID := tid("r5-port-owner")
+	adminID := tid("r5-port-admin")
+	memberID := tid("r5-port-member")
+	createDelegateTestProject(t, s, projectID, "r5-port", ownerID)
+	createTestUserWithProjectRole(t, s, ownerID, "r5-owner@test.com", projectID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, s, adminID, "r5-admin@test.com", projectID, store.ProjectRoleAdmin)
+	createTestUserWithProjectRole(t, s, memberID, "r5-member@test.com", projectID, store.ProjectRoleMember)
+
+	memberAgent := Resource{
+		Type: "agent", ID: tid("r5-member-agent"), OwnerID: memberID,
+		ParentType: "project", ParentID: projectID, Ancestry: []string{memberID},
+	}
+	callers := map[string]UserIdentity{
+		store.ProjectRoleOwner: NewAuthenticatedUser(ownerID, "r5-owner@test.com", "Owner", "member", "api"),
+		store.ProjectRoleAdmin: NewAuthenticatedUser(adminID, "r5-admin@test.com", "Admin", "member", "api"),
+	}
+	for name, caller := range callers {
+		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
+		require.False(t, d.Allowed, "precondition: %s at revision 4 must lack port access: %s", name, d.Reason)
+	}
+
+	reconcileBuiltInRoles(ctx, s)
+
+	for name, caller := range callers {
+		rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+		require.NoError(t, err)
+		assert.Contains(t, rd.Permissions, "agent.port_access", "%s should carry agent.port_access after reconciliation", name)
+		assert.NotContains(t, rd.Permissions, "agent.attach", "%s must still lack agent.attach", name)
+		assert.Equal(t, 5, getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to revision 5", name)
+
+		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
+		assert.True(t, d.Allowed, "%s should open a member's ports after reconciliation: %s", name, d.Reason)
+		d = authz.CheckAccess(ctx, caller, memberAgent, ActionAttach)
+		assert.False(t, d.Allowed, "%s must not attach to a member's agent: %s", name, d.Reason)
+	}
+
+	member := NewAuthenticatedUser(memberID, "r5-member@test.com", "Member", "member", "api")
+	otherAgent := memberAgent
+	otherAgent.OwnerID, otherAgent.Ancestry = ownerID, []string{ownerID}
+	d := authz.CheckAccess(ctx, member, otherAgent, ActionPortAccess)
+	assert.False(t, d.Allowed, "project-member must not gain port access on another member's agent: %s", d.Reason)
 }

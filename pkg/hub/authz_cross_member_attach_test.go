@@ -30,10 +30,11 @@ import (
 )
 
 // TestCrossMemberAttach_Matrix verifies that project owners/admins cannot
-// attach to (or reach ports of) agents owned by other project members, since
-// those agents run with their owner's user-scoped secrets (miller79/scion#88).
-// Owners keep access to their own agents and progeny through relationship
-// grants, and non-attach actions still flow through the owner/admin roles.
+// attach to agents owned by other project members, since those agents run
+// with their owner's user-scoped secrets, while they can open those agents'
+// forwarded ports through the agent.port_access their role carries. Owners
+// keep full access to their own agents and progeny through relationship
+// grants; plain members reach neither on another member's agent.
 func TestCrossMemberAttach_Matrix(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
