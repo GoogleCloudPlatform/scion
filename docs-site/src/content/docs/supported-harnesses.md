@@ -128,6 +128,8 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 
 Values outside the 0–100 range are clamped to the nearest boundary.
 
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference.
+
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
 - **Model selection**: Specific model selection must currently be handled via the `config.toml` or environment variables within the agent.
