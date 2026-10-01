@@ -3832,7 +3832,17 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** /stop <agent> — Stop a running agent. */
+  /**
+   * /stop <agent> — Stop a running agent.
+   *
+   * Like `resolvePathLinkProjectId`, a DM's thread-level `projectId` is not
+   * a project the DM belongs to — it's whatever project the user happened
+   * to be viewing before opening the DM (`inheritedProjectId()`). Resolving
+   * `/stop <slug>` against it could target an unrelated project's agent
+   * that happens to share the slug. In a DM, resolve against the peer
+   * agent's own project instead (`peerAgentProjectId()`); non-DM threads
+   * keep using `this.projectId`, which is the thread's real project.
+   */
   private async handleSlashStop(args: string): Promise<void> {
     const agentSlug = args.trim();
     if (!agentSlug) {
@@ -3840,14 +3850,15 @@ export class ScionChatThread extends LitElement {
       return;
     }
 
-    if (!this.projectId) {
+    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
+    if (!projectId) {
       this.insertLocalSystemMessage('No project context available.');
       return;
     }
 
     try {
       const res = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/agents/${encodeURIComponent(agentSlug)}/stop`,
+        `/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentSlug)}/stop`,
         { method: 'POST' }
       );
 
