@@ -2768,10 +2768,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		rawSettingsEnv := rawSettingsHarnessEnv(settings, profileName, harnessConfigName)
 		withSettings := fillAbsentEnv(requestEnv, rawSettingsEnv)
 		// expandedDirEnv is built once so fillAbsentDirEnv and
-		// authCandidateKeyValue consult the identical expanded view instead
-		// of each re-deriving it per key (which previously let
-		// authCandidateKeyValue index the directory by an un-expanded key,
-		// while fillAbsentDirEnv and buildAgentEnv both expand keys too).
+		// authCandidateKeyValue consult the identical expanded view,
+		// so both index the directory by the expanded key, as
+		// buildAgentEnv does.
 		expandedDirEnv := expandDirEnv(hcDirEnv)
 		withDir := fillAbsentDirEnv(withSettings, expandedDirEnv)
 

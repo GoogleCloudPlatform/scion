@@ -2619,8 +2619,8 @@ profiles:
 }
 
 // TestEnvGather_VertexAI_StillMissingSameError confirms that when none of the
-// settings sources declare GOOGLE_CLOUD_PROJECT/LOCATION, the preflight still
-// returns the same 202/needs error as before this change.
+// settings sources declare GOOGLE_CLOUD_PROJECT/LOCATION, the preflight
+// returns the 202/needs response for both keys.
 func TestEnvGather_VertexAI_StillMissingSameError(t *testing.T) {
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
@@ -2734,7 +2734,7 @@ profiles:
 }
 
 // TestEnvGather_VertexAI_EmptySettingsEnvFallsThroughToHarnessConfigDir
-// pins the corrected launch model for an auth-candidate key: run.go's Start
+// pins the launch model for an auth-candidate key: run.go's Start
 // deletes an empty GOOGLE_CLOUD_PROJECT entry from opts.Env after auth
 // resolves (its resolved.EnvVars only ever carries non-empty values), which
 // clears the way for finalScionCfg.Env — here, the harness-config
@@ -3122,10 +3122,9 @@ profiles:
 	}
 }
 
-// The tests below cover: the harness-config directory's own variable
-// expansion had no direct test, and the preflight did not search
-// template-bundled harness-config dirs the way launch's
-// resolveHarnessConfigDir does.
+// The tests below cover the harness-config directory's own ${VAR}
+// expansion, and the preflight's search of template-bundled harness-config
+// dirs (matching launch's resolveHarnessConfigDir).
 
 // TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing confirms that a dir
 // env value referencing an unset variable is dropped, matching
@@ -3343,7 +3342,7 @@ profiles:
 // for a hub-dispatched agent (TemplateID set), launch's own dispatch path
 // (start_context.go) hydrates the template and resolves the harness-config
 // chain from that hydrated local path, not from a same-named template slug
-// found on the broker's local disk. The preflight now hydrates the
+// found on the broker's local disk. The preflight hydrates the
 // template the same way (createAgent, next to the harness-config
 // hydration) and uses the hydrated path in place of the slug — so a stale
 // local template of the same name, which launch will never actually use,
@@ -3549,9 +3548,9 @@ func TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch(t *testing
 // path (not just extractRequiredEnvKeys accepting one) is covered end to
 // end. The region key is deliberately left unset in both the stale and
 // hydrated harness-configs, so the request always ends in 202 and never
-// reaches full dispatch: the stub hub client lacks the hubclient.Client
-// methods that buildStartContext would call, so a real hub connection
-// reaching full dispatch here would panic on the nil embedded interface.
+// reaches full dispatch: past buildStartContext, createAgent's
+// attachSkillResolver calls hubclient.Client.Skills(), which stubHubClient
+// does not implement (nil embedded interface), so it would panic.
 // The needs list shows which harness-config directory the preflight
 // actually scored.
 func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
