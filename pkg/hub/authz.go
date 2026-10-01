@@ -1673,21 +1673,35 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 // interactive session. A typed-nil concrete identity (see isNilIdentity)
 // takes this same empty-context path as a nil interface, checked before the
 // type switch below touches it: a nil concrete pointer panics on the field
-// or method access inside several of its arms.
+// or method access inside several of its arms — except a typed-nil
+// *ScopedUserIdentity, handled separately above the isNilIdentity check: see
+// the comment on that case for why its outcome must stay CredentialKindUAT
+// rather than fold into the shared empty-context path.
 func credentialContextForIdentity(identity Identity) CredentialContext {
+	// A typed-nil *ScopedUserIdentity is checked before the general
+	// isNilIdentity guard below, because it is the one concrete type whose
+	// typed-nil outcome here must NOT collapse to the empty CredentialContext
+	// that isNilIdentity's other cases share. A caller may derive a
+	// CredentialContext from a UAT identity independently of the request's
+	// Principal.Identity (see TestUATCeiling_Decide_TypedNilScopedIdentityCredentialDeniesRatherThanLiftingRestriction),
+	// so Decide's Principal-nil check (which already denies a typed-nil
+	// Principal.Identity with "missing principal") does not cover this case.
+	// Returning the empty CredentialContext{} here instead would give
+	// request.Credential.Kind == "", which skips Decide's
+	// suppliedCredentialCompatible/ceiling restriction entirely (that check
+	// only runs when request.Credential.Kind != "") and authorizes the
+	// request exactly as if no UAT credential had been supplied at all — a
+	// fail-open regression. Keeping Kind == CredentialKindUAT with a zero
+	// Ceiling (FrozenPermissionCeiling.Allows denies every permission) keeps
+	// this fail-closed, as established by ptone/scion#2143.
+	if v, ok := identity.(*ScopedUserIdentity); ok && v == nil {
+		return CredentialContext{Kind: CredentialKindUAT}
+	}
 	if isNilIdentity(identity) {
 		return CredentialContext{}
 	}
 	switch v := identity.(type) {
 	case *ScopedUserIdentity:
-		// v is never nil here: the isNilIdentity check above already routes a
-		// typed-nil *ScopedUserIdentity to the empty CredentialContext, the
-		// same path a nil interface takes. That empty context still denies —
-		// Decide's fail-closed classification check (an empty Kind is not a
-		// recognized credential kind) rejects it with "missing principal"
-		// before request.Credential.Kind or the UAT ceiling ever come into
-		// it, so it need not carry CredentialKindUAT itself to stay
-		// fail-closed.
 		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;

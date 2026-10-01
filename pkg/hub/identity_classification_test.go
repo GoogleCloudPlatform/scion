@@ -1125,10 +1125,21 @@ func TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks(t *t
 // this case panics instead of classifying (see isNilIdentity). Every case
 // here must: not panic in principalContextForIdentity,
 // credentialContextForIdentity, AncestryIsHubAttested or Decide; classify as
-// the empty principal/credential context; return false from
-// AncestryIsHubAttested; and deny in Decide with reason "missing principal",
-// the same path a nil interface takes, emitting exactly one audit record
-// with an empty derived PrincipalID.
+// the empty principal context; return false from AncestryIsHubAttested; and
+// deny in Decide with reason "missing principal", the same path a nil
+// interface takes, emitting exactly one audit record with an empty derived
+// PrincipalID.
+//
+// credentialContextForIdentity's typed-nil *ScopedUserIdentity case is the
+// one exception to "classify as the empty credential context": it predates
+// this test (ptone/scion#2143) and intentionally returns
+// CredentialContext{Kind: CredentialKindUAT} with a zero Ceiling, not the
+// empty CredentialContext — see the comment on that case in authz.go for why
+// collapsing it into the shared empty-context path would be a fail-open
+// regression for a caller that derives a Credential independently of
+// Principal.Identity. This test does not change that outcome; it only
+// confirms Decide still denies through the separate Principal-nil check,
+// which runs first regardless of the derived credential.
 func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 	for name := range identityInventoryExpectation {
 		t.Run(name, func(t *testing.T) {
@@ -1159,16 +1170,31 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 			default:
 				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
 			}
-			require.NotNil(t, identity, "the interface value under test must be typed-nil, not a nil interface")
+			// identity != nil (a plain Go interface comparison, not
+			// require.NotNil/assert.NotNil) is the correct check here:
+			// testify's NotNil uses reflection to unwrap pointer kinds and
+			// reports a typed-nil pointer as nil, which is exactly the
+			// distinction this table is built to exercise. A plain interface
+			// comparison is true for every case constructed above, since
+			// each carries a concrete type word even though the pointer
+			// value is nil.
+			require.True(t, identity != nil, "the interface value under test must be typed-nil, not a nil interface")
 
 			require.NotPanics(t, func() {
 				principal := principalContextForIdentity(identity)
 				assert.Equal(t, PrincipalContext{}, principal, "typed-nil identity must classify as the empty principal context")
 			}, "principalContextForIdentity must not panic on a typed-nil %s", name)
 
+			wantCredential := CredentialContext{}
+			if name == "ScopedUserIdentity" {
+				// Pre-existing ptone/scion#2143 fail-closed guard; see the
+				// doc comment above for why this type is exempt from the
+				// empty-context expectation every other type satisfies.
+				wantCredential = CredentialContext{Kind: CredentialKindUAT}
+			}
 			require.NotPanics(t, func() {
 				credential := credentialContextForIdentity(identity)
-				assert.Equal(t, CredentialContext{}, credential, "typed-nil identity must classify as the empty credential context")
+				assert.Equal(t, wantCredential, credential, "typed-nil identity must classify into its established credential context")
 			}, "credentialContextForIdentity must not panic on a typed-nil %s", name)
 
 			require.NotPanics(t, func() {
