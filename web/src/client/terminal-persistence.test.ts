@@ -1,6 +1,6 @@
 /**
- * Tests for TerminalWorkspacePersistence (design ptone/scion#2278): restore
- * for the bare /terminals route and the URL-driven cases (urlIntent, the
+ * Tests for TerminalWorkspacePersistence: restore for the bare /terminals
+ * route and the URL-driven cases (urlIntent, the
  * restore budget with late merge, and the rate-limited background retry),
  * the "no write before read" invariant, the snapshot, the debounce, and
  * keepalive PUTs. Uses a fake fetch and fake timers, a minimal fake
@@ -73,7 +73,15 @@ function simpleLocksRequest(): ReturnType<typeof vi.fn> {
  * terminal-coordinator-ownership.test.ts's createLockMock.
  */
 function createLockMock(): {
-  request: ReturnType<typeof vi.fn>;
+  request: ReturnType<
+    typeof vi.fn<
+      (
+        name: string,
+        opts: { mode?: string; ifAvailable?: boolean },
+        callback: (lock: object | null) => Promise<void>
+      ) => Promise<void>
+    >
+  >;
   releaseLock(name: string): void;
   isHeld(name: string): boolean;
 } {
@@ -230,8 +238,36 @@ function fakeWorkspace(): {
   };
 }
 
+/**
+ * A minimal Response stub, not a real one: `.json()` resolves via a plain
+ * `Promise.resolve()` (settles in exactly one microtask), instead of a real
+ * Response's stream-backed `.json()`, whose completion is scheduled outside
+ * the microtask queue and is not guaranteed to have settled after any fixed
+ * number of `await Promise.resolve()` flushes, especially under load. The
+ * persistence module only ever reads `.status` and calls `.json()` (see
+ * fetchWorkspace/putWorkspace/parseResponse), so that is all this needs to
+ * provide.
+ */
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
+  return { status, json: () => Promise.resolve(body) } as Response;
+}
+
+/**
+ * Drains the microtask queue until `predicate()` is true, checking after
+ * every drain rather than assuming a fixed number of ticks is enough: a
+ * hard-coded tick count ties the test to the exact depth of whatever
+ * promise chain it's waiting on, which has no reason to stay fixed as the
+ * code under test changes. Waiting on the real, observable condition
+ * instead removes that dependency. Throws with `description` if the
+ * predicate never holds, so a genuine regression fails clearly instead of
+ * the test silently racing on.
+ */
+async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+  for (let i = 0; i < 1000; i++) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`waitFor: ${description} did not become true`);
 }
 
 function serverDoc(
@@ -254,6 +290,21 @@ function serverDoc(
     pruned,
   };
 }
+
+/**
+ * Every fixture()'s persistence instance, disposed in the shared afterEach
+ * below. A successful restore() arms a real debounce timer (armDebounce()
+ * uses the platform setTimeout, not a fake one, unless the test has called
+ * vi.useFakeTimers()) whenever the write-back debounce is armed. A test that
+ * never advances or clears it would otherwise leave a live timer running
+ * past the end of the test: it fires later, against that test's now-stale
+ * fetchImpl mock (which has nothing left queued), producing a spurious
+ * console.warn that lands wherever the console.warn spy happens to be
+ * installed by then — a different, later test. dispose() clears the
+ * debounce timer, so tracking and disposing every fixture here prevents
+ * that regardless of whether a given test uses fake timers.
+ */
+let activePersistence: TerminalWorkspacePersistence[] = [];
 
 function fixture(opts?: {
   locks?: ReturnType<typeof createLockMock>;
@@ -285,7 +336,7 @@ function fixture(opts?: {
   });
   vi.stubGlobal(
     'fetch',
-    vi.fn((url: string) => Promise.resolve(agentResponse(String(url).split('/').pop())))
+    vi.fn((url: string) => Promise.resolve(agentResponse(String(url).split('/').pop() ?? '')))
   );
 
   const coordinator = new TerminalCoordinator(scope, {
@@ -301,7 +352,14 @@ function fixture(opts?: {
 
   const { workspace, selectCalls, setFrontmostKey } = fakeWorkspace();
   const onRestoredSelection = vi.fn();
-  const fetchImpl = vi.fn<typeof apiFetch>();
+  // Defaults to throwing so a call beyond what a test queued via
+  // mockResolvedValueOnce/mockResolvedValue fails loudly and specifically,
+  // instead of surfacing indirectly as an extra, unexplained console.warn
+  // (or, previously, a TypeError from reading .status off an undefined
+  // response).
+  const fetchImpl = vi.fn<typeof apiFetch>(() => {
+    throw new Error('unexpected fetchImpl call: no response was queued for it');
+  });
 
   const persistence = new TerminalWorkspacePersistence({
     coordinator,
@@ -312,6 +370,8 @@ function fixture(opts?: {
     restoreBudgetMs: opts?.restoreBudgetMs ?? 1500,
     retryIntervalMs: opts?.retryIntervalMs ?? 10000,
   });
+
+  activePersistence.push(persistence);
 
   return {
     coordinator,
@@ -325,6 +385,8 @@ function fixture(opts?: {
 }
 
 afterEach(() => {
+  for (const p of activePersistence) p.dispose();
+  activePersistence = [];
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -339,7 +401,7 @@ describe('restoreUrlIntent()', () => {
     expect(restoreUrlIntent(`/terminals/${agentA}`, '')).toBe(true);
   });
 
-  it('is true for a layout query naming a preset but no slots (design section 3.5.3)', () => {
+  it('is true for a layout query naming a preset but no slots', () => {
     expect(restoreUrlIntent('/terminals', '?lv=1&lp=two-columns')).toBe(true);
   });
 
@@ -448,7 +510,10 @@ describe('restore()', () => {
     f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA, 0, 2)));
     await vi.advanceTimersByTimeAsync(10000);
     await f.persistence.restore(false);
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // No timer has been armed yet (the first attempt failed before ever
+    // reaching merge()); a successful merge's armDebounce() call is what
+    // schedules the first one, so this is the retry's completion signal.
+    await waitFor(() => vi.getTimerCount() > 0, 'the retried merge armed the write-back debounce');
     expect(f.fetchImpl).toHaveBeenCalledTimes(2);
 
     // The retried merge finds agentA already in the registry (alreadyOpen),
@@ -473,7 +538,7 @@ describe('restore()', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('a throw from merge() that repeats on the retry still logs only once per generation (design section 3.5.4)', async () => {
+  it('a throw from merge() that repeats on the retry still logs only once per generation', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const f = fixture({ retryIntervalMs: 10000 });
@@ -494,7 +559,7 @@ describe('restore()', () => {
     f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA], agentA, 0, 2)));
     await vi.advanceTimersByTimeAsync(10000);
     await f.persistence.restore(false);
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(() => f.fetchImpl.mock.calls.length >= 2, 'the retry GET was sent');
     expect(f.fetchImpl).toHaveBeenCalledTimes(2);
 
     // Still exactly one warning for this generation, not two.
@@ -524,10 +589,9 @@ describe('restore()', () => {
     // null) and a LATER restore() call on the SAME instance, after the
     // queued waitForOwnership() grants the lock, must reset state and
     // perform a proper fresh GET — not treat anything as already settled.
-    // The guard that a stale generation cannot authorize a write (design
-    // section 3.4, the fix for impl-web-1 finding 4) is covered directly,
-    // by simulating a coordinator.generation the instance hasn't restored
-    // in, in the next test.
+    // The guard that a stale generation cannot authorize a write is covered
+    // directly, by simulating a coordinator.generation the instance hasn't
+    // restored in, in the next test.
     vi.useFakeTimers();
     const locks = createLockMock();
     const f = fixture({ locks });
@@ -548,7 +612,7 @@ describe('restore()', () => {
     // settles this via plain promise chaining (no timers), so draining the
     // microtask queue is enough — no real or fake time needed.
     releaseExternalHold();
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(() => f.coordinator.isOwner, 'the queued waiter acquired ownership');
     expect(f.coordinator.isOwner).toBe(true);
 
     // The SAME persistence instance, called again (as renderRoute would on
@@ -574,8 +638,8 @@ describe('restore()', () => {
   });
 
   it("a write is blocked when this instance has not restored in the coordinator's current generation", async () => {
-    // Direct regression test for impl-web-1 finding 4 / impl-web-2 finding 2:
-    // onChange()/fire() must require this.generation === coordinator.generation,
+    // Direct regression test: onChange()/fire() must require
+    // this.generation === coordinator.generation,
     // not just generation === this.generation (the value captured at the
     // last successful restore()). Simulated here by stubbing the
     // coordinator's generation getter after a successful merge, standing in
@@ -631,13 +695,13 @@ describe('restore()', () => {
     expect(f.coordinator.sessions).toHaveLength(0); // nothing merged yet
 
     // A second call, with the same GET still pending, must not wait on the
-    // network either (design section 3.5.1: "no navigation lag").
+    // network either: navigating within the viewer should never lag on it.
     await expect(f.persistence.restore(false)).resolves.toBeUndefined();
     expect(f.fetchImpl).toHaveBeenCalledTimes(1); // no new GET
 
     // The pending GET arrives late and merges (a late merge).
     resolveGet(jsonResponse(serverDoc([agentA], agentA)));
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(() => f.coordinator.sessions.length > 0, 'the late GET merged');
     expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA]);
   });
 
@@ -663,7 +727,7 @@ describe('restore()', () => {
     expect(f.coordinator.sessions).toHaveLength(0); // the retry GET has not resolved yet
 
     resolveRetryGet(jsonResponse(serverDoc([agentA], agentA)));
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(() => f.coordinator.sessions.length > 0, 'the retry GET merged');
     expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([agentA]);
 
     // Saving is enabled again: a further change writes back.
@@ -674,7 +738,7 @@ describe('restore()', () => {
     expect(f.fetchImpl).toHaveBeenCalledTimes(3);
   });
 
-  it('a GET failure logs once per generation, not again on a failed retry (design section 3.5.4)', async () => {
+  it('a GET failure logs once per generation, not again on a failed retry', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const f = fixture({ retryIntervalMs: 10000 });
@@ -688,7 +752,7 @@ describe('restore()', () => {
     f.fetchImpl.mockRejectedValueOnce(new Error('network'));
     await vi.advanceTimersByTimeAsync(10000);
     await f.persistence.restore(false);
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(() => f.fetchImpl.mock.calls.length >= 2, 'the retry GET was sent');
     expect(f.fetchImpl).toHaveBeenCalledTimes(2);
 
     // Still exactly one warning for this generation, not two.
@@ -764,7 +828,7 @@ describe('restore()', () => {
   );
 });
 
-describe('URL intent (design section 3.5.3)', () => {
+describe('URL intent', () => {
   it('restore(true) creates every restored entry idle, selects nothing, and does not call onRestoredSelection', async () => {
     const f = fixture();
     f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB], agentB)));
@@ -843,10 +907,10 @@ describe('URL intent (design section 3.5.3)', () => {
     f.fetchImpl.mockReturnValueOnce(new Promise((resolve) => (resolveGet = resolve)));
 
     const restorePromise = f.persistence.restore(true);
-    // The URL/path-open code runs while the GET is still pending (design
-    // section 3.5.3: "when a GET is slower than the budget, the URL/path
-    // code runs first"): it opens and selects agent X (not saved) directly,
-    // before the merge sees it.
+    // The URL/path-open code runs while the GET is still pending (when a
+    // GET is slower than the budget, the URL/path code runs first): it
+    // opens and selects agent X (not saved) directly, before the merge sees
+    // it.
     const [sessionX] = f.coordinator.restoreEntries([agentD], { connectAgentId: agentD });
     f.workspace.select(sessionX);
 
@@ -858,7 +922,10 @@ describe('URL intent (design section 3.5.3)', () => {
       jsonResponse(serverDoc([agentD, agentA, agentB, agentC], agentD, 0, 2))
     );
     resolveGet(jsonResponse(serverDoc([agentA, agentB, agentC], agentB)));
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    await waitFor(
+      () => f.coordinator.sessions.length === 4,
+      'the late merge appended the saved entries'
+    );
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(f.coordinator.sessions.map((s) => s.state.agentId)).toEqual([
@@ -983,11 +1050,11 @@ describe('write-back and debounce', () => {
       jsonResponse(serverDoc([agentA, agentB, agentC], agentB, 0, 2))
     );
     resolvePut(jsonResponse(serverDoc([agentA, agentB, agentC], agentA, 0, 2)));
-    // Let PUT #1's promise chain fully settle (fetchImpl -> response.json()
-    // -> fire()'s continuation -> its finally{} re-arming the dirty
-    // debounce) before checking anything: this crosses several microtask
-    // hops, not just one.
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // Wait for PUT #1's promise chain to fully settle (fetchImpl ->
+    // response.json() -> fire()'s continuation -> its finally{} re-arming
+    // the dirty debounce): no timer is pending until that finally{} block
+    // runs, so a newly-armed timer is the signal it has.
+    await waitFor(() => vi.getTimerCount() > 0, "PUT #1's finally{} re-armed the dirty debounce");
 
     expect(f.fetchImpl).toHaveBeenCalledTimes(1); // the dirty re-send goes through the debounce, not immediately
     await vi.advanceTimersByTimeAsync(999);
@@ -1014,7 +1081,7 @@ describe('write-back and debounce', () => {
     // previous doc during the in-flight PUT would hit the sameDoc early
     // return and never mark dirty — so once the in-flight PUT lands and
     // advances the baseline to what IT sent, the revert is silently lost:
-    // the hub keeps a state the user already left (design section 3.4).
+    // the hub keeps a state the user already left.
     vi.useFakeTimers();
     const f = fixture();
     f.fetchImpl.mockResolvedValueOnce(jsonResponse(serverDoc([agentA, agentB, agentC], agentC)));
@@ -1037,7 +1104,9 @@ describe('write-back and debounce', () => {
       jsonResponse(serverDoc([agentA, agentB, agentC], agentC, 0, 3))
     );
     resolvePut(jsonResponse(serverDoc([agentA, agentB, agentC], agentA, 0, 2))); // PUT(A) lands; baseline -> A
-    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // No timer is pending until PUT(A)'s finally{} re-arms the dirty
+    // debounce; wait for that instead of assuming a fixed tick count.
+    await waitFor(() => vi.getTimerCount() > 0, "PUT(A)'s finally{} re-armed the dirty debounce");
     await vi.advanceTimersByTimeAsync(1000); // the dirty re-send's own debounce window
 
     expect(f.fetchImpl).toHaveBeenCalledTimes(2); // the revert to C was saved
