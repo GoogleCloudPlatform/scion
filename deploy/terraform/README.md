@@ -549,7 +549,7 @@ applying.
 
 ## Troubleshooting
 
-**A 403 on a secret named `scion-hub-<h12>-...` shortly after the first
+**A 403 on a secret named `scion-<h12>-...` shortly after the first
 `hub` apply** means IAM propagation, not a wrong condition: the hub SA's
 conditioned `secretmanager.admin` grant (hub-identity) can take longer than
 the built-in 120s guard (`time_sleep.hub_iam_propagation`) to become
@@ -585,8 +585,10 @@ prevent (see hub-identity's IAM scope rule comment).
 - User- and project-scope secret creation needs a hub image built with
   ptone/scion#2152 (hub-prefixed secret names). The IAM grant for it already
   exists (`hub-identity`'s `hub_secretmanager_admin_hub_prefixed`); until a
-  hub runs that image, it still looks up hub-scope secrets under the legacy
-  pre-#2152 name, which only the separate legacy grant covers, and has no
-  prefix to create user/project-scope secrets under at all.
+  hub runs that image, it has no prefix to create user/project-scope secrets
+  under at all. The modules no longer carry the legacy hub-scope grant or
+  OIDC-signing-key pre-create — see
+  [`docs/deploy/agent-runbook-terraform-ha.md`](../../docs/deploy/agent-runbook-terraform-ha.md)'s
+  upgrade note before applying this version against an existing hub.
 - Typed `validation` blocks on every remaining variable, and a
   per-module README generated with `terraform-docs`.

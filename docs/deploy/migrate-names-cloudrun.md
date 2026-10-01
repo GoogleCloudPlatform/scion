@@ -603,25 +603,25 @@ filter matched nothing, not an error.
 
 ## 7. For Terraform-managed hubs: what can be removed afterward
 
-Once the final dry run in §4 (pass 5) shows zero pending items for **every** hub
-sharing a GCP project, the legacy IAM grant and the legacy pre-created secret that
-only existed to bridge the old naming scheme can be removed, each as its own
-per-resource acknowledgment rather than a single blanket change:
+The `terraform-ha` modules no longer carry the legacy conditioned
+`secretmanager.admin` grant or the legacy pre-created OIDC signing key secret —
+both were scoped to the hub's pre-migration secret-name prefix,
+`scion-hub-<h>-*`, where `<h>` is the first 12 hex characters of
+`sha256("<hub_id>:<hub_id>")` (`legacyGCPSecretName`, `pkg/secret/gcpbackend.go`).
+See
+[Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
+for how the hub-prefixed replacement is computed. A fresh hub now generates and
+stores its own OIDC signing key on first boot under the hub-prefixed name
+instead of reading a Terraform-pre-created one.
 
-- the legacy conditioned `secretmanager.admin` (or equivalent) grant scoped to the
-  hub's pre-migration secret-name prefix, `scion-hub-<h>-*`, where `<h>` is the first
-  12 hex characters of `sha256("<hub_id>:<hub_id>")` (`legacyGCPSecretName`,
-  `pkg/secret/gcpbackend.go`) — see
-  [Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
-  for how the hub-prefixed replacement is computed;
-- the Terraform-managed pre-create of the legacy-named OIDC signing key secret —
-  once every hub image resolves the OIDC key under the hub-prefixed name instead,
-  the pre-create under the legacy name is no longer read by anything.
-
-Do this only after confirming the final dry run's "zero pending" result — removing the
-legacy grant first means `migrate-names` can no longer even read the legacy names, so a
-"zero pending" result measured after removal only proves IAM was narrowed, not that
-migration finished.
+**Run this runbook through pass 4 (`--delete-legacy`) and confirm pass 5's
+"zero pending" result for every hub sharing a GCP project *before* upgrading
+that project's Terraform to a module version without the legacy grant.** Pass
+4 needs the legacy grant to delete the legacy-named secrets; once the grant is
+gone, `migrate-names` can no longer reach them at all. Applying the new
+Terraform first is not destructive — the leftover legacy secrets just become
+permanently un-deletable clutter, not a functional problem — but it
+forecloses cleaning them up later.
 
 ## 8. Break-glass
 
