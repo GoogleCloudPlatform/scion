@@ -139,13 +139,23 @@ type ExitReason string
 const (
 	ExitReasonCrashed        ExitReason = "crashed"
 	ExitReasonLimitsExceeded ExitReason = "limits_exceeded"
+	// ExitReasonPreempted is set when a Kubernetes pod's DisruptionTarget
+	// condition reports PreemptionByScheduler: the scheduler evicted the
+	// agent pod to make room for a higher-priority pod.
+	ExitReasonPreempted ExitReason = "preempted"
+	// ExitReasonEvicted is set when a Kubernetes pod was removed by any
+	// other disruption path: the pod status reason Evicted (kubelet
+	// node-pressure eviction), or a DisruptionTarget condition reason other
+	// than PreemptionByScheduler (for example TerminationByKubelet,
+	// EvictionByEvictionAPI, or another disruption-controller reason).
+	ExitReasonEvicted ExitReason = "evicted"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
 // Empty string is valid (no reason given).
 func (r ExitReason) IsValid() bool {
 	switch r {
-	case "", ExitReasonCrashed, ExitReasonLimitsExceeded:
+	case "", ExitReasonCrashed, ExitReasonLimitsExceeded, ExitReasonPreempted, ExitReasonEvicted:
 		return true
 	}
 	return false

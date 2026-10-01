@@ -140,6 +140,12 @@
         "namespace": { "type": "string" },
         "runtimeClassName": { "type": "string" },
         "serviceAccountName": { "type": "string" },
+        "priorityClassName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "PriorityClass name (DNS-1123 subdomain) applied to the agent pod's spec.priorityClassName. The PriorityClass must already exist on the cluster; Scion does not create one. Overrides any runtimes.<name>.priority_class_name default."
+        },
         "imagePullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"],

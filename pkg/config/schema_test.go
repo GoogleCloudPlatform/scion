@@ -587,6 +587,18 @@ max_duration: "2 hours"
 	assert.NotEmpty(t, errors, "invalid max_duration format should produce validation error")
 }
 
+func TestValidateAgentConfig_InvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: "Not_A_Valid_Name"
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "invalid priorityClassName should produce validation error")
+}
+
 func TestValidateAgentConfig_InvalidMaxTurns(t *testing.T) {
 	data := []byte(`
 schema_version: "1"
@@ -1022,6 +1034,7 @@ kubernetes:
   namespace: "scion-agents"
   runtimeClassName: "gvisor"
   serviceAccountName: "scion-agent-sa"
+  priorityClassName: "scion-agent-priority"
   resources:
     requests:
       cpu: "2"
@@ -1048,6 +1061,32 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "runtime with gke field should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: scion-agent-priority
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "runtime with a valid priority_class_name should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithInvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: Not_A_Valid_Name
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "runtime with an invalid priority_class_name should fail validation")
 }
 
 func TestValidateSettings_ServerHubSoftDelete(t *testing.T) {

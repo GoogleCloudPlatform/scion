@@ -236,6 +236,65 @@ func TestHeartbeatExitCode_StructuredCleanExit(t *testing.T) {
 	assert.Equal(t, 0, *got.ExitCode)
 }
 
+// TestHeartbeatExitCode_PreemptedEvictedMessage verifies that a Kubernetes
+// pod disruption gets its own default Message instead of being reported as
+// a generic crash, in both the non-zero-exit-code path (promotes stopped to
+// error) and the zero-exit-code path (stays stopped).
+func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
+	t.Run("preempted with a non-zero exit code promotes to error", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		ec := 137
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "preempted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "error", got.Phase, "non-zero ExitCode should still promote stopped to error")
+		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
+	})
+
+	t.Run("evicted with a zero exit code keeps stopped and gets no crash wording", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "evicted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "stopped", got.Phase, "ExitCode 0 should keep stopped phase")
+		assert.Equal(t, "evicted", got.ExitReason)
+		assert.Equal(t, "Agent pod was evicted", got.Message, "no exit code suffix expected when the exit code is not meaningful")
+	})
+
+	t.Run("ordinary crash keeps the existing wording unchanged", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		ec := 137
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "stopped",
+			ExitCode:   &ec,
+			ExitReason: "crashed",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "Agent crashed with exit code 137", got.Message, "regression: non-disruption crash wording must not change")
+	})
+}
+
 // TestHeartbeatExitCode_LegacyFallback verifies that when ExitCode is nil
 // (old broker), the hub falls back to parsing the ContainerStatus string.
 func TestHeartbeatExitCode_LegacyFallback(t *testing.T) {

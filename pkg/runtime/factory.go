@@ -207,6 +207,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
 		}
 		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
+		rt.PriorityClassName = rtConfig.PriorityClassName
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun

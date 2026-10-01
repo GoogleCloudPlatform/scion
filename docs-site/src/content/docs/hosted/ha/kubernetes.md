@@ -29,6 +29,7 @@ runtimes:
     namespace: scion-agents        # target namespace (default: "default")
     gke: false                     # enable GKE-specific features
     list_all_namespaces: false     # list agents across all namespaces
+    priority_class_name: scion-agent-priority  # default PriorityClass for agent pods (optional)
 
 profiles:
   default:
@@ -45,6 +46,7 @@ kubernetes:
   context: alternate-context           # override runtime context
   serviceAccountName: agent-sa         # Workload Identity / IRSA
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
+  priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
   imagePullPolicy: IfNotPresent        # Always, IfNotPresent, or Never
   nodeSelector:
     pool: agents
@@ -104,6 +106,52 @@ or declare them in broker `settings.yaml`, under `harness_configs.<name>.env` (o
 Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
 :::
 
+### Pod Priority and Preemption
+
+By default, agent pods have no `priorityClassName`, which puts them at priority 0 — the first choice when the scheduler needs to evict something to make room for a higher-priority pod (for example a `system-cluster-critical` pod like `kube-dns` being rescheduled during a node scale-down). On GKE Autopilot and Standard this is a real, observed failure mode: an agent pod can be preempted mid-run with no indication beyond a plain stop.
+
+Set a priority class so agent pods are not the default eviction target. Scion does not create the `PriorityClass` object itself — create one on the cluster first:
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: scion-agent-priority
+value: 1000           # above the default (0), below cluster-critical classes
+preemptionPolicy: Never # don't let this class preempt other pods to schedule
+globalDefault: false
+description: "Priority class for Scion agent pods"
+```
+
+Then reference it by name, either as a runtime-level default or per template/agent (the per-template value wins if both are set):
+
+```yaml
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: scion-agent-priority
+```
+
+```yaml
+kubernetes:
+  priorityClassName: scion-agent-priority
+```
+
+The name must be a valid DNS-1123 subdomain and must already exist on the cluster; an unset value (the default) leaves pods at priority 0, today's behaviour.
+
+#### Preempted and evicted status
+
+Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or a crash. When the runtime observes a pod that was removed by the scheduler or the kubelet rather than exiting normally, the agent's exit reason reflects it instead of reading as a generic crash:
+
+| Signal observed on the pod | Exit reason |
+|---|---|
+| Pod status reason `Evicted` (kubelet node-pressure eviction) | `evicted` |
+| `DisruptionTarget` condition, reason `PreemptionByScheduler` | `preempted` |
+| `DisruptionTarget` condition, reason `TerminationByKubelet` or `EvictionByEvictionAPI` | `evicted` |
+| `DisruptionTarget` condition, any other reason (for example a taint-manager or pod-GC removal) | `evicted` |
+
+This is reported only once the pod has actually reached a terminal state — a `DisruptionTarget` condition can appear while a pod is still finishing its grace period, and that pod has not stopped yet. It depends on the runtime observing the pod in that terminal state before the pod object is removed from the API server; if the pod disappears entirely between polls, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
+
 ## Architecture & Security
 
 ### Native Client & In-Cluster Authentication
@@ -162,6 +210,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Ephemeral storage (disk) | Supported (requests + limits) |
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
+| PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |

@@ -26,6 +26,9 @@ func TestIsValidExitReason(t *testing.T) {
 		// Valid terminal activities
 		{"crashed", true},
 		{"limits_exceeded", true},
+		// Valid: Kubernetes pod disruption reasons
+		{"preempted", true},
+		{"evicted", true},
 		// Invalid: non-terminal activities
 		{"working", false},
 		{"thinking", false},

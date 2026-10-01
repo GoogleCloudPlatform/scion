@@ -42,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -65,6 +66,13 @@ type KubernetesRuntime struct {
 	// blocks on its ctx argument to exercise the per-probe timeout without a
 	// real exec transport.
 	execProbe execProbeFunc
+
+	// PriorityClassName is the runtime-level default spec.priorityClassName
+	// applied to agent pods (settings runtimes.<name>.priority_class_name).
+	// An explicit per-template/agent kubernetes.priorityClassName overrides
+	// this in buildPod. Empty means no priority class is set (today's
+	// behaviour).
+	PriorityClassName string
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -2049,6 +2057,22 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// Priority class: an explicit per-template/agent kubernetes.priorityClassName
+	// wins over the runtime-level default (settings runtimes.<name>.priority_class_name,
+	// carried on r.PriorityClassName). Unset at both levels leaves
+	// pod.Spec.PriorityClassName unset — today's behaviour. Scion does not
+	// create the PriorityClass object; it must already exist on the cluster.
+	effectivePriorityClass := r.PriorityClassName
+	if config.Kubernetes != nil && config.Kubernetes.PriorityClassName != "" {
+		effectivePriorityClass = config.Kubernetes.PriorityClassName
+	}
+	if effectivePriorityClass != "" {
+		if errs := k8svalidation.IsDNS1123Subdomain(effectivePriorityClass); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid kubernetes.priorityClassName %q: %s", effectivePriorityClass, strings.Join(errs, "; "))
+		}
+		pod.Spec.PriorityClassName = effectivePriorityClass
+	}
+
 	return pod, nil
 }
 
@@ -2528,6 +2552,31 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	}
 }
 
+// k8sDisruptionExitReason inspects a pod for signs that it was removed by a
+// Kubernetes-initiated disruption rather than a normal stop or a container
+// crash: the pod-level status reason "Evicted" (kubelet node-pressure
+// eviction), or a DisruptionTarget condition. Returns "" when neither signal
+// is present. Callers should only use the result once the pod has actually
+// reached a terminal phase.
+func k8sDisruptionExitReason(pod corev1.Pod) string {
+	if pod.Status.Reason == "Evicted" {
+		return string(state.ExitReasonEvicted)
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.DisruptionTarget || cond.Status != corev1.ConditionTrue {
+			continue
+		}
+		if cond.Reason == corev1.PodReasonPreemptionByScheduler {
+			return string(state.ExitReasonPreempted)
+		}
+		// TerminationByKubelet, EvictionByEvictionAPI, or any other
+		// DisruptionTarget reason (for example a taint-manager or pod-GC
+		// removal) is reported as evicted.
+		return string(state.ExitReasonEvicted)
+	}
+	return ""
+}
+
 func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	namespace := r.DefaultNamespace
 	// When ListAllNamespaces is enabled, query across all namespaces
@@ -2597,6 +2646,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					}
 				}
 				break
+			}
+		}
+
+		// A pod that reached a terminal phase may have gotten there through a
+		// Kubernetes-initiated disruption rather than a normal stop or a
+		// container crash. Check only once the pod is terminal (agentStatus
+		// is stopped or error): a DisruptionTarget condition can appear on a
+		// pod that is still running out its grace period, and that pod has
+		// not stopped yet, so it must not be reported as preempted/evicted
+		// before it actually is.
+		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
+			if reason := k8sDisruptionExitReason(p); reason != "" {
+				exitReason = reason
 			}
 		}
 

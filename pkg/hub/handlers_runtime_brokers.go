@@ -855,7 +855,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 							if statusUpdate.Message == "" {
-								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
 							}
 						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
 							// Legacy fallback: parse from ContainerStatus string (old broker).
@@ -877,6 +877,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								statusUpdate.ExitReason = agentHB.ExitReason
 							} else if agentHB.ExitReason != "" {
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
 							}
 						}
 					}
@@ -1209,4 +1212,32 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// exitStatusMessage returns the default human-readable status Message for a
+// terminal agent, derived from the resolved ExitReason and the structured
+// ExitCode reported by the broker. Kubernetes pod disruptions get their own
+// wording so a preempted or evicted agent is not reported as a generic
+// crash; every other reason (including the empty one) keeps the existing
+// "Agent crashed with exit code N" wording, and produces no message at all
+// when there is no non-zero exit code to report.
+func exitStatusMessage(reason state.ExitReason, exitCode *int) string {
+	hasNonZeroExit := exitCode != nil && *exitCode != 0
+	switch reason {
+	case state.ExitReasonPreempted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was preempted, exit code %d", *exitCode)
+		}
+		return "Agent pod was preempted"
+	case state.ExitReasonEvicted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was evicted, exit code %d", *exitCode)
+		}
+		return "Agent pod was evicted"
+	default:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent crashed with exit code %d", *exitCode)
+		}
+		return ""
+	}
 }
