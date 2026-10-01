@@ -395,7 +395,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 		// Copy rather than mutate opts.InlineConfig in place: it is a
 		// pointer the caller owns (and, for Preflight, goes on to pass
 		// unchanged into Manager.Start), so writing AuthSelectedType
-		// directly into it would leak this function's derived value back
+		// directly into it would carry this function's derived value back
 		// into the caller's config.
 		cfgCopy := api.ScionConfig{}
 		if inlineCfg != nil {

@@ -319,14 +319,21 @@ func jitteredBackoff(min, max time.Duration) time.Duration {
 var errAbortedByKeepalive = errors.New("launch report: a keepalive answer ended the launch")
 
 // sendReportBlocking retries sendOnce with a jittered backoff in
-// [minBackoff, maxBackoff) until it gets a definitive answer, ctx is done, or
-// a keepalive running concurrently already ended the launch.
-func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient.AgentLaunchReport, minBackoff, maxBackoff, attemptTimeout time.Duration) (*hubclient.AgentLaunchReportResult, error) {
+// [minBackoff, maxBackoff) until it gets a definitive answer or ctx is done.
+// abortable also lets a keepalive answer that concurrently classified to an
+// abort action end the wait early; only SendClaim sets it. Design §3.8.5:
+// "the keepalive stops when the terminal's first attempt starts; from then
+// on only the terminal's answer decides cleanup" -- so SendTerminal must
+// keep retrying on its own TTL-bounded ctx regardless of abortCh, never
+// handing a terminal's outcome to a keepalive answer that raced it.
+func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient.AgentLaunchReport, minBackoff, maxBackoff, attemptTimeout time.Duration, abortable bool) (*hubclient.AgentLaunchReportResult, error) {
 	for {
-		select {
-		case <-s.abortCh:
-			return nil, errAbortedByKeepalive
-		default:
+		if abortable {
+			select {
+			case <-s.abortCh:
+				return nil, errAbortedByKeepalive
+			default:
+			}
 		}
 		result, err := s.sendOnce(ctx, report, attemptTimeout)
 		if err == nil {
@@ -336,6 +343,15 @@ func (s *launchSender) sendReportBlocking(ctx context.Context, report *hubclient
 			return nil, ctx.Err()
 		}
 		timer := time.NewTimer(jitteredBackoff(minBackoff, maxBackoff))
+		if !abortable {
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+			continue
+		}
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
@@ -359,7 +375,7 @@ func (s *launchSender) SendClaim(ctx context.Context) (*hubclient.AgentLaunchRep
 		State:      hubclient.AgentLaunchReportStateClaim,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, claimAttemptTimeout)
+	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, claimAttemptTimeout, true)
 }
 
 // StartKeepalive starts the per-launch keepalive goroutine (design §3.8.5).
@@ -440,6 +456,18 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 		}
 		result, err := s.sendOnce(ctx, report, keepaliveAttemptTimeout)
 		if err == nil {
+			if s.isTerminalStarted() {
+				// The terminal's first attempt started while this
+				// in-flight keepalive attempt was still waiting on its
+				// answer. Design §3.8.5: "the keepalive stops when the
+				// terminal's first attempt starts; from then on only the
+				// terminal's answer decides cleanup." Drop this answer
+				// rather than act on it -- acting on it here could abort
+				// the terminal's own retries (sendReportBlocking's
+				// abortable path) or record an outcome the terminal's own
+				// answer should decide instead.
+				return
+			}
 			switch action := classifyGateAnswer(result); action {
 			case gateContinue:
 				// nothing to do
@@ -497,5 +525,5 @@ func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, e
 		Agent:      agentInfo,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, terminalAttemptTimeout)
+	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, terminalAttemptTimeout, false)
 }

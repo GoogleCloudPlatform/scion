@@ -201,6 +201,23 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Step 2, F5: wait for a superseded record's cleanup before writing the
 	// shared marker, then write it (create launches only).
 	WaitSuperseded(ctx, lc.supersededDone)
+	if err := ctx.Err(); err != nil {
+		switch {
+		case errors.Is(err, context.Canceled):
+			// A local stop/delete (launchRegistry.CancelLocal) woke the
+			// wait, not a real ctx' deadline. Same rule as the claim's
+			// local-cancel case: the Hub already knows, or will
+			// independently learn, this launch is over, so no terminal.
+			return
+		default:
+			// context.DeadlineExceeded: ctx' ran out while waiting on the
+			// predecessor. The marker has not been written yet, so fail
+			// directly rather than writing it only to immediately treat
+			// the launch as timed out.
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "launch_timeout", "launch timed out waiting for a superseded launch to finish")
+			return
+		}
+	}
 	currentStep = "launching"
 	if rec.Kind == store.LaunchKindCreate && lc.opts.ProjectPath != "" {
 		if err := writeLaunchMarker(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID); err != nil {
@@ -257,7 +274,29 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 
+	if sender.IsAborted() {
+		// Start returned at about the same moment a keepalive answer
+		// recorded an abort, and Go's select above chose startCh instead
+		// of KeepaliveAborted (its choice between two ready cases is not
+		// ordered). Route to the same handling the KeepaliveAborted case
+		// above uses, rather than letting sr's result fall through to the
+		// success/failure path below with the recorded abort outcome left
+		// unacted on.
+		s.handleKeepaliveAbort(sender, rec, lc)
+		return
+	}
+
 	if sr.err != nil {
+		if errors.Is(sr.err, context.Canceled) {
+			// A local stop/delete (launchRegistry.CancelLocal) woke Start
+			// via ctx' cancellation, not a real deadline (the
+			// launch_timeout case is context.DeadlineExceeded, handled by
+			// classifyStartError below). Same rule as the claim's and
+			// WaitSuperseded's local-cancel cases: the Hub already knows,
+			// or will independently learn, this launch is over, so no
+			// terminal.
+			return
+		}
 		code, message := classifyStartError(ctx, sr.err)
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message)
 		return
