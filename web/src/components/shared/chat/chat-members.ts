@@ -247,6 +247,7 @@ export class ScionChatMembers extends LitElement {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
+      overscroll-behavior: contain;
     }
 
     .section-label {

@@ -391,6 +391,7 @@ export class ScionChatSpaceRail extends LitElement {
     .rail-body {
       flex: 1;
       overflow-y: auto;
+      overscroll-behavior: contain;
       padding: 0.25rem 0;
     }
 
