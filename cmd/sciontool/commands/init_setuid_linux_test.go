@@ -22,10 +22,11 @@ import (
 // a symbol that exists only in init_setuid_linux.go — see that symbol's own
 // doc comment) rather than init_setuid_other.go's by-name implementation,
 // and that the real per-entry chown it issues is the single-fd
-// AT_EMPTY_PATH call used by the single-fd chown, never a by-name
+// AT_EMPTY_PATH call on the already-opened entry (so no path is
+// re-resolved between open and chown), never a by-name
 // AT_SYMLINK_NOFOLLOW one. It also serves as the required proof that a
 // symlink entry's preserved behaviour (the link itself is chowned, its
-// target is never followed or chowned) survives the fd-based rewrite.
+// target is never followed or chowned) holds under the fd-based chown.
 func TestChownHomeEntryNoFollow_Linux_FDPathUsesAtEmptyPath(t *testing.T) {
 	dir := t.TempDir()
 	groupPath := filepath.Join(dir, "group")
