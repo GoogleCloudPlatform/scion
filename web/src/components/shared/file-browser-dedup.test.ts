@@ -102,6 +102,19 @@ function makeImmediateSource(label: string, files: string[] = []) {
   return { source, listFiles };
 }
 
+/** A data source whose listFiles() immediately rejects with the given message. */
+function makeFailingSource(label: string, message = 'boom') {
+  const listFiles = vi.fn(() => Promise.reject(new Error(message)));
+  const source: FileBrowserDataSource = {
+    listFiles,
+    deleteFile: vi.fn(),
+    uploadFiles: vi.fn(),
+    getDownloadUrl: () => `/download/${label}`,
+    getPreviewUrl: () => `/preview/${label}`,
+  };
+  return { source, listFiles };
+}
+
 describe('scion-file-browser — one initial listing per data source', () => {
   it('issues exactly one request across connectedCallback + the initial dataSource update', async () => {
     const { source, listFiles } = makeImmediateSource('a', ['foo.txt']);
@@ -481,5 +494,29 @@ describe('scion-file-browser — one initial listing per data source', () => {
     await el.updateComplete;
 
     expect((el as { files: FileEntry[] }).files).toEqual([]);
+  });
+
+  it('clears a stale error when disconnected then cleared to null, even with nothing requested or in flight', async () => {
+    // Round-5 review nit: the widened reset condition's `error !== null`
+    // clause had no test. Same shape as the files-clearing test above, but
+    // for a load that failed rather than one that succeeded.
+    const { source } = makeFailingSource('a');
+
+    const el = new FileBrowserCtor();
+    el.dataSource = source;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    expect((el as { error: string | null }).error).not.toBeNull();
+
+    // Disconnect (the load already settled with an error, so nothing is in
+    // flight; this nulls _requestedSource) ...
+    document.body.removeChild(el);
+    // ... then clear the data source to null while detached.
+    el.dataSource = null;
+    await el.updateComplete;
+
+    expect((el as { error: string | null }).error).toBeNull();
   });
 });
