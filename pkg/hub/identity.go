@@ -217,19 +217,10 @@ func (s *ScopedUserIdentity) Decoration() *CredentialDecoration {
 func (s *ScopedUserIdentity) Boundary() TokenBoundary { return s.boundary }
 
 // ScopedProjectID returns the project this identity is restricted to, or ""
-// for a hub-boundary identity — never a positive claim of hub access by
-// itself. Every consumer of this string must treat an empty value as no
-// project, not as unscoped.
-//
-// This accessor is derived from the boundary field, so a project-boundary
-// identity's project reads exactly as it would from a dedicated field.
-// auth.go's logging, authz.go's Decide gate, authz_list.go's list-caveat
-// reduction, authorized_list.go's cursor key, and authz_candelegate.go's
-// delegation check each call this accessor directly; each needs its own
-// boundary-aware handling to serve a hub-boundary identity correctly, which
-// Boundary() exists to support going forward. Token mint issues only
-// project-boundary tokens, so this accessor's callers only ever observe a
-// project boundary from a real, server-issued token.
+// for a hub-boundary identity. An empty value is never a positive claim of
+// hub access by itself: every consumer must treat it as no project, not as
+// unscoped. It is derived from the boundary field. A caller that needs to
+// distinguish hub from project must use Boundary().
 func (s *ScopedUserIdentity) ScopedProjectID() string { return s.boundary.ProjectID }
 
 // ScopedScopes returns the action scopes this identity is limited to.
