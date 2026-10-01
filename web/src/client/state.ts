@@ -209,12 +209,11 @@ function mergeAgentDelta(
  * `dirty.unknown` exists for), so an append-only list would grow without
  * bound.
  *
- * `fields` covers every field except `activity`, each delta promoted via
- * `promoteDetailFields` *before* folding (so a later delta's top-level
- * field — e.g. plain `message` — is never re-overwritten by an earlier
- * delta's stale `detail.message` when `fields` is replayed through
- * `mergeAgentDelta` with `skipPromote`, since that would promote `detail`
- * a second time, out of order). The one exception is `_capabilities`:
+ * `fields` covers every field except `activity`. Each delta is promoted
+ * via `promoteDetailFields` before folding, so `applyCompactedDelta`
+ * replays `fields` with `skipPromote`. Promoting again would re-derive
+ * top-level fields from the last raw `detail` and overwrite later values.
+ * The one exception is `_capabilities`:
  * `mergeAgentDelta` keeps the base's truthy value when a delta's own is
  * falsy (`null`/absent), so folding must apply that same rule against the
  * accumulator's current value, not just overwrite it — see
@@ -1375,9 +1374,9 @@ export class StateManager extends EventTarget {
    *
    * Deliberately does not use `state.connected`/`isConnected`: those answer
    * "is some connection open", which stays stale-true across the gap
-   * between `setScope` and the new generation's own `connected` (B1, round
-   * 1 review) — `sseClient.connect()` tears the old connection down without
-   * a `disconnected` event.
+   * between `setScope` and the new generation's own `connected` —
+   * `sseClient.connect()` tears the old connection down without a
+   * `disconnected` event.
    */
   sseConnected(generation: number): Promise<void> {
     if (generation !== this.generation) {

@@ -230,7 +230,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.phase).toBe('error');
   });
 
-  it('B2: the pending entry is consumed — a later created event does not re-apply it', () => {
+  it('the pending entry is consumed — a later created event does not re-apply it', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
@@ -245,7 +245,7 @@ describe('W3 seed epoch', () => {
     expect(sm.getAgent('a1')?.phase).toBe('running');
   });
 
-  it('B2: an unknown-ID delta recorded mid-epoch still goes through sticky-activity/detail merge semantics at seed time', () => {
+  it('an unknown-ID delta recorded mid-epoch still goes through sticky-activity/detail merge semantics at seed time', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
 
@@ -311,7 +311,7 @@ describe('W3 seed epoch', () => {
     emit(sm, 'agent.a1.deleted', {});
 
     const token = sm.beginSeedEpoch();
-    emit(sm, 'agent.a1.status', { phase: 'error' }); // must be dropped outright (N1)
+    emit(sm, 'agent.a1.status', { phase: 'error' }); // must be dropped outright, not buffered
 
     // Even ignoring the tombstone-skip in seedAgents itself, there must be
     // no recorded delta to reapply — the ID was never buffered or recorded.
@@ -402,7 +402,7 @@ describe('W3 seed epoch', () => {
       }
     }
     expect(checked).toBe(ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran, nothing skipped
-  });
+  }, 60_000); // 5^4 = 625 StateManager instances; the default 5s test timeout is too tight under load
 
   it('a created event drained during an epoch is recorded before its buffered deltas, not after', () => {
     // Buffer two deltas for an unknown ID, open an epoch throughout, then

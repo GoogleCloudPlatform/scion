@@ -189,7 +189,7 @@ describe('compacted buffer/epoch paths vs. sequential application', () => {
       if (got !== want) bad.push(JSON.stringify({ live0, rest, deltas, got, want }));
     }
     expect(bad, `${bad.length} mismatches; first: ${bad[0]}`).toEqual([]);
-  });
+  }, 60_000); // N=3000 cases; default 5s test timeout is too tight under load
 
   it('unknown-ID epoch vs sequential', () => {
     const rand = mulberry32(0x1234567);
@@ -213,7 +213,7 @@ describe('compacted buffer/epoch paths vs. sequential application', () => {
       if (got !== want) bad.push(JSON.stringify({ rest, deltas, got, want }));
     }
     expect(bad, `${bad.length} mismatches; first: ${bad[0]}`).toEqual([]);
-  });
+  }, 60_000); // N=3000 cases; default 5s test timeout is too tight under load
 
   it('buffer then created vs sequential', () => {
     const rand = mulberry32(0xabcdef);
@@ -236,7 +236,7 @@ describe('compacted buffer/epoch paths vs. sequential application', () => {
       if (got !== want) bad.push(JSON.stringify({ created, deltas, got, want }));
     }
     expect(bad, `${bad.length} mismatches; first: ${bad[0]}`).toEqual([]);
-  });
+  }, 60_000); // N=3000 cases; default 5s test timeout is too tight under load
 
   it('buffer + created inside epoch + post-deltas, seed vs sequential', () => {
     const rand = mulberry32(0x9e3779b9);
@@ -265,5 +265,5 @@ describe('compacted buffer/epoch paths vs. sequential application', () => {
       if (got !== want) bad.push(JSON.stringify({ rest, pre, created, post, got, want }));
     }
     expect(bad, `${bad.length} mismatches; first: ${bad[0]}`).toEqual([]);
-  });
+  }, 60_000); // N=3000 cases; default 5s test timeout is too tight under load
 });

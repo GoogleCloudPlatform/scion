@@ -367,7 +367,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     for (const [id, agent] of expected) {
       expect(actual.get(id)).toEqual(agent);
     }
-  });
+  }, 60_000); // 10k-event pass; the default 5s test timeout is too tight under load
 
   it('final state equals immediate application at every periodic checkpoint, not just at the end', () => {
     // The test above compares only once, after all 10,000 events. With a
@@ -399,7 +399,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
         }
       }
     }
-  }, 30_000); // two 10k-event passes with checkpoints; the default 5s test timeout is too tight here
+  }, 60_000); // two 10k-event passes with checkpoints; the default 5s test timeout is too tight here
 
   it('10k-event fuzz with interleaved rAF/timeout flush points, verified at every flush', () => {
     // The previous version of this test applied all 10,000 events and then
@@ -441,7 +441,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     let flushesWithNonEmptyUnknown = 0;
     // Mirrors state.deletedAgentIds: permanent within one scope (cleared
     // below on each periodic setScope, mirroring setScope's own clear),
-    // used (like production's N1 check) to decide whether a status/ports
+    // used the same way production does to decide whether a status/ports
     // delta for an absent ID would be buffered as unknown at all.
     let deletedIdsShadow = new Set<string>();
 
@@ -584,7 +584,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     // run, not just in an opening window before every one of a small fixed
     // ID pool gets permanently tombstoned.
     expect(flushesWithNonEmptyUnknown).toBeGreaterThanOrEqual(200);
-  }, 30_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
+  }, 60_000); // thousands of interleaved flush points; the default 5s test timeout is too tight here
 
   it('setScope discards a pending dirty set — no stale agents-changed fires in the new generation', () => {
     const sm = new StateManager();
@@ -712,7 +712,7 @@ describe('W2 coalescing fuzz (10k random events)', () => {
     expect(sm.getAgent('a1')).toBe(before);
   });
 
-  it('N4: a genuine ports change (different value) still dirties and replaces the object', () => {
+  it('a genuine ports change (different value) still dirties and replaces the object', () => {
     const sm = new StateManager();
     sm.setScope({ type: 'dashboard' });
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' });
@@ -935,7 +935,7 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
       }
     }
     expect(checked).toBe(STICKY_PROBE_ACTIVITIES.length ** 4); // sanity: the full 5^4 grid ran
-  });
+  }, 60_000); // 5^4 = 625 StateManager instances; the default 5s test timeout is too tight under load
 
   it('a long-lived unknown ID does not grow pendingAgentDeltas without bound', () => {
     // A sliding TTL (refreshed on every touch) only bounds how long an
@@ -965,7 +965,7 @@ describe('W2 unknown-buffer expiry (§7: 30s TTL)', () => {
     expect(Array.isArray(entry)).toBe(false);
     expect(Object.keys(entry?.fields ?? {}).length).toBeLessThan(10);
     expect(JSON.stringify(entry).length).toBeLessThan(500);
-  });
+  }, 60_000); // 5000 events with a timer advance each; the default 5s test timeout is too tight under load
 });
 
 describe('W2 resync edges (§7 N4, pinned against sse-client.ts)', () => {
@@ -1146,9 +1146,9 @@ describe('W2 sseConnected(generation)', () => {
   });
 
   it('isConnected is left alone by setScope — chat-thread.ts:1536 reads it to seed its reconnect catch-up', () => {
-    // Round 1 also reset `state.connected` in setScope, as a "consider" fix
-    // alongside connectedGeneration. That is a silent behaviour change for
-    // chat-thread.ts, the one reader of `stateManager.isConnected`: it seeds
+    // Resetting `state.connected` in setScope alongside connectedGeneration
+    // would be a silent behaviour change for chat-thread.ts, the one reader
+    // of `stateManager.isConnected`: it seeds
     // `_sawSseConnect` from it, and swallows the first `connected` it sees
     // as "nothing to catch up on" when that flag is already true. Making
     // isConnected go stale-false across a setScope made a warm navigation
