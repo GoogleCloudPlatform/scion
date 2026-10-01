@@ -14,9 +14,9 @@
 
 ## Admin Control (Rollout / Rollback)
 
-Hub-wide enable and disable is through the **Experiments tab**: Admin → Server Config → Experiments, with the `hub.experiments.update` permission (and `hub.config.read` to open the page). Toggling applies to all users of this hub; each user sees the change the next time they load or refresh the page. There is no separate "Save & Reload" step for this tab, and no restart is needed.
+Hub-wide enable and disable is through the **Experiments tab**: Admin → Server Config → Experiments, with the `hub.experiments.update` permission (and `hub.config.read` to open the page). Toggling applies to all users of this hub; each user sees the change the next time they load or refresh the page. There is no separate "Save & Reload" step for this tab.
 
-- **Per-user override (dev/QA only)**: `localStorage.setItem('scion:feature:web.terminal_workspace', 'true'|'false')`. This only takes effect when the experiments fetch fails or the user is signed out; for a signed-in user on a working hub, the admin value wins.
+- **Per-user override (dev/QA only)**: `localStorage.setItem('scion:feature:web.terminal_workspace', 'true')` or `'false'`. This only takes effect when the experiments fetch fails or the user is signed out; for a signed-in user on a working hub, the admin value wins.
 - **Behavior on disable**: active retained sessions are preserved in memory until the next page reload. On reload, the flag is re-evaluated and the app reverts to the legacy disposable-pane mode (`/agents/{id}/terminal`). In-memory terminal state (scrollback, xterm instances, layout assignments) is discarded on page reload. The agent process continues running server-side; users can re-attach after reload.
 
 ## Prerequisites
