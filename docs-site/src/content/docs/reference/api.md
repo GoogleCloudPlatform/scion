@@ -45,6 +45,11 @@ Agent state uses a layered model:
 - **Activity**: Runtime activity within the `running` phase (`working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh; `stalled` flags a live-but-hung agent and can trigger auto-suspend. (A crash surfaces as the `error` phase, not as an activity.)
 - **Detail**: Freeform context (tool name, message, task summary).
 
+#### Agent Self-Service (`/api/v1/agent`)
+Endpoints an agent calls on its own behalf. They authenticate with the agent token, sent in the `X-Scion-Agent-Token` header (which `sciontool` uses) or as an `Authorization: Bearer` token, and take no agent ID in the URL: the Hub derives the agent's identity from the token.
+
+- `POST /secrets`: Fetch several secret values in one call. Body: `{"keys": ["KEY_A", "KEY_B"]}` (1 to 100 keys, 64 KB body limit). Returns `{"secrets": [...]}`, one entry per requested key with `key`, `status` (`ok`, `not_found`, or `entitled_but_unavailable`), `value` (only when `ok`) and `error`. Per-key failures do not fail the request; a request the agent is not authorized for at all returns `403`. Values are scoped to the agent's project. `sciontool init` uses this to fetch the keys listed in `SCION_SECRET_KEYS` at startup.
+
 #### Projects (`/api/v1/projects`)
 
 The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/groves` or any path under it now return `404 Not Found`; use `/api/v1/projects`.
