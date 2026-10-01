@@ -334,9 +334,9 @@ type localAncestryProvenanceIdentity interface {
 // stage 2 and the progeny fact read ancestry evidence explicitly from the
 // stored agent record (hubDeliveryIdentity.evidence) instead — see
 // relationshipStageAncestryAttested (authz_delivery_credential.go).
-// ProgenyListPredicate and EvaluateProgeny are unchanged and keep calling
-// this function directly, so they return not-attested / match-nothing for
-// a hub_delivery principal. Every other consumer of this function (the
+// ProgenyListPredicate and EvaluateProgeny call this function directly, so
+// they return not-attested / match-nothing for a hub_delivery principal.
+// Every other consumer of this function (the
 // step-10 pre-backfill allow, messaging, material_grants, material_runtime)
 // stays on its not-attested path too, so no consumer extends trust to the
 // credential without an explicit arm.

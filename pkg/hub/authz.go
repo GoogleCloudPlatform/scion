@@ -500,11 +500,12 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		credential = derivedCredential
 	}
 	// A hub_delivery identity always uses its own derived credential, even
-	// when the caller supplied one of the same kind (the entry block above
-	// only checked that the supplied kind matched; it never substitutes the
-	// caller's CredentialContext for the derived one). No caller-supplied
-	// Scopes, Ceiling or ID can travel with this kind: the credential's
-	// authority is fixed by the constructor, not by request data.
+	// when the caller supplied one of the same kind: the lines above keep a
+	// caller-supplied CredentialContext whenever its kind was admitted, but
+	// for hub_delivery that context is replaced by the derived one here, so
+	// no caller-supplied Scopes, Ceiling or ID travels with it. The
+	// credential's authority is fixed by the constructor, not by request
+	// data.
 	if derivedCredential.Kind == CredentialKindHubDelivery {
 		credential = derivedCredential
 	}

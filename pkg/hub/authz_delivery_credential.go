@@ -76,12 +76,9 @@ func (h *hubDeliveryIdentity) ID() string        { return h.agentID }
 func (h *hubDeliveryIdentity) Type() string      { return "agent" }
 func (h *hubDeliveryIdentity) ProjectID() string { return h.projectID }
 
-// Scopes always returns nil: the credential carries no scope authority of
-// its own and cannot be widened by a stored role or scope change (F design
-// section 4.12 asks for "Scopes = stored role"; this plan deliberately
-// departs from that — see the 7b delivery_credential restriction, which
-// replaces agentScopeRestriction for this type precisely because nil scopes
-// would otherwise deny everything).
+// Scopes is always nil rather than the stored role: the 7b
+// delivery_credential restriction replaces agentScopeRestriction for this
+// type, so the credential's authority is fixed to hubDeliveryPermissionIDs.
 func (h *hubDeliveryIdentity) Scopes() []AgentTokenScope     { return nil }
 func (h *hubDeliveryIdentity) HasScope(AgentTokenScope) bool { return false }
 func (h *hubDeliveryIdentity) Ancestry() []string            { return append([]string(nil), h.ancestry...) }
@@ -162,7 +159,7 @@ func deliveryCredentialRestriction() Restriction {
 // below handles that case before any field of h is read.
 //
 // Every deny here returns a nil error with cause left at its zero value
-// (""), so Decide's read-only fail-open for step-10 errors
+// (""), so Decide's read-only allow-on-error for step-10 errors
 // (authz.go, isReadOnlyOperation) can never apply to a hub_delivery deny.
 func (a *AuthzService) checkHubDeliveryCeiling(
 	ctx context.Context,

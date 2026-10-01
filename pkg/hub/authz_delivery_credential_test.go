@@ -79,8 +79,8 @@ func TestHubDelivery_PipelineReachesRelationshipStage(t *testing.T) {
 
 // TestHubDelivery_ListPredicateAndPointEvaluationMatchNothing pins
 // precondition 3 (Q3 "Non-attestation"): ProgenyListPredicate and
-// EvaluateProgeny call the unchanged relationshipAncestryAttested, which is
-// false for a hub_delivery principal, so they match nothing — even though
+// EvaluateProgeny call relationshipAncestryAttested, which is false for a
+// hub_delivery principal, so they match nothing — even though
 // the same stored agent record, wrapped in a storedAgentIdentity, is a
 // positive control that does match.
 func TestHubDelivery_ListPredicateAndPointEvaluationMatchNothing(t *testing.T) {
@@ -369,4 +369,54 @@ func TestHubDelivery_ProgenyCandidatePassesStage5WithRoleBinding(t *testing.T) {
 
 	r := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.True(t, r.Accepted, "progeny candidate must be accepted at stage 5 despite the role binding: %+v", r)
+}
+
+// TestHubDelivery_EntryBlockRows is table-driven over Decide's entry-block
+// treatment of a hub_delivery identity, keyed by subtest name so a later
+// phase can add further rows (for example the unrecognized-kind and
+// non-matching-identity denies) without restructuring this test.
+//
+// override_ignores_supplied_credential pins the forced derived-credential
+// override (authz.go, immediately after the entry block): a caller-supplied
+// CredentialContext whose Kind matches the identity's own derived kind is
+// accepted by the entry-block compatibility check, like any other kind, but
+// for hub_delivery it is then replaced by the derived credential, so the
+// caller's ID, Type and Scopes travel no further and change nothing about
+// the outcome.
+func TestHubDelivery_EntryBlockRows(t *testing.T) {
+	t.Run("override_ignores_supplied_credential", func(t *testing.T) {
+		f := newGoldenFixture(t)
+		ctx := context.Background()
+
+		agentC := tid("hd-entry-override-agent")
+		newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+		h, err := f.authz.newHubDeliveryIdentity(ctx, agentC)
+		require.NoError(t, err)
+
+		baseReq := AuthzRequest{
+			Principal:  principalContextForIdentity(h),
+			Resource:   Resource{Type: "secret", ID: f.secretID},
+			Action:     ActionDeliver,
+			Permission: "secret.deliver",
+			Explain:    true,
+		}
+
+		withoutSupplied := baseReq
+		withoutSupplied.Credential = CredentialContext{}
+		wantDecision := f.authz.Decide(ctx, withoutSupplied)
+
+		withSupplied := baseReq
+		withSupplied.Credential = CredentialContext{
+			Kind:   CredentialKindHubDelivery,
+			ID:     "x",
+			Type:   "x",
+			Scopes: []string{"secret.read", "env_var.read"},
+		}
+		gotDecision := f.authz.Decide(ctx, withSupplied)
+
+		assert.Empty(t, gotDecision.CredentialID, "no caller-supplied ID travels with the derived credential")
+		assert.Empty(t, gotDecision.CredentialType, "no caller-supplied Type travels with the derived credential")
+		assert.Equal(t, wantDecision.Allowed, gotDecision.Allowed, "a supplied Scopes/ID/Type must not change the outcome")
+		assert.Equal(t, wantDecision.Reason, gotDecision.Reason, "a supplied Scopes/ID/Type must not change the outcome")
+	})
 }

@@ -914,6 +914,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})
 	scopedUAT := NewScopedUserIdentityWithCredentialID(interactiveUser, tid("session-gate-project"), []string{"agent:read"}, tid("session-gate-cred"))
 	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}}}
+	hubDelivery := &hubDeliveryIdentity{agentID: "session-gate-hub-delivery-agent", boundAgentID: "session-gate-hub-delivery-agent"}
 	unknown := &unclassifiedMockIdentity{id: tid("session-gate-unknown")}
 
 	svc := &UserAccessTokenService{}
@@ -933,6 +934,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 		{"dev session", devUser, DevUserID, false},
 		{"UAT credential", scopedUAT, userID, true},
 		{"agent JWT credential", agentJWT, "agent-1", true},
+		{"hub_delivery credential", hubDelivery, "session-gate-hub-delivery-agent", true},
 		{"unrecognized identity", unknown, tid("session-gate-unknown"), true},
 		{"nil identity", nil, tid("session-gate-nonexistent"), true},
 	}
