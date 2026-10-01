@@ -279,6 +279,66 @@ func TestCanAgentDelegateToAgent_CurrentCreateOnlyCannotDelegateFull(t *testing.
 		"a current-schema token without project:agent:sa_assign must not be able to delegate full")
 }
 
+// TestCanAgentDelegateToAgent_LegacyParentCanDelegateExplicitAssignScope
+// covers the case a legacy pre-split parent's effective authority includes
+// project:agent:sa_assign even though its raw scopes never literally name
+// it: a legacy actor holding only project:agent:create can delegate an
+// explicit project:agent:sa_assign grant (requested independently of any
+// role bundle, via GrantDescriptor.AgentScopes with AgentRole none) to a
+// child. This is the intended consequence of judging delegation by the
+// parent's effective authority rather than its literal scope list: before
+// the split, project:agent:create and project:agent:sa_assign were the same
+// scope string, so a parent holding it could already confer
+// gcp_service_account.assign on a child by delegating that scope; this pins
+// that the same parent can still confer it explicitly today.
+func TestCanAgentDelegateToAgent_LegacyParentCanDelegateExplicitAssignScope(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+
+	actor := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:            jwt.Claims{Subject: tid("candelegate-legacy-explicit-assign")},
+		Scopes:            []AgentTokenScope{ScopeAgentCreate},
+		legacyScopeSchema: true,
+	}}
+	grant := GrantDescriptor{
+		Type:        GrantTypeAgentDelegation,
+		AgentRole:   string(AgentRoleNone),
+		AgentScopes: []AgentTokenScope{ScopeAgentSAAssign},
+		ProjectID:   tid("candelegate-legacy-explicit-assign-project"),
+	}
+
+	decision := authz.CanDelegate(context.Background(), actor, grant)
+	assert.True(t, decision.Allowed,
+		"a legacy parent holding project:agent:create must be able to delegate an explicit project:agent:sa_assign grant: %q",
+		decision.Reason)
+}
+
+// TestCanAgentDelegateToAgent_CurrentParentCannotDelegateAssignItLacks is the
+// mirror: a non-legacy actor holding only project:agent:create (not flagged
+// as a legacy pre-split token) must NOT be able to delegate an explicit
+// project:agent:sa_assign grant it does not itself hold.
+func TestCanAgentDelegateToAgent_CurrentParentCannotDelegateAssignItLacks(t *testing.T) {
+	authz, _ := authzTestSetup(t)
+
+	actor := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims: jwt.Claims{Subject: tid("candelegate-current-explicit-assign")},
+		Scopes: []AgentTokenScope{ScopeAgentCreate},
+		// legacyScopeSchema deliberately left unset.
+	}}
+	grant := GrantDescriptor{
+		Type:        GrantTypeAgentDelegation,
+		AgentRole:   string(AgentRoleNone),
+		AgentScopes: []AgentTokenScope{ScopeAgentSAAssign},
+		ProjectID:   tid("candelegate-current-explicit-assign-project"),
+	}
+
+	decision := authz.CanDelegate(context.Background(), actor, grant)
+	assert.False(t, decision.Allowed,
+		"a non-legacy parent must not be able to delegate project:agent:sa_assign it does not hold: %q",
+		decision.Reason)
+	assert.Contains(t, decision.Reason, string(ScopeAgentSAAssign),
+		"the denial must name the missing scope, not an unrelated one")
+}
+
 // scopeSplitFixture is the shared world for the CheckAccess-level scope-split
 // tests: one project and one service account inside it, so a test only has
 // to vary the calling agent's scopes and legacy status.

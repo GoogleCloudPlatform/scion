@@ -228,11 +228,10 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 // layer that owns it.
 //
 // ⚠️ ActionAssign, not ActionRead. A grant to READ a service account is not a
-// grant to ASSIGN one; the two were conflated here until svc-accnt Step 2.
-// Reachability for project-scoped accounts comes from: authz.go's AgentScopes
-// wiring (project:agent:sa_assign, its own agent scope as of ptone/scion#2339
-// — effectiveAgentScopes keeps a token minted under the prior, combined
-// project:agent:create scope working) for agent callers, and the
+// grant to ASSIGN one. Reachability for project-scoped accounts comes from:
+// authz.go's AgentScopes wiring (project:agent:sa_assign) for agent callers;
+// effectiveAgentScopes also grants it to a token minted under the earlier
+// schema, where project:agent:create carried it, and the
 // gcp_service_account.assign permission curated into the project-owner,
 // project-admin and project-member RoleDefinitions in seed.go for humans
 // (ptone/scion#2147).
