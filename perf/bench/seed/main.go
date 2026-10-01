@@ -5,9 +5,14 @@
 // Refuses to run against an existing, non-empty --db by default
 // (bench-rev-1 B6): re-seeding the same file is not supported (it fails
 // partway through with "already exists" errors after having already
-// mutated hub bootstrap state), so this fails fast up front instead. Pass
-// --force-existing to override for deliberate reuse of an already-seeded
-// file you understand the limits of.
+// mutated hub bootstrap state), so this fails fast up front instead. The
+// check normalizes --db the same way openSQLiteForBench does (stripping a
+// "file:" prefix and "?query" suffix) before checking the filesystem
+// (bench-rev-2 R4: a "file:" DSN form bypassed an earlier, unnormalized
+// version of this check entirely). There is no override flag -- an earlier
+// version offered --force-existing, but every documented use of it still
+// fails partway through anyway (bench-rev-2 NB7), so it added a path to a
+// known-broken outcome rather than a real capability. Use a fresh path.
 //
 // It is the first stage of the perf/2393-large-project-bench harness
 // (ptone/scion#2393, #2374, #2367): every other bench tool consumes the
@@ -85,11 +90,10 @@ func main() {
 	projectName := flag.String("project-name", "Large Project Bench", "project display name")
 	randSeed := flag.Int64("rand-seed", 42, "seed for deterministic synthetic data generation")
 	outPath := flag.String("out", "", "path to write seed metadata JSON (required)")
-	forceExisting := flag.Bool("force-existing", false, "allow seeding into an already-existing, non-empty --db file (unsupported: fails partway through with 'already exists' after mutating hub bootstrap state -- see bench-rev-1 B6)")
 	flag.Parse()
 
 	if *dbPath == "" || *secret == "" || *outPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: seed --db <path> --session-secret <secret> --out <metadata.json> [--agents N] [--project-slug slug] [--project-name name] [--rand-seed N] [--force-existing]")
+		fmt.Fprintln(os.Stderr, "usage: seed --db <path> --session-secret <secret> --out <metadata.json> [--agents N] [--project-slug slug] [--project-name name] [--rand-seed N]")
 		os.Exit(2)
 	}
 	if *agents < 0 {
@@ -97,7 +101,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := checkDBNotExists(*dbPath, *forceExisting); err != nil {
+	if err := checkDBNotExists(*dbPath); err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(2)
 	}
@@ -111,17 +115,37 @@ func main() {
 	}
 }
 
-// checkDBNotExists refuses an already-existing, non-empty dbPath unless
-// force is set. Extracted from main() so it is directly unit-testable
-// (bench-rev-1 B6): re-seeding an existing file is not supported (run()
-// fails partway through, after already mutating hub bootstrap state, with
-// an "already exists" error on the owner/member user), so this fails fast
-// before opening the database at all.
-func checkDBNotExists(dbPath string, force bool) error {
-	if force {
-		return nil
+// normalizeDBPathForStat strips the "file:" prefix and any "?query" suffix
+// openSQLiteForBench accepts, so a stat-based existence check inspects the
+// same filesystem path the DSN actually resolves to.
+//
+// bench-rev-2 R4: an earlier version of checkDBNotExists called os.Stat on
+// the raw --db value. Since openSQLiteForBench accepts (and this tool's own
+// callers may pass) a "file:" DSN with a "?cache=shared"-style suffix, e.g.
+// "file:/tmp/hub.db?cache=shared", os.Stat on that literal string looks for
+// a path starting with the 5 characters "file:" and containing a literal
+// "?", which essentially never exists -- so the guard always passed,
+// regardless of whether the real underlying file existed and had data.
+func normalizeDBPathForStat(dbPath string) string {
+	p := strings.TrimPrefix(dbPath, "file:")
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
 	}
-	fi, statErr := os.Stat(dbPath)
+	return p
+}
+
+// checkDBNotExists refuses an already-existing, non-empty dbPath.
+// Extracted from main() so it is directly unit-testable (bench-rev-1 B6):
+// re-seeding an existing file is not supported (run() fails partway
+// through, after already mutating hub bootstrap state, with an "already
+// exists" error on the owner/member user), so this fails fast before
+// opening the database at all. No override flag: an earlier version had
+// --force-existing, but every documented use of it still ends in that same
+// failure, so it only offered a path to a known-broken outcome
+// (bench-rev-2 NB7) -- removed rather than kept as a trap.
+func checkDBNotExists(dbPath string) error {
+	statPath := normalizeDBPathForStat(dbPath)
+	fi, statErr := os.Stat(statPath)
 	if statErr != nil {
 		return nil // does not exist (or unreadable, which run() will fail on anyway) -- fine
 	}
@@ -129,11 +153,10 @@ func checkDBNotExists(dbPath string, force bool) error {
 		return nil // e.g. a freshly `touch`ed placeholder; nothing to lose
 	}
 	return fmt.Errorf(
-		"--db %s already exists and is non-empty (%d bytes). Re-seeding an existing "+
-			"file is not supported: it will fail partway through (after already mutating "+
-			"hub bootstrap state) with an \"already exists\" error on the owner/member user. "+
-			"Use a fresh path, remove the file first, or pass --force-existing if you "+
-			"understand the risk", dbPath, fi.Size())
+		"--db %s (resolved path %s) already exists and is non-empty (%d bytes). Re-seeding "+
+			"an existing file is not supported: it will fail partway through (after already "+
+			"mutating hub bootstrap state) with an \"already exists\" error on the owner/member "+
+			"user. Use a fresh path or remove the file first", dbPath, statPath, fi.Size())
 }
 
 // openSQLiteForBench opens dbPath the same way cmd/server_foreground.go's

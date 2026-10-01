@@ -58,6 +58,19 @@ jobs:
         working-directory: ./web
         run: npm run typecheck
 
+      # bench-rev-2 NB11: the eslint override and lint:e2e-perf script
+      # (bench-rev-1 Nit5) passed locally but were never wired into CI.
+      - name: Lint perf/2393 browser benchmark (e2e-perf)
+        working-directory: ./web
+        run: npm run lint:e2e-perf
+
+      # bench-rev-2 Test Coverage gap: lib.mjs's pure functions (the
+      # standalone-graph matcher bug in R1 was exactly this kind of bug)
+      # now have node:test coverage; wire it in so it actually runs.
+      - name: Test perf/2393 browser benchmark (e2e-perf)
+        working-directory: ./web
+        run: npm run test:e2e-perf
+
       - name: Run Web Tests
         working-directory: ./web
         run: npm test

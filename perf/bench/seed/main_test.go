@@ -195,12 +195,13 @@ func TestRunSeedsNonAdminProjectMember(t *testing.T) {
 
 // TestCheckDBNotExists covers bench-rev-1 B6's refusal behavior directly
 // (extracted into its own function specifically so it is unit-testable
-// without spawning the compiled binary).
+// without spawning the compiled binary), including bench-rev-2 R4's "file:"
+// DSN / "?query" bypass.
 func TestCheckDBNotExists(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("missing path is fine", func(t *testing.T) {
-		if err := checkDBNotExists(filepath.Join(dir, "does-not-exist.db"), false); err != nil {
+		if err := checkDBNotExists(filepath.Join(dir, "does-not-exist.db")); err != nil {
 			t.Errorf("checkDBNotExists on a missing path: %v", err)
 		}
 	})
@@ -210,28 +211,62 @@ func TestCheckDBNotExists(t *testing.T) {
 		if err := os.WriteFile(p, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := checkDBNotExists(p, false); err != nil {
+		if err := checkDBNotExists(p); err != nil {
 			t.Errorf("checkDBNotExists on an empty file: %v", err)
 		}
 	})
 
-	t.Run("non-empty file is refused by default", func(t *testing.T) {
+	t.Run("non-empty file is refused for a plain path", func(t *testing.T) {
 		p := filepath.Join(dir, "nonempty.db")
 		if err := os.WriteFile(p, []byte("not really sqlite but non-empty"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := checkDBNotExists(p, false); err == nil {
+		if err := checkDBNotExists(p); err == nil {
 			t.Error("checkDBNotExists on a non-empty file: want error, got nil")
 		}
 	})
 
-	t.Run("non-empty file allowed with force", func(t *testing.T) {
-		p := filepath.Join(dir, "nonempty-forced.db")
+	t.Run("non-empty file is refused for a file: DSN with no query (R4)", func(t *testing.T) {
+		p := filepath.Join(dir, "nonempty-filedsn.db")
 		if err := os.WriteFile(p, []byte("not really sqlite but non-empty"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := checkDBNotExists(p, true); err != nil {
-			t.Errorf("checkDBNotExists with force=true: %v", err)
+		if err := checkDBNotExists("file:" + p); err == nil {
+			t.Error("checkDBNotExists on file:<non-empty path>: want error, got nil")
 		}
 	})
+
+	t.Run("non-empty file is refused for a file: DSN with a query suffix (R4)", func(t *testing.T) {
+		p := filepath.Join(dir, "nonempty-filedsn-query.db")
+		if err := os.WriteFile(p, []byte("not really sqlite but non-empty"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkDBNotExists("file:" + p + "?cache=shared"); err == nil {
+			t.Error("checkDBNotExists on file:<non-empty path>?cache=shared: want error, got nil")
+		}
+	})
+
+	t.Run("missing path is fine even as a file: DSN with a query suffix", func(t *testing.T) {
+		p := filepath.Join(dir, "does-not-exist-filedsn.db")
+		if err := checkDBNotExists("file:" + p + "?cache=shared"); err != nil {
+			t.Errorf("checkDBNotExists on a missing file: DSN: %v", err)
+		}
+	})
+}
+
+func TestNormalizeDBPathForStat(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"/tmp/hub.db", "/tmp/hub.db"},
+		{"file:/tmp/hub.db", "/tmp/hub.db"},
+		{"file:/tmp/hub.db?cache=shared", "/tmp/hub.db"},
+		{"/tmp/hub.db?cache=shared", "/tmp/hub.db"},
+	}
+	for _, c := range cases {
+		if got := normalizeDBPathForStat(c.in); got != c.want {
+			t.Errorf("normalizeDBPathForStat(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }

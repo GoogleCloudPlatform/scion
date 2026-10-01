@@ -52,11 +52,26 @@ type SeedMetadata struct {
 // APIBenchReport is written by perf/bench/apibench after running its timed
 // trials against a seeded project.
 type APIBenchReport struct {
-	GeneratedAt time.Time       `json:"generatedAt"`
-	HubBaseURL  string          `json:"hubBaseUrl"`
-	Seed        SeedMetadata    `json:"seed"`
-	Scenarios   []ScenarioStats `json:"scenarios"`
-	Machine     MachineInfo     `json:"machine"`
+	GeneratedAt time.Time `json:"generatedAt"`
+	// HarnessCommit is the harness's own `git rev-parse HEAD` at run time,
+	// or "" if it could not be determined (bench-rev-2 NB4): lets a report
+	// be matched back to the exact code that produced it without relying on
+	// wall-clock proximity to a commit timestamp.
+	HarnessCommit     string            `json:"harnessCommit,omitempty"`
+	HubBaseURL        string            `json:"hubBaseUrl"`
+	EffectiveSettings EffectiveSettings `json:"effectiveSettings"`
+	Seed              SeedMetadata      `json:"seed"`
+	Scenarios         []ScenarioStats   `json:"scenarios"`
+	Machine           MachineInfo       `json:"machine"`
+}
+
+// EffectiveSettings records the resolved CLI flags a report was produced
+// with (bench-rev-2 NB4), so a reader does not have to guess defaults.
+type EffectiveSettings struct {
+	Runs           int  `json:"runs"`
+	Warmup         int  `json:"warmup"`
+	TimeoutSeconds int  `json:"timeoutSeconds"`
+	WantPerfTrace  bool `json:"wantPerfTrace"`
 }
 
 // Attempt records one HTTP request attempt, success or failure. A failure
@@ -133,4 +148,13 @@ type MachineInfo struct {
 	LoadAvg5      float64 `json:"loadAvg5,omitempty"`
 	LoadAvg15     float64 `json:"loadAvg15,omitempty"`
 	UptimeSeconds float64 `json:"uptimeSeconds,omitempty"`
+
+	// *AtEnd are sampled again after the run completes (bench-rev-2 NB9): a
+	// 500-agent run can take many minutes, long enough for load to swing
+	// sharply within a single report. A report whose start/end load differ
+	// a lot flags itself as having run through a noise spike rather than
+	// steady-state conditions.
+	LoadAvg1AtEnd  float64 `json:"loadAvg1AtEnd,omitempty"`
+	LoadAvg5AtEnd  float64 `json:"loadAvg5AtEnd,omitempty"`
+	LoadAvg15AtEnd float64 `json:"loadAvg15AtEnd,omitempty"`
 }

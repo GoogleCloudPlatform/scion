@@ -15,79 +15,73 @@
  */
 
 module.exports = {
-  root: true,
-  env: {
-    node: true,
-    es2022: true,
-  },
-  parser: '@typescript-eslint/parser',
-  parserOptions: {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    project: './tsconfig.json',
-  },
-  overrides: [
-    {
-      files: ['e2e/terminal-workspace/*.ts'],
-      parserOptions: { project: './e2e/terminal-workspace/tsconfig.json' },
+    root: true,
+    env: {
+        node: true,
+        es2022: true,
     },
-    {
-      files: ['e2e/terminal-entrypoints/*.ts'],
-      parserOptions: { project: './e2e/terminal-entrypoints/tsconfig.json' },
+    parser: '@typescript-eslint/parser',
+    parserOptions: {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        project: './tsconfig.json',
     },
-    {
-      files: ['e2e/terminal-hidden/*.ts'],
-      parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
-    },
-    {
-      files: ['src/client/terminal-*.test.ts'],
-      parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
-    },
-    // bench-rev-1 Nit5: e2e-perf/*.mjs (the perf/2393 harness's browser
-    // benchmark) isn't part of the tsconfig.json TS program the root
-    // parserOptions.project requires, so it needs the plain ESLint
-    // parser and non-type-checked rules rather than inheriting the
-    // root @typescript-eslint/recommended-requiring-type-checking
-    // config, which would fail to parse it.
-    {
-      files: ['e2e-perf/**/*.mjs'],
-      // Mixes Node-side orchestration code with inline functions passed to
-      // Playwright's page.evaluate()/addInitScript(), which run in the
-      // browser -- both sets of globals (document/window/localStorage vs.
-      // process/Buffer) are legitimately used in this one file.
-      env: { node: true, browser: true, es2022: true },
-      parser: 'espree',
-      parserOptions: { ecmaVersion: 'latest', sourceType: 'module', project: null },
-      // disable-type-checked turns off every rule that needs
-      // parserServices (i.e. a real tsconfig program) -- required
-      // here because plain espree can't provide those, and this file
-      // isn't (and shouldn't need to be) part of tsconfig.json's
-      // program.
-      extends: [
+    overrides: [
+        {
+            files: ['e2e/terminal-workspace/*.ts'],
+            parserOptions: { project: './e2e/terminal-workspace/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-entrypoints/*.ts'],
+            parserOptions: { project: './e2e/terminal-entrypoints/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-hidden/*.ts'],
+            parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
+        },
+        {
+            files: ['src/client/terminal-*.test.ts'],
+            parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
+        },
+        // bench-rev-1 Nit5: e2e-perf/*.mjs (the perf/2393 harness's browser
+        // benchmark) isn't part of the tsconfig.json TS program the root
+        // parserOptions.project requires, so it needs the plain ESLint
+        // parser and non-type-checked rules rather than inheriting the
+        // root @typescript-eslint/recommended-requiring-type-checking
+        // config, which would fail to parse it. Mixes Node-side
+        // orchestration code with inline functions passed to Playwright's
+        // page.evaluate()/addInitScript(), which run in the browser -- both
+        // sets of globals are legitimately used in this one file.
+        {
+            files: ['e2e-perf/**/*.mjs'],
+            env: { node: true, browser: true, es2022: true },
+            parser: 'espree',
+            parserOptions: { ecmaVersion: 'latest', sourceType: 'module', project: null },
+            extends: [
+                'eslint:recommended',
+                'plugin:@typescript-eslint/disable-type-checked',
+                'plugin:prettier/recommended',
+            ],
+            rules: {
+                'no-console': 'off',
+                // Return-type annotations aren't meaningful in plain (non-TS) JS.
+                '@typescript-eslint/explicit-function-return-type': 'off',
+            },
+        },
+    ],
+    plugins: ['@typescript-eslint', 'prettier'],
+    extends: [
         'eslint:recommended',
-        'plugin:@typescript-eslint/disable-type-checked',
+        'plugin:@typescript-eslint/recommended',
+        'plugin:@typescript-eslint/recommended-requiring-type-checking',
         'plugin:prettier/recommended',
-      ],
-      rules: {
-        'no-console': 'off',
-        // Return-type annotations aren't meaningful in plain (non-TS) JS.
-        '@typescript-eslint/explicit-function-return-type': 'off',
-      },
+    ],
+    rules: {
+        '@typescript-eslint/explicit-function-return-type': 'warn',
+        '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+        '@typescript-eslint/no-explicit-any': 'warn',
+        'no-console': ['warn', { allow: ['warn', 'error', 'info'] }],
+        'prettier/prettier': 'error',
     },
-  ],
-  plugins: ['@typescript-eslint', 'prettier'],
-  extends: [
-    'eslint:recommended',
-    'plugin:@typescript-eslint/recommended',
-    'plugin:@typescript-eslint/recommended-requiring-type-checking',
-    'plugin:prettier/recommended',
-  ],
-  rules: {
-    '@typescript-eslint/explicit-function-return-type': 'warn',
-    '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-    '@typescript-eslint/no-explicit-any': 'warn',
-    'no-console': ['warn', { allow: ['warn', 'error', 'info'] }],
-    'prettier/prettier': 'error',
-  },
-  ignorePatterns: ['dist', 'node_modules', 'public', '*.cjs'],
+    ignorePatterns: ['dist', 'node_modules', 'public', '*.cjs'],
 };

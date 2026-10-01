@@ -15,7 +15,8 @@ Do **not** point any of this at the live hub
 subprocess you start locally against a throwaway SQLite file, in an
 environment isolated from your own agent/shell (see "Isolate the hub
 environment" below) -- the hub must not inherit your ambient cloud
-telemetry credentials or write into your real `~/.scion`.
+telemetry credentials, mint tokens for a real GCP service account, or write
+into your real `~/.scion`.
 
 ## Layout
 
@@ -28,8 +29,13 @@ telemetry credentials or write into your real `~/.scion`.
   Lives under `web/` (not here) purely so `@playwright/test` resolves from
   `web/node_modules` without a second `npm install`; see that file's header
   comment. Measures navigation-to-populated time, DOM size (including shadow
-  roots), long tasks, and SSE burst-update settle time for the project
-  grid/list/embedded-graph views and the standalone graph page.
+  roots), long tasks, graph pan/zoom/hover cost, and SSE burst-update settle
+  time for the project grid/list/embedded-graph views and the standalone
+  graph page.
+- `web/e2e-perf/lib.mjs` -- the pure, Playwright-free functions from the
+  above (network-outcome classification, stats, burst-target selection),
+  split out so they have real unit tests: `web/e2e-perf/lib.test.mjs`, run
+  with `npm run test:e2e-perf` (from `web/`).
 
 ## One-time setup
 
@@ -67,22 +73,34 @@ environment, which is a different thing and is required -- see next section.
 
 Following earlier versions of this doc verbatim, the bench hub subprocess
 inherited the agent container's full environment: `SCION_TELEMETRY_*` /
-`SCION_OTEL_*` (which made it hold live connections to Google Cloud Trace
-and a local telemetry forwarder, and log an RPC error once a second -- real
-overhead inside the numbers being measured), the ambient GCP quota project,
-and `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` pointing at the *live* hub (never
+`SCION_OTEL_*` (which made it hold a live connection to a local telemetry
+forwarder and log an RPC error once a second), the ambient
+`SCION_HUB_ENDPOINT`/`SCION_HUB_URL` pointing at the *live* hub (never
 contacted in practice, but there is no reason for a throwaway benchmark
-process to hold it in its environment at all). It also wrote into the real
+process to hold it in its environment at all), and it wrote into the real
 `~/.scion/{hub-id,storage,attachments,harness-configs}` shared with every
-other agent on this host, and warned about running from a project directory
-context (`/workspace` is one).
+other agent on this host.
 
-Use a scrubbed launch for every hub subprocess this harness starts:
+`env -i` alone is **not sufficient** (bench-rev-2 R3): it clears process
+environment variables, but Application Default Credentials are discovered
+via the GCE metadata server (`169.254.169.254`), not the environment, so a
+hub launched with only `env -i` still logs `GCP token generator configured`
+/ `GCP service account minting configured` / `Policy Troubleshooter checker
+configured` and holds live connections to the metadata server and Google
+APIs -- confirmed via `ss -tnp` during bench-rev-2's review. A throwaway
+bench hub must not be able to mint tokens for a real service account.
+
+Use a scrubbed launch for every hub subprocess this harness starts, run
+from **outside** any project/repo directory (e.g. `cd /tmp/scion-bench`
+first -- running from inside a git checkout makes the hub warn "Server is
+running from a project directory context" and use that project's
+templates/settings instead of its own throwaway ones):
 
 ```sh
 mkdir -p /tmp/scion-bench/home
 
 env -i HOME=/tmp/scion-bench/home PATH="$PATH" SCION_CLI_MODE=human \
+  GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 \
   /tmp/scion-bin server start \
   --hosted --enable-hub \
   --db /tmp/scion-bench/hub25.db \
@@ -91,20 +109,36 @@ env -i HOME=/tmp/scion-bench/home PATH="$PATH" SCION_CLI_MODE=human \
   --foreground --no-auto-migrate
 ```
 
-run from **outside** any project/repo directory (e.g. `cd /tmp/scion-bench`
-first) -- run it from inside a git checkout and the hub warns "Server is
-running from a project directory context" and uses that project's
-templates/settings instead of its own throwaway ones.
+`GCE_METADATA_HOST`/`GCE_METADATA_IP` point the Go GCP metadata client
+(`cloud.google.com/go/compute/metadata`, which both the ADC resolver and the
+hub's own GCP-identity features use) at a loopback address nothing listens
+on, so metadata-server lookups fail immediately instead of succeeding
+against the real instance metadata service.
 
-`env -i` clears the *entire* environment and re-adds only `PATH` (needed to
-find binaries the hub shells out to) and the two variables the hub itself
-needs. `HOME=/tmp/scion-bench/home` gives it a private, empty
-`~/.scion`-equivalent instead of writing into yours. Verify isolation
-worked by checking the hub's own log for the storage-backend line -- it
-should say `/tmp/scion-bench/home/.scion/storage`, not your real home
-directory -- and confirm no `Cloud Logging query service initialized` /
-`rpc error: code = Unimplemented` lines appear (both are `SCION_TELEMETRY_*`
-side effects that should no longer be reachable).
+**Verify isolation worked**, every time, before trusting a capture:
+
+1. Check the hub's own log for the storage-backend line -- it should say
+   `/tmp/scion-bench/home/.scion/storage`, not your real home directory.
+2. Confirm neither of these appears anywhere in the hub's log: the real
+   service-account email (`scion-my-grove@...` or similar), or the real GCP
+   project ID (`deploy-demo-test` or similar). The GCP-subsystem log lines
+   themselves (`GCP token generator configured`, `Policy Troubleshooter: no
+   GCP project ID available`, ...) still appear with
+   `GCE_METADATA_HOST`/`GCE_METADATA_IP` set -- that is expected, since the
+   hub still attempts and logs the lookup -- but their content must say
+   `unknown - not running on GCE` / `connection refused` / similar, not a
+   real identity. Confirm no `Cloud Logging query service initialized` or
+   `rpc error: code = Unimplemented` lines appear either (those are
+   `SCION_TELEMETRY_*` side effects, unrelated to GCP identity, and should
+   not be reachable at all once the environment is scrubbed).
+3. While the hub is running, `lsof -p <hub-pid> -i` and confirm it prints
+   **no rows at all** for that PID (a healthy isolated hub holds its own
+   listening socket, visible via plain `lsof -p <hub-pid>` without `-i`, but
+   zero outbound/established network connections). Do not rely on
+   `ss -tnp` for this without root: in a shared network namespace (as in
+   this container) it lists every process's sockets, and without root it
+   cannot attach the `pid=` column to tell them apart -- a connection
+   `ss -tn` shows does not mean the hub holds it.
 
 ## Seed a project
 
@@ -134,12 +168,13 @@ records the actual realized distribution counts (seeding is randomized but
 seeded via `--rand-seed`, default 42, so reruns are reproducible) plus the
 owner/member bearer tokens and project ID, which every other tool reads.
 
-**The seed tool refuses to run against an existing, non-empty `--db`** by
-default: re-seeding an already-seeded file is not supported (it fails
-partway through, after already mutating hub bootstrap state, with an
-"already exists" error on the owner/member user). Use a fresh path, remove
-the file first, or pass `--force-existing` if you specifically understand
-and accept that.
+**The seed tool refuses to run against an existing, non-empty `--db`**:
+re-seeding an already-seeded file is not supported (it fails partway
+through, after already mutating hub bootstrap state, with an "already
+exists" error on the owner/member user). The check normalizes a `file:`-DSN
+or `?query`-suffixed `--db` value before looking at the filesystem
+(bench-rev-2 R4), so there is no DSN-form bypass. There is no override
+flag -- use a fresh path or remove the file first.
 
 See `perf/bench/seed/synthetic.go` for the exact distributions and the
 rationale comments next to each one.
@@ -185,19 +220,24 @@ empty reply to the client:
 - `pkg/hub/web.go:2913` -- hard-coded `WriteTimeout: 60 * time.Second` on
   the combined hub+web `http.Server` (`WebServer.Start`).
 
-At 500 agents, `project-agents-list`'s API median is already close to this
-ceiling and its tail exceeds it (see `measurements.md`). Above it, the
-client gets a connection reset with no body, `project-detail.ts`'s
+At 500 agents, some fraction of `project-agents-list`/`project-list`/
+`project-graph-embedded` requests take long enough to cross this ceiling
+(see `measurements.md` for how often, which varies run to run with host
+load -- bench-rev-2's review found the api-side client can occasionally
+still receive a slow-but-complete response past 60s, so this is a real but
+not deterministic cliff; see measurements.md's N9 discussion). Above it,
+the client gets a connection reset with no body, `project-detail.ts`'s
 `loadData()` `Promise.all` rejects, and the page falls to its error/empty
 state -- which renders almost no agent cards. **A naive "did the expected
 element count ever appear" check cannot tell that apart from "still
 rendering a huge DOM"**; `large-project-bench.mjs` watches the actual
 network outcome of the load-bearing API request (`page.on('response'
 /'requestfailed')`) to classify each run as `populated` /
-`load-failed(<reason>)` / `still-loading` instead. See `measurements.md`'s
-baseline section for what this looked like at 500 agents on unmodified
-main, and bench-rev-1's review for how this was found (raw evidence at
-`gs://scion-xproject-exchange/slow-list/raw/bench-rev-1/`).
+`load-failed(<reason>)` / `loaded-not-rendered` / `still-loading` instead.
+See `measurements.md`'s baseline section for what this looked like at 500
+agents on unmodified main, and bench-rev-1/bench-rev-2's reviews for how
+this was found (raw evidence at `gs://scion-xproject-exchange/slow-list/
+raw/bench-rev-1/` and `.../raw/bench-rev-2/`).
 
 ## API benchmark
 
@@ -210,23 +250,39 @@ main, and bench-rev-1's review for how this was found (raw evidence at
   --notes "machine/CPU conditions, e.g. shared broker container"
 ```
 
-Runs two scenarios against the seeded project, authenticated as the seeded
-member: `project-agents-list` (`GET /api/v1/projects/{id}/agents`, the
-project grid/list page's request) and `global-agents-list` (`GET
-/api/v1/agents?projectId={id}`, what the standalone graph page fetches).
+Runs three scenarios against the seeded project, authenticated as the
+seeded member:
+
+- `project-agents-list`: `GET /api/v1/projects/{id}/agents` -- the project
+  grid/list page's request.
+- `global-agents-list-unscoped`: `GET /api/v1/agents`, no query string --
+  what the standalone graph page actually fetches
+  (`web/src/components/pages/agent-graph.ts:115`). An earlier version of
+  this tool instead measured the `projectId=`-scoped variant below and
+  mislabeled it as "what the standalone graph page loads", which it is not
+  (bench-rev-2 R1, related/non-blocking).
+- `global-agents-list-scoped`: `GET /api/v1/agents?projectId={id}` -- not
+  fetched by any page today; kept as a reference point for how much a
+  server-side project filter would save over the unscoped fetch above.
 
 A request attempt is recorded whether it succeeds or not: a client timeout,
 a connection error, and a non-2xx status are all failures, kept in the
 report's `attempts` list, and excluded from the median/min/max/stddev
 (computed over successful attempts only, per `successCount`/`failureCount`).
 A single failed attempt no longer aborts the whole run and discards every
-other sample. Raise `--timeout-seconds` (default 60) for large agent counts
--- the unmodified-`main` baseline at 500 agents regularly exceeds 60s per
-request (see "A real product finding" above).
+other sample. Raise `--timeout-seconds` (default 60) for large agent
+counts -- some 500-agent requests exceed 60s (see "A real product finding"
+above; how often varies with host load, it is not "regularly" on every run).
 
-`MachineInfo` in the report includes `/proc/loadavg` and `/proc/uptime`
-automatically (Linux only) -- see "Choosing regression budgets" below for
-why, and for what this is not sufficient for.
+`MachineInfo` in the report includes `/proc/loadavg` and `/proc/uptime`,
+sampled once at the start and again at the end of the run (bench-rev-2 NB9:
+a 500-agent run takes long enough for load to swing within one report) --
+see "Choosing regression budgets" below for why this is recorded, and for
+what it is not sufficient for. The report also records the harness's own
+`git rev-parse HEAD` and the effective `--runs`/`--warmup`/
+`--timeout-seconds`/`--want-perf-trace` settings (bench-rev-2 NB4), so a
+report file is self-describing without having to match it to a commit by
+timestamp.
 
 When run against a hub built from the `perf/2392-agent-list-instrumentation`
 branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
@@ -248,6 +304,7 @@ Requires the hub from the previous step restarted with web + test-login
 
 ```sh
 env -i HOME=/tmp/scion-bench/home PATH="$PATH" SCION_CLI_MODE=human \
+  GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 \
   /tmp/scion-bin server start \
   --hosted --enable-hub --enable-web --enable-test-login \
   --db /tmp/scion-bench/hub25.db --session-secret bench-secret-1 \
@@ -268,31 +325,58 @@ node e2e-perf/large-project-bench.mjs \
 Runs four scenarios -- `project-grid`, `project-list`,
 `project-graph-embedded` (all three via `/projects/{id}`, matching the
 original investigation's view-toggle table), and `standalone-graph`
-(`/agents/graph?project={id}`) -- each `--runs` times. Every run is
-classified `populated` / `load-failed(<reason>)` / `still-loading` (see "A
-real product finding" above); only `populated` runs contribute to the
+(`/agents/graph?project={id}`) -- each `--runs` times: **run 0 uses a
+fresh ("cold") browser context; runs 1..N-1 share one ("warm") context**
+(bench-rev-2 NB3), reported separately
+(`medianNavToPopulatedMsCold`/`...Warm`) as well as combined, since a cold
+run is measurably slower and averaging it in without saying so is
+misleading.
+
+Every run is classified `populated` / `load-failed(<reason>)` /
+`loaded-not-rendered` / `still-loading` (see "A real product finding"
+above; `loaded-not-rendered` -- bench-rev-2 NB6 -- is a 2xx response that
+still never reaches the expected rendered count, a render failure distinct
+from "nothing observed at all"). Only `populated` runs contribute to the
 reported median/min/max/stddev for navigation time, DOM element count
 (recursively counted through every open shadow root, since this Lit app
 keeps almost all of its structure there), and long-task totals from a
 `PerformanceObserver` injected before navigation. `successCount`/
 `failureCount` and a per-outcome tally are reported alongside, so "5/5
 populated" and "1/5 populated, 4 load-failed" are never conflated into the
-same median. The report is written incrementally (after every scenario and
-every burst run), so a Chromium crash mid-benchmark loses at most the
-in-flight run, not the whole report.
+same median. Each run also records when the load-bearing request's network
+outcome was observed, in elapsed ms from navigation start
+(`networkObservedAtMs`, bench-rev-2 NB5), so a WriteTimeout attribution is a
+measurement, not an inference from a run's total wall-clock time. The
+report is written incrementally (after every scenario and every burst run),
+so a Chromium crash mid-benchmark loses at most the in-flight run, not the
+whole report.
+
+For the two graph scenarios, a populated run also performs a short
+pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
+in and out, drag-pan) and reports the long-task cost specifically
+attributable to it (`graphInteraction`) -- this was previously listed as a
+#2393 acceptance gap "not attempted here for lack of time"; no source
+change was needed, so it is implemented now.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
-same as `--runs`). Each run: loads the grid once (skipping the burst
-entirely, with a recorded reason, if the grid itself did not populate),
-picks up to `--burst-count` (default 15) agents that are **not** currently
-`suspended` (see below), fires real `phase` updates via the REST API as the
-seeded owner while checking every POST's status, polls each *accepted*
-agent's own rendered `<scion-status-badge>` until it shows the new
-value -- ground truth for "the live update reached the DOM" -- and then
-**restores every updated agent to its pre-burst phase** before the next
-run. Server-side application is confirmed independently via a follow-up GET
-per agent, so "the server never applied this update" and "the UI did not
-settle" are reported as distinct, non-overlapping counts.
+same as `--runs`), all within one browser context. Each run: picks up to
+`--burst-count` (default 15) agents that are **not** currently `suspended`
+(see below), fires real `phase` updates via the REST API as the seeded
+owner while checking every POST's status, polls each *accepted* agent's
+own rendered `<scion-status-badge>` until it shows the new value -- ground
+truth for "the live update reached the DOM" -- then **restores every
+updated agent to its pre-burst phase AND activity** (bench-rev-2 NB1) and
+**waits for the restore to be confirmed in the DOM** before the next run
+starts (bench-rev-2 R2: an earlier version fired the restore and moved on
+without waiting, so a slow-to-render restore from run *i* could be
+miscounted as run *i+1*'s own settle -- see `pickBurstTarget`'s doc comment
+in `lib.mjs` for the full mechanism). Settle time is measured **per agent,
+from that agent's own POST completion** (bench-rev-2 NB2: an earlier
+version measured from a shared burst-start timestamp, which folded
+roughly half of each reported "SSE settle time" into what was actually POST
+latency). Server-side application is confirmed independently via a
+follow-up GET per agent, so "the server never applied this update" and "the
+UI did not settle" are reported as distinct, non-overlapping counts.
 
 Raise `--populate-timeout-ms`/`--nav-timeout-ms` (default 120000/120000) for
 large agent counts; at 500 agents on unmodified `main`, some views exceed
@@ -320,7 +404,8 @@ baseline section).
   (originally reported as 6/15 and 12/15 in `measurements.md`'s superseded
   numbers) was entirely this, not SSE. The burst scenario now skips
   currently-suspended agents as sources, never targets `suspended`, checks
-  every POST's status, and restores state afterward.
+  every POST's status, and restores state (including waiting for the
+  restore -- see above) afterward.
 - The burst scenario also deliberately never targets phase `"running"`:
   `getAgentDisplayStatus` (`web/src/shared/types.ts`) renders a running
   agent's *activity* instead of the literal phase whenever activity is
@@ -342,31 +427,37 @@ baseline section).
 ## Choosing regression budgets
 
 Not implemented by this harness, and deliberately not guessed at: this
-container (`scion-community-broker-01`) is a shared, variably-loaded host.
-`apibench`'s reruns during bench-rev-1's review saw medians roughly half
-the original baseline's under a load average of ~100-450 (16 CPUs) and one
-sample over 60s -- environment noise on this scale would swamp any
-regression budget chosen from data captured here.
+container (`scion-community-broker-01`) is a shared host with 16 CPUs and a
+load average observed to swing from roughly 47 to 450 depending on what
+else is running. Repeated apibench reruns during review, under otherwise
+identical isolated conditions, varied by more than 2x run to run purely
+from this -- host-load noise, not anything this harness's own changes
+caused (an earlier draft of `measurements.md` incorrectly credited
+environment isolation for a faster recapture; see that file's "What
+changed and why" for the correction). Environment noise on this scale would
+swamp any regression budget chosen from data captured here.
 
-Recommendation for whoever picks budgets: capture a repeated (>=10 run)
-baseline on a quiet, dedicated runner (not this container, and not while
-anything else is benchmarking), and derive budgets from that run's own
-variance (e.g. median + a multiple of its stddev), separately for API time,
-browser rendering, and live-update settle time, at each of 25/100/500
-agents. `MachineInfo.loadAvg1/5/15` and `uptimeSeconds` (recorded
-automatically by `apibench`) are there so a reader can sanity-check whether
-a given historical run's numbers are trustworthy for that purpose, not to
+This data is also heavy-tailed (occasional samples several multiples of the
+typical value), so a budget built from mean + k*stddev over a small number
+of runs would be dominated by single outliers. Prefer a median-ratio gate
+(e.g. fail if the median regresses more than X% over at least 10 runs),
+with MAD or IQR for spread, over a stddev-based one.
+
+The strongest near-term option does not need a quiet runner at all:
+**host-independent counters can be budgeted and CI-gated today, on any
+host.** Authorization store-call and decision counts (from #2392's perf
+trace), response bytes, DOM element count, and long-task count at a fixed
+agent count are all independent of machine speed. Only wall-clock budgets
+need a quiet, dedicated runner with a repeated (>=10 run) baseline.
+`MachineInfo.loadAvg1/5/15` (now sampled at both the start and end of an
+apibench run) are recorded so a reader can sanity-check whether a given
+historical run's numbers are trustworthy for wall-clock comparisons, not to
 derive budgets from directly.
 
 ## #2393 acceptance-criteria gaps
 
-Tracked here rather than silently dropped; each either follow-up work or
-out of scope for this PR:
+Tracked here rather than silently dropped:
 
-- **Graph interaction timing** (pan/zoom/hover render cost) -- not
-  implemented. Would need to drive synthetic pointer events against
-  `agent-tree-view.ts` and re-run its layout; a reasonable follow-up, not
-  attempted here for lack of time.
 - **In-app readiness marks** (data arrival / visible rows / graph ready)
   -- infeasible without web source changes: there are currently no such
   marks anywhere in the app (confirmed by grepping for
@@ -377,24 +468,30 @@ out of scope for this PR:
 - **Large-file-list dataset** -- infeasible in this PR: `perf/bench/seed`
   only seeds agents/projects/users, not file-browser data sources. Adding
   realistic file trees is a separate, non-trivial seeding surface.
-- **Warm vs cold trial distinction** -- not implemented: all runs in a
-  scenario currently share one browser context (and thus HTTP cache).
-  Feasible as a follow-up (first run in a fresh context = cold, subsequent
-  runs reuse it = warm) but not done here for time.
 - **No regression budgets, no CI wiring** -- see "Choosing regression
   budgets" above; nothing is claimed here, so there is nothing to verify,
   but wiring real budgets into CI is real follow-up work once a
-  quiet-runner baseline exists.
+  quiet-runner baseline exists (or, for the host-independent counters
+  above, no quiet runner is even needed).
 - **Graph membership across cursor pages** -- not covered: this harness's
   seeded agent counts (25/100/500) are all served in a single page at the
   default `limit=500`, so cursor pagination through `/api/v1/agents` is
-  never exercised. Follow-up: seed >500 agents and confirm the graph drains
-  every cursor page.
+  never exercised. Separately, `agent-graph.ts:115` makes exactly one fetch
+  and never follows a cursor at all today -- above 500 agents, the
+  standalone graph is silently truncated in production, independent of
+  this harness. That is a product correctness gap for #2372, not just a
+  missing test.
 - **List sort/filter correctness** -- not covered: this harness only
   measures default-order list/grid rendering, not sort/filter parameter
   correctness. That is more naturally a correctness test than a
   performance benchmark; flagging for a separate test, not blocking this
   harness.
+
+Graph interaction timing (pan/zoom/hover) and warm/cold trial distinction
+were also previously listed here as gaps "for lack of time"; both are
+implemented now (see "Browser benchmark" above) since neither needed a
+source change or genuine infrastructure -- they were follow-up work, not
+constraints.
 
 ## Notes on measurement fidelity
 
@@ -409,11 +506,11 @@ out of scope for this PR:
   harmless drift from the seeded distribution recorded in `seed-*.json`, not
   a harness bug -- re-run `perf/bench/seed` for a fresh, undrifted DB if you
   need the exact seeded counts to hold.
-- All measurements in this repo's `measurements.md` were taken on a single
-  shared/contended CPU inside the `scion-community-broker-01` agent
-  container, with (for the 100/500-agent cases) up to three hub subprocesses
-  co-resident. Treat absolute numbers as this-machine, this-run numbers;
-  treat the *shape* (order-of-magnitude growth from 25 to 100 to 500 agents,
-  and which view/scenario is slowest) as the portable finding -- and see
-  "Choosing regression budgets" above before using these numbers to gate
-  anything.
+- All measurements in this repo's `measurements.md` were taken on a shared
+  host (`scion-community-broker-01`, 16 CPUs, widely variable load -- not a
+  single CPU), with (for the 100/500-agent cases) up to three hub
+  subprocesses co-resident. Treat absolute numbers as this-machine,
+  this-run numbers; treat the *shape* (order-of-magnitude growth from 25 to
+  100 to 500 agents, and which view/scenario is slowest) as the portable
+  finding -- and see "Choosing regression budgets" above before using these
+  numbers to gate anything.

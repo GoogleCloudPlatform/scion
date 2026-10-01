@@ -27,16 +27,13 @@
  * web/test-scripts/realtime-lifecycle-test.js. It lives under web/ (rather
  * than perf/bench/) specifically so `@playwright/test` resolves from
  * web/node_modules without a second install -- see the harness README for
- * why.
+ * why. Pure/testable logic lives in lib.mjs (see lib.test.mjs, run with
+ * `node --test e2e-perf/lib.test.mjs`).
  *
  * Session auth reuses the hub's --enable-test-login endpoint the same way
  * web/e2e/harness/auth.ts does (find-or-create-by-email, so it logs in as
  * the exact non-admin project-member perf/bench/seed already created and
- * bound a project-member role to, rather than a fresh user). The JWT/cookie
- * logic is duplicated here in ~30 lines rather than imported from
- * e2e/harness/auth.ts, which hardcodes a fixed e2e-only session secret --
- * this script needs to use whatever --session-secret perf/bench/seed's
- * metadata says the hub was actually started with.
+ * bound a project-member role to, rather than a fresh user).
  *
  * Usage:
  *   cd web && node e2e-perf/large-project-bench.mjs \
@@ -49,25 +46,50 @@
  * --web-assets-dir <built web/dist/client>, against the same --db and
  * --session-secret perf/bench/seed used (see the harness README).
  *
- * bench-rev-1 fixes (see gs://scion-xproject-exchange/slow-list/reviews/
- * bench-rev-1.md): a run that never populates within its timeout is now
- * classified as populated / load-failed(<reason>) / still-loading by
- * watching the page's network activity for the load-bearing API request,
- * instead of being lumped in with genuine "still rendering" cases (B2).
- * Timed-out/failed runs are excluded from the median/min/max/stddev
- * (B3), which are now computed over successes only and reported alongside
- * successCount/failureCount. The SSE burst scenario now runs
- * --burst-runs times (default 5, not 1), skips agents that are already
- * `suspended` (a silently-dropped update target -- see
- * pkg/hub/handlers_agent_lifecycle.go's Guard 0), never targets
- * `suspended` either, checks every POST's status, and restores every
- * updated agent to its pre-burst phase afterward so repeated runs do not
- * accumulate stuck agents (B1).
+ * bench-rev-2 fixes (see gs://scion-xproject-exchange/slow-list/reviews/
+ * bench-rev-2.md) on top of bench-rev-1's:
+ * - R1: the network matcher now matches on parsed pathname so it actually
+ *   fires for the standalone graph's unscoped `/api/v1/agents` fetch (it
+ *   previously required a `projectId=` query param that page never sends).
+ * - R2: consecutive burst runs target a rotation offset by run index, and
+ *   each run's restore is polled to confirm it actually reached the DOM
+ *   before the next run starts -- a prior run's stale, not-yet-restored
+ *   badge could otherwise be miscounted as the next run's settle.
+ * - NB1: restores both phase and activity, not phase alone.
+ * - NB2: settle time is measured per agent from that agent's own POST
+ *   completion, not from a shared burst-start timestamp (which folded in
+ *   POST latency as if it were SSE latency).
+ * - NB3: the first run of each scenario uses a fresh ("cold") browser
+ *   context; subsequent runs share one ("warm") context. Reported
+ *   separately.
+ * - NB4: the report records the harness's git commit and effective
+ *   timeouts.
+ * - NB5: network failures/non-2xx responses record when they happened
+ *   (elapsed ms from navigation start), so WriteTimeout attribution is
+ *   measured, not inferred from wall-clock totals alone.
+ * - NB6: a 2xx response that never renders is now `loaded-not-rendered`,
+ *   distinct from `still-loading` (no response observed at all).
+ * - Graph interaction timing (pan/zoom/hover) is now measured for both
+ *   graph scenarios, not deferred.
  */
 
 import { chromium } from '@playwright/test';
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  apiMatcherFor,
+  classifyOutcome,
+  median,
+  minMax,
+  stddev,
+  summarizeLongTasks,
+  summarizeScenario,
+  generateTestLoginToken,
+  pickBurstTarget,
+} from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
 
@@ -105,58 +127,30 @@ const runs = parseInt(args.runs || '5', 10);
 const navTimeoutMs = parseInt(args['nav-timeout-ms'] || '120000', 10);
 const populateTimeoutMs = parseInt(args['populate-timeout-ms'] || '120000', 10);
 const burstCount = parseInt(args['burst-count'] || '15', 10);
-// bench-rev-1 B3: the burst scenario now runs multiple times like the other
-// scenarios, not once (n=1 against a brief requiring at least 5 runs).
 const burstRuns = parseInt(args['burst-runs'] || String(runs), 10);
 const settleTimeoutMs = parseInt(args['settle-timeout-ms'] || '30000', 10);
 const notes = args.notes || '';
 
 const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
 
+// bench-rev-2 NB4: record enough provenance that a report can be matched
+// back to the exact harness version and settings that produced it, without
+// relying on wall-clock proximity to a commit (which bench-rev-2 had to ask
+// about directly for the round-1 data).
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+function gitHeadSha() {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
+  } catch {
+    return null;
+  }
+}
+
 // Incremental output (bench-rev-1 N5): written after every scenario and
-// every burst run, so a Chromium crash mid-benchmark (observed on this
-// container's default /dev/shm size -- see the --disable-dev-shm-usage
-// launch arg below) loses at most the in-flight run, not the whole report.
+// every burst run, so a Chromium crash mid-benchmark loses at most the
+// in-flight run, not the whole report.
 function writeReportSoFar(report) {
   fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
-}
-
-// ---- test-login session (mirrors web/e2e/harness/auth.ts) -------------
-
-const USER_TOKEN_ISSUER = 'scion-hub';
-const TEST_LOGIN_AUDIENCE = 'scion-test-login';
-const USER_SIGNING_KEY_NAME = 'user_signing_key';
-
-function deriveSigningKey(secret, keyName) {
-  return crypto.createHash('sha256').update(`scion-hub-signing-key:${keyName}:${secret}`).digest();
-}
-
-function base64url(buf) {
-  return buf.toString('base64url');
-}
-
-function signJWT(payload, signingKey) {
-  const header = base64url(Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
-  const body = base64url(Buffer.from(JSON.stringify(payload)));
-  const sig = crypto.createHmac('sha256', signingKey).update(`${header}.${body}`).digest();
-  return `${header}.${body}.${base64url(sig)}`;
-}
-
-function generateTestLoginToken(secret, subject = 'perf-bench') {
-  const key = deriveSigningKey(secret, USER_SIGNING_KEY_NAME);
-  const now = Math.floor(Date.now() / 1000);
-  return signJWT(
-    {
-      iss: USER_TOKEN_ISSUER,
-      sub: subject,
-      aud: TEST_LOGIN_AUDIENCE,
-      iat: now,
-      nbf: now,
-      exp: now + 300,
-      jti: crypto.randomBytes(16).toString('base64url'),
-    },
-    key
-  );
 }
 
 async function createSessionCookies(baseURL, secret, email, role, displayName) {
@@ -208,8 +202,7 @@ async function createSessionCookies(baseURL, secret, email, role, displayName) {
     }
     // The hub only sets Secure cookies over TLS; this harness runs the hub
     // over plain http:// locally, so a Secure attribute (if present) would
-    // make Playwright silently refuse to send it back. Strip it here rather
-    // than requiring a local TLS setup purely for the benchmark.
+    // make Playwright silently refuse to send it back.
     if (cookie.secure && url.protocol === 'http:') cookie.secure = false;
     if (!cookie.sameSite) cookie.sameSite = 'Lax';
     cookies.push(cookie);
@@ -217,12 +210,16 @@ async function createSessionCookies(baseURL, secret, email, role, displayName) {
   return { cookies, user: data.user };
 }
 
+let sessionCookies = null;
+
+async function newCookiedContext(browser) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await context.addCookies(sessionCookies);
+  return context;
+}
+
 // ---- page helpers -------------------------------------------------------
 
-// countAllDeep counts every element in the document AND every open shadow
-// root reachable from it, matching how ptone/scion#2367's original
-// investigation reported "DOM elements including shadow roots" for a Lit
-// app where nearly all structure lives inside shadow DOM.
 async function countAllDeep(page) {
   return page.evaluate(() => {
     function walk(root) {
@@ -251,6 +248,34 @@ async function countSelectorDeep(page, selector) {
   }, selector);
 }
 
+// bench-rev-2 NB6/R1-adjacent: returns bounding boxes (in viewport
+// coordinates) for up to `limit` matched elements, piercing shadow roots,
+// so the graph-interaction step below can hover/drag over real node
+// positions instead of guessing coordinates.
+async function elementRectsDeep(page, selector, limit) {
+  return page.evaluate(
+    ({ sel, lim }) => {
+      const rects = [];
+      function walk(root) {
+        for (const el of root.querySelectorAll(sel)) {
+          if (rects.length >= lim) return;
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            rects.push({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+          }
+        }
+        for (const el of root.querySelectorAll('*')) {
+          if (rects.length >= lim) return;
+          if (el.shadowRoot) walk(el.shadowRoot);
+        }
+      }
+      walk(document);
+      return rects;
+    },
+    { sel: selector, lim: limit }
+  );
+}
+
 async function waitForCount(page, selector, expected, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last = 0;
@@ -262,54 +287,20 @@ async function waitForCount(page, selector, expected, timeoutMs) {
   return { count: last, timedOut: true };
 }
 
-function summarizeLongTasks(entries) {
-  if (!entries.length) return { count: 0, totalMs: 0, maxMs: 0 };
-  let total = 0;
-  let max = 0;
-  for (const e of entries) {
-    total += e.duration;
-    if (e.duration > max) max = e.duration;
-  }
-  return { count: entries.length, totalMs: total, maxMs: max };
-}
-
-// ---- network-outcome classification (bench-rev-1 B2) ---------------------
-//
-// The hub's default WriteTimeout is 60s (pkg/config/hub_config.go's
-// HubServerConfig.WriteTimeout, and pkg/hub/web.go's WebServer.Start,
-// hard-coded). A handler that has not started writing its response by then
-// gets its connection forcibly closed: the browser's fetch/XHR sees a
-// network-level failure (an empty reply), loadData's Promise.all rejects,
-// and the page falls to its error/empty state -- which renders almost no
-// agent cards and looks, from a "did the selector count reach N" check
-// alone, identical to "still loading". Watching the actual network outcome
-// of the load-bearing API request is the only way to tell those apart.
-
-// apiMatcherFor returns a predicate matching the specific request each
-// scenario's data load depends on, per project-detail.ts / agent-graph.ts.
-function apiMatcherFor(scenarioKey, projectId) {
-  if (scenarioKey === 'standalone-graph') {
-    return (url) => url.includes('/api/v1/agents') && url.includes(`projectId=${projectId}`);
-  }
-  // project-grid / project-list / project-graph-embedded all load via
-  // project-detail.ts's loadData(), which fetches both the project and its
-  // agents in parallel; the agents call is the one whose cost scales with
-  // agent count.
-  return (url) => url.includes(`/api/v1/projects/${projectId}/agents`);
-}
-
-function attachNetworkWatch(page, matches) {
-  const state = { status: null, failed: null, url: null };
+function attachNetworkWatch(page, matches, navStart) {
+  const state = { status: null, failed: null, url: null, atMs: null };
   const onResponse = (resp) => {
     if (matches(resp.url())) {
       state.status = resp.status();
       state.url = resp.url();
+      state.atMs = Date.now() - navStart;
     }
   };
   const onRequestFailed = (req) => {
     if (matches(req.url())) {
       state.failed = req.failure()?.errorText || 'unknown';
       state.url = req.url();
+      state.atMs = Date.now() - navStart;
     }
   };
   page.on('response', onResponse);
@@ -323,24 +314,12 @@ function attachNetworkWatch(page, matches) {
   };
 }
 
-// classifyOutcome turns (populated?, network state) into one of:
-// "populated" | "load-failed(<reason>)" | "still-loading".
-function classifyOutcome(populatedOk, netState) {
-  if (populatedOk) return 'populated';
-  if (netState.failed) return `load-failed(network:${netState.failed})`;
-  if (netState.status != null && (netState.status < 200 || netState.status >= 300)) {
-    return `load-failed(http:${netState.status})`;
-  }
-  return 'still-loading';
-}
-
 // ---- scenario definitions ------------------------------------------------
 
 // The web app's project-detail route reads the path segment verbatim and
 // passes it straight to `GET /api/v1/projects/{id}` (pkg/hub/
 // handlers_projects_core.go's getProject), which does a raw-ID store lookup
-// with no slug resolution (unlike the agent-list endpoints' projectId query
-// param, which does resolve slugs). The URL must carry the project UUID.
+// with no slug resolution. The URL must carry the project UUID.
 const projectPath = `/projects/${encodeURIComponent(seed.projectId)}`;
 const scenarios = [
   {
@@ -348,183 +327,210 @@ const scenarios = [
     url: projectPath,
     viewMode: 'grid',
     selector: '.agent-card',
+    isGraph: false,
   },
   {
     key: 'project-list',
     url: projectPath,
     viewMode: 'list',
-    // bench-rev-1 Nit1: ".agent-table-container tr" also matches the header
-    // row, so readiness fired one row early (e.g. 26/25, 501/500 in raw
-    // data). Scope to the body rows.
     selector: '.agent-table-container tbody tr',
+    isGraph: false,
   },
   {
     key: 'project-graph-embedded',
     url: projectPath,
     viewMode: 'graph',
     selector: '.node-wrapper',
+    isGraph: true,
   },
   {
     key: 'standalone-graph',
+    // bench-rev-2 R1 (related, non-blocking): this view fetches the
+    // *unscoped* `/api/v1/agents` (web/src/components/pages/
+    // agent-graph.ts:115), not a project-filtered request -- the `project`
+    // query param only drives client-side filtering (`:135`). The URL
+    // itself is correct (it is what a user would navigate to); it is
+    // apiMatcherFor (lib.mjs) that had to change to match the real,
+    // unscoped request this page sends.
     url: `/agents/graph?project=${encodeURIComponent(seed.projectId)}`,
     viewMode: null,
     selector: '.node-wrapper',
+    isGraph: true,
   },
 ];
 
-async function runScenario(context, scenario, expectedCount) {
-  const apiMatches = apiMatcherFor(scenario.key, seed.projectId);
-  const runsOut = [];
-  for (let i = 0; i < runs; i++) {
-    const page = await context.newPage();
-    const consoleErrors = [];
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') consoleErrors.push(msg.text());
-    });
-    const netWatch = attachNetworkWatch(page, apiMatches);
+// performGraphInteraction drives a short pan/zoom/hover sequence against a
+// populated graph view and measures the long-task cost specifically
+// attributable to it (delta against a snapshot taken immediately before).
+// Previously listed in the README as a #2393 acceptance gap "not attempted
+// here for lack of time" -- no source change is needed, so there was no
+// genuine constraint; implemented now.
+async function performGraphInteraction(page) {
+  const before = await page.evaluate(() => (window.__benchLongTasks || []).length);
+  const rects = await elementRectsDeep(page, '.node-wrapper', 5);
 
-    await page.addInitScript(() => {
-      window.__benchLongTasks = [];
-      try {
-        const po = new PerformanceObserver((list) => {
-          for (const e of list.getEntries()) {
-            window.__benchLongTasks.push({ startTime: e.startTime, duration: e.duration });
-          }
-        });
-        po.observe({ type: 'longtask', buffered: true });
-      } catch {
-        // longtask not supported in this engine build; long-task metrics
-        // will just read as zero for this run rather than failing it.
-      }
-    });
-    if (scenario.viewMode) {
-      const vm = scenario.viewMode;
-      await page.addInitScript((viewMode) => {
-        try {
-          localStorage.setItem('scion-view-project-agents', viewMode);
-        } catch {
-          // localStorage unavailable pre-navigation in some engine states;
-          // the page falls back to its own default view in that case.
-        }
-      }, vm);
-    }
+  const interactionStart = Date.now();
 
-    const navStart = Date.now();
-    let navError = null;
-    try {
-      await page.goto(hubBase + scenario.url, {
-        waitUntil: 'domcontentloaded',
-        timeout: navTimeoutMs,
-      });
-    } catch (err) {
-      navError = String(err);
-    }
-
-    let populated = { count: 0, timedOut: true };
-    let elapsedMs = Date.now() - navStart;
-    if (!navError) {
-      populated = await waitForCount(page, scenario.selector, expectedCount, populateTimeoutMs);
-      elapsedMs = Date.now() - navStart;
-    }
-
-    const outcome = navError
-      ? `load-failed(nav:${navError})`
-      : classifyOutcome(!populated.timedOut, netWatch.state);
-    const isPopulated = outcome === 'populated';
-
-    const domCount = navError ? null : await countAllDeep(page);
-    const longTasks = navError ? [] : await page.evaluate(() => window.__benchLongTasks || []);
-    netWatch.detach();
-
-    runsOut.push({
-      run: i,
-      outcome,
-      // navToPopulatedMs is set ONLY for a genuinely populated run
-      // (bench-rev-1 B3): a load-failed or still-loading run's elapsed
-      // wall-clock time is not a rendering duration and must never be
-      // averaged into medianNavToPopulatedMs as if it were one.
-      navToPopulatedMs: isPopulated ? elapsedMs : null,
-      elapsedMs,
-      populatedCount: populated.count,
-      expectedCount,
-      domElementCount: domCount,
-      longTasks: summarizeLongTasks(longTasks),
-      networkStatus: netWatch.state.status,
-      networkFailed: netWatch.state.failed,
-      consoleErrorCount: consoleErrors.length,
-      consoleErrorsSample: consoleErrors.slice(0, 5),
-    });
-
-    await page.close();
-  }
-  return runsOut;
-}
-
-function median(xs) {
-  if (!xs.length) return null;
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
-function minMax(xs) {
-  if (!xs.length) return { min: null, max: null };
-  return { min: Math.min(...xs), max: Math.max(...xs) };
-}
-
-function stddev(xs) {
-  if (xs.length < 2) return 0;
-  const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
-  const sumSq = xs.reduce((a, b) => a + (b - mean) * (b - mean), 0);
-  return Math.sqrt(sumSq / (xs.length - 1));
-}
-
-// summarizeScenario computes bench-rev-1 B3's required spread stats --
-// median/min/max/stddev, not just a median -- over SUCCESSFUL
-// ("populated") runs only, and reports success/failure counts and an
-// outcome tally separately so a reader can see at a glance whether a
-// scenario's numbers are "5/5 populated" or "1/5 populated, 4 load-failed".
-function summarizeScenario(scenario, results) {
-  const populatedRuns = results.filter((r) => r.outcome === 'populated');
-  const navTimes = populatedRuns.map((r) => r.navToPopulatedMs);
-  const domCounts = populatedRuns.map((r) => r.domElementCount).filter((n) => n != null);
-  const longTaskTotals = populatedRuns.map((r) => r.longTasks.totalMs);
-
-  const outcomeCounts = {};
-  for (const r of results) {
-    outcomeCounts[r.outcome] = (outcomeCounts[r.outcome] || 0) + 1;
+  // Hover across up to 5 nodes.
+  for (const r of rects) {
+    await page.mouse.move(r.x, r.y);
+    await page.waitForTimeout(50);
   }
 
-  const navMinMax = minMax(navTimes);
-  const domMinMax = minMax(domCounts);
-  const longTaskMinMax = minMax(longTaskTotals);
+  // Zoom: wheel over the canvas center.
+  const box = rects[0] || { x: 720, y: 500 };
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.wheel(0, -200); // zoom in
+  await page.waitForTimeout(100);
+  await page.mouse.wheel(0, 200); // zoom back out
+  await page.waitForTimeout(100);
+
+  // Pan: drag from one point to another.
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 80, box.y + 40, { steps: 10 });
+  await page.mouse.move(box.x, box.y, { steps: 10 });
+  await page.mouse.up();
+
+  // Let any triggered re-render/long tasks finish.
+  await page.waitForTimeout(300);
+
+  const interactionMs = Date.now() - interactionStart;
+  const allLongTasks = await page.evaluate(() => window.__benchLongTasks || []);
+  const deltaLongTasks = allLongTasks.slice(before);
 
   return {
-    selector: scenario.selector,
-    runs: results,
-    successCount: populatedRuns.length,
-    failureCount: results.length - populatedRuns.length,
-    outcomeCounts,
-    medianNavToPopulatedMs: median(navTimes),
-    minNavToPopulatedMs: navMinMax.min,
-    maxNavToPopulatedMs: navMinMax.max,
-    stddevNavToPopulatedMs: stddev(navTimes),
-    medianDomElementCount: median(domCounts),
-    minDomElementCount: domMinMax.min,
-    maxDomElementCount: domMinMax.max,
-    medianLongTaskTotalMs: median(longTaskTotals),
-    minLongTaskTotalMs: longTaskMinMax.min,
-    maxLongTaskTotalMs: longTaskMinMax.max,
+    nodesInteracted: rects.length,
+    interactionMs,
+    longTasks: summarizeLongTasks(deltaLongTasks),
   };
+}
+
+async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, cold) {
+  const apiMatches = apiMatcherFor(scenario.key, seed.projectId);
+  const consoleErrors = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') consoleErrors.push(msg.text());
+  });
+
+  await page.addInitScript(() => {
+    window.__benchLongTasks = [];
+    try {
+      const po = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          window.__benchLongTasks.push({ startTime: e.startTime, duration: e.duration });
+        }
+      });
+      po.observe({ type: 'longtask', buffered: true });
+    } catch {
+      // longtask not supported in this engine build.
+    }
+  });
+  if (scenario.viewMode) {
+    const vm = scenario.viewMode;
+    await page.addInitScript((viewMode) => {
+      try {
+        localStorage.setItem('scion-view-project-agents', viewMode);
+      } catch {
+        // localStorage unavailable pre-navigation in some engine states.
+      }
+    }, vm);
+  }
+
+  const navStart = Date.now();
+  const netWatch = attachNetworkWatch(page, apiMatches, navStart);
+  let navError = null;
+  try {
+    await page.goto(hubBase + scenario.url, {
+      waitUntil: 'domcontentloaded',
+      timeout: navTimeoutMs,
+    });
+  } catch (err) {
+    navError = String(err);
+  }
+
+  let populated = { count: 0, timedOut: true };
+  let elapsedMs = Date.now() - navStart;
+  if (!navError) {
+    populated = await waitForCount(page, scenario.selector, expectedCount, populateTimeoutMs);
+    elapsedMs = Date.now() - navStart;
+  }
+
+  const outcome = navError
+    ? `load-failed(nav:${navError})`
+    : classifyOutcome(!populated.timedOut, netWatch.state);
+  const isPopulated = outcome === 'populated';
+
+  const domCount = navError ? null : await countAllDeep(page);
+  const longTasks = navError ? [] : await page.evaluate(() => window.__benchLongTasks || []);
+
+  let graphInteraction = null;
+  if (isPopulated && scenario.isGraph) {
+    graphInteraction = await performGraphInteraction(page);
+  }
+
+  netWatch.detach();
+
+  return {
+    run: runIndex,
+    cold,
+    outcome,
+    // navToPopulatedMs is set ONLY for a genuinely populated run: a
+    // load-failed/loaded-not-rendered/still-loading run's elapsed
+    // wall-clock time is not a rendering duration.
+    navToPopulatedMs: isPopulated ? elapsedMs : null,
+    elapsedMs,
+    populatedCount: populated.count,
+    expectedCount,
+    domElementCount: domCount,
+    longTasks: summarizeLongTasks(longTasks),
+    graphInteraction,
+    networkStatus: netWatch.state.status,
+    networkFailed: netWatch.state.failed,
+    // bench-rev-2 NB5: when the load-bearing request's outcome was
+    // observed, in elapsed ms from navigation start -- so a WriteTimeout
+    // attribution is a measurement, not an inference from the run's total
+    // wall-clock time.
+    networkObservedAtMs: netWatch.state.atMs,
+    consoleErrorCount: consoleErrors.length,
+    consoleErrorsSample: consoleErrors.slice(0, 5),
+  };
+}
+
+// bench-rev-2 NB3: run 0 uses a fresh ("cold") context; runs 1..N-1 share
+// one ("warm") context. The README's previous reason for deferring this
+// ("not done here for time") was not a real constraint -- it is a few
+// lines, implemented here.
+async function runScenario(browser, scenario, expectedCount) {
+  const runsOut = [];
+
+  const coldContext = await newCookiedContext(browser);
+  try {
+    const coldPage = await coldContext.newPage();
+    runsOut.push(await runOneScenarioAttempt(coldPage, scenario, expectedCount, 0, true));
+    await coldPage.close();
+  } finally {
+    await coldContext.close();
+  }
+
+  if (runs > 1) {
+    const warmContext = await newCookiedContext(browser);
+    try {
+      for (let i = 1; i < runs; i++) {
+        const page = await warmContext.newPage();
+        runsOut.push(await runOneScenarioAttempt(page, scenario, expectedCount, i, false));
+        await page.close();
+      }
+    } finally {
+      await warmContext.close();
+    }
+  }
+
+  return runsOut;
 }
 
 // ---- live-update (SSE burst) responsiveness ------------------------------
 
-// getStatusBadgeLabelDeep reads the rendered <scion-status-badge label=...>
-// for a given agent's card, searching every shadow root. project-detail.ts's
-// renderAgentCard (around line 2515) doesn't stamp a data-agent-id, but it
-// does render `<a href="/agents/{id}">`, which is a stable enough anchor to
-// find the enclosing .agent-card and its status badge from the outside.
 async function getStatusBadgeLabelDeep(page, agentId) {
   return page.evaluate((id) => {
     function walk(root) {
@@ -546,59 +552,40 @@ async function getStatusBadgeLabelDeep(page, agentId) {
   }, agentId);
 }
 
-// postAgentPhase POSTs a phase update and returns whether it was accepted
-// (bench-rev-1 B1: "check every POST response" -- the original version
-// never did, so a silently-dropped update to a `suspended` agent looked
-// identical to a slow-but-successful one).
-async function postAgentPhase(id, phase) {
+// postAgentStatus POSTs a status update (phase and/or activity) and returns
+// whether it was accepted.
+async function postAgentStatus(id, body) {
   const res = await fetch(`${hubBase}/api/v1/agents/${id}/status`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seed.ownerToken}` },
-    body: JSON.stringify({ phase }),
+    body: JSON.stringify(body),
   });
   return { ok: res.ok, status: res.status };
 }
 
-async function getAgentPhase(id) {
+async function getAgent(id) {
   const res = await fetch(`${hubBase}/api/v1/agents/${id}`, {
     headers: { Authorization: `Bearer ${seed.ownerToken}` },
   });
   if (!res.ok) return null;
-  const data = await res.json();
-  return data.phase ?? null;
+  return res.json();
 }
 
-// store.AgentStatusUpdate (pkg/store/store.go) has no top-level "status"
-// field -- only "phase"/"activity"/etc. POSTing {"status": ...} decodes
-// successfully (readJSON ignores unknown keys) but silently changes
-// nothing, which looks identical to "the update never arrived" from the
-// browser side. Use "phase" with a value from pkg/agent/state.Phase.
-//
-// bench-rev-1 B1: deliberately excludes "suspended" as a *target* --
-// updateAgentStatus's Guard 0 (pkg/hub/handlers_agent_lifecycle.go) silently
-// drops any phase/activity update sent to an agent that is *currently*
-// suspended, and still returns 200. Targeting "suspended" therefore makes
-// that agent permanently un-updatable for every subsequent run against the
-// same database, which is what produced the originally-reported "6/15" and
-// "12/15" settle results -- those were deterministic artifacts of
-// previously-suspended agents, not SSE flakiness. Agents that are already
-// suspended are also skipped as *sources* below, for the same reason.
-//
-// Also excludes "running": web/src/shared/types.ts's getAgentDisplayStatus()
-// renders a running agent's *activity* instead of the literal phase string
-// whenever activity is non-empty, so "running" would only be unambiguous
-// for agents that happen to have no activity set -- every other target here
-// renders as the phase string verbatim.
-const BURST_TARGET_ROTATION = ['stopped', 'error', 'stopping'];
+async function waitForBadgeValue(page, id, expectedValue, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const label = await getStatusBadgeLabelDeep(page, id);
+    if (label && label.toLowerCase() === expectedValue.toLowerCase()) {
+      return { settled: true, atMs: Date.now() };
+    }
+    await page.waitForTimeout(100);
+  }
+  return { settled: false, atMs: null };
+}
 
-async function runBurstOnce(page) {
-  // Fetch a page of real agents, authenticated as the seeded project owner
-  // (the seeded member may not carry agent.update -- ordinary project
-  // members are not expected to; using the owner to *drive* the burst is
-  // fine, since the thing under measurement is how the *viewer's* browser
-  // session settles after a burst of SSE updates, not who sent them).
+async function runBurstOnce(page, runIndex) {
   // Over-fetch beyond burstCount so there is room to skip already-suspended
-  // agents (bench-rev-1 B1) without running out of candidates.
+  // agents without running out of candidates.
   const listResp = await fetch(
     `${hubBase}/api/v1/projects/${seed.projectId}/agents?limit=${burstCount * 3}`,
     { headers: { Authorization: `Bearer ${seed.ownerToken}` } }
@@ -610,36 +597,43 @@ async function runBurstOnce(page) {
   const candidates = (listData.agents || []).filter((a) => a.phase !== 'suspended');
   const targets = candidates.slice(0, burstCount);
   if (targets.length < burstCount) {
-    console.warn(
-      `  warning: only ${targets.length}/${burstCount} non-suspended agents available for the burst`
-    );
+    console.warn(`  warning: only ${targets.length}/${burstCount} non-suspended agents available`);
   }
 
-  const preBurstPhase = new Map(targets.map((a) => [a.id, a.phase]));
-  const targetPhase = new Map();
-  for (let idx = 0; idx < targets.length; idx++) {
-    const id = targets[idx].id;
-    let phase = BURST_TARGET_ROTATION[idx % BURST_TARGET_ROTATION.length];
-    if (phase === preBurstPhase.get(id)) {
-      phase = BURST_TARGET_ROTATION[(idx + 1) % BURST_TARGET_ROTATION.length];
-    }
-    targetPhase.set(id, phase);
-  }
-
-  const burstStart = Date.now();
-  const postResults = await Promise.all(
-    targets.map(async (a) => ({ id: a.id, ...(await postAgentPhase(a.id, targetPhase.get(a.id))) }))
+  // bench-rev-2 NB1: capture activity too, so the restore below can put
+  // agents back exactly as they were, not just their phase.
+  const preBurst = new Map(
+    targets.map((a) => [a.id, { phase: a.phase, activity: a.activity || '' }])
   );
-  const burstSentMs = Date.now() - burstStart;
+  // bench-rev-2 R2: offset the rotation by runIndex so consecutive runs
+  // never request the same target phase for the same agent -- see
+  // pickBurstTarget's doc comment in lib.mjs for why that matters.
+  const targetPhase = new Map(
+    targets.map((a, idx) => [a.id, pickBurstTarget(idx, runIndex, preBurst.get(a.id).phase)])
+  );
+
+  const postStartedAt = Date.now();
+  const postResults = await Promise.all(
+    targets.map(async (a) => {
+      const r = await postAgentStatus(a.id, { phase: targetPhase.get(a.id) });
+      return { id: a.id, ...r, postCompletedAtMs: Date.now() - postStartedAt };
+    })
+  );
+  const burstSentMs = Date.now() - postStartedAt;
 
   const rejected = postResults.filter((r) => !r.ok);
-  const acceptedIds = postResults.filter((r) => r.ok).map((r) => r.id);
+  const accepted = postResults.filter((r) => r.ok);
+  const postCompletedAt = new Map(accepted.map((r) => [r.id, postStartedAt + r.postCompletedAtMs]));
 
-  // Poll every burst-updated agent's badge until all *accepted* updates
-  // show their target status in the DOM (ground truth for "the live update
-  // reached the DOM"), or until settleTimeoutMs elapses.
+  // Poll every accepted agent's badge until it shows its target status in
+  // the DOM (ground truth for "the live update reached the DOM"), or until
+  // settleTimeoutMs elapses. bench-rev-2 NB2: record each agent's OWN
+  // settle delta relative to ITS OWN POST completion, not a shared
+  // burst-start timestamp (which folds in POST latency as if it were SSE
+  // latency).
   const deadline = Date.now() + settleTimeoutMs;
   const settledAtByAgent = new Map();
+  const acceptedIds = accepted.map((r) => r.id);
   for (;;) {
     for (const id of acceptedIds) {
       if (settledAtByAgent.has(id)) continue;
@@ -653,38 +647,45 @@ async function runBurstOnce(page) {
     await page.waitForTimeout(100);
   }
   const settledCount = settledAtByAgent.size;
-  const lastSettledAt = settledCount ? Math.max(...settledAtByAgent.values()) : null;
-  const settledAllMs = lastSettledAt != null ? lastSettledAt - burstStart : null;
+  const perAgentSettleMs = acceptedIds
+    .filter((id) => settledAtByAgent.has(id))
+    .map((id) => settledAtByAgent.get(id) - postCompletedAt.get(id));
+  const settleMM = minMax(perAgentSettleMs);
 
-  // bench-rev-1 B1: distinguish "the server never applied the update" from
-  // "the UI did not settle" -- GET each targeted agent's server-side phase
-  // and compare to what was requested, separately from the DOM-badge
-  // settle check above. A GET-confirmed non-application (e.g. a rejected
-  // POST, or a race with the restore below) must never be blamed on SSE.
+  // Distinguish "the server never applied the update" from "the UI did not
+  // settle": GET each targeted agent's server-side phase independently of
+  // the DOM-badge check above.
   const serverAppliedCount = (
     await Promise.all(
-      acceptedIds.map(async (id) => (await getAgentPhase(id)) === targetPhase.get(id))
+      acceptedIds.map(async (id) => (await getAgent(id))?.phase === targetPhase.get(id))
     )
   ).filter(Boolean).length;
 
-  // Restore every targeted agent to its pre-burst phase (bench-rev-1 B1:
-  // "make the scenario non-destructive"), so a subsequent run -- in this
-  // same process or a future invocation against the same database -- does
-  // not inherit an ever-growing set of stuck/suspended agents. Restoring to
-  // a phase that is itself never "suspended" (filtered above) means this
-  // never re-triggers Guard 0 on the next run.
+  // Restore every targeted agent to its pre-burst phase AND activity
+  // (bench-rev-2 NB1), then -- bench-rev-2 R2 -- WAIT for the restore to be
+  // confirmed in the DOM before returning, so the *next* run never starts
+  // against a stale, not-yet-restored badge. This doubles as a second,
+  // independent SSE-delivery measurement.
+  const restoreStartedAt = Date.now();
   const restoreResults = await Promise.all(
-    targets.map(async (a) => ({
-      id: a.id,
-      ...(await postAgentPhase(a.id, preBurstPhase.get(a.id))),
-    }))
+    targets.map(async (a) => ({ id: a.id, ...(await postAgentStatus(a.id, preBurst.get(a.id))) }))
   );
   const restoreFailures = restoreResults.filter((r) => !r.ok);
   if (restoreFailures.length > 0) {
-    console.warn(
-      `  warning: failed to restore ${restoreFailures.length}/${targets.length} agents to their pre-burst phase`
-    );
+    console.warn(`  warning: failed to restore ${restoreFailures.length}/${targets.length} agents`);
   }
+  const restoreAcceptedIds = restoreResults.filter((r) => r.ok).map((r) => r.id);
+  const restoreSettled = await Promise.all(
+    restoreAcceptedIds.map(async (id) => {
+      const expected = preBurst.get(id).phase;
+      const result = await waitForBadgeValue(page, id, expected, settleTimeoutMs);
+      return { id, ...result };
+    })
+  );
+  const restoreSettledCount = restoreSettled.filter((r) => r.settled).length;
+  const restoreSettleMs = restoreSettled
+    .filter((r) => r.settled)
+    .map((r) => r.atMs - restoreStartedAt);
 
   return {
     requestedCount: targets.length,
@@ -695,32 +696,36 @@ async function runBurstOnce(page) {
     settledCount,
     serverAppliedCount,
     timedOut: settledCount < acceptedIds.length,
-    // Null when not every accepted agent's badge updated within
-    // settleTimeoutMs -- reported explicitly as a timeout rather than a
-    // misleadingly small number.
-    settledAllMs,
+    // bench-rev-2 NB2: per-agent settle time (this agent's badge update
+    // minus this agent's own POST completion), not a shared burst-start
+    // delta. medianSettleMs/minSettleMs/maxSettleMs below describe THIS
+    // run's distribution across its own settled agents.
+    medianSettleMs: median(perAgentSettleMs),
+    minSettleMs: settleMM.min,
+    maxSettleMs: settleMM.max,
     restoreFailureCount: restoreFailures.length,
+    restoreSettledCount,
+    restoreTotalCount: restoreAcceptedIds.length,
+    medianRestoreSettleMs: median(restoreSettleMs),
   };
 }
 
-async function runBurstScenario(context) {
+async function runBurstScenario(browser) {
+  const context = await newCookiedContext(browser);
   const page = await context.newPage();
   await page.addInitScript(() => {
     localStorage.setItem('scion-view-project-agents', 'grid');
   });
+  const navStart = Date.now();
   const apiMatches = apiMatcherFor('project-grid', seed.projectId);
-  const netWatch = attachNetworkWatch(page, apiMatches);
+  const netWatch = attachNetworkWatch(page, apiMatches, navStart);
   await page.goto(hubBase + projectPath, { waitUntil: 'domcontentloaded', timeout: navTimeoutMs });
   const populated = await waitForCount(page, '.agent-card', seed.agentCount, populateTimeoutMs);
   netWatch.detach();
 
-  // bench-rev-1 N4: do not fire a burst at a page that never loaded --
-  // runBurstScenario previously ignored waitForCount's timedOut entirely,
-  // so at 500 agents it could (and did) fire the burst against an
-  // error/empty page and then blame SSE for the resulting non-settle.
   if (populated.timedOut) {
     const outcome = classifyOutcome(false, netWatch.state);
-    await page.close();
+    await context.close();
     return {
       skipped: true,
       skipReason: `grid did not populate before firing the burst (${outcome})`,
@@ -731,28 +736,30 @@ async function runBurstScenario(context) {
 
   const results = [];
   for (let i = 0; i < burstRuns; i++) {
-    const r = await runBurstOnce(page);
+    const r = await runBurstOnce(page, i);
     results.push(r);
     console.log(
       `  burst run ${i}: ${r.acceptedCount}/${r.requestedCount} accepted, ` +
-        `${r.settledCount}/${r.acceptedCount} settled in DOM, ` +
-        `${r.serverAppliedCount}/${r.acceptedCount} confirmed server-applied ` +
-        `(settledAllMs=${r.settledAllMs}, timedOut=${r.timedOut})`
+        `${r.settledCount}/${r.acceptedCount} settled (median ${r.medianSettleMs}ms), ` +
+        `${r.serverAppliedCount}/${r.acceptedCount} server-applied, ` +
+        `restore ${r.restoreSettledCount}/${r.restoreTotalCount} confirmed (timedOut=${r.timedOut})`
     );
   }
-  await page.close();
+  await context.close();
 
-  const settledAllMsValues = results.map((r) => r.settledAllMs).filter((v) => v != null);
-  const mm = minMax(settledAllMsValues);
+  const medianSettleValues = results.map((r) => r.medianSettleMs).filter((v) => v != null);
+  const mm = minMax(medianSettleValues);
   return {
     skipped: false,
     runsAttempted: results.length,
     results,
-    medianSettledAllMs: median(settledAllMsValues),
-    minSettledAllMs: mm.min,
-    maxSettledAllMs: mm.max,
-    stddevSettledAllMs: stddev(settledAllMsValues),
+    medianSettleMs: median(medianSettleValues),
+    minSettleMs: mm.min,
+    maxSettleMs: mm.max,
+    stddevSettleMs: stddev(medianSettleValues),
     fullySettledRunCount: results.filter((r) => !r.timedOut).length,
+    fullyRestoredRunCount: results.filter((r) => r.restoreSettledCount === r.restoreTotalCount)
+      .length,
   };
 }
 
@@ -766,27 +773,23 @@ async function main() {
     'member',
     'Bench Member'
   );
+  sessionCookies = cookies;
 
   const browser = await chromium.launch({
     headless: true,
-    // bench-rev-1 N5: this container's /dev/shm is 64MB, which crashes
-    // Chromium (page.evaluate: Target crashed) partway through a large-DOM
-    // run without this flag -- and the original script wrote no report at
-    // all when that happened. --disable-dev-shm-usage makes Chromium use
-    // /tmp instead.
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  await context.addCookies(cookies);
 
   const report = {
     generatedAt: new Date().toISOString(),
+    harnessCommit: gitHeadSha(),
     hubBaseUrl: hubBase,
     seedProjectId: seed.projectId,
     seedProjectSlug: seed.projectSlug,
     agentCount: seed.agentCount,
     runs,
     burstRuns,
+    effectiveTimeouts: { navTimeoutMs, populateTimeoutMs, settleTimeoutMs, burstCount },
     notes,
     scenarios: {},
   };
@@ -794,27 +797,28 @@ async function main() {
 
   try {
     for (const scenario of scenarios) {
-      console.log(`running scenario ${scenario.key} (${runs} runs)...`);
-      const results = await runScenario(context, scenario, seed.agentCount);
+      console.log(`running scenario ${scenario.key} (${runs} runs: 1 cold + ${runs - 1} warm)...`);
+      const results = await runScenario(browser, scenario, seed.agentCount);
       report.scenarios[scenario.key] = summarizeScenario(scenario, results);
       const s = report.scenarios[scenario.key];
       console.log(
         `  ${s.successCount}/${results.length} populated; outcomes=${JSON.stringify(s.outcomeCounts)}; ` +
-          `median nav->populated: ${s.medianNavToPopulatedMs}ms [${s.minNavToPopulatedMs}, ${s.maxNavToPopulatedMs}]; ` +
+          `median nav->populated: ${s.medianNavToPopulatedMs}ms (cold=${s.medianNavToPopulatedMsCold}ms, warm=${s.medianNavToPopulatedMsWarm}ms); ` +
           `median DOM count: ${s.medianDomElementCount} [${s.minDomElementCount}, ${s.maxDomElementCount}]`
       );
       writeReportSoFar(report);
     }
 
     console.log(`running SSE burst-update responsiveness scenario (${burstRuns} runs)...`);
-    report.liveUpdateBurst = await runBurstScenario(context);
+    report.liveUpdateBurst = await runBurstScenario(browser);
     if (report.liveUpdateBurst.skipped) {
       console.log(`  skipped: ${report.liveUpdateBurst.skipReason}`);
     } else {
       console.log(
-        `  median settle time: ${report.liveUpdateBurst.medianSettledAllMs}ms ` +
-          `[${report.liveUpdateBurst.minSettledAllMs}, ${report.liveUpdateBurst.maxSettledAllMs}]; ` +
-          `${report.liveUpdateBurst.fullySettledRunCount}/${report.liveUpdateBurst.runsAttempted} runs fully settled`
+        `  median settle time: ${report.liveUpdateBurst.medianSettleMs}ms ` +
+          `[${report.liveUpdateBurst.minSettleMs}, ${report.liveUpdateBurst.maxSettleMs}]; ` +
+          `${report.liveUpdateBurst.fullySettledRunCount}/${report.liveUpdateBurst.runsAttempted} runs fully settled, ` +
+          `${report.liveUpdateBurst.fullyRestoredRunCount}/${report.liveUpdateBurst.runsAttempted} fully restored`
       );
     }
     writeReportSoFar(report);

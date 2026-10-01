@@ -14,17 +14,23 @@
 //	  --runs 5 \
 //	  --out /tmp/scion-bench/api-25.json
 //
-// Two scenarios are always run against the seed's project:
+// Three scenarios are always run against the seed's project:
 //
 //   - "project-agents-list": GET /api/v1/projects/{id}/agents -- what the
 //     project grid/list page loads (ptone/scion#2367's dominant measured
 //     bottleneck).
-//   - "global-agents-list": GET /api/v1/agents?projectId={id} -- what the
-//     standalone/global agent graph page loads (web/src/components/pages/
-//     agent-graph.ts fetches this same unscoped endpoint and filters
-//     client-side; passing projectId here reproduces the
-//     "standalone project-filtered graph" row from the original
-//     investigation's evidence table).
+//   - "global-agents-list-unscoped": GET /api/v1/agents, no query string --
+//     what the standalone graph page actually fetches
+//     (web/src/components/pages/agent-graph.ts:115 calls
+//     apiFetch('/api/v1/agents') with no parameters and filters
+//     client-side). bench-rev-2 R1 (related, non-blocking): an earlier
+//     version of this tool instead measured the `projectId=`-scoped
+//     variant below and mislabeled it as "what the standalone graph page
+//     loads", which it is not.
+//   - "global-agents-list-scoped": GET /api/v1/agents?projectId={id} -- not
+//     fetched by any page today, kept as a reference point for how much a
+//     server-side project filter would save over the unscoped fetch above,
+//     since the authorization/list-scope code path differs between the two.
 //
 // Every request authenticates as the seed's non-admin project-member
 // principal, per the brief: the default-deny/per-resource evaluation path
@@ -59,12 +65,24 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/perf/bench/internal/benchout"
 )
+
+// gitHeadSHA returns the harness's own git HEAD commit, or "" if it cannot
+// be determined (e.g. run from outside a git checkout). bench-rev-2 NB4.
+func gitHeadSHA() string {
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
 const perfTraceRequestHeader = "X-Scion-Perf-Trace"
 
@@ -72,7 +90,7 @@ func main() {
 	hubURL := flag.String("hub", "http://127.0.0.1:19810", "hub base URL")
 	seedPath := flag.String("seed", "", "path to seed metadata JSON produced by perf/bench/seed (required)")
 	runs := flag.Int("runs", 5, "number of timed trials per scenario (median/spread reported over these)")
-	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (failures here are also recorded, not fatal)")
+	warmup := flag.Int("warmup", 1, "number of untimed warmup requests per scenario before the timed runs (bench-rev-2 NB8: warmup results are discarded, not recorded in the report, and a warmup failure is not fatal)")
 	outPath := flag.String("out", "", "path to write the JSON report (required)")
 	wantPerfTrace := flag.Bool("want-perf-trace", false, "set the opt-in X-Scion-Perf-Trace header and record any perf-trace response data (only meaningful on a #2392-instrumented hub build)")
 	notes := flag.String("notes", "", "free-form note about machine/CPU conditions for this run, copied into the report")
@@ -102,12 +120,23 @@ func main() {
 		endpoint string
 	}{
 		{"project-agents-list", fmt.Sprintf("/api/v1/projects/%s/agents", seed.ProjectID)},
-		{"global-agents-list", fmt.Sprintf("/api/v1/agents?projectId=%s", seed.ProjectID)},
+		{"global-agents-list-unscoped", "/api/v1/agents"},
+		{"global-agents-list-scoped", fmt.Sprintf("/api/v1/agents?projectId=%s", seed.ProjectID)},
 	}
 
 	report := benchout.APIBenchReport{
 		GeneratedAt: time.Now().UTC(),
-		HubBaseURL:  *hubURL,
+		// bench-rev-2 NB4: record the harness's own commit, so a report can
+		// be matched back to the exact code that produced it without
+		// relying on wall-clock proximity to a commit timestamp.
+		HarnessCommit: gitHeadSHA(),
+		HubBaseURL:    *hubURL,
+		EffectiveSettings: benchout.EffectiveSettings{
+			Runs:           *runs,
+			Warmup:         *warmup,
+			TimeoutSeconds: *timeoutSeconds,
+			WantPerfTrace:  *wantPerfTrace,
+		},
 		// bench-rev-1 N6: the seed metadata embeds long-lived bearer tokens
 		// and the session secret. redactSeed strips them before anything
 		// gets written to disk, so a report file can never leak a working
@@ -124,7 +153,10 @@ func main() {
 	// bench-rev-1 N8: record load/uptime automatically, since budgets
 	// cannot be chosen from a shared, variably-loaded host -- see
 	// perf/bench/README.md's "Choosing regression budgets" section for what
-	// this is and is not sufficient for.
+	// this is and is not sufficient for. bench-rev-2 NB9: a 500-agent run
+	// takes many minutes, so load is sampled again at the end -- a report
+	// whose start/end load differ sharply flags itself as having run
+	// through a noise spike rather than steady-state conditions.
 	report.Machine.LoadAvg1, report.Machine.LoadAvg5, report.Machine.LoadAvg15 = readLoadAvg()
 	report.Machine.UptimeSeconds = readUptimeSeconds()
 	if h, err := os.Hostname(); err == nil {
@@ -151,6 +183,9 @@ func main() {
 			exitCode = 1
 		}
 	}
+
+	// bench-rev-2 NB9: sample again at the end, not just the start.
+	report.Machine.LoadAvg1AtEnd, report.Machine.LoadAvg5AtEnd, report.Machine.LoadAvg15AtEnd = readLoadAvg()
 
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
