@@ -224,11 +224,10 @@ func TestAgentGCPToken_MetadataModeNotAssignedDenied(t *testing.T) {
 
 // TestResolveAgentGCPMintFacts_NilIdentityDenied is a direct unit test of
 // resolveAgentGCPMintFacts: a nil *store.GCPIdentityConfig must deny rather
-// than dereference ServiceAccountID. Both call sites in this file only reach
-// resolveAgentGCPMintFacts after resolveAgentGCPAssignment has already
-// returned ok == true (which never pairs with a nil config), so this case is
-// not reachable through either handler today; the check is exercised here
-// directly so the function stays safe for any future caller.
+// than dereference ServiceAccountID. Both handlers in handlers_gcp_identity.go
+// call resolveAgentGCPMintFacts only after resolveAgentGCPAssignment returns
+// ok == true, which never pairs with a nil config, so this case is exercised
+// here directly rather than through a handler.
 func TestResolveAgentGCPMintFacts_NilIdentityDenied(t *testing.T) {
 	srv, _ := testServer(t)
 	allowed := srv.resolveAgentGCPMintFacts(context.Background(), nil, "some-project")
