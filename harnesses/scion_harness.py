@@ -719,7 +719,7 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     normalized = _MODEL_ALIAS_SHORTHAND.get(normalized, normalized)
     if normalized not in _KNOWN_MODEL_ALIASES:
         return raw  # concrete model name: preserve the caller's spelling
-    aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
+    aliases = ctx.harness_config.get("model_aliases") if isinstance(ctx.harness_config, dict) else None
     if not isinstance(aliases, dict):
         aliases = {}
     return aliases.get(normalized, normalized)
