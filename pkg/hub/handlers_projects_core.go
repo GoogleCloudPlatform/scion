@@ -2478,21 +2478,16 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	// --- Keys action: routed through authorizeAgentKeys (contract §3.1) ---
-	// The agent-credential cross-project refusal must be decided before any
-	// agent-target lookup on this route (invariant 4, AK-21c): compare the
-	// caller's own project against the already-resolved {project} ID first,
-	// so a foreign agent identity never causes (or requires) a lookup for a
-	// same-slug agent that might exist in the URL's project. Only once that
-	// passes do we resolve the target, using the same canonical
+	// --- Keys action: ExecuteAgentKeys (task 2.2, contract §3.1) ---
+	// This is the sole authoritative operation for the keys action on this
+	// route (see execute_agent_keys.go for the full flow): bounded strict
+	// body decode, one minted operation ID, the agent-credential
+	// cross-project refusal decided before any agent-target lookup
+	// (invariant 4, AK-21c), target resolution via the same canonical
 	// resolveProjectAgent the logs/cloud-logs/message-logs branches above
-	// already use, so a store failure surfaces as a generic 5xx via
-	// writeErrorFromErr rather than being collapsed into a misleading
-	// "agent does not exist" 404. A store.ErrNotFound miss is reported as
-	// keys' own "not_found" (invariant 3), not the shared resolution
-	// block's agent_not_found/{agent_slug,project_id} shape a few lines
-	// below, which is specific to every other (non-keys) action on this
-	// route.
+	// use, authorizeAgentKeys, admission and one typed dispatch. It writes
+	// its own response for every outcome and never falls through to the
+	// generic switch below.
 	//
 	// No separate nil-identity guard: authorizeAgentKeys already fails
 	// closed (keys_denied) on a nil identity, and the shared auth
@@ -2501,30 +2496,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// or, placed after resolution, let an (unreachable) unauthenticated
 	// caller learn whether the agent exists before being refused.
 	if action == api.AgentActionKeys {
-		if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
-			writeAgentKeysAuthzDenial(w, *denial)
-			return
-		}
-		agent, err := s.resolveProjectAgent(ctx, projectID, agentID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Agent")
-				return
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		decision := s.authorizeAgentKeys(r, agent)
-		if !decision.Allowed {
-			writeAgentKeysAuthzDenial(w, decision)
-			return
-		}
-		// Task 2.2 adds the real handler; until then, an authorized call
-		// still 404s here, matching the two switches' shared
-		// `default: NotFound(w, "Action")` below for every other
-		// not-yet-implemented action on this route — not because it was
-		// denied.
-		NotFound(w, "Action")
+		s.handleAgentActionKeysProjectScoped(w, r, projectID, agentID)
 		return
 	}
 

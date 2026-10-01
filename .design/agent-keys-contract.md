@@ -280,7 +280,7 @@ impersonating a user.
 | --- | --- |
 | Human session | `ActionAttach` on the target agent; retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`) |
 | User access token | Same human authority, intersected with credential scope and project/hub boundary; a token name or automation label is not an agent identity |
-| Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), and sender's current project **equal to** target project; no self/parent/ancestor shortcut |
+| Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), sender's current project **equal to** target project (no self/parent/ancestor shortcut), **and** live attach authority on the target via `authorizeAgentTargetAction(ctx, identity, target, ActionAttach)` — same-project equality alone is no longer sufficient (ptone/scion#2460, superseding the Phase 5 deferral for this one gate; see §10's Phase 5 note). No permissive fallback: an invalid/revoked delegation or an evaluator failure denies |
 | Broker credential | Only authenticated Hub→broker execution under the internal contract (§4); never direct public `/keys` authority |
 
 Key points, restated because they are easy to get backwards:
@@ -807,7 +807,8 @@ field-rejection cases, which are not the same shape as AK-3..AK-6.
 | — | All | Two logical key presses in one call | **Not supported** — no atomic sequence API; caller must issue two calls |
 | AK-18 | T/P | Human session, no `ActionAttach` on target | 403 `keys_denied` |
 | AK-19 | T/P | No authentication | 401 `unauthorized` |
-| AK-20 | T/P | Agent credential, same project, lifecycle scope | 200 `dispatched` |
+| AK-20 | T/P | Agent credential, same project, lifecycle scope, **and** live attach authority on the target (ptone/scion#2460); pre-backfill, the shared evaluator's legacy allowance counts, as for attach | 200 `dispatched` |
+| AK-20a | T/P | Agent credential, same project, lifecycle scope, but no attach authority (no live delegation edge (post-backfill), delegator lacks attach, an invalid/revoked delegation, or an evaluator failure) | 403 `keys_denied` — same-project equality alone no longer admits; no finer reason in the response, same fixed message as every other `keys_denied` cause (ptone/scion#2460) |
 | AK-21 | T | Agent credential, cross-project target that exists | 422 `cross_project_keys_unsupported` (§3.1 Option 1: resolve first, then compare) |
 | AK-21b | T | Agent credential, target ID does not exist in any project | 404 `not_found` — distinguishes "foreign" from "nonexistent" per §3.1 |
 | AK-21c | P | Agent credential, URL `{project}` (UUID or hosted `{uuid}__{slug}` form) resolves to a project != credential's project | 422 `cross_project_keys_unsupported`, decided before any target-agent lookup — target existence is never queried (§3.1) |
@@ -1265,7 +1266,16 @@ size reduction, not just a logical consequence to leave implicit.
   (`pkg/hub/agentrole.go:56`-66); the more restricted roles do not have it. Concretely: a
   non-`full`-role agent that can successfully send `message --raw` to a same-project agent today
   will get 403 `keys_denied` from the identical call once 2.3 ships, even though nothing about its
-  role or the target changed.
+  role or the target changed. **As of ptone/scion#2460, the bridge also inherits the
+  attach-relationship requirement** §3's Agent-credential row now carries: `ScopeAgentLifecycle`
+  plus same-project membership is not sufficient on its own, because `authorizeAgentKeys` also
+  requires live attach authority on the target via `authorizeAgentTargetAction`. Concretely: a
+  `full`-role, same-project agent is still denied 403 `keys_denied` from `message --raw` once 2.3
+  ships if it has no live delegation edge reaching attach authority on the target (post-backfill;
+  pre-backfill, the shared evaluator's legacy allowance admits it, same as any other attach-gated
+  action), or if its delegator lacks attach authority, or if the delegation is invalid/revoked —
+  2.3 inherits all of this automatically by calling `authorizeAgentKeys`, not a bridge-specific
+  check.
 - **Humans.** A human with message authority but not `ActionAttach` on the target sees the same
   shift: allowed today via `authorizeAgentMessage`, denied after 2.3 via `authorizeAgentKeys`.
 
@@ -1449,7 +1459,13 @@ deliberately left absent) then 2.2 (`ExecuteAgentKeys`, limits, audit, consuming
 Dispatcher`); 2.3 follows 2.2 and 0.2 (owns the message-handler cutover using the field table in
 §6.1); client owner → 3.1 (hubclient + CLI `keys`/alias, including the `cmd/keys.go` help-text fix
 from §2.3); docs/inventory owner → 3.2. Phase 5 (relationship-authorization integration) stays
-explicitly deferred pending #2119/#2120.
+explicitly deferred pending #2119/#2120, **except** for the agent-credential gate itself:
+ptone/scion#2460 supersedes that deferral for `authorizeAgentKeys`'s agent-credential branch
+specifically — same-project equality is no longer sufficient there; see §3's Agent-credential row
+and AK-20/AK-20a. Every other
+Phase 5 scope item (the human-session branch, the broker/system-credential branch, and the wider
+relationship-authorization integration this deferral otherwise covers) remains open and deferred;
+this is a narrow, named exception to the deferral, not its closure.
 
 **Phase boundary between 2.1 and 2.2:** see §3's "Phase-boundary clarification" paragraph for the
 normative text (what 2.1 implements now vs. what 2.2 must add) and ptone/scion#2196 for 2.2's
@@ -1583,7 +1599,13 @@ each specified in full there:**
   role has `ScopeAgentLifecycle`) that can send a same-project `message --raw` today gets 403
   `keys_denied` after 2.3 ships, and the same happens to a human with message authority but not
   `ActionAttach`. This follows from adopted decision 2 and is intentional, but is a real,
-  rollout-visible authority change alongside the size reduction above. See contract §6.3.
+  rollout-visible authority change alongside the size reduction above. As of ptone/scion#2460, the
+  bridge also inherits the attach-relationship requirement `authorizeAgentKeys`'s agent-credential
+  branch now carries: even a `full`-role, same-project agent gets 403 `keys_denied` from
+  `message --raw` if it has no live delegation edge reaching attach authority on the target
+  (post-backfill), if its delegator lacks attach authority, or if the delegation is
+  invalid/revoked — automatically, since 2.3 must call `authorizeAgentKeys` and never a
+  bridge-specific check. See contract §6.3.
 - **Bridge body-size cap (new, disclosed).** The bridge's pre-authorization read (needed to
   determine raw selection before `authorizeAgentMessage` runs) introduces a 2 MiB body-size bound
   where no bound of any kind exists on the message path today. A body built only from `msg`/`message`
