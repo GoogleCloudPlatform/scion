@@ -3,7 +3,8 @@
 Branch `perf/2385-sse-consumers`, base `origin/main` 7ca2edd599128241ecf12ab064eff6a0a831a6e.
 Touches `web/src/client/state.ts`, `web/src/client/agent-merge.ts` (new),
 `web/src/components/pages/project-detail.ts`, `web/src/components/pages/agents.ts`,
-plus five test files (one new, four touched).
+plus four test files (two new, two touched). Includes one post-dev-report
+follow-up fix (the tombstone-race fix below), ruled by slow-list-lists-em.
 
 ## What
 
@@ -156,30 +157,50 @@ own test.
   `.map()`); the only `repeat(` hit in `project-detail.ts` is an unrelated
   CSS `grid-template-columns: repeat(auto-fill, ...)`. P1c evidently
   implemented the grid/list render with `.map()` rather than the design
-  doc's `repeat(items, a => a.id, ...)` proposal. No change made here; flagged
-  for the EM/architect in case the design's identity-via-`repeat()` intent
-  was meant to land as part of P1c or is still wanted as a follow-up (Lit's
-  un-keyed array rendering reuses DOM nodes positionally rather than by
-  object identity, which is a separate, smaller concern from the JS-level
-  object identity `mergeChanged` guarantees).
-- `onAgentsUpdated`'s old deleted-agent handling scanned the *entire*
-  persistent `stateManager.getDeletedAgentIds()` set on every flush (a
-  side effect of its full-rebuild-from-`getAgents()` design), which
-  incidentally also scrubbed a tombstoned ID that had raced into `this.agents`
-  via a REST response landing after its SSE `deleted` had already been
-  processed in an earlier flush. `mergeChanged`-based merging only inspects
-  the current flush's `change.deleted` (the precise, intended signal), so
-  that specific race (a REST load's response containing an already-tombstoned
-  ID, with no further flush ever naming that same ID again) is no longer
-  self-healed by an unrelated later flush. This is a pre-existing, latent
-  edge case in the REST-load functions themselves (both pages assign
-  `this.agents`/`data.agents` directly from the response before
-  `stateManager.seedAgents` — which does skip tombstoned IDs — ever runs),
-  not something P4 was asked to touch (the brief: "keep your project-detail
-  diff to the live-update path"), and it is not covered by any existing
-  test. Flagged for the EM rather than fixed, since fixing it means touching
-  the P1c-owned REST-load functions in both files, out of this phase's
-  scoped diff.
+  doc's `repeat(items, a => a.id, ...)` proposal. Flagged for the EM;
+  **ruling: accepted, no change in P4** — keyed rendering of window items
+  belongs to P5, which rebuilds grid and list from the window.
+
+## Follow-up: tombstone-race fix (EM ruling)
+
+Flagged as a second deviation: `onAgentsUpdated`'s old deleted-agent handling
+scanned the *entire* persistent `stateManager.getDeletedAgentIds()` set on
+every flush (a side effect of its full-rebuild-from-`getAgents()` design),
+which incidentally also scrubbed a tombstoned ID that had raced into
+`this.agents` via a REST response landing after its SSE `deleted` had
+already been processed in an earlier flush. `mergeChanged`-based merging
+only inspects the current flush's `change.deleted`, so that race was no
+longer self-healed by an unrelated later flush.
+
+**Ruling: fix it in P4** — removing the old per-flush rebuild removes its
+incidental scrubbing too, so without a replacement P4 reintroduces the
+stale-deleted-agent case. Fixed with a new `dropTombstoned(agents,
+deletedIds)` in `agent-merge.ts` (returns the same array reference when
+nothing needs dropping, so it adds no churn on the common case), applied at
+every point a REST response is assigned into page-level state:
+`project-detail.ts`'s `loadAgentsForViewImpl` (both the `complete` and
+paged branches) and `loadLegacyAgentsImpl`, its paged window page fetcher
+`fetchAgentsPage` (the EM's "if the paged window's server pages need the
+same filter, apply it there too" — applied), and `agents.ts`'s
+`fetchAndMergeAgents`. No request added anywhere.
+
+Tests added per the EM's instruction: one end-to-end test per page (SSE
+delete processed, then a REST response still listing that ID lands, agent
+not shown) — `project-detail-agent-window.test.ts` > "small state: live
+updates" > "a REST response landing after an SSE delete does not resurrect
+the deleted agent"; `agents-live-updates.test.ts` > "a REST response
+landing after an SSE delete does not resurrect the deleted agent" — plus
+four `agent-merge.test.ts` unit tests for `dropTombstoned` itself (no-op
+when no IDs are deleted at all; no-op when none of the held agents are
+tombstoned; drops one; drops several). Verified each end-to-end test fails
+without its corresponding fix: reverted the `dropTombstoned` call at the
+relevant site (`sed`, not committed), reran, confirmed the failure, restored.
+
+Commands and results for this follow-up: `npm run typecheck` pass; `npx
+eslint` on the four non-test files — 160 problems (52 errors, 108
+warnings), unchanged from the prior commit's baseline; `npx prettier
+--check` pass; targeted `npx vitest run` across the same 13 files —
+208 tests, all passing (202 before this commit + 6 new).
 
 ## Design mapping (P4 bullets to file:function)
 
@@ -195,22 +216,29 @@ own test.
 5. `state.ts:bufferAgentDelta`'s expiry timer — epoch/buffer TTL agreement
    fix, with `state-seed-epoch.test.ts`'s new test for the exact cited
    sequence.
+6. (Follow-up, EM ruling.) `agent-merge.ts:dropTombstoned` — applied at
+   `project-detail.ts:loadAgentsForViewImpl` (both branches),
+   `loadLegacyAgentsImpl`, `fetchAgentsPage`, and `agents.ts:fetchAndMergeAgents`.
 
 ## W2/W3/W10 sub-cases to test names
 
 - **W2 (coalescing/identity):** `agent-merge.test.ts` → "unchanged agents stay
   the same object...", "...20-agent burst...", "...applies deletes and
   upserts together...", "carries the untouched object through by
-  reference..."; `project-detail-agent-window.test.ts` → "small state: live
-  updates" (extended with the `===` assertion); `agents-live-updates.test.ts`
-  → "merges a status delta in place, preserving identity for every untouched
-  agent...".
+  reference...", and the `dropTombstoned` block (four tests);
+  `project-detail-agent-window.test.ts` → "small state: live
+  updates" (extended with the `===` assertion, plus the new "a REST response
+  landing after an SSE delete does not resurrect the deleted agent");
+  `agents-live-updates.test.ts` → "merges a status delta in place, preserving
+  identity for every untouched agent...", plus its own new "a REST response
+  landing after an SSE delete does not resurrect the deleted agent".
 - **W3 (seed epoch):** `state-seed-epoch.test.ts` → "a TTL-expired buffered
-  delta is not replayed by a later seed (P4 fix) > matches live state once
-  the buffer entry it was recorded from has expired".
+  delta is not replayed by a later seed" > "matches live state once the
+  buffer entry it was recorded from has expired".
 - **W10 (request counts, rows 1-18 unchanged):** `project-detail-agent-window.test.ts`'s
   existing P1-subset-gate test ("page load issues exactly one agents
   request...") and every other request-count assertion in that file, rerun
   unchanged and still passing (zero added); `agents-live-updates.test.ts`'s
-  three tests each assert `requests.length` stays at its pre-delta count
+  tests each assert `requests.length` (or an equivalent fetch-call count)
+  stays at its pre-delta count
   across every SSE delta.
