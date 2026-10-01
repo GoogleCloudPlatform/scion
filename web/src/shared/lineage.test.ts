@@ -17,7 +17,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildLineageForest,
+  computeStableLayout,
   descendantCounts,
+  detectPureRemoval,
   layoutForest,
   layoutForestWithUsers,
   parentIdOf,
@@ -33,6 +35,7 @@ import {
   H_GAP_X,
   H_GAP_Y,
   PAD,
+  type ForestLayout,
 } from './lineage.js';
 import type { Agent } from './types.js';
 
@@ -572,5 +575,220 @@ describe('cycle promotion pins the lowest id, not merely the first member met wh
     const edges = layout.edges.map((e) => `${e.parentId}>${e.childId}`).sort();
     // tail's agent id is 'a', so its edge reads "r>a".
     expect(edges).toEqual(['p>r', 'r>a', 'r>q']);
+  });
+});
+
+describe('detectPureRemoval (#2481)', () => {
+  const r1 = agent('r1', 'root-1', ['user-1']);
+  const k1 = agent('k1', 'kid-1', ['user-1', 'r1']);
+  const g1 = agent('g1', 'grandkid-1', ['user-1', 'r1', 'k1']);
+  const r2 = agent('r2', 'root-2', ['user-2']);
+
+  it('returns null when nothing changed', () => {
+    expect(detectPureRemoval([r1, k1], [r1, k1])).toBeNull();
+  });
+
+  it('returns null when an agent was added', () => {
+    expect(detectPureRemoval([r1], [r1, k1])).toBeNull();
+  });
+
+  it('returns null when a survivor was renamed', () => {
+    expect(detectPureRemoval([r1, k1], [r1, { ...k1, name: 'renamed' }])).toBeNull();
+  });
+
+  it('returns null when a survivor was reparented', () => {
+    const reparented = agent('g1', 'grandkid-1', ['user-1', 'r1']); // was under k1
+    expect(detectPureRemoval([r1, k1, g1], [r1, k1, reparented])).toBeNull();
+  });
+
+  it('returns null when a survivor moved to a different root user', () => {
+    const movedUser = agent('k1', 'kid-1', ['user-9', 'r1']);
+    expect(detectPureRemoval([r1, k1], [r1, movedUser])).toBeNull();
+  });
+
+  it('reports a removed leaf with no orphans', () => {
+    const result = detectPureRemoval([r1, k1, g1], [r1, k1]);
+    expect(result).not.toBeNull();
+    expect(result!.removedIds).toEqual(new Set(['g1']));
+    expect(result!.orphanedIds).toEqual(new Set());
+  });
+
+  it('reports a removed parent and the children it orphans', () => {
+    const result = detectPureRemoval([r1, k1, g1], [r1, g1]);
+    expect(result).not.toBeNull();
+    expect(result!.removedIds).toEqual(new Set(['k1']));
+    expect(result!.orphanedIds).toEqual(new Set(['g1'])); // g1's parent (k1) was removed
+  });
+
+  it('reports multiple removed roots with no orphans', () => {
+    const result = detectPureRemoval([r1, r2], []);
+    expect(result).not.toBeNull();
+    expect(result!.removedIds).toEqual(new Set(['r1', 'r2']));
+    expect(result!.orphanedIds).toEqual(new Set());
+  });
+});
+
+describe('computeStableLayout (#2481)', () => {
+  /** Node positions keyed by agent id, for comparing before/after a layout call. */
+  function posById(layout: ForestLayout): Record<string, { px: number; py: number }> {
+    const out: Record<string, { px: number; py: number }> = {};
+    for (const n of layout.nodes) out[n.agent.id] = { px: n.px, py: n.py };
+    return out;
+  }
+
+  const noCollapse = new Set<string>();
+
+  /** Builds the `previous` argument, defaulting to the inputs the common
+   * (vertical, no collapse, no users) tests use. */
+  function prev(
+    agents: readonly Agent[],
+    layout: ForestLayout,
+    overrides: { showUsers?: boolean; orientation?: 'vertical' | 'horizontal' } = {}
+  ) {
+    return {
+      agents,
+      collapsedIds: noCollapse,
+      showUsers: overrides.showUsers ?? false,
+      orientation: overrides.orientation ?? ('vertical' as const),
+      layout,
+    };
+  }
+
+  it('with no previous layout, matches a full fresh layout', () => {
+    const agents = [agent('r1', 'root', ['user-1']), agent('k1', 'kid', ['user-1', 'r1'])];
+    const stable = computeStableLayout(agents, noCollapse, false, 'vertical', null);
+    const fresh = layoutForest(buildLineageForest(agents));
+    expect(posById(stable)).toEqual(posById(fresh));
+  });
+
+  it('removing an unrelated leaf keeps every other node pixel-identical', () => {
+    // Two independent trees: deleting a leaf from tree A must not move
+    // anything in tree B, nor its own siblings/ancestors in tree A — a leaf
+    // removal never needs to re-root anything, so the old layout is still
+    // completely valid minus that one node.
+    const before = [
+      agent('r1', 'root-1', ['user-1']),
+      agent('a1', 'child-a', ['user-1', 'r1']),
+      agent('a2', 'child-b', ['user-1', 'r1']),
+      agent('r2', 'root-2', ['user-2']),
+      agent('b1', 'other-tree-child', ['user-2', 'r2']),
+    ];
+    const beforeLayout = layoutForest(buildLineageForest(before));
+    const beforePos = posById(beforeLayout);
+
+    const after = before.filter((a) => a.id !== 'a2'); // a2 is a leaf
+    const stable = computeStableLayout(
+      after,
+      noCollapse,
+      false,
+      'vertical',
+      prev(before, beforeLayout)
+    );
+
+    expect(stable.nodes.map((n) => n.agent.id).sort()).toEqual(['a1', 'b1', 'r1', 'r2']);
+    for (const id of ['a1', 'r1', 'r2', 'b1']) {
+      expect(posById(stable)[id]).toEqual(beforePos[id]);
+    }
+    // The removed node's edge is gone; nothing else is.
+    expect(stable.edges.some((e) => e.childId === 'a2')).toBe(false);
+    expect(stable.edges).toHaveLength(beforeLayout.edges.length - 1);
+  });
+
+  it('removing a parent with children keeps unrelated trees pixel-identical', () => {
+    const before = [
+      agent('r1', 'root-1', ['user-1']),
+      agent('k1', 'kid-1', ['user-1', 'r1']),
+      agent('g1', 'grandkid-1', ['user-1', 'r1', 'k1']), // orphaned when k1 is deleted
+      agent('r2', 'root-2', ['user-2']),
+      agent('b1', 'other-tree-child', ['user-2', 'r2']),
+    ];
+    const beforeLayout = layoutForest(buildLineageForest(before));
+    const beforePos = posById(beforeLayout);
+
+    const after = before.filter((a) => a.id !== 'k1');
+    const stable = computeStableLayout(
+      after,
+      noCollapse,
+      false,
+      'vertical',
+      prev(before, beforeLayout)
+    );
+
+    // Unaffected tree (r2/b1) is byte-identical to its previous position.
+    expect(posById(stable).r2).toEqual(beforePos.r2);
+    expect(posById(stable).b1).toEqual(beforePos.b1);
+
+    // g1 was orphaned and promoted to a root; it must still be present, with
+    // no parent edge any more.
+    expect(stable.nodes.map((n) => n.agent.id).sort()).toEqual(['b1', 'g1', 'r1', 'r2']);
+    expect(stable.edges.some((e) => e.childId === 'g1')).toBe(false);
+    expect(stable.edges.some((e) => e.childId === 'k1')).toBe(false);
+
+    // Sanity: this really did need a reflow (g1's depth changed from 2 to 0),
+    // which is exactly why unrelated-tree preservation needs the override
+    // step rather than being automatic.
+    expect(posById(stable).g1).not.toEqual(beforePos.g1);
+  });
+
+  it('restores previous user-row positions for an unaffected group when a sibling group reflows', () => {
+    const before = [
+      agent('r1', 'root-1', ['user-1']),
+      agent('k1', 'kid-1', ['user-1', 'r1']),
+      agent('g1', 'grandkid-1', ['user-1', 'r1', 'k1']),
+      agent('r2', 'root-2', ['user-2']),
+    ];
+    const beforeLayout = layoutForestWithUsers(buildLineageForest(before));
+    const beforeUserPos = new Map(beforeLayout.users.map((u) => [u.id, { px: u.px, py: u.py }]));
+
+    const after = before.filter((a) => a.id !== 'k1'); // orphans g1 under user-1
+    const stable = computeStableLayout(
+      after,
+      noCollapse,
+      true,
+      'vertical',
+      prev(before, beforeLayout, { showUsers: true })
+    );
+
+    const stableUserPos = new Map(stable.users.map((u) => [u.id, { px: u.px, py: u.py }]));
+    expect(stableUserPos.get('user-2')).toEqual(beforeUserPos.get('user-2'));
+  });
+
+  it('falls back to a full fresh layout when an agent is added alongside a removal', () => {
+    // Not a pure removal (net addition), so detectPureRemoval returns null
+    // and the function must not try to reuse stale positions.
+    const before = [agent('r1', 'root-1', ['user-1']), agent('k1', 'kid-1', ['user-1', 'r1'])];
+    const beforeLayout = layoutForest(buildLineageForest(before));
+
+    const after = [agent('r1', 'root-1', ['user-1']), agent('n1', 'newcomer', ['user-1', 'r1'])];
+    const stable = computeStableLayout(
+      after,
+      noCollapse,
+      false,
+      'vertical',
+      prev(before, beforeLayout)
+    );
+    const fresh = layoutForest(buildLineageForest(after));
+    expect(posById(stable)).toEqual(posById(fresh));
+  });
+
+  it('falls back to a full fresh layout when orientation changed', () => {
+    const before = [agent('r1', 'root-1', ['user-1']), agent('k1', 'kid-1', ['user-1', 'r1'])];
+    const beforeLayout = layoutForest(buildLineageForest(before));
+    const after = before.slice(0, 1); // a pure removal in agent terms...
+
+    // ...but computeStableLayout is called with a changed orientation, which
+    // has no "unaffected region" concept, so it must reflow fully in the new
+    // orientation rather than mixing stale vertical pixels into a horizontal
+    // layout.
+    const stable = computeStableLayout(
+      after,
+      noCollapse,
+      false,
+      'horizontal',
+      prev(before, beforeLayout, { orientation: 'vertical' })
+    );
+    let fresh = layoutForest(buildLineageForest(after));
+    fresh = transposeLayout(fresh);
+    expect(posById(stable)).toEqual(posById(fresh));
   });
 });

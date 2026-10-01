@@ -386,6 +386,229 @@ export function layoutForestWithUsers(roots: LineageNode[]): ForestLayout {
 }
 
 /**
+ * Pixel endpoints for the edge between a positioned parent and child, given
+ * the flow direction. Vertical: parent bottom-center → child top-center.
+ * Horizontal: parent right-edge-center → child left-edge-center. Mirrors the
+ * inline math in `layoutForest`'s vertical walk and `transposeLayout`'s
+ * horizontal edge rebuild, factored out so `computeStableLayout` can recompute
+ * an edge's pixels from a node whose position it chose to preserve rather
+ * than recompute.
+ */
+export function edgeEndpoints(
+  orientation: Orientation,
+  parent: { px: number; py: number },
+  child: { px: number; py: number }
+): { x1: number; y1: number; x2: number; y2: number } {
+  if (orientation === 'horizontal') {
+    return {
+      x1: parent.px + NODE_W,
+      y1: parent.py + NODE_H / 2,
+      x2: child.px,
+      y2: child.py + NODE_H / 2,
+    };
+  }
+  return { x1: parent.px + NODE_W / 2, y1: parent.py + NODE_H, x2: child.px, y2: child.py };
+}
+
+/**
+ * Maps every node in the forest to the agent ID of the root of its tree.
+ * Used by `computeStableLayout` to tell which old nodes belong to a tree that
+ * a removal touched (and must reflow) versus one it didn't (and must keep its
+ * exact previous pixels).
+ */
+function rootIdsOf(roots: LineageNode[]): Map<string, string> {
+  const map = new Map<string, string>();
+  const walk = (node: LineageNode, rootId: string): void => {
+    map.set(node.agent.id, rootId);
+    for (const child of node.children) walk(child, rootId);
+  };
+  for (const root of roots) walk(root, root.agent.id);
+  return map;
+}
+
+/** What changed between two agent lists for `computeStableLayout` to key off. */
+export interface PureRemoval {
+  /** IDs present in the old list but not the new one. */
+  removedIds: Set<string>;
+  /** Surviving IDs whose direct parent is one of `removedIds` — these are
+   * promoted to new roots by `buildLineageForest` and need a fresh position. */
+  orphanedIds: Set<string>;
+}
+
+/**
+ * Detects a "pure removal": `newAgents` is missing one or more IDs from
+ * `oldAgents`, and every surviving agent has the same direct parent
+ * (`parentIdOf`), root user (`rootUserOf`) and name as before — i.e. the only
+ * topology input that changed is which IDs are present, not how the
+ * survivors relate to each other. Returns null for any other kind of change
+ * (an addition, a rename, a reparent among survivors, or no change at all),
+ * since those don't have a well-defined "unaffected" region worth preserving
+ * and are rare enough that a full reflow (the pre-#2481 behavior) is fine.
+ */
+export function detectPureRemoval(
+  oldAgents: readonly Agent[],
+  newAgents: readonly Agent[]
+): PureRemoval | null {
+  if (newAgents.length >= oldAgents.length) return null;
+  const oldById = new Map(oldAgents.map((a) => [a.id, a]));
+  const newIds = new Set(newAgents.map((a) => a.id));
+  for (const a of newAgents) {
+    const old = oldById.get(a.id);
+    if (
+      !old ||
+      parentIdOf(old) !== parentIdOf(a) ||
+      rootUserOf(old) !== rootUserOf(a) ||
+      old.name !== a.name
+    ) {
+      return null;
+    }
+  }
+  const removedIds = new Set<string>();
+  for (const a of oldAgents) {
+    if (!newIds.has(a.id)) removedIds.add(a.id);
+  }
+  const orphanedIds = new Set<string>();
+  for (const a of newAgents) {
+    const pid = parentIdOf(a);
+    if (pid && removedIds.has(pid)) orphanedIds.add(a.id);
+  }
+  return { removedIds, orphanedIds };
+}
+
+/**
+ * Builds the layout for `agents`, reusing `previous`'s pixel positions for
+ * every node/user whose forest-root tree is unaffected by what changed since
+ * `previous.agents`. This is what keeps unrelated nodes from visibly jumping
+ * when a single agent is deleted elsewhere in the graph (#2481):
+ * `layoutForest`'s tidy-tree algorithm assigns leaf x-slots with a single
+ * counter shared across every root in the forest, so removing (or re-rooting)
+ * one node can renumber — and therefore reposition — leaves in a completely
+ * unrelated tree laid out after it.
+ *
+ * Falls back to a full fresh layout (the pre-#2481 behavior) when there is no
+ * previous layout, when `collapsedIds`/`showUsers`/`orientation` differ from
+ * what `previous.layout` was built with (those have no "unaffected region"
+ * concept — e.g. a previous *vertical* pixel is meaningless to reuse in a
+ * fresh *horizontal* layout), or when `detectPureRemoval` reports something
+ * other than a pure removal (see its doc comment).
+ *
+ * Two removal shapes, handled differently:
+ * - Clean removal (no `orphanedIds`): every removed ID was a leaf, so the
+ *   remaining tree needs no re-rooting and the previous layout is still
+ *   valid as-is. The removed nodes/edges (and any user left with no agents)
+ *   are dropped in place; nothing else is recomputed, so nothing else can
+ *   move. This is the common case (deleting a single leaf agent).
+ * - Re-rooting removal (`orphanedIds` non-empty): a removed agent had
+ *   surviving children, which `buildLineageForest` promotes to new roots, so
+ *   that one tree must reflow. A full fresh layout is computed to get valid
+ *   positions for the changed structure, then every node/user whose old root
+ *   tree did NOT contain a removed agent has its previous pixel position
+ *   restored — undoing any renumbering the shared layout call gave it. Edges
+ *   are rebuilt from final positions to match.
+ */
+export function computeStableLayout(
+  agents: Agent[],
+  collapsedIds: ReadonlySet<string>,
+  showUsers: boolean,
+  orientation: Orientation,
+  previous: {
+    agents: readonly Agent[];
+    collapsedIds: ReadonlySet<string>;
+    showUsers: boolean;
+    orientation: Orientation;
+    layout: ForestLayout;
+  } | null
+): ForestLayout {
+  const freshLayout = (): ForestLayout => {
+    const forest = buildLineageForest(agents);
+    pruneCollapsed(forest, collapsedIds);
+    let layout = showUsers ? layoutForestWithUsers(forest) : layoutForest(forest);
+    if (orientation === 'horizontal') layout = transposeLayout(layout);
+    return layout;
+  };
+
+  if (!previous) return freshLayout();
+  if (
+    previous.collapsedIds !== collapsedIds ||
+    previous.showUsers !== showUsers ||
+    previous.orientation !== orientation
+  ) {
+    return freshLayout();
+  }
+  const removal = detectPureRemoval(previous.agents, agents);
+  if (!removal) return freshLayout();
+
+  const oldNodePos = new Map(
+    previous.layout.nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }])
+  );
+  const oldUserPos = new Map(previous.layout.users.map((u) => [u.id, { px: u.px, py: u.py }]));
+
+  if (removal.orphanedIds.size === 0) {
+    const nodes = previous.layout.nodes.filter((n) => !removal.removedIds.has(n.agent.id));
+    const edges = previous.layout.edges.filter(
+      (e) => !removal.removedIds.has(e.parentId) && !removal.removedIds.has(e.childId)
+    );
+    const liveUserKeys = new Set(
+      edges.map((e) => e.parentId).filter((id) => id.startsWith('user:'))
+    );
+    const users = previous.layout.users.filter((u) => liveUserKeys.has(userKey(u.id)));
+    return { nodes, edges, users, width: previous.layout.width, height: previous.layout.height };
+  }
+
+  const oldRootOf = rootIdsOf(buildLineageForest(previous.agents as Agent[]));
+  const affectedRoots = new Set<string>();
+  for (const id of removal.removedIds) {
+    const root = oldRootOf.get(id);
+    if (root) affectedRoots.add(root);
+  }
+  const isAffected = (agentId: string): boolean => affectedRoots.has(oldRootOf.get(agentId) ?? '');
+
+  const fresh = freshLayout();
+  const nodes = fresh.nodes.map((n) => {
+    if (isAffected(n.agent.id)) return n;
+    const old = oldNodePos.get(n.agent.id);
+    return old ? { ...n, ...old } : n;
+  });
+  const nodePos = new Map(nodes.map((n) => [n.agent.id, { px: n.px, py: n.py }]));
+
+  const affectedUsers = new Set<string>();
+  for (const a of agents) {
+    if (isAffected(a.id)) {
+      const uid = rootUserOf(a);
+      if (uid) affectedUsers.add(uid);
+    }
+  }
+  const users = fresh.users.map((u) => {
+    if (affectedUsers.has(u.id)) return u;
+    const old = oldUserPos.get(u.id);
+    return old ? { ...u, ...old } : u;
+  });
+  const userPos = new Map(users.map((u) => [u.id, { px: u.px, py: u.py }]));
+
+  const posOf = (key: string): { px: number; py: number } | undefined =>
+    key.startsWith('user:') ? userPos.get(key.slice('user:'.length)) : nodePos.get(key);
+  const edges = fresh.edges.map((e) => {
+    const parent = posOf(e.parentId);
+    const child = posOf(e.childId);
+    if (!parent || !child) return e;
+    return { ...e, ...edgeEndpoints(orientation, parent, child) };
+  });
+
+  let width = fresh.width;
+  let height = fresh.height;
+  for (const n of nodes) {
+    width = Math.max(width, n.px + NODE_W + PAD);
+    height = Math.max(height, n.py + NODE_H + PAD);
+  }
+  for (const u of users) {
+    width = Math.max(width, u.px + NODE_W + PAD);
+    height = Math.max(height, u.py + NODE_H + PAD);
+  }
+
+  return { nodes, edges, users, width, height };
+}
+
+/**
  * Transposes a vertical layout (from layoutForest / layoutForestWithUsers)
  * into a horizontal one: depth maps to the x axis (roots on the left, depth
  * increases to the right) and leaf slots stack vertically. Cards keep their

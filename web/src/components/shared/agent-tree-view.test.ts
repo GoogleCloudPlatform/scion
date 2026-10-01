@@ -391,13 +391,138 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
     expect(didAutoFit()).toBe(false);
   });
 
-  it('resets auto-fit when a project drops out of the scope', async () => {
+  it('does not reset auto-fit when a project drops out of the scope (#2481)', async () => {
+    // A project leaving scope (e.g. an agent delete emptied it out of a
+    // cross-project graph) must not reset the viewport — that is the
+    // cross-project variant of the same jarring reset #2481 reports, just
+    // for the whole canvas instead of one node. Only a project *entering*
+    // scope is worth re-fitting for.
     el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
     await el.updateComplete;
     setDidAutoFit(true);
     el.agents = el.agents.filter((a) => a.projectId !== 'p2');
     await el.updateComplete;
-    expect(didAutoFit()).toBe(false);
+    expect(didAutoFit()).toBe(true);
+  });
+});
+
+describe('scion-agent-tree-view stable layout & keyed rendering on delete (#2481)', () => {
+  let el: ScionAgentTreeView;
+
+  function baseAgents(): Agent[] {
+    return [
+      agent('r1', 'root-1', ['user-1']),
+      agent('a1', 'child-a', ['user-1', 'r1']),
+      agent('a2', 'child-b', ['user-1', 'r1']),
+      agent('r2', 'root-2', ['user-2']),
+      agent('b1', 'other-tree-child', ['user-2', 'r2']),
+    ];
+  }
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el.agents = baseAgents();
+    document.body.appendChild(el);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  /** Maps agent id -> its rendered .node-wrapper DOM element, for identity checks. */
+  function wrappersById(): Map<string, Element> {
+    const out = new Map<string, Element>();
+    el.shadowRoot!.querySelectorAll('.node-wrapper').forEach((wrapper) => {
+      const href = wrapper.querySelector('a.node')?.getAttribute('href') ?? '';
+      out.set(href.replace('/agents/', ''), wrapper);
+    });
+    return out;
+  }
+
+  it('removing a leaf keeps every other node at its exact previous position', async () => {
+    const before = nodePositions(el);
+
+    el.agents = el.agents.filter((a) => a.id !== 'a2'); // a2 is a leaf
+    await el.updateComplete;
+
+    const after = nodePositions(el);
+    expect(after['a2']).toBeUndefined();
+    for (const id of ['r1', 'a1', 'r2', 'b1']) {
+      expect(after[id]).toBe(before[id]);
+    }
+  });
+
+  it('removing a parent with children keeps unrelated trees in place', async () => {
+    const before = nodePositions(el);
+
+    // a1 has no children, so delete r1 instead: a1 and a2 both orphan and
+    // get re-rooted, but the unrelated r2/b1 tree must not move.
+    el.agents = el.agents.filter((a) => a.id !== 'r1');
+    await el.updateComplete;
+
+    const after = nodePositions(el);
+    expect(after['r1']).toBeUndefined();
+    expect(after['r2']).toBe(before['r2']);
+    expect(after['b1']).toBe(before['b1']);
+    // a1/a2 are still rendered (promoted to roots), just not necessarily at
+    // their old positions.
+    expect(after['a1']).toBeTruthy();
+    expect(after['a2']).toBeTruthy();
+  });
+
+  it('keeps DOM element identity for surviving nodes across a deletion (keyed repeat())', async () => {
+    const before = wrappersById();
+
+    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    await el.updateComplete;
+
+    const after = wrappersById();
+    expect(after.has('a2')).toBe(false);
+    for (const id of ['r1', 'a1', 'r2', 'b1']) {
+      expect(after.get(id)).toBe(before.get(id));
+    }
+  });
+
+  it('keeps DOM edge element identity for surviving edges across a deletion (keyed repeat())', async () => {
+    const beforeEdges = Array.from(el.shadowRoot!.querySelectorAll('svg path.edge'));
+    expect(beforeEdges).toHaveLength(3); // r1->a1, r1->a2, r2->b1
+
+    // Mark the r1->a1 edge (the one with the smallest d/path y1, i.e. the
+    // first edge in the surviving r1 tree) by tagging it directly — <path>
+    // carries no id/data attribute identifying its endpoints, so identity is
+    // the only thing we can check across the two renders.
+    const tagged = beforeEdges[0];
+    tagged.setAttribute('data-test-tag', 'x');
+
+    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    await el.updateComplete;
+
+    const afterEdges = Array.from(el.shadowRoot!.querySelectorAll('svg path.edge'));
+    expect(afterEdges).toHaveLength(2);
+    expect(afterEdges.some((p) => p.getAttribute('data-test-tag') === 'x')).toBe(true);
+  });
+
+  it('does not reset pan/zoom or auto-fit when deleting a leaf agent', async () => {
+    const view = el as unknown as {
+      panX: number;
+      panY: number;
+      scale: number;
+      didAutoFit: boolean;
+    };
+    view.didAutoFit = true;
+    view.panX = 42;
+    view.panY = -17;
+    view.scale = 1.4;
+
+    el.agents = el.agents.filter((a) => a.id !== 'a2');
+    await el.updateComplete;
+
+    expect(view.didAutoFit).toBe(true);
+    expect(view.panX).toBe(42);
+    expect(view.panY).toBe(-17);
+    expect(view.scale).toBe(1.4);
   });
 });
 
