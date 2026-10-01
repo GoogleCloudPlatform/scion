@@ -77,10 +77,12 @@ second rebases onto the other.
 ## Verification
 
 - `npm ci` in `web/`: clean install.
-- `npx vitest run` (full suite, default parallel): passes; a subset of
-  unrelated files (admin-groups, chat-\*, …) intermittently time out under
-  worker-pool contention in this environment, not a real failure — the same
-  files pass individually and with `--no-file-parallelism`.
+- `npx vitest run` (full suite, default parallel): intermittent test/hook
+  timeouts under worker-pool contention in this environment, a different
+  subset of files each run (including, sometimes, the touched
+  `admin-server-config.test.ts`), with comparable counts on a clean pre-1b
+  base run the same way. No assertion ever fails, only timeouts, and every
+  file passes individually and under `--no-file-parallelism`.
 - `npx vitest run --no-file-parallelism` (full suite): all files, all tests
   pass.
 - `npm run typecheck`: clean.
@@ -109,9 +111,7 @@ second rebases onto the other.
 
 ## Size
 
-13 web files changed, about +1680/-65 against upstream `main`
-(`git diff --stat`), plus this log. Above the ~550-700 line M target;
-`admin-experiments.ts` plus its test file account for most of the
-overrun — a full CRUD admin tab with four states (normal, 403, malformed,
-empty) and sequential-write semantics, plus the tests the design's
-acceptance criteria call for by name.
+13 web files changed, +1730/-64 against upstream `main` (`git diff
+--stat`), plus this log. Most of that is `admin-experiments.ts` and its
+test file: an admin tab with four states (normal, 403, malformed, empty),
+sequential-write semantics, and a test for each state and write path.
