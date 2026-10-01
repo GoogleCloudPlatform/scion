@@ -1,0 +1,30 @@
+# Experiments Phase 2 — convention and documentation (ptone/scion#2217)
+
+Branch: `scion/experiments-2`, based on `scion/experiments-1b` (ptone/scion#2436), which is rebased onto upstream `main` after Phase 1a-i and 1a-ii merged upstream as GoogleCloudPlatform/scion#2121 and GoogleCloudPlatform/scion#2152.
+
+## Scope
+
+Docs and convention only. The single code file touched is `web/src/utils/feature-flags.ts`, and only a doc comment.
+
+- `docs-site/src/content/docs/reference/experiments.md` (new): what an experiment is; for admins (permissions, next-page-load semantics, unknown-override retention and single-name removal, the failed-request fallback, and the malformed-settings behavior with "Reset all to defaults"); for developers launching an experiment, including the server-decides-hub-behavior enforcement principle; changing a default; retiring (graduate or abandon); the four-row precedence table and the devtools-override behavior change; and the review-date cadence.
+- `AGENTS.md` (root): a short "Experimental features" note pointing new feature work at the registry and the new reference page.
+- `web/AGENTS.md`: the web-specific line of that note (the registry/docs pointer and the `/api/v1/settings/public` guidance).
+- `web/src/utils/feature-flags.ts`: corrected a doc comment on `setFeatureFlag` that still referenced a Go-template injection of `window.__SCION_FEATURES__`. The module header comment already described the real boot-fetch mechanism from the prior phase.
+- `docs-site/src/content/docs/reference/web-config.md`: the Feature Flags section now describes the boot-time fetch and the current precedence order, distinguishes a registered experiment from an unregistered flag, and links to the new reference page.
+- `web/e2e/terminal-workspace/ROLLOUT.md`: rewritten to document admin control through the Experiments tab and to drop the stale "not in `DEFAULT_ON_FLAGS`" and Go-template statements.
+
+## Findings versus the design text
+
+- The nav path is **Admin → Server Config → Experiments**, not "Settings → Server Config → Experiments." Confirmed against `web/src/components/shared/nav.ts` and existing cross-references in `admin-users.ts`. The new docs page and both doc fixes use the real path.
+- `web/src/utils/feature-flags.ts`'s module header comment already described the boot fetch and the four-row precedence, and no longer claimed the Go template sets the flags — this part of the planned fix had already landed in the prior phase. The remaining stray reference was in `setFeatureFlag`'s own doc comment, fixed here.
+- A pre-existing, unrelated comment in `web/e2e/chat-palette/fixture.ts` still describes a native-chat test fixture's flags as "exactly as main.ts would set them from the Go template." This predates this work, concerns `web.native_chat_v2` (not a registered experiment), and is outside this phase's single-file code-change scope, so it was left as-is and is flagged for whoever owns that fixture next.
+
+## Release notes
+
+This repository records release notes as dated weekly digests under `docs-site/src/content/docs/release-notes/`, plus a daily per-PR changelog under `changelog/`. Both are compiled after merge from PRs merged to `main` in the period they cover; neither is edited by an individual feature PR, and neither currently has an open page for this unmerged work. A proposed line is included in the PR description for whichever digest ends up covering this change.
+
+## Verification
+
+- `docs-site`: `npm ci`, then `npm run build` (requires Node >= 22; the sandbox's default Node was 20, so a local Node 22 toolchain and the `d2` CLI were used to run the real build rather than skip it). Build succeeds, generates `/reference/experiments/`, and the `starlight-links-validator` link check reports all internal links valid.
+- `web`: `npm ci`; `npm run typecheck` clean; `npx prettier --check src/utils/feature-flags.ts` clean; `npx eslint src/utils/feature-flags.ts` clean; `npx vitest run src/utils/feature-flags.test.ts` — 32/32 passing (no test changes needed; existing precedence tests already cover the corrected doc comment's behavior).
+- Repo-wide grep confirms no remaining doc claims that a Go template sets `window.__SCION_FEATURES__`, and `ROLLOUT.md` no longer says the flag is off by default.
