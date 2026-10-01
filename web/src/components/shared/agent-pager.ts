@@ -40,6 +40,15 @@ export class ScionAgentPager extends LitElement {
   @property({ type: Number })
   pageIndex = 0;
 
+  /**
+   * Rows before this page, i.e. `a - 1` in "a-b of N" (design §6.1). Not
+   * assumed to be `pageIndex * pageSize` — a page can be short (design §5.3
+   * step 5a, E2), so the host tracks the real running offset (round 2
+   * review N2').
+   */
+  @property({ type: Number })
+  rangeStart = 0;
+
   /** Number of rows actually rendered on the current page. */
   @property({ type: Number })
   rowsOnPage = 0;
@@ -138,7 +147,7 @@ export class ScionAgentPager extends LitElement {
     if (this.rowsOnPage === 0) {
       return html`<span class="range">0 of ${this.total}</span>`;
     }
-    const a = this.pageIndex * this.pageSize + 1;
+    const a = this.rangeStart + 1;
     const b = a + this.rowsOnPage - 1;
     return html`<span class="range">${a}-${b} of ${this.total}</span>`;
   }

@@ -90,6 +90,8 @@ export class AgentListWindow extends EventTarget {
   private _state: WindowState = 'small';
   private pageItems: Agent[] = [];
   private cursors: Array<string | undefined> = [undefined];
+  /** `pageOffsets[i]` = rows before page `i` (round 2 review N2'). Pages can be short (E2, §5.3 step 5a's race-dropped rows), so this is tracked as pages are actually fetched, not assumed to be `pageIndex * pageSize`. */
+  private pageOffsets: number[] = [0];
   private _pageIndex = 0;
   private _totalCount = 0;
   private _hasNext = false;
@@ -169,6 +171,7 @@ export class AgentListWindow extends EventTarget {
     this._totalCount = result.totalCount;
     this._hasNext = !!result.nextCursor;
     this.cursors = [undefined, result.nextCursor];
+    this.pageOffsets = [0, result.agents.length];
     this._pageIndex = 0;
     this._updatesAvailable = false;
     this._error = null;
@@ -183,10 +186,31 @@ export class AgentListWindow extends EventTarget {
     }
   }
 
-  /** Unsliced, filtered + sorted local view (small state only). Grid and tree views render this directly (design §6.3). */
+  /** Memoization cache for `display` (round 2 review N4'): recomputed only when the held array's identity or the view state's identity changes. */
+  private displayCache: { held: Agent[]; viewState: AgentListViewState; result: Agent[] } | null =
+    null;
+
+  /**
+   * Unsliced, filtered + sorted local view (small state only). Grid and tree
+   * views render this directly (design §6.3). Memoized on `(H identity,
+   * view state)` per design §6.1 — `getHeldAgents()` returns the same
+   * reference across renders until the host reassigns `this.agents`, and
+   * `setViewState` always replaces `this.viewState` with a new object, so
+   * both are cheap identity checks.
+   */
   get display(): Agent[] {
     if (this._state !== 'small') return this.pageItems;
-    return this.filteredAndSorted(this.getHeldAgents());
+    const held = this.getHeldAgents();
+    if (
+      this.displayCache &&
+      this.displayCache.held === held &&
+      this.displayCache.viewState === this.viewState
+    ) {
+      return this.displayCache.result;
+    }
+    const result = this.filteredAndSorted(held);
+    this.displayCache = { held, viewState: this.viewState, result };
+    return result;
   }
 
   private filteredAndSorted(list: Agent[]): Agent[] {
@@ -219,6 +243,21 @@ export class AgentListWindow extends EventTarget {
     return this._state === 'paged' ? this._totalCount : this.display.length;
   }
 
+  /**
+   * Rows before the current page (design §6.1's "a" in "a-b of N" is
+   * `rangeStart + 1`). In the small state this is exact
+   * (`pageIndex * pageSize`, a pure local slice). In the paged state a page
+   * can be short — a race-dropped row (design §5.3 step 5a, E2) — so this
+   * is the actually-tracked running offset, not an assumption that every
+   * prior page was full (round 2 review N2').
+   */
+  get rangeStart(): number {
+    if (this._state === 'paged') {
+      return this.pageOffsets[this._pageIndex] ?? this._pageIndex * this.viewState.pageSize;
+    }
+    return this._pageIndex * this.viewState.pageSize;
+  }
+
   get stats(): { total: number; running: number } {
     if (this._state === 'small') {
       const held = this.getHeldAgents();
@@ -231,16 +270,29 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * A sort, phase, page-size or label change. Always resets `pageIndex` to 0
-   * (design §6.3). Purely local — never issues a request, in either state
-   * (round 1 review B3): the project page's `syncAgentsForViewState` is the
-   * single place that decides whether a view-state change needs a fresh
-   * paged request (design §4.3's "one request per trigger", and the §11
-   * P1c interim-cost transitions).
+   * A sort, phase, page-size or label change. Purely local — never issues a
+   * request, in either state (round 1 review B3): the project page's
+   * `syncAgentsForViewState` is the single place that decides whether a
+   * view-state change needs a fresh paged request (design §4.3's "one
+   * request per trigger", and the §11 P1c interim-cost transitions).
+   *
+   * Resets `pageIndex` to 0 only in the **small** state (design §6.3, "a
+   * change resets to page 0"). In the **paged** state, `pageIndex` and the
+   * current page/cursors are left alone here (round 2 review B1'): every
+   * paged view-state change that actually needs a different page — sort,
+   * phase, page-size — is followed by `syncAgentsForViewState` calling
+   * `loadAgentsForView`, whose `setPaged` already resets to page 0 together
+   * with the items and cursors it fetched. A **label** change alone is
+   * never followed by a refetch (it only takes effect on commit), so
+   * resetting `pageIndex` here for a paged label keystroke would desync it
+   * from the rows still on screen — the pager, Prev/Next and the chip's
+   * page-0 rule would all act as if page 0 were showing.
    */
   setViewState(partial: Partial<AgentListViewState>): void {
     this.viewState = { ...this.viewState, ...partial };
-    this._pageIndex = 0;
+    if (this._state === 'small') {
+      this._pageIndex = 0;
+    }
     this.notifyChange();
   }
 
@@ -295,6 +347,8 @@ export class AgentListWindow extends EventTarget {
       this._totalCount = result.totalCount;
       this._pageIndex = index;
       this.cursors[index + 1] = result.nextCursor;
+      this.pageOffsets[index + 1] =
+        (this.pageOffsets[index] ?? index * this.viewState.pageSize) + result.agents.length;
       this._hasNext = !!result.nextCursor;
       this._updatesAvailable = false;
       this.seedStats(result.stats);
@@ -335,7 +389,12 @@ export class AgentListWindow extends EventTarget {
     };
   }
 
-  /** Whether key `k` would land on the *current* page, per design §6.2 ("on page 0: K >= first for desc, K <= first for asc"). */
+  /**
+   * Whether an **off-page** key `k` would land on the *current* page, per
+   * design §6.2 ("on page 0: K >= first for desc, K <= first for asc"). Used
+   * only for off-page members (round 2 review B2'a — an on-page row uses
+   * the different `onPageChipForNewKey` predicate below).
+   */
   private withinPageKRange(k: string, range: { first: string; last: string } | null): boolean {
     if (!range) return this._pageIndex === 0; // an empty page 0 accepts anything.
     const { first, last } = range;
@@ -343,6 +402,29 @@ export class AgentListWindow extends EventTarget {
       return this._pageIndex === 0 ? k >= first : k <= first && k >= last;
     }
     return this._pageIndex === 0 ? k <= first : k >= first && k <= last;
+  }
+
+  /**
+   * Whether an **on-page** row's new key `k` should raise the chip (design
+   * §6.2: "the new K is outside the page's [first,last] range and the row
+   * is not at the top of page 0"). Round 2 review B2'a: this is the
+   * opposite direction of `withinPageKRange` — a row already on the page
+   * that simply reorders to the current extreme ("the top of page 0") never
+   * left the page, so no chip; only falling off the *other* end, or rising
+   * past the top on any page but page 0 (nothing above page 0 to shift it
+   * into), does.
+   */
+  private onPageChipForNewKey(k: string, range: { first: string; last: string }): boolean {
+    const { first, last } = range;
+    const atPageZero = this._pageIndex === 0;
+    if (this.viewState.sortDir === 'desc') {
+      if (k < last) return true; // fell off the bottom, onto the next page.
+      if (k > first) return !atPageZero; // rose past the old top.
+      return false; // reordered within range.
+    }
+    if (k > last) return true;
+    if (k < first) return !atPageZero;
+    return false;
   }
 
   private passesPhase(a: Agent): boolean {
@@ -377,9 +459,9 @@ export class AgentListWindow extends EventTarget {
       if (onPage.has(id)) {
         if (this.passesPhase(agent)) {
           // Replace this object, then re-sort the page locally (today's live reorder, Q-D).
-          // Chip iff the new key would move it off this page (design §6.2).
+          // Chip iff the new key would move it off this page (design §6.2; round 2 review B2'a).
           const newK = updatedKey(agent);
-          if (!this.withinPageKRange(newK, rangeBefore)) chip = true;
+          if (rangeBefore && this.onPageChipForNewKey(newK, rangeBefore)) chip = true;
           onPage.set(id, agent);
           resort = true;
         } else {
@@ -419,32 +501,40 @@ export class AgentListWindow extends EventTarget {
     rangeBefore: { first: string; last: string } | null
   ): boolean {
     const wasMember = this.memberIndex.has(id);
-    const prevPhase = this.memberIndex.getPhase(id);
-    const prevPassed =
-      wasMember && (!this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter);
-    const nowPasses = this.passesPhase(agent);
 
     if (wasMember) {
       // An existing off-page member's phase changes unconditionally (round 1
       // review B6: only *adding* a new member is gated by the add rule).
+      const prevPhase = this.memberIndex.getPhase(id);
+      const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
+      const nowPasses = this.passesPhase(agent);
       this.memberIndex.set(id, agent.phase);
-    } else if (this.passesCommittedLabel(agent)) {
-      // A genuinely new member under today's add rule (design §6.2; round 1
-      // review B6) — e.g. a `created` event, which `AgentsChangedDetail`
-      // cannot distinguish from any other upsert, so the add rule itself is
-      // the gate against inflating stats for an out-of-label agent.
-      this.memberIndex.set(id, agent.phase);
-    } else {
-      // Not a member and does not pass the add rule: never added, and the
-      // off-page member-index update below never applies to it. Still
-      // raises the chip, like a delta for a project-scope agent generally.
-      return true;
+      const newlyPasses = nowPasses && !prevPassed;
+      const enteredRange = this.withinPageKRange(updatedKey(agent), rangeBefore);
+      // "Off-page member change affecting counts only" shows no chip (design §6.2).
+      return newlyPasses || enteredRange;
     }
 
-    const newlyPasses = nowPasses && !prevPassed;
-    const enteredRange = this.withinPageKRange(updatedKey(agent), rangeBefore);
-    // "Off-page member change affecting counts only" shows no chip (design §6.2).
-    return newlyPasses || enteredRange;
+    if (!this.passesCommittedLabel(agent)) {
+      // Neither on-page nor a member, and outside the committed label: the
+      // same as a delta for an ID the window has never heard of — ignored,
+      // with no chip (design §6.2; round 2 review B2'b). The project page
+      // has no "created outside today's add rule" row; that row is for the
+      // global mine/shared pages only.
+      return false;
+    }
+
+    // A genuinely new member under today's add rule (design §6.2; round 1
+    // review B6) — e.g. a `created` event, which `AgentsChangedDetail`
+    // cannot distinguish from any other upsert, so the add rule itself is
+    // the gate against inflating stats for an out-of-label agent.
+    this.memberIndex.set(id, agent.phase);
+    // "created... show if it could land on this page" (design §6.2; round 2
+    // review B2'c): for a desc sort only page 0 can receive a brand-new
+    // row (inserts sort before the cursor — design §4.5); an asc sort can
+    // receive one on any page.
+    const couldLandOnThisPage = this.viewState.sortDir === 'asc' || this._pageIndex === 0;
+    return this.passesPhase(agent) && couldLandOnThisPage;
   }
 
   /** An off-page `unknown` delta (design §6.2): only phase (and sometimes `lastActivityEvent`) is known. */

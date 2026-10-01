@@ -252,6 +252,16 @@ export class ScionPageProjectDetail extends LitElement {
   private agentsAbortController: AbortController | null = null;
 
   /**
+   * Whether a page-level agents load (`loadAgentsForView`/`loadLegacyAgents`)
+   * is in flight. Used only to show a loading indicator instead of "No
+   * agents match the current filter" during the gap between leaving the
+   * paged state and the legacy load landing (round 2 review N5') — not a
+   * correctness mechanism (see `agentsLoadGen`/`isStaleAgentsLoad` for that).
+   */
+  @state()
+  private agentsLoading = false;
+
+  /**
    * Page size for the list view's window (design Q4), persisted under
    * `scion-pagesize-project-agents`. Read once in `connectedCallback`
    * (round 1 review B4) — `<scion-agent-pager>` is a controlled component
@@ -1516,6 +1526,24 @@ export class ScionPageProjectDetail extends LitElement {
    * change that needs a fresh paged request.
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
+    this.agentsLoading = true;
+    try {
+      await this.loadAgentsForViewImpl(trigger);
+    } finally {
+      this.agentsLoading = false;
+    }
+  }
+
+  /**
+   * `agentsLoading` is a simple (non-ref-counted) flag, round 2 review N5':
+   * it covers the single-trigger case the review names (a paged -> grid
+   * transition's legacy load), not a precise count across genuinely
+   * overlapping triggers — an older trigger finishing first could clear it
+   * while a newer one (already guarded against overwriting data by
+   * `agentsLoadGen`) is still in flight. Good enough for a loading
+   * indicator; `isStaleAgentsLoad` remains the correctness guard.
+   */
+  private async loadAgentsForViewImpl(trigger: AgentsViewTrigger): Promise<void> {
     const label = this.committedLabel.trim();
     if (!this.isP1Eligible() || this.sortedRefusedForLabel === label) {
       await this.loadLegacyAgents(trigger);
@@ -1601,6 +1629,18 @@ export class ScionPageProjectDetail extends LitElement {
 
   /** Today's unsorted request (design §4.3's "legacy mode"), used when the view state is not P1-eligible, or sorted mode was refused for this label. */
   private async loadLegacyAgents(
+    trigger: AgentsViewTrigger,
+    carried?: { gen: number; signal: AbortSignal }
+  ): Promise<void> {
+    this.agentsLoading = true;
+    try {
+      await this.loadLegacyAgentsImpl(trigger, carried);
+    } finally {
+      this.agentsLoading = false;
+    }
+  }
+
+  private async loadLegacyAgentsImpl(
     trigger: AgentsViewTrigger,
     carried?: { gen: number; signal: AbortSignal }
   ): Promise<void> {
@@ -2629,7 +2669,9 @@ export class ScionPageProjectDetail extends LitElement {
             ${this.viewMode === 'list' && this.listViewUsesWindow
               ? this.renderAgentWindowList()
               : this.displayAgents.length === 0
-                ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
+                ? this.agentsLoading
+                  ? html`<div class="empty-filter-state">Loading agents…</div>`
+                  : html`<div class="empty-filter-state">No agents match the current filter.</div>`
                 : this.viewMode === 'graph'
                   ? html`<scion-agent-tree-view
                       .agents=${this.displayAgents}
@@ -2953,6 +2995,7 @@ export class ScionPageProjectDetail extends LitElement {
         <scion-agent-pager
           .storageKey=${PAGER_PAGE_SIZE_STORAGE_KEY}
           .pageIndex=${this.agentWindow.pageIndex}
+          .rangeStart=${this.agentWindow.rangeStart}
           .rowsOnPage=${items.length}
           .total=${this.agentWindow.total}
           .pageSize=${this.pagerPageSize}
@@ -2961,14 +3004,28 @@ export class ScionPageProjectDetail extends LitElement {
           .loading=${this.agentWindow.loading}
           .error=${this.agentWindow.error}
           .showChip=${this.agentWindow.updatesAvailable}
-          @prev=${() => void this.agentWindow.prev()}
-          @next=${() => void this.agentWindow.next()}
-          @chip-click=${() => void this.agentWindow.refresh()}
+          @prev=${() => this.onPagerNav(() => this.agentWindow.prev())}
+          @next=${() => this.onPagerNav(() => this.agentWindow.next())}
+          @chip-click=${() => this.onPagerNav(() => this.agentWindow.refresh())}
           @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>) =>
             this.onPagerSizeChange(e.detail.pageSize)}
         ></scion-agent-pager>
       </div>
     `;
+  }
+
+  /**
+   * A direct window navigation/refresh (Prev/Next/chip-click) supersedes
+   * whatever page-level load (`loadAgentsForView`/`loadLegacyAgents`) might
+   * still be in flight (round 2 review N1') — bumping `agentsLoadGen` makes
+   * that older response's `isStaleAgentsLoad` check discard it instead of
+   * calling `setSmall`/`setPaged` and resetting the page the user just
+   * navigated to. The window's own navigation is unaffected: it guards
+   * itself with its own generation counter.
+   */
+  private onPagerNav(action: () => Promise<void>): void {
+    this.agentsLoadGen++;
+    void action();
   }
 
   private onPagerSizeChange(size: AgentPagerPageSize): void {

@@ -522,3 +522,220 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false);
   });
 });
+
+describe('AgentListWindow — round 2 review fixes', () => {
+  function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): PagedPageResult {
+    return {
+      agents,
+      totalCount: agents.length,
+      stats: {
+        total: agents.length,
+        running: agents.filter((a) => a.phase === 'running').length,
+        agents: agents.map((a) => [a.id, a.phase]),
+      },
+      ...opts,
+    };
+  }
+
+  it("B1': setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)", async () => {
+    const page0 = [agent('a'), agent('b')];
+    const page1 = [agent('c'), agent('d')];
+    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
+      !params.cursor
+        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+        : pagedResult(page1, { totalCount: 4 })
+    );
+    const { win } = createWindow({ viewState: makeViewState(), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+    expect(win.hasPrev).toBe(true);
+    expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
+
+    const callsBefore = fetchPage.mock.calls.length;
+    win.setViewState({ label: 'en' }); // sl-input: local preview only
+    expect(win.pageIndex).toBe(1); // unchanged
+    expect(win.hasPrev).toBe(true); // unchanged
+    expect(win.items.map((a) => a.id)).toEqual(['c', 'd']); // still page 1's rows
+    expect(fetchPage.mock.calls.length).toBe(callsBefore); // no request
+  });
+
+  describe("B2'a: on-page page-0 chip predicate is K vs last, not the off-page K vs first test", () => {
+    it('Q1 desc, page 0: a mid-page row changes with its key unchanged raises no chip', () => {
+      const items = [
+        agent('a', { updated: '2026-01-03T00:00:00Z' }),
+        agent('b', { updated: '2026-01-02T00:00:00Z' }),
+        agent('c', { updated: '2026-01-01T00:00:00Z' }),
+      ];
+      const known = new Map(items.map((a) => [a.id, a]));
+      const { win } = createWindow({
+        viewState: makeViewState({ pageSize: 3 }),
+        getAgent: (id) => known.get(id),
+      });
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      known.set('b', agent('b', { updated: '2026-01-02T00:00:00Z', phase: 'stopped' }));
+      win.applyChanges({ upserted: ['b'], deleted: [], unknown: new Map(), generation: 1 });
+      expect(win.updatesAvailable).toBe(false);
+    });
+
+    it('Q2 asc, page 0: a row whose key moves but stays within [first,last] raises no chip', () => {
+      const items = [
+        agent('a', { updated: '2026-01-01T00:00:00Z' }),
+        agent('b', { updated: '2026-01-02T00:00:00Z' }),
+        agent('c', { updated: '2026-01-05T00:00:00Z' }),
+      ];
+      const known = new Map(items.map((a) => [a.id, a]));
+      const { win } = createWindow({
+        viewState: makeViewState({ pageSize: 3, sortDir: 'asc' }),
+        getAgent: (id) => known.get(id),
+      });
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      known.set('a', agent('a', { updated: '2026-01-03T00:00:00Z' }));
+      win.applyChanges({ upserted: ['a'], deleted: [], unknown: new Map(), generation: 1 });
+      expect(win.updatesAvailable).toBe(false);
+      expect(win.items.map((a) => a.id)).toEqual(['b', 'a', 'c']); // re-sorted within the page
+    });
+
+    it('Q3 desc, page 0: a row rising to the new top (no longer bounded above) raises no chip', () => {
+      const items = [
+        agent('a', { updated: '2026-01-03T00:00:00Z' }),
+        agent('b', { updated: '2026-01-02T00:00:00Z' }),
+        agent('c', { updated: '2026-01-01T00:00:00Z' }),
+      ];
+      const known = new Map(items.map((a) => [a.id, a]));
+      const { win } = createWindow({
+        viewState: makeViewState({ pageSize: 3 }),
+        getAgent: (id) => known.get(id),
+      });
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      known.set('c', agent('c', { updated: '2026-01-09T00:00:00Z' }));
+      win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
+      expect(win.updatesAvailable).toBe(false);
+      expect(win.items.map((a) => a.id)).toEqual(['c', 'a', 'b']);
+    });
+
+    it('desc, page 1 (not page 0): a row rising past the old top DOES raise the chip (the page-0 exception does not apply elsewhere)', async () => {
+      const page0 = [agent('a', { updated: '2026-02-01T00:00:00Z' })];
+      const page1 = [
+        agent('b', { updated: '2026-01-03T00:00:00Z' }),
+        agent('c', { updated: '2026-01-02T00:00:00Z' }),
+      ];
+      const known = new Map([...page0, ...page1].map((a) => [a.id, a]));
+      const fetchPage = vi.fn(async () => pagedResult(page1, { totalCount: 3, stats: undefined }));
+      const { win } = createWindow({
+        viewState: makeViewState({ pageSize: 1 }),
+        fetchPage,
+        getAgent: (id) => known.get(id),
+      });
+      win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }), '');
+      await win.next();
+      known.set('c', agent('c', { updated: '2026-01-05T00:00:00Z' })); // now above page1's old first ('b')
+      win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
+      expect(win.updatesAvailable).toBe(true);
+    });
+
+    it('desc, page 0: a row falling below the bottom DOES raise the chip', () => {
+      const items = [
+        agent('a', { updated: '2026-01-03T00:00:00Z' }),
+        agent('b', { updated: '2026-01-02T00:00:00Z' }),
+        agent('c', { updated: '2026-01-01T00:00:00Z' }),
+      ];
+      const known = new Map(items.map((a) => [a.id, a]));
+      const { win } = createWindow({
+        viewState: makeViewState({ pageSize: 3 }),
+        getAgent: (id) => known.get(id),
+      });
+      win.setPaged(pagedResult(items, { totalCount: 10, nextCursor: 'c' }), '');
+      known.set('a', agent('a', { updated: '2025-01-01T00:00:00Z' })); // now older than everything
+      win.applyChanges({ upserted: ['a'], deleted: [], unknown: new Map(), generation: 1 });
+      expect(win.updatesAvailable).toBe(true);
+    });
+  });
+
+  it("Q5 / B2'b: an off-page upsert of a state-known agent that fails the committed label is ignored (no chip, no addition)", () => {
+    const page0 = [agent('a')];
+    const nonMember = agent('x', { labels: { env: 'dev' }, updated: '2026-02-01T00:00:00Z' });
+    const known = new Map([...page0, nonMember].map((a) => [a.id, a]));
+    const { win } = createWindow({
+      viewState: makeViewState(),
+      getAgent: (id) => known.get(id),
+    });
+    win.setPaged(pagedResult(page0, { totalCount: 1 }), 'env=prod');
+
+    win.applyChanges({ upserted: ['x'], deleted: [], unknown: new Map(), generation: 1 });
+
+    expect(win.updatesAvailable).toBe(false);
+    expect(win.memberIndex.has('x')).toBe(false);
+    expect(win.stats.total).toBe(1);
+  });
+
+  it("Q6 / B2'c: a newly created off-page agent raises the chip only if it could land on THIS page (desc: page 0 only)", async () => {
+    const page0 = [agent('a', { updated: '2026-01-03T00:00:00Z' })];
+    const page1 = [agent('d', { updated: '2026-01-02T00:00:00Z' })];
+    const known = new Map([...page0, ...page1].map((a) => [a.id, a]));
+    const fetchPage = vi.fn(async () => pagedResult(page1, { totalCount: 3, stats: undefined }));
+    const { win } = createWindow({
+      viewState: makeViewState({ pageSize: 1 }),
+      fetchPage,
+      getAgent: (id) => known.get(id),
+    });
+    win.setPaged(pagedResult(page0, { totalCount: 3, nextCursor: 'c1' }), '');
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+
+    const created = agent('n', { updated: '2026-03-01T00:00:00Z' }); // newest overall: would land on page 0, not here
+    known.set('n', created);
+    win.applyChanges({ upserted: ['n'], deleted: [], unknown: new Map(), generation: 1 });
+
+    expect(win.updatesAvailable).toBe(false); // page 1 can never receive a brand-new desc row
+    expect(win.memberIndex.has('n')).toBe(true); // still added as a member (stats update live)
+  });
+
+  it('a newly created agent on page 0 (desc) DOES raise the chip', () => {
+    const page0 = [agent('a', { updated: '2026-01-03T00:00:00Z' })];
+    const { win } = createWindow({
+      viewState: makeViewState({ pageSize: 1 }),
+      getAgent: (id) => (id === 'n' ? agent('n', { updated: '2026-02-01T00:00:00Z' }) : undefined),
+    });
+    win.setPaged(pagedResult(page0, { totalCount: 1 }), '');
+    win.applyChanges({ upserted: ['n'], deleted: [], unknown: new Map(), generation: 1 });
+    expect(win.updatesAvailable).toBe(true);
+  });
+
+  it("N2': rangeStart tracks the real running offset, not pageIndex * pageSize, across a short page", async () => {
+    const page0 = [agent('a'), agent('b'), agent('c')]; // a short page0: 3 rows at pageSize 3 (full)
+    const page1 = [agent('d'), agent('e')]; // page1 is SHORT: only 2 rows (one race-dropped, design E2)
+    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
+      !params.cursor
+        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 10 })
+        : pagedResult(page1, { nextCursor: 'c2', totalCount: 10 })
+    );
+    const { win } = createWindow({ viewState: makeViewState({ pageSize: 3 }), fetchPage });
+    win.setPaged(await fetchPage({ cursor: undefined, limit: 3, wantStats: true }), '');
+    expect(win.rangeStart).toBe(0);
+    await win.next();
+    expect(win.rangeStart).toBe(3); // rows before page 1: exactly page0's 3 rows
+    await win.next(); // page 2 starts after page1's actual (short) 2 rows, not an assumed 3
+    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c2', limit: 3, wantStats: false });
+    expect(win.rangeStart).toBe(5); // 3 + 2, not 3 + 3
+  });
+
+  it("N4': display is memoized on (held identity, view state identity)", () => {
+    let agents = [agent('b'), agent('a')];
+    const { win } = createWindow({ viewState: makeViewState(), getHeldAgents: () => agents });
+    win.setSmall();
+    const d1 = win.display;
+    const d2 = win.display;
+    expect(d1).toBe(d2); // same reference: not recomputed
+
+    win.setViewState({ phaseFilter: 'running' });
+    const d3 = win.display;
+    expect(d3).not.toBe(d1); // view state changed: recomputed
+    const d4 = win.display;
+    expect(d4).toBe(d3); // stable again until something changes
+
+    agents = [agent('b'), agent('a')]; // host reassigns this.agents (new array, same content)
+    const d5 = win.display;
+    expect(d5).not.toBe(d3); // held identity changed: recomputed even though content is equal
+  });
+});

@@ -667,7 +667,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length).toBe(before); // still zero-cost (design §6.2)
     });
 
-    it('B6: an off-page status change for a non-member under a different committed label never inflates stats.total', async () => {
+    it("B6 + B2'b: an off-page status change for a non-member under a different committed label never inflates stats.total and never raises the chip", async () => {
       const projectId = 'p-paged-label';
       const members = Array.from({ length: 30 }, (_, i) =>
         makeAgent(i, { labels: { env: 'prod' } })
@@ -720,6 +720,7 @@ describe('project-detail — agent list window (P1c)', () => {
       await el.updateComplete;
 
       expect(internals(el).agentStats.total).toBe(30); // unchanged
+      expect(internals(el).agentWindow.updatesAvailable).toBe(false); // ignored outright: no chip (round 2 review B2'b)
       expect(requests.length).toBe(before);
     });
 
@@ -872,7 +873,7 @@ describe('project-detail — agent list window (P1c)', () => {
       expect(requests.length - n).toBe(1); // phase change while paged: exactly one (design row 6)
     });
 
-    it('grid<->list toggles cost exactly the documented interim requests, then zero (round 1 review B3)', async () => {
+    it("grid<->list toggles cost exactly the documented interim requests, then zero, once the set is complete and promoted to small (round 1 review B3; not the always-paged case — see B3' below)", async () => {
       const projectId = 'p-b3-toggles';
       localStorage.setItem('scion-view-project-agents', 'list');
       // 30 agents; the sorted endpoint reports complete once asked again
@@ -926,6 +927,103 @@ describe('project-detail — agent list window (P1c)', () => {
       }
       expect(requests.length - n).toBe(0); // held: this.agents already has the complete set
     }, 20_000);
+
+    it("always-paged (fit=0): a dir flip costs one request, and list<->grid toggles cost exactly one each, alternating legacy and fit (round 2 review B3')", async () => {
+      const projectId = 'p-b3-always-paged';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // every sorted request in this test stays paged
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: true, // the legacy fallback is also "large" (truncated), so it never promotes to small either
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      let n = requests.length;
+      internals(el).toggleSort('updated'); // same field: flips dir only
+      await new Promise((r) => setTimeout(r, 10));
+      expect(requests.length - n).toBe(1);
+
+      const toggle = viewToggle(el)!;
+      const perToggleCosts: number[] = [];
+      for (const v of ['grid', 'list', 'grid', 'list', 'grid', 'list']) {
+        n = requests.length;
+        toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
+        await new Promise((r) => setTimeout(r, 10));
+        perToggleCosts.push(requests.length - n);
+      }
+      // Every toggle costs exactly one request: ->grid is the legacy load
+      // (exiting 'paged'), ->list is the fit request (re-entering 'paged',
+      // since this fixture never reports complete) — design §11's two
+      // interim-cost bullets, paid on every toggle while the project stays
+      // above the fit threshold.
+      expect(perToggleCosts).toEqual([1, 1, 1, 1, 1, 1]);
+    }, 20_000);
+  });
+
+  describe("label typing while paged (round 2 review B1')", () => {
+    it('does not reset pageIndex, the rows shown, or issue a request', async () => {
+      const projectId = 'p-b1-typing';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 60 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0');
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      await internals(el).agentWindow.next();
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(1);
+      const itemsBefore = internals(el).agentWindow.items.map((a) => a.id);
+
+      const before = requests.length;
+      const input = labelInput(el)!;
+      input.value = 'en';
+      input.dispatchEvent(new Event('sl-input'));
+      await el.updateComplete;
+
+      expect(internals(el).agentWindow.pageIndex).toBe(1); // unchanged (round 2 review B1')
+      expect(internals(el).agentWindow.items.map((a) => a.id)).toEqual(itemsBefore);
+      expect(requests.length).toBe(before); // still zero
+      const pagerEl = el.shadowRoot?.querySelector('scion-agent-pager') as unknown as {
+        pageIndex: number;
+        hasPrev: boolean;
+      } | null;
+      expect(pagerEl?.pageIndex).toBe(1);
+      expect(pagerEl?.hasPrev).toBe(true);
+    });
   });
 
   describe('persisted page size (round 1 review B4)', () => {
@@ -1060,6 +1158,188 @@ describe('project-detail — agent list window (P1c)', () => {
       expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.name)).toEqual([
         'second-trigger',
       ]);
+    });
+  });
+
+  describe("window navigation supersedes a pending page-level load (round 2 review N1')", () => {
+    it('a Next click while an older lifecycle refresh is still in flight keeps the navigated-to page when the refresh finally lands', async () => {
+      const projectId = 'p-n1-prime';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      let holdNextPageZeroFit = false;
+      let heldResolve: ((r: Response) => void) | null = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
+              holdNextPageZeroFit = false;
+              requests.push({ url: rawUrl });
+              return new Promise<Response>((resolve) => {
+                heldResolve = resolve;
+              });
+            }
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      // Start a lifecycle refresh (a page-0 fit request) and hold its response.
+      holdNextPageZeroFit = true;
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 10));
+
+      // While it's still pending, click Next on the real pager element —
+      // onPagerNav must bump agentsLoadGen so the stale refresh below is
+      // discarded instead of resetting the page the user just navigated to.
+      const pagerEl = el.shadowRoot!.querySelector('scion-agent-pager')!;
+      pagerEl.dispatchEvent(new Event('next'));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+      expect(internals(el).agentWindow.pageIndex).toBe(1);
+
+      // Now let the older refresh finally resolve.
+      heldResolve!(
+        jsonResponse({
+          agents: agents.slice(0, 25),
+          totalCount: 30,
+          complete: false,
+          nextCursor: '25',
+          stats: {
+            total: 30,
+            running: 30,
+            agents: agents.map((a) => [a.id, a.phase]),
+          },
+        })
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+
+      // The late refresh must not have reset the navigation back to page 0.
+      expect(internals(el).agentWindow.pageIndex).toBe(1);
+    });
+  });
+
+  describe("fit-path label 400 restores the previous committedLabel (round 1 review N3, round 2 N3')", () => {
+    it('a 400 on the sorted (fit) path keeps the previous data and reverts committedLabel', async () => {
+      const projectId = 'p-n3-fit-400';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      let failLabelOnFitPath = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (
+            failLabelOnFitPath &&
+            u.pathname === `/api/v1/projects/${projectId}/agents` &&
+            u.searchParams.get('sort') &&
+            u.searchParams.get('label') === 'env=prod'
+          ) {
+            requests.push({ url: rawUrl });
+            return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 <= 500)
+      const before = (el as unknown as { agents: Agent[] }).agents;
+      expect(before.length).toBe(5);
+      expect(internals(el).committedLabel).toBe('');
+
+      failLabelOnFitPath = true;
+      const input = labelInput(el)!;
+      input.value = 'env=prod';
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The sorted (fit) request, not the legacy path, received the 400.
+      expect(requests.some((r) => r.url.includes('sort=') && r.url.includes('label=env'))).toBe(
+        true
+      );
+      const after = (el as unknown as { agents: Agent[] }).agents;
+      expect(after.length).toBe(5); // previous data kept (design §6.3 N2)
+      expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label (N3)
+    });
+  });
+
+  describe("a loading indicator replaces the empty-filter message during the paged -> grid gap (round 2 review N5')", () => {
+    it('shows "Loading agents…" while the legacy fallback is in flight, then the grid once it lands', async () => {
+      const projectId = 'p-n5-loading';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i));
+      const requests: AgentsRequest[] = [];
+      let holdLegacy = false;
+      let heldResolve: ((r: Response) => void) | null = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged at mount
+          } else if (
+            holdLegacy &&
+            u.pathname === `/api/v1/projects/${projectId}/agents` &&
+            !u.searchParams.get('sort')
+          ) {
+            holdLegacy = false;
+            requests.push({ url: rawUrl });
+            return new Promise<Response>((resolve) => {
+              heldResolve = resolve;
+            });
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      holdLegacy = true;
+      const toggle = viewToggle(el)!;
+      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      expect(el.shadowRoot?.textContent).toContain('Loading agents');
+      expect(el.shadowRoot?.textContent).not.toContain('No agents match the current filter');
+
+      heldResolve!(jsonResponse({ agents, _capabilities: { actions: ['read'] } }));
+      await new Promise((r) => setTimeout(r, 10));
+      await el.updateComplete;
+
+      expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
     });
   });
 });
