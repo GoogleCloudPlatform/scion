@@ -1218,6 +1218,12 @@ type Server struct {
 	// value is ready to use.
 	ghResolveFlight singleflight.Group
 
+	// ghRefreshFailMu guards ghLastRefreshFailure, which records the last
+	// time a background stale-refresh failed for a given cache key (see
+	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
+	ghRefreshFailMu      sync.Mutex
+	ghLastRefreshFailure map[string]time.Time
+
 	// nonceCacheStore is the DB-backed HMAC nonce replay cache (nil when entClient is nil).
 	// When set, it replaces the in-memory NonceCache in BrokerAuthService for
 	// cross-instance replay protection.

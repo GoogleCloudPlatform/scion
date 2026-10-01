@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 )
 
 // TestGitHubResolutionStore_GetPut tests basic cache operations.
@@ -114,8 +115,12 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 
 	// Exactly one row for this cache_key: a conflict-target-less upsert that
 	// instead fell back to always inserting (the failure mode this guards
-	// against) would leave two.
-	count, err := client.GitHubResolutionCache.Query().Count(ctx)
+	// against) would leave two. Filtered by cache_key, not a bare Count(),
+	// since this DSN (file:ent?mode=memory&cache=shared) is shared across the
+	// package's tests and could otherwise pick up rows left by another test.
+	count, err := client.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
+		Count(ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 }

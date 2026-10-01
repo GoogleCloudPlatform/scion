@@ -1745,6 +1745,37 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 // upstream is unresponsive.
 const hubGitHubRefreshTimeout = 2 * time.Minute
 
+// ghRefreshFailureBackoff bounds how often a background stale-refresh is
+// retried for the same cache key after it fails. Without this, a
+// persistently failing ref (rate limit, outage) would start a brand new
+// refresh attempt on every single stale hit, while silently continuing to
+// serve the stale value regardless.
+const ghRefreshFailureBackoff = 1 * time.Minute
+
+// recentGHRefreshFailure reports whether a background refresh for cacheKey
+// failed within the last ghRefreshFailureBackoff.
+func (s *Server) recentGHRefreshFailure(cacheKey string) bool {
+	s.ghRefreshFailMu.Lock()
+	defer s.ghRefreshFailMu.Unlock()
+	t, ok := s.ghLastRefreshFailure[cacheKey]
+	return ok && time.Since(t) < ghRefreshFailureBackoff
+}
+
+func (s *Server) recordGHRefreshFailure(cacheKey string) {
+	s.ghRefreshFailMu.Lock()
+	defer s.ghRefreshFailMu.Unlock()
+	if s.ghLastRefreshFailure == nil {
+		s.ghLastRefreshFailure = make(map[string]time.Time)
+	}
+	s.ghLastRefreshFailure[cacheKey] = time.Now()
+}
+
+func (s *Server) clearGHRefreshFailure(cacheKey string) {
+	s.ghRefreshFailMu.Lock()
+	defer s.ghRefreshFailMu.Unlock()
+	delete(s.ghLastRefreshFailure, cacheKey)
+}
+
 // resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
 // This method is called by handleSkillsResolve for gh:// URIs. It:
 //  1. Parses the gh:// URI
@@ -1813,9 +1844,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
 					"uri", rawURI, "error", staleErr)
 			} else if ok {
-				slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
-					"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
-				go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, isBranchRef)
+				if s.recentGHRefreshFailure(cacheKey) {
+					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh after a recent failure",
+						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+				} else {
+					slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
+						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
+					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
+				}
 				return buildResolvedSkillResponse(ghRef, stale), nil
 			}
 		}
@@ -1825,7 +1861,30 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	// for this exact cache key into a single mint+commits+contents+Put
 	// sequence, so a burst hitting a cold or just-expired-past-staleness
 	// entry for the same ref does not send one request per caller to GitHub.
-	v, err, _ := s.ghResolveFlight.Do(cacheKey, func() (interface{}, error) {
+	//
+	// Every caller — leader and followers alike — waits via DoChan and a
+	// select on its own ctx: a caller whose own context is done returns
+	// ctx.Err() immediately rather than blocking for the whole flight. The
+	// flight itself runs on a context detached from any one caller's
+	// cancellation (so the leader's own context ending does not fail the
+	// others, or skip the cache write), but bounded by
+	// boundedHubFlightTimeout, derived from the leader's own remaining
+	// deadline where it has one.
+	resultCh := s.ghResolveFlight.DoChan(cacheKey, func() (result interface{}, ferr error) {
+		// DoChan always runs this function in a goroutine it spawns itself,
+		// never the calling goroutine (see golang.org/x/sync/singleflight) —
+		// unlike Do, there is no caller stack frame to recover a panic in. A
+		// panic here otherwise crashes the process outright (singleflight
+		// deliberately makes it unrecoverable once there is a channel
+		// waiter). Recovering here, inside the function singleflight runs,
+		// converts it into a normal error instead, delivered to every waiter
+		// through resultCh like any other failure.
+		defer func() {
+			if r := recover(); r != nil {
+				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", cacheKey, r)
+			}
+		}()
+
 		// Re-check: a concurrent flight for this exact key may have already
 		// landed while this call waited to become the flight leader.
 		if s.ghResolutionStore != nil {
@@ -1833,12 +1892,38 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				return buildResolvedSkillResponse(ghRef, entry), nil
 			}
 		}
-		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
+
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boundedHubFlightTimeout(ctx, hubGitHubRefreshTimeout))
+		defer cancel()
+		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case res := <-resultCh:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*ResolvedSkillResponse), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.(*ResolvedSkillResponse), nil
+}
+
+// boundedHubFlightTimeout returns the timeout to use for a detached flight
+// derived from ctx: the leader's own remaining deadline when it has one and
+// it is shorter than ceiling, otherwise ceiling. A flight must be detached
+// from its leader's cancellation (so one cancelled leader does not fail every
+// waiter or skip the cache write), but discarding the leader's deadline
+// entirely would hand a tight broker create-deadline an unbounded ceiling
+// instead. A leader with no deadline, or a generous one, still gets a sane
+// upper bound.
+func boundedHubFlightTimeout(ctx context.Context, ceiling time.Duration) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining > 0 && remaining < ceiling {
+			return remaining
+		}
+	}
+	return ceiling
 }
 
 // refreshGitHubSkillInBackground re-resolves ghRef and updates the cache on
@@ -1846,31 +1931,53 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 // resolveGitHubSkill, step 4). It runs detached from any specific request —
 // the stale caller has already returned — on a bounded timeout, and shares
 // ghResolveFlight's key with the synchronous miss path so a burst of stale
-// hits for the same ref collapses into one refresh.
-func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *agent.GitHubSkillRef, token string, isBranchRef bool) {
+// hits for the same ref collapses into one refresh. installID is the same
+// value resolveGitHubSkill resolved for this request, passed through so the
+// refreshed entry's TokenScope is preserved rather than overwritten with "".
+func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *agent.GitHubSkillRef, token, installID string, isBranchRef bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), hubGitHubRefreshTimeout)
 	defer cancel()
 
-	_, err, _ := s.ghResolveFlight.Do(cacheKey, func() (interface{}, error) {
+	// A panic in fetchAndCacheGitHubSkill is recovered inside the DoChan
+	// closure below (see its comment), so this goroutine itself cannot panic
+	// from that; no recover needed at this level.
+	resultCh := s.ghResolveFlight.DoChan(cacheKey, func() (result interface{}, ferr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				ferr = fmt.Errorf("panic during background GitHub skill refresh for %s: %v", cacheKey, r)
+			}
+		}()
 		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
 			return buildResolvedSkillResponse(ghRef, entry), nil
 		}
-		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, "", isBranchRef, nil)
+		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, nil)
 	})
-	if err != nil {
-		slog.WarnContext(ctx, "github_resolution_cache: background refresh failed",
-			"uri", rawURI, "error", err)
+
+	select {
+	case res := <-resultCh:
+		if res.Err != nil {
+			s.recordGHRefreshFailure(cacheKey)
+			slog.WarnContext(ctx, "github_resolution_cache: background refresh failed",
+				"uri", rawURI, "error", res.Err)
+		} else {
+			s.clearGHRefreshFailure(cacheKey)
+		}
+	case <-ctx.Done():
+		s.recordGHRefreshFailure(cacheKey)
+		slog.WarnContext(ctx, "github_resolution_cache: background refresh timed out",
+			"uri", rawURI, "error", ctx.Err())
 	}
 }
 
 // fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
 // then directory contents), stores the result in the resolution cache under
 // cacheKey, and returns the response. installID is recorded on the cache
-// entry's TokenScope; pass "" from a background refresh, which only ever
-// updates a row that a synchronous call already created (and so already set
-// TokenScope correctly) or creates one no synchronous caller is waiting on.
+// entry's TokenScope and must be the same value the triggering request
+// resolved via resolveGitHubToken — both the synchronous path and a
+// background refresh pass it through explicitly, so a refresh can never
+// overwrite an existing row's TokenScope with an empty value.
 //
-// Called from within s.ghResolveFlight.Do, so concurrent callers sharing
+// Called from within s.ghResolveFlight.DoChan, so concurrent callers sharing
 // cacheKey share one execution — refSHAMemo is only touched by whichever
 // caller's goroutine actually becomes the flight leader.
 func (s *Server) fetchAndCacheGitHubSkill(

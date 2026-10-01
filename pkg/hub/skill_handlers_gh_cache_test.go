@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -398,6 +399,94 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 		"%d concurrent resolutions of the same ref must make exactly one contents lookup", n)
 }
 
+// TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters is the acceptance
+// test for the hub-side single-flight leader needing its own detached,
+// bounded context: the synchronous flight's leader has its own request
+// context cancelled mid-flight. The leader itself must get context.Canceled
+// promptly, but the flight must keep running — the other waiter must still
+// succeed, and the cache write must still happen (not be skipped because the
+// leader walked away).
+func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "cancel-leader-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		commitSHA = "6666666666666666666666666666666666666666"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	proceed := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+		_, _ = w.Write([]byte(commitSHA))
+	})
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/contents/"+skillPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ctxLeader, cancelLeader := context.WithCancel(context.Background())
+	ctxWaiter := context.Background()
+
+	var respLeader, respWaiter *ResolvedSkillResponse
+	var errLeader, errWaiter error
+	doneLeader := make(chan struct{})
+	doneWaiter := make(chan struct{})
+
+	go func() {
+		respLeader, errLeader = srv.resolveGitHubSkill(ctxLeader, uri, project.ID, nil)
+		close(doneLeader)
+	}()
+
+	<-entered // the leader's fetch has started and is blocked on proceed
+
+	go func() {
+		respWaiter, errWaiter = srv.resolveGitHubSkill(ctxWaiter, uri, project.ID, nil)
+		close(doneWaiter)
+	}()
+
+	cancelLeader()
+	<-doneLeader // must return promptly: the flight is still blocked on proceed below
+	if !errors.Is(errLeader, context.Canceled) {
+		t.Fatalf("expected the cancelled leader to get context.Canceled, got %v", errLeader)
+	}
+	if respLeader != nil {
+		t.Errorf("expected a nil response for the cancelled leader, got %+v", respLeader)
+	}
+
+	select {
+	case <-doneWaiter:
+		t.Fatal("the uncancelled waiter returned before the flight was released — it should still be blocked on proceed")
+	default:
+	}
+
+	close(proceed) // let the still-running flight finish for the waiter
+	<-doneWaiter
+
+	require.NoError(t, errWaiter)
+	require.NotNil(t, respWaiter)
+	assert.Equal(t, safeShortSHA(commitSHA), respWaiter.ResolvedVersion)
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	_, hit, err := srv.ghResolutionStore.Get(context.Background(), cacheKey)
+	require.NoError(t, err)
+	assert.True(t, hit, "the flight's cache write must not be skipped because the leader was cancelled")
+}
+
 // TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground is the
 // acceptance test for W on the hub cache: a branch-ref entry that is
 // TTL-expired but within agent.MaxResolutionStaleAge must be served
@@ -464,6 +553,8 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 	require.NoError(t, err)
 	require.True(t, hit)
 	assert.Equal(t, freshSHA, entry.CommitSHA, "the background refresh must have updated the cache")
+	assert.Equal(t, "public", entry.TokenScope,
+		"a background refresh must not overwrite TokenScope with an empty value")
 }
 
 // TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously is the
