@@ -52,6 +52,19 @@ type KubernetesRuntime struct {
 	GKEMode           bool // Enables GKE-specific features (SecretProviderClass CSI, GCS FUSE)
 	GKEAutoDetected   bool // True when GKE was auto-detected (enables Autopilot tolerance only)
 	ListAllNamespaces bool // When true, List() queries all namespaces for scion pods
+
+	// execReadyClock supplies the time source and sleep function used by
+	// waitForExecReady's backoff loop. It defaults to real time via
+	// NewKubernetesRuntime; tests override it to drive the retry/backoff/cap
+	// logic deterministically without a real sleep.
+	execReadyClock execReadyClock
+
+	// execProbe is the readiness probe waitForExecReady runs on each
+	// attempt. Nil (the default from NewKubernetesRuntime) means "exec a
+	// cheap no-op command via execInPod"; tests replace it with a func that
+	// blocks on its ctx argument to exercise the per-probe timeout without a
+	// real exec transport.
+	execProbe execProbeFunc
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -67,6 +80,7 @@ func NewKubernetesRuntime(client *k8s.Client) *KubernetesRuntime {
 	return &KubernetesRuntime{
 		Client:           client,
 		DefaultNamespace: defaultKubernetesNamespace(),
+		execReadyClock:   realExecReadyClock(),
 	}
 }
 
@@ -188,6 +202,14 @@ func isSyncTransientError(err error) bool {
 		"i/o timeout",
 		"TLS handshake",
 		"use of closed network connection",
+		// F15: a scale-from-zero node's API-server-to-kubelet exec tunnel
+		// (e.g. the GKE konnectivity agent) is not up yet when the first
+		// exec lands right after the container starts. Observed as
+		// "stream failed: error dialing backend: No agent available".
+		// Both substrings are matched independently so either wording
+		// variant of the same underlying condition is caught.
+		"no agent available",
+		"error dialing backend",
 	}
 	for _, pattern := range transientPatterns {
 		if strings.Contains(strings.ToLower(msg), strings.ToLower(pattern)) {
@@ -195,6 +217,179 @@ func isSyncTransientError(err error) bool {
 		}
 	}
 	return false
+}
+
+// execReadyMaxWait bounds the cumulative elapsed time (wall time between
+// probe attempts, including time spent inside each probe) that
+// waitForExecReady spends retrying the exec-tunnel probe before giving up.
+// A single in-flight probe is bounded separately by execReadyProbeTimeout,
+// so the actual wall-clock wait is execReadyMaxWait plus at most one more
+// execReadyProbeTimeout for the final, cap-triggering probe.
+const execReadyMaxWait = 90 * time.Second
+
+// execReadyMaxBackoff caps the exponential backoff between probes.
+const execReadyMaxBackoff = 8 * time.Second
+
+// execReadyMaxBackoffShift is the largest exponent execReadyWithRetry's
+// backoff computation will shift by (1<<3 == 8, matching execReadyMaxBackoff
+// in seconds). Capping the shift itself, not just the resulting duration,
+// keeps the computation well away from any shift-count edge cases for a
+// larger-than-expected attempt count.
+const execReadyMaxBackoffShift = 3
+
+// execReadyProbeTimeout bounds a single readiness probe so one stalled dial
+// (e.g. a tunnel that accepts the connection and then hangs) cannot hold
+// waitForExecReady well past execReadyMaxWait. A probe that hits this
+// per-attempt deadline is treated the same as any other transient probe
+// failure and retried under the usual backoff and cap — see
+// wrapProbeTimeout. A var, not a const, so tests can shrink it to run the
+// per-probe-timeout path in milliseconds instead of execReadyProbeTimeout's
+// production value.
+var execReadyProbeTimeout = 10 * time.Second
+
+// execReadyClock supplies the time source and sleep function used by the
+// exec-readiness retry loop. Production code gets this from
+// NewKubernetesRuntime; tests replace it with a fake clock so the loop's
+// cap and backoff behavior can be exercised without a real sleep.
+type execReadyClock struct {
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
+}
+
+// realExecReadyClock returns the production clock: wall time plus a sleep
+// that honors context cancellation.
+func realExecReadyClock() execReadyClock {
+	return execReadyClock{
+		now: time.Now,
+		sleep: func(ctx context.Context, d time.Duration) error {
+			// time.NewTimer plus an explicit Stop, rather than time.After,
+			// so an early ctx cancellation doesn't leave the timer running
+			// (and ineligible for GC) until it fires on its own.
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}
+}
+
+// wrapProbeTimeout rewrites err so that a deadline caused by the probe's own
+// execReadyProbeTimeout (not the caller's ctx) reads as a timeout. This
+// matters because isSyncTransientError recognizes "timeout" but not Go's
+// plain "context deadline exceeded", so without the rewrite a stalled probe
+// would be misclassified as non-transient and fail the whole wait instead
+// of being retried. When ctx itself is already done, err is returned
+// unchanged — that case should propagate (and the next clock.sleep call
+// will return ctx.Err() to end the loop) rather than being retried forever.
+func wrapProbeTimeout(ctx, probeCtx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil || !errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("exec readiness probe timeout after %s: %w", execReadyProbeTimeout, err)
+}
+
+// execProbeFunc is the shape of the readiness probe waitForExecReady runs on
+// each attempt. The production default execs a cheap no-op command; tests
+// replace KubernetesRuntime.execProbe with a func that blocks on ctx so the
+// per-probe timeout (execReadyProbeTimeout, applied by the caller via
+// context.WithTimeout before invoking the probe) can be exercised without a
+// real exec transport.
+type execProbeFunc func(ctx context.Context, namespace, podName string) error
+
+// waitForExecReady probes the pod's exec tunnel with a cheap no-op command
+// until it succeeds, a non-transient error occurs, ctx is cancelled, or
+// execReadyMaxWait of cumulative elapsed time passes (see
+// execReadyProbeTimeout for the per-probe bound). A pod and its main
+// container reporting Running (waitForPodReady) does not mean the
+// API-server-to-kubelet exec tunnel is ready: on a scale-from-zero node the
+// tunnel can still be coming up for tens of seconds afterward, and the
+// first real exec (home sync, or the startup-gate touch when HomeDir is
+// unset) would otherwise fail outright. Call this once, right after
+// waitForPodReady and before any other exec into the pod. agentName is used
+// only for log correlation.
+func (r *KubernetesRuntime) waitForExecReady(ctx context.Context, namespace, podName, agentName string) error {
+	probe := r.execProbe
+	if probe == nil {
+		probe = func(ctx context.Context, namespace, podName string) error {
+			_, err := r.execInPod(ctx, namespace, podName, []string{"true"})
+			return err
+		}
+	}
+	return r.execReadyWithRetry(ctx, func() error {
+		probeCtx, cancel := context.WithTimeout(ctx, execReadyProbeTimeout)
+		defer cancel()
+		return wrapProbeTimeout(ctx, probeCtx, probe(probeCtx, namespace, podName))
+	}, agentName, namespace, podName)
+}
+
+// execReadyWithRetry runs op with bounded exponential backoff (1s, 2s, 4s,
+// 8s, capped thereafter at execReadyMaxBackoff), retrying only errors
+// isSyncTransientError classifies as transient, until op succeeds, a
+// non-transient error is returned (fail fast, no retry), ctx is cancelled,
+// or execReadyMaxWait of cumulative wait time is exhausted. Factored out
+// from waitForExecReady so tests can drive it with a test-supplied op and a
+// fake clock instead of a real exec transport and real sleeps. agentName,
+// namespace and podName are log correlation fields only.
+func (r *KubernetesRuntime) execReadyWithRetry(ctx context.Context, op func() error, agentName, namespace, podName string) error {
+	clock := r.execReadyClock
+	if clock.now == nil || clock.sleep == nil {
+		// A KubernetesRuntime built as a literal rather than via
+		// NewKubernetesRuntime has a zero-value execReadyClock; fall back to
+		// the real one instead of a nil-func panic.
+		clock = realExecReadyClock()
+	}
+	start := clock.now()
+	logFields := func(extra ...any) []any {
+		base := []any{"phase", "wait-exec", "agent", agentName, "namespace", namespace, "pod", podName}
+		return append(base, extra...)
+	}
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = op()
+		if lastErr == nil {
+			runtimeLog.Info("Pod exec tunnel ready",
+				logFields("attempts", attempt+1, "elapsed_ms", clock.now().Sub(start).Milliseconds())...)
+			return nil
+		}
+		if !isSyncTransientError(lastErr) {
+			return lastErr
+		}
+
+		elapsed := clock.now().Sub(start)
+		if elapsed >= execReadyMaxWait {
+			return fmt.Errorf("gave up after %s (%d attempts): %w",
+				elapsed.Round(time.Second), attempt+1, lastErr)
+		}
+
+		// Exponential backoff: 1s, 2s, 4s, 8s, then holds at
+		// execReadyMaxBackoff. The shift itself is capped (not just the
+		// resulting duration, after the fact) so a surprisingly large
+		// attempt count — the elapsed check above is what actually keeps
+		// attempt small in practice, so this is a second, independent
+		// guard — can't compute a degenerate (zero or, pre-Go's
+		// well-defined large-shift semantics, negative-looking) backoff
+		// instead of simply holding at the cap.
+		shift := attempt
+		if shift > execReadyMaxBackoffShift {
+			shift = execReadyMaxBackoffShift
+		}
+		backoff := time.Duration(1<<uint(shift)) * time.Second
+		if backoff > execReadyMaxBackoff {
+			backoff = execReadyMaxBackoff
+		}
+		if remaining := execReadyMaxWait - elapsed; backoff > remaining {
+			backoff = remaining
+		}
+		runtimeLog.Warn("Pod exec tunnel not ready, retrying",
+			logFields("attempt", attempt+1, "backoff", backoff, "elapsed_ms", elapsed.Milliseconds(), "error", lastErr)...)
+		if err := clock.sleep(ctx, backoff); err != nil {
+			return err
+		}
+	}
 }
 
 func ensureAnnotations(annotations map[string]string) map[string]string {
@@ -381,6 +576,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
 	if err := r.waitForPodReady(ctx, namespace, createdPod.Name); err != nil {
 		return createdPod.Name, err
+	}
+
+	// Wait for Running to really mean exec-able before the first exec below
+	// (home sync, or the startup-gate touch when HomeDir is unset). This is
+	// the only exec call site that runs unconditionally for every pod this
+	// function creates — local or NFS backend, fresh create or a restart's
+	// stop-then-create — so placing it here once covers all of them. See
+	// waitForExecReady's doc comment for why Running alone is insufficient.
+	runtimeLog.Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
+	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
+		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
 	}
 
 	if config.HomeDir != "" {
@@ -1911,6 +2117,16 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 }
 
 func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
+	// Guard against fake/test clientsets where Config is nil (no real API
+	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
+	// built as a literal rather than via NewKubernetesRuntime has a nil
+	// Client, and r.Client.Config would panic before ever reaching the
+	// Config check. Without either guard, a test or caller hitting this path
+	// with no exec transport gets a nil-pointer panic from the REST client
+	// deep inside the SPDY executor setup below instead of a clear error.
+	if r.Client == nil || r.Client.Config == nil {
+		return fmt.Errorf("K8s REST config not available (test environment)")
+	}
 	fmt.Printf("  Preparing tar archive from %s...\n", sourcePath)
 	tarCmd := exec.CommandContext(ctx, "tar", "-cz", "-C", sourcePath, ".")
 	tarCmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
